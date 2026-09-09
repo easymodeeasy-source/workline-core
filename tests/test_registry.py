@@ -16,11 +16,11 @@ class RegistryValidationTests(unittest.TestCase):
     def _write_valid_registry(self, root: Path) -> None:
         lines = ["# registry", "", "## Rules"]
         for rule_id in REQUIRED_RULE_IDS:
-            lines.extend([f"- id: `{rule_id}`", "  owner: registry", ""])
+            lines.extend([f"<!-- workline-id: {rule_id} -->", ""])
         lines.append("## Skills")
         for skill_id in REQUIRED_SKILL_IDS:
             target = f"{skill_id}/SKILL.md"
-            lines.extend([f"- id: `{skill_id}`", f"  target: `{target}`", ""])
+            lines.extend([f"<!-- workline-id: {skill_id} -->", f"<!-- workline-target: {target} -->", ""])
             path = root / target
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"# {skill_id}\n", encoding="utf-8")
@@ -35,7 +35,7 @@ class RegistryValidationTests(unittest.TestCase):
         root = self._root()
         self._write_valid_registry(root)
         registry = root / "registry.md"
-        registry.write_text(registry.read_text(encoding="utf-8").replace("- id: `rules/git`", "- id: `rules/other`"), encoding="utf-8")
+        registry.write_text(registry.read_text(encoding="utf-8").replace("<!-- workline-id: rules/git -->", "<!-- workline-id: rules/other -->"), encoding="utf-8")
         codes = {problem.code for problem in validate_registry(root).problems}
         self.assertIn("required_rule_missing", codes)
 
@@ -43,7 +43,7 @@ class RegistryValidationTests(unittest.TestCase):
         root = self._root()
         self._write_valid_registry(root)
         registry = root / "registry.md"
-        registry.write_text(registry.read_text(encoding="utf-8") + "\n- id: `skills/start`\n  target: `skills/start/SKILL.md`\n", encoding="utf-8")
+        registry.write_text(registry.read_text(encoding="utf-8") + "\n<!-- workline-id: skills/start -->\n<!-- workline-target: skills/start/SKILL.md -->\n", encoding="utf-8")
         codes = {problem.code for problem in validate_registry(root).problems}
         self.assertIn("duplicate_skill", codes)
 
