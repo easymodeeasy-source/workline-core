@@ -69,6 +69,27 @@ class RegistryValidationTests(unittest.TestCase):
         codes = {problem.code for problem in validate_registry(root).problems}
         self.assertIn("skill_target_outside_root", codes)
 
+    def test_missing_target_marker_fails(self) -> None:
+        root = self._root()
+        self._write_valid_registry(root)
+        registry = root / "registry.md"
+        registry.write_text(registry.read_text(encoding="utf-8").replace("<!-- workline-target: skills/start/SKILL.md -->", ""), encoding="utf-8")
+        codes = {problem.code for problem in validate_registry(root).problems}
+        self.assertIn("skill_target_missing", codes)
+
+    def test_duplicate_required_rule_fails(self) -> None:
+        root = self._root()
+        self._write_valid_registry(root)
+        registry = root / "registry.md"
+        registry.write_text(registry.read_text(encoding="utf-8") + "\n<!-- workline-id: rules/git -->\n", encoding="utf-8")
+        codes = {problem.code for problem in validate_registry(root).problems}
+        self.assertIn("duplicate_rule", codes)
+
+    def test_repository_registry_passes(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        result = validate_registry(repo_root)
+        self.assertTrue(result.ok, result.problems)
+
 
 if __name__ == "__main__":
     unittest.main()
