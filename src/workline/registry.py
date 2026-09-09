@@ -19,8 +19,8 @@ REQUIRED_SKILL_IDS = (
     "skills/start",
 )
 
-_ID_LINE = re.compile(r"^\s*-\s*id:\s*`?([^`\s]+)`?\s*$")
-_TARGET_LINE = re.compile(r"^\s*target:\s*`?([^`\s]+)`?\s*$")
+_ID_LINE = re.compile(r"^\s*<!--\s*workline-id:\s*([^\s]+)\s*-->\s*$")
+_TARGET_LINE = re.compile(r"^\s*<!--\s*workline-target:\s*([^\s]+)\s*-->\s*$")
 
 
 @dataclass(frozen=True)
@@ -75,7 +75,11 @@ def validate_registry(root: Path) -> RegistryValidation:
     if not registry.is_file():
         return RegistryValidation((RegistryProblem("registry_missing", "registry.md is missing"),))
 
-    text = registry.read_text(encoding="utf-8")
+    try:
+        text = registry.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return RegistryValidation((RegistryProblem("registry_unreadable", "registry.md is not readable UTF-8"),))
+
     blocks = _extract_id_blocks(text)
 
     for rule_id in REQUIRED_RULE_IDS:
