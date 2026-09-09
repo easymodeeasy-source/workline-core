@@ -29,4 +29,4 @@ D:\AIproject\workline-core
 
 - design review: converged for implementation
 - repair-induced regression check: PASS
-- implementation: not started
+- implementation: core implemented (registry / mutation / project-start / phase-create / create / start / roadmap)
