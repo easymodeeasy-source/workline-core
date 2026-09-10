@@ -140,19 +140,30 @@ def _stop_on_structure(store: ProjectStore, context: str) -> ProjectView:
     return view
 
 
-def _open(store: ProjectStore, operation: str, identity: dict[str, Any], entities: list[str] = ()) -> Mutation:
+def _open(
+    store: ProjectStore, operation: str, identity: dict[str, Any], entities: list[str] = ()
+) -> tuple[Mutation, gitops.PushDestination | None]:
+    """Open (or resume) the operation's mutation with a verified push destination.
+
+    The destination is checked before the mutation exists, so an unpinned or
+    drifted remote STOPs with no intent record, no domain write and no network
+    contact.
+    """
+    destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
     invocation = {"operation": operation, **identity}
     mutation = controller.open(OWNER, invocation, WriteScope(entities=tuple(entities), files=LEDGER_FILES))
     gitops.ensure_git_ready(store.root)
     gitops.record_preexisting_dirty(mutation, store.root)
     mutation.apply()
-    return mutation
+    return mutation, destination
 
 
-def _finalize(mutation: Mutation, message: str, extra_paths: list[str] = ()) -> str | None:
+def _finalize(
+    mutation: Mutation, destination: gitops.PushDestination | None, message: str, extra_paths: list[str] = ()
+) -> str | None:
     paths = sorted(set(owned_canonical_paths(mutation)) | set(extra_paths))
-    gitops.finalize(mutation, "finalize", message, paths, push=True)
+    gitops.finalize(mutation, "finalize", message, paths, destination=destination)
     _stop_on_structure(mutation.store, "postcheck")
     mutation.complete()
     return gitcmd.head_commit(mutation.store.root)
@@ -176,12 +187,14 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
     if not plan.phases:
         raise ValidationError("a new Roadmap registers all of its Phases; none were decided")
     _stop_on_structure(store, "precheck")
-    mutation = _open(store, "roadmap-create", {"name": plan.name})
+    mutation, destination = _open(store, "roadmap-create", {"name": plan.name})
     with abandon_on_stop(mutation):
-        return _create_roadmap(store, mutation, plan)
+        return _create_roadmap(store, mutation, destination, plan)
 
 
-def _create_roadmap(store: ProjectStore, mutation: Mutation, plan: RoadmapPlan) -> RoadmapResult:
+def _create_roadmap(
+    store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, plan: RoadmapPlan
+) -> RoadmapResult:
     roadmap_id = mutation.reserve_id("roadmap", "roadmap")
     mutation.extend_scope(entities=[roadmap_id])
 
@@ -197,7 +210,9 @@ def _create_roadmap(store: ProjectStore, mutation: Mutation, plan: RoadmapPlan) 
     mutation.apply()
 
     phases = register_phases(mutation, "phases", roadmap_id, plan.phases, list(plan.relations))
-    head = _finalize(mutation, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}")
+    head = _finalize(
+        mutation, destination, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}"
+    )
     return RoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed)
 
 
@@ -240,12 +255,12 @@ def add_phases(
         "roadmap_id": roadmap_id,
         "key": invocation_key or " | ".join(spec.name for spec in phases.values()),
     }
-    mutation = _open(store, "roadmap-add-phases", identity, [roadmap_id])
+    mutation, destination = _open(store, "roadmap-add-phases", identity, [roadmap_id])
     with abandon_on_stop(mutation):
         registered = register_phases(
             mutation, "phases", roadmap_id, phases, list(relations), future_plan_change=future_plan_change
         )
-        head = _finalize(mutation, f"chore(workline): add phases to roadmap {display}")
+        head = _finalize(mutation, destination, f"chore(workline): add phases to roadmap {display}")
     return PhaseAdditionResult(
         roadmap_id, registered.phase_ids, registered.relation_ids, mutation.id, head, mutation.resumed
     )
@@ -341,12 +356,12 @@ def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign) ->
         if key in ("integration", "confirmation"):
             raise ValidationError(f"reserved Work key: {key}")
 
-    mutation = _open(store, "phase-entry", {"phase_id": phase_id}, [phase_id])
+    mutation, destination = _open(store, "phase-entry", {"phase_id": phase_id}, [phase_id])
     with abandon_on_stop(mutation):
-        return _expand_phase(store, mutation, phase, phase_id, roadmap_id, design)
+        return _expand_phase(store, mutation, destination, phase, phase_id, roadmap_id, design)
 
 
-def _expand_phase(store: ProjectStore, mutation: Mutation, phase: Entity, phase_id: str, roadmap_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
+def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, phase: Entity, phase_id: str, roadmap_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
     normal_specs = {
         key: WorkSpec(w.name, w.desired_state, phase_id=phase_id, roadmap_id=roadmap_id, related=tuple(w.related))
         for key, w in design.works.items()
@@ -393,7 +408,7 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, phase: Entity, phase_
         paths += list(confirmation.paths)
 
     after = _stop_on_structure(store, "phase structure check")
-    head = _finalize(mutation, f"chore(workline): expand phase {phase.display}", paths)
+    head = _finalize(mutation, destination, f"chore(workline): expand phase {phase.display}", paths)
 
     after = ProjectView.load(store)
     startable = after.startable_works(phase_id)
@@ -411,11 +426,11 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, phase: Entity, phase_
 def _lifecycle(store: ProjectStore, operation: str, entity_id: str, event_type: str, precheck) -> OperationResult:
     view = _stop_on_structure(store, "precheck")
     precheck(view)
-    mutation = _open(store, operation, {"entity": entity_id}, [entity_id])
+    mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, [event_type]))
     mutation.apply()
-    head = _finalize(mutation, f"chore(workline): {event_type} {entity_id}")
+    head = _finalize(mutation, destination, f"chore(workline): {event_type} {entity_id}")
     return OperationResult(event_type, entity_id, mutation.id, head)
 
 
@@ -468,7 +483,7 @@ def cancel_roadmap(store: ProjectStore, roadmap_id: str) -> OperationResult:
 def _plan_exclude(store: ProjectStore, operation: str, entity_id: str, replan: Replan, precheck) -> OperationResult:
     view = _stop_on_structure(store, "precheck")
     precheck(view)
-    mutation = _open(store, operation, {"entity": entity_id}, [entity_id])
+    mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
     with abandon_on_stop(mutation):
         work_ids, removals, additions = plan_replan(mutation, "replan", view, replan)
         projection = projected_view(
@@ -483,7 +498,7 @@ def _plan_exclude(store: ProjectStore, operation: str, entity_id: str, replan: R
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, ["plan_excluded"]))
     mutation.apply()
     apply_replan(mutation, "replan", replan, removals, additions, work_ids)
-    head = _finalize(mutation, f"chore(workline): plan_excluded {entity_id}")
+    head = _finalize(mutation, destination, f"chore(workline): plan_excluded {entity_id}")
     return OperationResult("plan_excluded", entity_id, mutation.id, head)
 
 
@@ -681,7 +696,7 @@ def maintain_work_related(
         if not removals and not effective_adds:
             return no_change
 
-    mutation = _open(store, operation, identity, [work_id])
+    mutation, destination = _open(store, operation, identity, [work_id])
     with abandon_on_stop(mutation):
         if not mutation.has_stage("related"):
             # Either a new mutation, or a pending one that crashed before
@@ -724,7 +739,7 @@ def maintain_work_related(
     removed_ids = tuple(e["payload"]["record"]["id"] for e in recorded if e["kind"] == "remove_relation")
     _related_postcheck(store, work_id, before, added_ids, removed_ids)
 
-    head = _finalize(mutation, f"chore(workline): update related refs {work.display}")
+    head = _finalize(mutation, destination, f"chore(workline): update related refs {work.display}")
     return RelatedMaintenanceResult(
         work_id, added_ids, removed_ids, mutation.id, head, changed=True, resumed=mutation.resumed
     )

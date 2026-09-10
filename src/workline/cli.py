@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 
 from .bootstrap import backfill_bootstrap
 from .create import RelatedSpec, WorkSpec, create_standalone_work
 from .errors import StopError
 from .project_start import project_start
+from .push_pin import pin_push_destination
 from .registry import validate_registry
 from .store import ProjectStore
 from .validate import validate_project
@@ -16,7 +18,23 @@ def _related(items: list[str] | None, rel_type: str) -> list[RelatedSpec]:
     return [RelatedSpec(rel_type, target) for target in (items or [])]
 
 
+def _tolerant_output() -> None:
+    """Never let an unencodable character turn a STOP report into a traceback.
+
+    Console encodings differ (cp932, cp1252, ...); a message the operator needs
+    to read must survive one that cannot represent every character in it.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerant_output()
     parser = argparse.ArgumentParser(prog="workline")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -26,6 +44,19 @@ def main(argv: list[str] | None = None) -> int:
     start = subparsers.add_parser("project-start", help="initialize a folder as a Workline Project")
     start.add_argument("project_root")
     start.add_argument("--workline-root", required=True)
+    start.add_argument(
+        "--expected-push-url",
+        help="the push destination you approve for this Project; pinned only when the remote already resolves to it",
+    )
+    start.add_argument("--push-remote", default="origin")
+
+    pin = subparsers.add_parser(
+        "pin-push-destination",
+        help="approve the push destination of an established Workline Project (human-confirmed, idempotent)",
+    )
+    pin.add_argument("project_root", nargs="?", default=".")
+    pin.add_argument("--url", action="append", required=True, help="approved push destination (repeatable)")
+    pin.add_argument("--remote", default="origin")
 
     check = subparsers.add_parser("validate-project", help="validate a Project's canonical structure")
     check.add_argument("project_root", nargs="?", default=".")
@@ -58,8 +89,29 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         if args.command == "project-start":
-            result = project_start(Path(args.project_root), Path(args.workline_root))
+            result = project_start(
+                Path(args.project_root),
+                Path(args.workline_root),
+                expected_push_url=args.expected_push_url,
+                push_remote=args.push_remote,
+            )
             print(f"project-start: {result.status} ({result.project_root}) head={result.head}")
+            if result.pinned_url:
+                print(f"push destination: {result.pinned_url}")
+            elif result.unpinned_remotes:
+                print(
+                    "push destination: unpinned (remotes: "
+                    + ", ".join(result.unpinned_remotes)
+                    + "); pin it with `workline pin-push-destination` before any operation that pushes"
+                )
+            return 0
+
+        if args.command == "pin-push-destination":
+            result = pin_push_destination(Path(args.project_root), args.url, remote=args.remote)
+            print(
+                f"pin-push-destination: {result.status} ({result.project_root}) "
+                f"{result.remote} -> {result.url} head={result.head} pushed={result.pushed}"
+            )
             return 0
 
         if args.command == "validate-project":

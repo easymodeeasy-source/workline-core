@@ -229,9 +229,19 @@ def standalone_scope(view: ProjectView, work_id: str) -> list[Entity]:
 # --------------------------------------------------------------------------- START
 
 class _Session:
-    def __init__(self, store: ProjectStore, mutation: Mutation, mode: str, executor: Executor) -> None:
+    def __init__(
+        self,
+        store: ProjectStore,
+        mutation: Mutation,
+        destination: gitops.PushDestination | None,
+        mode: str,
+        executor: Executor,
+    ) -> None:
         self.store = store
         self.mutation = mutation
+        # The push destination START verified at its entry; every commit this
+        # session finalizes pushes there or nowhere.
+        self.destination = destination
         self.mode = mode
         self.executor = executor
         self.completed: list[str] = []
@@ -244,7 +254,7 @@ class _Session:
         to_commit = sorted(p for p in owned if p in dirty)
         if not to_commit:
             return
-        gitops.finalize(self.mutation, stage, message, to_commit, push=True)
+        gitops.finalize(self.mutation, stage, message, to_commit, destination=self.destination)
 
     def _lifecycle(self, work: Entity, types: list[str]) -> None:
         if not types:
@@ -461,6 +471,9 @@ def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> S
     work = store.read_entity("work", work_id)  # stable resolve; no fallback
     view = _structure_or_stop(store, "start precheck")
     gitops.ensure_git_ready(store.root)
+    # Before the mutation exists: an unpinned or drifted push destination STOPs
+    # here, with no intent record, no domain write and no network contact.
+    destination = gitops.ensure_push_destination(store)
 
     controller = MutationController(store)
     # invocation identity = the required START inputs (stable Work ID and mode);
@@ -474,7 +487,7 @@ def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> S
         if state.terminal and not mutation.resumed:
             raise SpecViolation(f"Work {work_id} is {state.state}")
 
-        session = _Session(store, mutation, mode, executor)
+        session = _Session(store, mutation, destination, mode, executor)
         phase_id = work.phase_id
         current: Entity | None = work
         result: StartResult
@@ -523,6 +536,7 @@ def plan_exclude_standalone_work(store: ProjectStore, work_id: str, replan: Repl
         raise SpecViolation("Phase Work plan exclusion is owned by Roadmap")
     if view.work_state(work_id).state != UNSTARTED:
         raise SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}")
+    destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
     mutation = controller.open(OWNER, {"operation": "start-plan-exclude", "work_id": work_id}, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     gitops.ensure_git_ready(store.root)
@@ -542,7 +556,13 @@ def plan_exclude_standalone_work(store: ProjectStore, work_id: str, replan: Repl
         mutation.add_effects("event", event_effects(mutation, "event", work_id, ["plan_excluded"]))
     mutation.apply()
     apply_replan(mutation, "replan", replan, removals, additions, work_ids)
-    gitops.finalize(mutation, "finalize", f"chore(workline): plan_excluded {work.display}", owned_canonical_paths(mutation), push=True)
+    gitops.finalize(
+        mutation,
+        "finalize",
+        f"chore(workline): plan_excluded {work.display}",
+        owned_canonical_paths(mutation),
+        destination=destination,
+    )
     _structure_or_stop(store, "postcheck")
     mutation.complete()
     return StartResult("plan_excluded", work_id, mutation.id, head=gitcmd.head_commit(store.root))

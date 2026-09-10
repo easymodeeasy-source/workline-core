@@ -217,6 +217,7 @@ def backfill_bootstrap(project_root: Path) -> BackfillResult:
     ensure_bootstrap_committable(store)
 
     owned = [BOOTSTRAP_REL_PATH]
+    destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
     invocation = {"operation": OWNER, "project_root": str(root)}
     mutation = controller.open(OWNER, invocation, WriteScope(files=tuple(owned)))
@@ -233,13 +234,13 @@ def backfill_bootstrap(project_root: Path) -> BackfillResult:
     mutation.apply()
 
     head_before = gitcmd.head_commit(root)
-    push = gitcmd.has_remote(root, gitops.DEFAULT_REMOTE)
-    gitops.finalize(mutation, "commit", BACKFILL_COMMIT_MESSAGE, owned, push=push)
+    gitops.finalize(mutation, "commit", BACKFILL_COMMIT_MESSAGE, owned, destination=destination)
 
     _postcheck(store, owned, preexisting, head_before)
     mutation.complete()
     return BackfillResult(
-        "created", root, mutation.id, gitcmd.head_commit(root), pushed=push, resumed=mutation.resumed
+        "created", root, mutation.id, gitcmd.head_commit(root),
+        pushed=destination is not None, resumed=mutation.resumed,
     )
 
 

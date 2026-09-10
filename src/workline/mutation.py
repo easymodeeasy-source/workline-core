@@ -24,7 +24,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import gitcmd, yamlish
+from . import gitcmd, pushurl, yamlish
+from .destination import resolve_active_push_url, verify_recorded_destination
 from .durable import DurableWriteError, durable_write_text
 from .errors import GitError, ReconcileRequired, StopError, ValidationError
 from .ids import is_valid_id, kind_of, new_id
@@ -33,6 +34,8 @@ from .store import (
     INFRA_WRITE_PATHS,
     PHASE_EVENTS,
     PHASE_TERMINAL_EVENTS,
+    PIN_OWNERS,
+    PROJECT_YAML_REL,
     RELATED_TYPES,
     ROADMAP_EVENTS,
     ROADMAP_RELATION_TYPES,
@@ -44,6 +47,7 @@ from .store import (
     Event,
     ProjectStore,
     Relation,
+    parse_push_pin,
     render_relations,
 )
 
@@ -73,8 +77,18 @@ class Effect:
     payload: dict[str, Any]
 
     @staticmethod
-    def write_file(path: str, content: str) -> "Effect":
-        return Effect("write_file", {"path": path, "content": content})
+    def write_file(path: str, content: str, base: str | None = None) -> "Effect":
+        """Write ``content`` to ``path``.
+
+        ``base`` is the content the file is expected to hold *before* the write
+        (``None`` = the file is expected not to exist yet). It is what lets a
+        resume tell "my write has not happened yet" from "someone else changed
+        this file", the same way ``git_commit`` carries ``base_head``.
+        """
+        payload: dict[str, Any] = {"path": path, "content": content}
+        if base is not None:
+            payload["base"] = base
+        return Effect("write_file", payload)
 
     @staticmethod
     def add_relation(file: str, relation: Relation) -> "Effect":
@@ -93,8 +107,15 @@ class Effect:
         return Effect("git_commit", {"message": message, "paths": list(paths), "base_head": base_head})
 
     @staticmethod
-    def git_push(remote: str, branch: str) -> "Effect":
-        return Effect("git_push", {"remote": remote, "branch": branch})
+    def git_push(remote: str, branch: str, url: str) -> "Effect":
+        """A push to one named destination.
+
+        ``url`` is the normalized push destination resolved from Git at record
+        time. It is part of the durable payload so a resume verifies the
+        destination instead of following the remote name to wherever it points
+        by then.
+        """
+        return Effect("git_push", {"remote": remote, "branch": branch, "url": url})
 
 
 @dataclass(frozen=True)
@@ -213,7 +234,7 @@ class Mutation:
         for effect in effects:
             seq += 1
             record = {"seq": seq, "stage": stage, "kind": effect.kind, "payload": effect.payload, "applied": False}
-            self.controller.validate_effect(record, recorded + pending_records)
+            self.controller.validate_effect(record, recorded + pending_records, self.owner)
             pending_records.append(record)
         self.record["effects"] = recorded + pending_records
         self._save()
@@ -376,7 +397,31 @@ class MutationController:
             if e["kind"] == "add_relation" and e["payload"]["file"] == file
         }
 
-    def validate_effect(self, record: dict[str, Any], previous: list[dict[str, Any]]) -> None:
+    def _guard_push_pin(self, content: str, owner: str) -> None:
+        """Only the pin owners may change ``git.push`` in project.yaml.
+
+        The push destination is Project-specific safety configuration, so the
+        controller refuses the write mechanically instead of leaving the rule
+        to Skill prose: a domain operation cannot make the Project follow a
+        remote it happens to find.
+        """
+        try:
+            data = yamlish.load(content)
+        except yamlish.YamlishError as exc:
+            raise ValidationError(f"project.yaml payload is not readable: {exc}", code="project_yaml_invalid") from exc
+        if not isinstance(data, dict):
+            raise ValidationError("project.yaml payload is not a mapping", code="project_yaml_invalid")
+        proposed = parse_push_pin(data)
+        current = self.store.read_push_pin() if self.store.project_yaml.is_file() else None
+        if proposed == current or owner in PIN_OWNERS:
+            return
+        raise ValidationError(
+            f"operation owner {owner} may not change the Project's push destination pin; "
+            "it is changed only by the pin maintenance operation, with human confirmation",
+            code="push_pin_owner",
+        )
+
+    def validate_effect(self, record: dict[str, Any], previous: list[dict[str, Any]], owner: str) -> None:
         kind = record["kind"]
         payload = record["payload"]
         if kind not in EFFECT_KINDS:
@@ -395,8 +440,12 @@ class MutationController:
                 raise ValidationError(f"write_file path must be a canonical .workline path: {path!r}")
             if not isinstance(payload.get("content"), str):
                 raise ValidationError("write_file content must be text")
+            if "base" in payload and not isinstance(payload["base"], str):
+                raise ValidationError("write_file base must be text")
             if any(e["kind"] == "write_file" and e["payload"]["path"] == path for e in previous):
                 raise ValidationError(f"write_file path written twice in one mutation: {path}")
+            if path == PROJECT_YAML_REL:
+                self._guard_push_pin(payload["content"], owner)
             return
         if kind in ("add_relation", "remove_relation"):
             file = payload.get("file")
@@ -478,8 +527,28 @@ class MutationController:
                 raise ValidationError("runtime metadata is never committed")
             return
         if kind == "git_push":
-            if not payload.get("remote") or not payload.get("branch"):
-                raise ValidationError("git_push needs remote and branch")
+            remote, branch, url = payload.get("remote"), payload.get("branch"), payload.get("url")
+            if not remote or not branch or not url:
+                raise ValidationError("git_push needs remote, branch and the resolved push destination")
+            if pushurl.is_secret_bearing(url):
+                raise ValidationError(
+                    f"git_push destination carries credentials ({pushurl.redact(url)})",
+                    code="push_destination_secret",
+                )
+            if pushurl.normalize(url) != url:
+                raise ValidationError(f"git_push destination is not in canonical form: {url}")
+            pin = self.store.read_push_pin()
+            if pin is None:
+                raise ValidationError(
+                    "git_push cannot be recorded: this Project has no approved push destination",
+                    code="push_destination_unpinned",
+                )
+            if remote != pin.remote or url not in pin.allowed_urls:
+                raise ValidationError(
+                    f"git_push {remote} -> {url} is not the Project's approved destination "
+                    f"({pin.remote} -> {', '.join(pin.allowed_urls)})",
+                    code="push_destination_mismatch",
+                )
 
     # classification ------------------------------------------------------------
     def classify(self, record: dict[str, Any]) -> str:
@@ -493,7 +562,12 @@ class MutationController:
                 current = _normalize(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError):
                 return MISMATCH
-            return MATCHING if current == _normalize(payload["content"]) else MISMATCH
+            if current == _normalize(payload["content"]):
+                return MATCHING
+            base = payload.get("base")
+            if base is not None and current == _normalize(base):
+                return UNAPPLIED  # the decided update has not been applied yet
+            return MISMATCH
         if kind == "add_relation":
             rec = payload["record"]
             existing = {r.id: r for r in self.store.read_relation_file(payload["file"])}
@@ -540,17 +614,36 @@ class MutationController:
         return MISMATCH
 
     def _classify_push(self, payload: dict[str, Any]) -> str:
+        """Classify a recorded push — destination first, network second.
+
+        The destination the effect was recorded against is confirmed against
+        the Project pin and the current Git configuration *before* anything is
+        contacted, so a mutation never follows a remote name to a destination
+        it was not recorded for.
+
+        The evidence then comes from that destination itself (``ls-remote`` on
+        the URL), never from the fetch URL and never from a remote-tracking
+        ref, which survives a failed fetch and would make a stale answer look
+        like a confirmed one.
+        """
         repo = self.store.root
-        remote, branch = payload["remote"], payload["branch"]
+        branch, url = payload["branch"], payload["url"]
+        verify_recorded_destination(self.store, payload["remote"], url)
         head = gitcmd.head_commit(repo)
         if head is None:
             return MISMATCH
-        gitcmd.fetch(repo, remote, branch)  # failure tolerated: push will report it
-        remote_head = gitcmd.remote_ref(repo, remote, branch)
+        remote_head = gitcmd.ls_remote_head(repo, url, branch)
         if remote_head is None:
-            return UNAPPLIED
+            return UNAPPLIED  # the branch does not exist at the destination yet
         if remote_head == head:
             return MATCHING
+        if not gitcmd.has_commit(repo, remote_head):
+            fetched = gitcmd.fetch_url(repo, url, branch)
+            if fetched != remote_head:
+                raise ReconcileRequired(
+                    f"push destination {url} moved while it was being inspected "
+                    f"({remote_head} -> {fetched}): reconcile required"
+                )
         if gitcmd.is_ancestor(repo, remote_head, head):
             return UNAPPLIED
         return MISMATCH
@@ -587,8 +680,20 @@ class MutationController:
             gitcmd.commit_only(repo, payload["message"], paths)
             return
         if kind == "git_push":
-            result = gitcmd.push(self.store.root, payload["remote"], payload["branch"])
+            repo = self.store.root
+            remote, url = payload["remote"], payload["url"]
+            # Re-resolved immediately before the push: the window between the
+            # check and the push cannot be closed entirely (Git reads its own
+            # configuration when it runs), but it is narrowed to this call.
+            current = resolve_active_push_url(repo, remote)
+            if current != url:
+                raise StopError(
+                    f"push destination changed just before pushing (expected {url}, remote {remote} now "
+                    f"resolves to {current}): STOP",
+                    code="push_destination_changed",
+                )
+            result = gitcmd.push(repo, remote, payload["branch"])
             if not result.ok:
-                raise GitError(f"push to {payload['remote']} failed: {result.stderr.strip() or result.stdout.strip()}")
+                raise GitError(f"push to {url} failed: {result.stderr.strip() or result.stdout.strip()}")
             return
         raise ValidationError(f"unknown effect kind: {kind}")

@@ -26,7 +26,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from . import yamlish
+from . import pushurl, yamlish
 from .errors import ValidationError
 from .ids import is_valid_id
 
@@ -41,6 +41,12 @@ TMP_DIR = ".workline/runtime/tmp"
 # it is the one non-``.workline`` path an operation owner may write.
 BOOTSTRAP_REL_PATH = ".claude/skills/workline/SKILL.md"
 INFRA_WRITE_PATHS = (BOOTSTRAP_REL_PATH,)
+
+PROJECT_YAML_REL = f"{WORKLINE_DIR}/project.yaml"
+
+# Only these operation owners may write the ``git.push`` pin. The Mutation
+# Controller enforces it; it is not left to Skill prose.
+PIN_OWNERS = ("project-start", "push-destination-pin")
 
 ENTITY_DIRS = {"roadmap": "roadmaps", "phase": "phases", "work": "works"}
 
@@ -143,6 +149,63 @@ class Relation:
 
 
 @dataclass(frozen=True)
+class PushPin:
+    """The Project's approved push destination — a safety pin, not a cache.
+
+    ``allowed_urls`` holds the destinations a human explicitly approved (an
+    https and an ssh form of the same repository, say). It is never derived
+    from the current Git configuration and never auto-refreshed: exactly one
+    of these URLs must be what Git actually resolves as the active push
+    destination, or the operation STOPs.
+    """
+
+    remote: str
+    allowed_urls: tuple[str, ...]
+
+    def to_record(self) -> dict[str, Any]:
+        return {"remote": self.remote, "allowed_urls": list(self.allowed_urls)}
+
+
+def parse_push_pin(data: dict[str, Any]) -> PushPin | None:
+    """Read the ``git.push`` pin out of project.yaml data; None when unpinned."""
+    git_block = data.get("git")
+    if git_block is None:
+        return None
+    if not isinstance(git_block, dict):
+        raise ValidationError("project.yaml git must be a mapping", code="project_yaml_invalid")
+    push = git_block.get("push")
+    if push is None:
+        return None
+    if not isinstance(push, dict):
+        raise ValidationError("project.yaml git.push must be a mapping", code="project_yaml_invalid")
+    remote = push.get("remote")
+    if not isinstance(remote, str) or not remote.strip():
+        raise ValidationError("project.yaml git.push.remote missing", code="project_yaml_invalid")
+    urls = push.get("allowed_urls")
+    if not isinstance(urls, list) or not urls:
+        raise ValidationError("project.yaml git.push.allowed_urls must be a non-empty list", code="project_yaml_invalid")
+    accepted: list[str] = []
+    for url in urls:
+        if not isinstance(url, str) or not url.strip():
+            raise ValidationError("project.yaml git.push.allowed_urls holds an empty entry", code="project_yaml_invalid")
+        if pushurl.is_secret_bearing(url):
+            raise ValidationError(
+                f"project.yaml git.push.allowed_urls holds a credential-bearing URL ({pushurl.redact(url)})",
+                code="project_yaml_invalid",
+            )
+        canonical = pushurl.normalize(url)
+        if canonical != url:
+            raise ValidationError(
+                f"project.yaml git.push.allowed_urls is not in canonical form: {url} (expected {canonical})",
+                code="project_yaml_invalid",
+            )
+        accepted.append(url)
+    if len(set(accepted)) != len(accepted):
+        raise ValidationError("project.yaml git.push.allowed_urls holds duplicates", code="project_yaml_invalid")
+    return PushPin(remote.strip(), tuple(accepted))
+
+
+@dataclass(frozen=True)
 class Event:
     id: str
     type: str
@@ -190,11 +253,34 @@ def render_event_line(event: Event) -> str:
     return json.dumps(event.to_record(), ensure_ascii=False, separators=(",", ":"))
 
 
-def render_project_yaml(workline_root: Path) -> str:
-    return yamlish.dump({
-        "workline": {"root": str(workline_root)},
-        "rules": {key: {"ref": ref} for key, ref in RULE_REFS.items()},
-    })
+def project_yaml_text(data: dict[str, Any], pin: PushPin | None) -> str:
+    """Render project.yaml data with ``pin`` as its ``git.push`` block.
+
+    Every key the file already holds is preserved; only ``git.push`` is
+    replaced, so pinning a destination never rewrites the rest of the file.
+    """
+    ordered: dict[str, Any] = {}
+    if "workline" in data:
+        ordered["workline"] = data["workline"]
+    git_block = {k: v for k, v in (data.get("git") or {}).items() if k != "push"}
+    if pin is not None:
+        git_block["push"] = pin.to_record()
+    if git_block:
+        ordered["git"] = git_block
+    for key, value in data.items():
+        if key not in ("workline", "git"):
+            ordered[key] = value
+    return yamlish.dump(ordered)
+
+
+def render_project_yaml(workline_root: Path, pin: PushPin | None = None) -> str:
+    return project_yaml_text(
+        {
+            "workline": {"root": str(workline_root)},
+            "rules": {key: {"ref": ref} for key, ref in RULE_REFS.items()},
+        },
+        pin,
+    )
 
 
 # --------------------------------------------------------------------------- store
@@ -250,6 +336,14 @@ class ProjectStore:
         if not isinstance(data, dict):
             raise ValidationError("project.yaml is not a mapping", code="project_yaml_invalid")
         return data
+
+    def read_push_pin(self) -> PushPin | None:
+        """The Project's approved push destination, or None when unpinned."""
+        return parse_push_pin(self.load_project_yaml())
+
+    def project_yaml_with_pin(self, pin: PushPin | None) -> str:
+        """Current project.yaml re-rendered with ``pin`` as its ``git.push``."""
+        return project_yaml_text(self.load_project_yaml(), pin)
 
     def workline_root(self) -> Path:
         data = self.load_project_yaml()

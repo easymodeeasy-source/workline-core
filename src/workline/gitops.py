@@ -3,7 +3,10 @@
 * pre-existing dirty state is captured at operation entry and never staged;
 * only paths the current operation owns are committed;
 * commit / push are recorded as mutation effects so a failure resumes from the
-  Git stage without re-running domain writes.
+  Git stage without re-running domain writes;
+* a push is only ever recorded for a destination the operation owner verified
+  at its entry (:mod:`workline.destination`), never for whatever ``origin``
+  happens to be.
 """
 
 from __future__ import annotations
@@ -11,11 +14,24 @@ from __future__ import annotations
 from pathlib import Path
 
 from . import gitcmd
+from .destination import DEFAULT_REMOTE, PushDestination, ensure_push_destination
 from .errors import StopError
 from .mutation import Effect, Mutation
 from .store import RUNTIME_DIR, ProjectStore
 
-DEFAULT_REMOTE = "origin"
+__all__ = [
+    "DEFAULT_REMOTE",
+    "PushDestination",
+    "canonical_dirty_paths",
+    "capture_preexisting_dirty",
+    "ensure_git_ready",
+    "ensure_push_destination",
+    "ensure_separable",
+    "finalize",
+    "finalize_effects",
+    "is_runtime_path",
+    "record_preexisting_dirty",
+]
 
 
 def is_runtime_path(path: str) -> bool:
@@ -60,22 +76,31 @@ def ensure_git_ready(repo: Path) -> str:
     return branch
 
 
-def finalize_effects(store: ProjectStore, message: str, paths: list[str], *, push: bool) -> list[Effect]:
-    """Build commit (+ push when a remote exists and ``push`` is requested) effects."""
+def finalize_effects(
+    store: ProjectStore, message: str, paths: list[str], *, destination: PushDestination | None
+) -> list[Effect]:
+    """Build the commit effect, plus a push effect when ``destination`` is set.
+
+    ``destination`` is the verified :class:`PushDestination` the owner obtained
+    at its entry; ``None`` means this finalization does not push (a remote-less
+    Project, or Project開始, whose initial commit deliberately needs no push).
+    """
     repo = store.root
     effects = [Effect.git_commit(message, sorted(set(paths)), gitcmd.head_commit(repo))]
-    if push and gitcmd.has_remote(repo, DEFAULT_REMOTE):
-        effects.append(Effect.git_push(DEFAULT_REMOTE, ensure_git_ready(repo)))
+    if destination is not None:
+        effects.append(Effect.git_push(destination.remote, ensure_git_ready(repo), destination.url))
     return effects
 
 
-def finalize(mutation: Mutation, stage: str, message: str, paths: list[str], *, push: bool) -> None:
+def finalize(
+    mutation: Mutation, stage: str, message: str, paths: list[str], *, destination: PushDestination | None
+) -> None:
     """Record and apply the Git stage of ``mutation`` (idempotent on resume)."""
     store = mutation.store
     if not mutation.has_stage(stage):
         preexisting = record_preexisting_dirty(mutation, store.root)
         ensure_separable(preexisting, paths)
-        mutation.add_effects(stage, finalize_effects(store, message, paths, push=push))
+        mutation.add_effects(stage, finalize_effects(store, message, paths, destination=destination))
     mutation.apply()
 
 

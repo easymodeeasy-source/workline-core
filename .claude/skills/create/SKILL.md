@@ -46,6 +46,8 @@ registration coreが担当しない:
 
 直接Standalone invocationでは、CREATE entrypointのDirect Work Operation contextが人間/AIから与えられたWork意味を確定入力として受け、registration core呼出後にpostcheck / commit / remoteありならpushまで行う。新しいSkill routingは作らない。
 
+pushする場合の宛先は `rules/git` のpush destinationに従う。mutationを開くより前・networkより前に承認先一致を検査し、承認先なし / 不一致はWork登録の前にSTOPする。CREATEで承認先を変更しない。
+
 ## Input
 
 通常Work必須:
@@ -213,7 +215,7 @@ START caller
 Direct standalone invocation
 → CREATE entrypointがDirect Work Operation mutationを開始
 → registration coreを同mutationで実行
-→ entrypoint contextがpostcheck / commit / remoteありならpush
+→ entrypoint contextがpostcheck / commit / remoteありなら承認先へpush
 ```
 
 途中失敗後は同じmutation ID / Work ID / relation IDをresumeする。新IDで重複CREATEしない。

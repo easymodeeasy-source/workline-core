@@ -73,18 +73,31 @@ class WorklineTestCase(unittest.TestCase):
         path.mkdir(parents=True)
         return path
 
-    def new_project(self, name: str = "proj", *, remote: bool = False) -> ProjectStore:
+    def new_project(self, name: str = "proj", *, remote: bool = False, pin: bool = True) -> ProjectStore:
+        """A Workline Project; with ``remote`` its push destination is pinned.
+
+        ``pin=False`` produces the state an existing Project is in before the
+        one-time pin backfill: a remote with no approved destination.
+        """
         root = self.new_dir(name)
+        expected = None
         if remote:
-            bare = self.tmp / f"{name}-remote.git"
+            bare = self.remote_path(name)
             git(self.tmp, "init", "--bare", "-b", "main", str(bare))
             git(root, "init", "-b", "main")
             git(root, "remote", "add", "origin", str(bare))
-        project_start(root, WORKLINE_ROOT)
+            expected = str(bare) if pin else None
+        project_start(root, WORKLINE_ROOT, expected_push_url=expected)
         return ProjectStore(root)
 
     def remote_path(self, name: str = "proj") -> Path:
         return self.tmp / f"{name}-remote.git"
+
+    def remote_url(self, name: str = "proj") -> str:
+        """The pinned (normalized) form of this Project's push destination."""
+        from workline import pushurl
+
+        return pushurl.normalize(str(self.remote_path(name)))
 
     # roadmap helpers ---------------------------------------------------------
     def simple_roadmap(self, store: ProjectStore, phases: dict[str, tuple[str, str]] | None = None, relations=()) -> rm.RoadmapResult:

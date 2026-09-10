@@ -114,13 +114,17 @@ class CreateDirectInvocationTests(WorklineTestCase):
 
     def test_duplicate_retry_resumes_same_work(self) -> None:
         store = self.new_project(remote=True)
-        git(store.root, "remote", "set-url", "origin", str(self.tmp / "missing-remote.git"))
+        # The push fails transiently while the approved destination stays the
+        # same: the remote is unreachable, not a different repository.
+        bare = self.remote_path()
+        away = self.tmp / "proj-remote-away.git"
+        bare.rename(away)
         spec = WorkSpec("Retry", "retry done")
         with self.assertRaises(StopError):
             create_standalone_work(store, spec)
         works_before = [p.name for p in store.entity_dir("work").iterdir()]
         self.assertEqual(len(works_before), 1)
-        git(store.root, "remote", "set-url", "origin", str(self.remote_path()))
+        away.rename(bare)
         result = create_standalone_work(store, spec)
         self.assertTrue(result.resumed)
         self.assertEqual([p.name for p in store.entity_dir("work").iterdir()], works_before)

@@ -125,6 +125,42 @@ commit失敗 / push失敗時はdomain writeを再実行せず、同じpending mu
 
 START terminal処理は `work_target_removed` / `work_completed` を含む最終commitと、remoteありならその最終pushまでをfinalization mutationとする。local completed / remote未反映時は通常STARTを再実行せず finalization resumeする。
 
+### Push destination
+
+remoteがある通常Projectのpushは、Project正本が承認したpush destinationと一致するときだけ行う。承認先の正本は `.workline/project.yaml`。
+
+```text
+git:
+  push:
+    remote: <remote name>
+    allowed_urls:
+      - <normalized push URL>
+```
+
+これはcacheではなくsafety authorityである。Git remote configはclone毎・未追跡・任意のツールが書き換え可能で、それ自身を正とすると「最初から誤ったremote」を検出できない。承認先はcommitされ、fresh cloneへ届き、変更がreviewに現れる。
+
+push系operation ownerは、mutationを開くより前に、networkへ触れるより前に検査する。
+
+```text
+remoteなし                   → local commit成立でよい（従来どおり）
+remoteあり・承認先なし       → STOP
+承認先のremote名が存在しない → STOP
+active push URLが0件 / 複数件 → STOP
+resolved URLがallowed_urls外 → STOP
+```
+
+active push destinationはGit自身の解決結果（`pushurl` / `pushInsteadOf` 適用後）を使い、正確に1件でなければならない。複数destinationへのfan-outは扱わない。
+
+`git_push` effectは承認済みdestinationをdurableに保持する。resume時もnetworkより前に、記録済みdestinationとcurrent解決結果の一致を確認する。remote名だけを見て現在の指し先へfetch / pushしない。不一致は `reconcile required`。
+
+push反映の確認はpush destination自身へ問い合わせる。fetch URL側のstateやremote-tracking refを反映済みの根拠にしない。
+
+credentialを含むURLは承認先・回復記録・エラーメッセージのいずれにも残さない。検出時はredactしてSTOPする。
+
+承認先を書き込めるのはProject開始と専用のpin maintenanceだけで、Mutation Controllerがownerを機械的に検査する。AIやdomain operationがcurrent remoteへ承認先を自動追従させない。承認先の追加・変更はProject固有ルール変更として人間確認の対象。
+
+Worklineが保証するのは「どのrepositoryへpushするか」までである。HTTPS credential account、SSH authentication identity、credential managerが選ぶaccount、provider CLIのlogin accountは保証しない。remote destination確認済みをaccount確認済みとして報告しない。
+
 ---
 
 ## AI Decision

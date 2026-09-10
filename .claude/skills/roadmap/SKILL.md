@@ -175,7 +175,7 @@ human_confirmationの構造的必要性を初期判定
 ↓
 Phase構造検査
 ↓
-Roadmap operation commit / remoteありならpush
+Roadmap operation commit / remoteありなら承認先へpush
 ↓
 実行要求がある場合STARTへhandoff
 ```
@@ -348,5 +348,7 @@ RoadmapがRoadmap operation owner。
 Roadmap body / Phase / relation / Work構造の変更は同じ上位mutationへ束ねられる。Phase CREATE / CREATEは子登録処理で独立commit / pushしない。
 
 Phase展開後、STARTへ渡す前にRoadmap-owned structural changesをcommitし、remoteありならpushする。
+
+pushする場合の宛先は `rules/git` のpush destinationに従う。各Roadmap operationはmutationを開くより前・networkより前に承認先一致を検査し、承認先なし / 不一致はSTOPする。Roadmap操作で承認先を変更しない。
 
 途中失敗は同じmutationをresume。期待値不一致ならreconcile required。

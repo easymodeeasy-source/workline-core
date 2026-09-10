@@ -317,6 +317,9 @@ def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_ke
         f"{WORKLINE_DIR}/relations/related.yaml",
         f"{WORKLINE_DIR}/events/events.jsonl",
     ))
+    # Entry check before the mutation exists: an unpinned or drifted push
+    # destination STOPs here, with no intent record and no domain write.
+    destination = gitops.ensure_push_destination(store)
     mutation = controller.open(DIRECT_OWNER, invocation, scope)
     with abandon_on_stop(mutation):
         gitops.ensure_git_ready(store.root)
@@ -324,7 +327,7 @@ def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_ke
         result = register_works(mutation, "register", {"work": spec})
     work_id = result.work_ids["work"]
     message = f"chore(workline): create {ProjectView.load(store).works[work_id].display}"
-    gitops.finalize(mutation, "finalize", message, list(result.paths), push=True)
+    gitops.finalize(mutation, "finalize", message, list(result.paths), destination=destination)
     _stop_on_problems(validate_structure(ProjectView.load(store)), "postcheck")
     mutation.complete()
     from . import gitcmd

@@ -204,10 +204,12 @@ class StartLifecycleTests(WorklineTestCase):
         roadmap, entry = self._phase(store)
         w1 = entry.work_ids["w1"]
         calls: list[str] = []
+        away = self.tmp / "proj-remote-away.git"
 
         def executor(ctx: st.ExecutionContext):
             calls.append(ctx.work.id)
-            git(store.root, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+            # The approved destination stays the same; it is merely unreachable.
+            self.remote_path().rename(away)
             return st.Completed()
 
         with self.assertRaises(StopError) as ctx:
@@ -217,7 +219,7 @@ class StartLifecycleTests(WorklineTestCase):
         self.assertEqual(git(store.root, "log", "-1", "--format=%s").strip(), "chore(workline): complete W-01")
         pending = MutationController(store).list_pending()
         self.assertEqual(len(pending), 1)
-        git(store.root, "remote", "set-url", "origin", str(self.remote_path()))
+        away.rename(self.remote_path())
         resumed = st.start(store, w1, "single-work", executor)
         self.assertEqual(resumed.status, "completed")
         self.assertEqual(resumed.mutation_id, pending[0]["mutation_id"])

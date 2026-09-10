@@ -109,6 +109,41 @@ python -m workline.cli backfill-bootstrap <project-root>
 
 backfillは通常のmaintenanceなので、Project開始の「初期commit必須・push不要」例外を適用しない。remoteがあればcommit後pushまで行う（clone先で利用可能である必要があるため）。
 
+### Push destination pin
+
+remoteがあるProjectのpushは、Project正本が承認したdestinationと一致するときだけ行う（`rules/git`）。承認先を持たない既存Projectは、push系operationで `push_destination_unpinned` としてSTOPする。1回だけ次を実行する。
+
+```bash
+python -m workline.cli pin-push-destination <project-root> --url <approved push URL>
+```
+
+```text
+入力: 承認するURLを人間が明示（current remoteから自動生成しない）
+検査: credential混入なし / Gitが解決するactive push URLが正確に1件 / 明示URLと一致
+変更: .workline/project.yaml の git.push だけ（1 commit）
+不変: .workline再初期化なし
+      Roadmap / Phase / Work / relations / events変更なし
+他のpending mutationがある: STOP
+再実行: idempotent
+```
+
+新規Projectはこの承認をProjectSTART時に行える。
+
+```bash
+python -m workline.cli project-start <project-root> --workline-root <workline-root> --expected-push-url <approved push URL>
+```
+
+remoteを正式に変更する場合の順序:
+
+```text
+人間がGit remoteを変更
+→ 通常operationは不一致でSTOP（fail-closed）
+→ 人間が新destinationを明示して pin-push-destination
+→ 通常operation再開
+```
+
+Worklineが保証するのは「どのrepositoryへpushするか」まで。HTTPS credential account / SSH identity / credential manager / provider CLIのlogin accountは保証しない。
+
 ## Canonical implementation first
 
 canonical implementationが存在する処理を、Skill実行者が独自に再実装しない。
@@ -127,6 +162,7 @@ SKILL本文を根拠に `.workline` 構造・project.yaml・bootstrap・registry
 - repair-induced regression check: PASS
 - implementation: core implemented (registry / mutation / project-start / project-router / bootstrap + backfill / phase-create / create / start / roadmap)
 - post-project Skill discovery: implemented (Project-side bootstrap → canonical router → dynamic registry inventory)
+- push destination identity: implemented (project.yaml pin → entry check → durable git_push destination → pin maintenance)
 
 ## Tests
 

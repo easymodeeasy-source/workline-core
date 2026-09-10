@@ -301,6 +301,8 @@ commit直前にdiffを再確認し、START-owned changeだけをstageする。�
 
 remoteあり通常Projectでは最終Work結果をremoteへ反映する。remoteなしはlocal commitでよい。
 
+pushする場合の宛先は `rules/git` のpush destinationに従う。START開始前、mutationを開くより前、networkへ触れるより前に承認先一致を検査し、承認先なし / 不一致 / 解決不能はdomain writeの前にSTOPする。承認先をSTART側で変更しない。
+
 ### Terminal finalization
 
 Work成果の必要commit / push後、terminal lifecycleを同じfinalization mutationで処理する。
@@ -316,7 +318,7 @@ work_completed
 ↓
 eventsを含む最終commit
 ↓
-remoteありなら最終push
+remoteありなら承認先へ最終push
 ↓
 外部的にもWork complete
 ```

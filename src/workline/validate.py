@@ -82,6 +82,12 @@ def validate_project_yaml(store: ProjectStore) -> list[Problem]:
             result = registry_module.validate_registry(root_path)
             for issue in result.problems:
                 problems.append(Problem(issue.code, issue.message))
+    try:
+        # Shape only: the pin is compared against the live Git configuration by
+        # the operation entry check, never by validation (which stays offline).
+        store.read_push_pin()
+    except Exception as exc:  # ValidationError
+        problems.append(Problem("project_yaml_invalid", str(exc)))
     rules = data.get("rules")
     if not isinstance(rules, dict):
         problems.append(Problem("project_yaml_invalid", "rules missing"))

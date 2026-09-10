@@ -413,7 +413,9 @@ class PhaseAdditionTests(WorklineTestCase):
         store = self.new_project(remote=True)
         result = self.simple_roadmap(store)
         phases = {"c": PhaseSpec("C", "c state")}
-        git(store.root, "remote", "set-url", "origin", str(self.tmp / "missing.git"))
+        # The approved destination stays the same; it is merely unreachable.
+        away = self.tmp / "proj-remote-away.git"
+        self.remote_path().rename(away)
         with self.assertRaises(StopError) as ctx:
             rm.add_phases(store, result.roadmap_id, phases)
         self.assertEqual(ctx.exception.code, "git_error")
@@ -422,7 +424,7 @@ class PhaseAdditionTests(WorklineTestCase):
         registered = [p for p in ProjectView.load(store).phases if p != result.phase_ids["a"]]
         self.assertEqual(len(registered), 1)
 
-        git(store.root, "remote", "set-url", "origin", str(self.remote_path()))
+        away.rename(self.remote_path())
         resumed = rm.add_phases(store, result.roadmap_id, phases)
         self.assertTrue(resumed.resumed)
         self.assertEqual(resumed.mutation_id, pending[0]["mutation_id"])
