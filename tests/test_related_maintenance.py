@@ -352,6 +352,111 @@ class FinalizationTests(RelatedMaintenanceCase):
         self.assertEqual(validate_project(store), [])
 
 
+class ResumeTests(RelatedMaintenanceCase):
+    """A crash between the domain effects and Git must resume, never restart.
+
+    The removal case is the sharp one: once the remove effect is applied the
+    relation is gone from related.yaml, so re-resolving the request against
+    current state would call it unresolvable and refuse to continue.
+    """
+
+    def _crash_before_commit(self):
+        return mock.patch(
+            "workline.roadmap.gitops.finalize", side_effect=RuntimeError("crash before commit")
+        )
+
+    def test_remove_only_resume_keeps_the_same_mutation(self) -> None:
+        store, entry = self.entered_project()
+        w2 = entry.work_ids["w2"]
+        relation = next(r for r in ProjectView.load(store).related if r.from_id == w2)
+
+        with self._crash_before_commit():
+            with self.assertRaises(RuntimeError):
+                rm.maintain_work_related(store, w2, remove_relation_ids=(relation.id,))
+
+        pending = MutationController(store).list_pending()
+        self.assertEqual(len(pending), 1)
+        # the remove is already applied: current state no longer holds the relation
+        self.assertNotIn(relation.id, {r.id for r in ProjectView.load(store).related})
+
+        result = rm.maintain_work_related(store, w2, remove_relation_ids=(relation.id,))
+
+        self.assertTrue(result.resumed)
+        self.assertEqual(result.mutation_id, pending[0]["mutation_id"])
+        self.assertEqual(result.removed, (relation.id,))
+        self.assertEqual(result.added, ())
+        self.assertEqual(self.related_of(store, w2), [])
+        self.assertEqual(MutationController(store).list_pending(), [])
+        self.assertEqual(validate_project(store), [])
+
+    def test_add_and_remove_resume_does_not_multiply_relation_ids(self) -> None:
+        store, entry = self.entered_project()
+        w2 = entry.work_ids["w2"]
+        relation = next(r for r in ProjectView.load(store).related if r.from_id == w2)
+        request = dict(add=(RelatedSpec("obey", "docs/SAFETY.md"),), remove_relation_ids=(relation.id,))
+
+        with self._crash_before_commit():
+            with self.assertRaises(RuntimeError):
+                rm.maintain_work_related(store, w2, **request)
+
+        pending = MutationController(store).list_pending()
+        self.assertEqual(len(pending), 1)
+        applied = [r.id for r in ProjectView.load(store).related if r.from_id == w2]
+        self.assertEqual(len(applied), 1)  # R removed, S added
+
+        result = rm.maintain_work_related(store, w2, **request)
+
+        self.assertTrue(result.resumed)
+        self.assertEqual(result.mutation_id, pending[0]["mutation_id"])
+        self.assertEqual(result.added, tuple(applied))  # the same S, not a second one
+        self.assertEqual(result.removed, (relation.id,))
+        self.assertEqual([r.id for r in ProjectView.load(store).related if r.from_id == w2], applied)
+        self.assertEqual(self.related_of(store, w2), [("obey", "docs/SAFETY.md")])
+        self.assertEqual(MutationController(store).list_pending(), [])
+        self.assertEqual(validate_project(store), [])
+
+    def test_push_failure_resumes_only_the_push(self) -> None:
+        store, entry = self.entered_project("pushfail", remote=True)
+        w3 = entry.work_ids["w3"]
+        failing = gitcmd.GitResult(1, "", "network down")
+
+        with mock.patch("workline.mutation.gitcmd.push", return_value=failing):
+            with self.assertRaises(Exception):
+                rm.maintain_work_related(store, w3, add=(RelatedSpec("must_read", CONTRACT),))
+
+        pending = MutationController(store).list_pending()
+        self.assertEqual(len(pending), 1)
+        local_head = gitcmd.head_commit(store.root)
+        applied = [r.id for r in ProjectView.load(store).related if r.from_id == w3]
+        self.assertEqual(len(applied), 1)  # domain effect and local commit already landed
+        self.assertNotEqual(
+            git(self.remote_path("pushfail"), "rev-parse", "main").strip(), local_head
+        )
+
+        result = rm.maintain_work_related(store, w3, add=(RelatedSpec("must_read", CONTRACT),))
+
+        self.assertTrue(result.resumed)
+        self.assertEqual(result.mutation_id, pending[0]["mutation_id"])
+        self.assertEqual(result.added, tuple(applied))
+        # no second commit: the domain effect was not reinterpreted
+        self.assertEqual(gitcmd.head_commit(store.root), local_head)
+        self.assertEqual(git(self.remote_path("pushfail"), "rev-parse", "main").strip(), local_head)
+        self.assertEqual(MutationController(store).list_pending(), [])
+        self.assertEqual(validate_project(store), [])
+
+    def test_new_operation_still_rejects_an_unresolvable_relation(self) -> None:
+        """The resume path must not weaken validation for a fresh request."""
+        store, entry = self.entered_project()
+        w2 = entry.work_ids["w2"]
+        self.assertEqual(MutationController(store).list_pending(), [])
+
+        with self.assertRaises(ValidationError):
+            rm.maintain_work_related(store, w2, remove_relation_ids=("rel_0000000000000000000000000",))
+
+        self.assertEqual(MutationController(store).list_pending(), [])
+        self.assertEqual(self.related_of(store, w2), [("must_read", CONTRACT)])
+
+
 class RegressionFixtureTests(RelatedMaintenanceCase):
     """The PokeTool case that exposed the defect, reduced to a fixture."""
 

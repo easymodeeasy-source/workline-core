@@ -246,6 +246,19 @@ started / held / completed / cancelled / plan_excluded Workのrelated変更は�
 
 同一edge（type / from / to / condition が同一）が既に存在する場合は重複追加しない。有効変更が0件ならno-opとして正常終了し、commitもpushもrelation IDの発行も行わない。
 
+request identityはrequest内容だけから決まり、current related stateに依存しない。matching pending mutationが既にeffectsをdurable記録している場合は、current stateから対象を再解決せず記録済みeffectsを正としてresumeする。
+
+```text
+remove effect適用後にcommit前失敗
+→ 現在のrelated.yamlに対象relationは無い
+→ これを「unresolvable」と判定しない
+→ 記録済みmutationのeffectsから継続する
+```
+
+適用済みeffectの判定はMutation Controllerの `未適用 / 適用済み・期待値一致 / 適用済み・期待値不一致` に委ねる。resume時に新しいrelation IDやmutationを作らない。
+
+まだeffectsを記録していないpending mutationは、何も適用されていないので通常のcurrent-state validationから続行してよい。新規operationでは解決不能relation IDを引き続き拒否する。
+
 **`relations/related.yaml` の手編集は禁止。** Work再作成やplan exclusionでrelated不足を回避しない。Mutation Controller経由の正式経路を使う。
 
 ## Lifecycle

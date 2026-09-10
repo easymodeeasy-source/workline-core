@@ -558,6 +558,67 @@ def _unstarted_roadmap_work(view: ProjectView, work_id: str) -> Entity:
     return work
 
 
+def _related_request_key(add: tuple[RelatedSpec, ...], remove_relation_ids: tuple[str, ...]) -> str:
+    """Identity of a maintenance request, derived from the request only.
+
+    Deliberately independent of current state so the same retry resolves to
+    the same pending mutation after a crash, whatever the effects already did
+    to ``related.yaml``.
+    """
+    adds = [
+        f"+{spec.type}:{spec.to}:{json.dumps(spec.condition, sort_keys=True) if spec.condition is not None else ''}"
+        for spec in add
+    ]
+    return " | ".join(adds + [f"-{relation_id}" for relation_id in remove_relation_ids])
+
+
+def _resolve_related_changes(
+    view: ProjectView,
+    work_id: str,
+    add: tuple[RelatedSpec, ...],
+    remove_relation_ids: tuple[str, ...],
+) -> tuple[list[Relation], list[tuple[int, RelatedSpec]]]:
+    """Resolve a request against current state.
+
+    Only ever called when nothing of this mutation has been applied yet, so
+    "the relation is not there" genuinely means the request is wrong rather
+    than already done.
+    """
+    existing = {r.id: r for r in view.related}
+    removals: list[Relation] = []
+    seen_removals: set[str] = set()
+    for relation_id in remove_relation_ids:
+        relation = existing.get(relation_id)
+        if relation is None:
+            raise ValidationError(
+                f"related maintenance: relation {relation_id} unresolvable; "
+                "no name / target / similarity fallback is attempted"
+            )
+        if relation.from_id != work_id:
+            raise SpecViolation(
+                f"related maintenance: relation {relation_id} belongs to {relation.from_id}, not {work_id}"
+            )
+        if relation_id not in seen_removals:
+            seen_removals.add(relation_id)
+            removals.append(relation)
+
+    # An edge that already exists (after the requested removals) is not added
+    # a second time; duplicates inside one request collapse the same way.
+    remaining = {
+        related_edge_key(r.type, r.from_id, r.to, r.extra.get("condition"))
+        for r in view.related
+        if r.id not in seen_removals
+    }
+    effective_adds: list[tuple[int, RelatedSpec]] = []
+    for index, spec in enumerate(add):
+        key = related_edge_key(spec.type, work_id, spec.to, spec.condition)
+        if key in remaining:
+            continue
+        remaining.add(key)
+        effective_adds.append((index, spec))
+    return removals, effective_adds
+
+
 def _related_snapshot(view: ProjectView, work_id: str) -> dict[str, Any]:
     work = view.works[work_id]
     return {
@@ -603,76 +664,59 @@ def maintain_work_related(
     work = _unstarted_roadmap_work(view, work_id)
     validate_related_specs(add, f"related maintenance {work_id}")
 
-    existing = {r.id: r for r in view.related}
-    removals: list[Relation] = []
-    seen_removals: set[str] = set()
-    for relation_id in remove_relation_ids:
-        relation = existing.get(relation_id)
-        if relation is None:
-            raise ValidationError(
-                f"related maintenance: relation {relation_id} unresolvable; "
-                "no name / target / similarity fallback is attempted"
-            )
-        if relation.from_id != work_id:
-            raise SpecViolation(
-                f"related maintenance: relation {relation_id} belongs to {relation.from_id}, not {work_id}"
-            )
-        if relation_id not in seen_removals:
-            seen_removals.add(relation_id)
-            removals.append(relation)
-
-    # An edge that already exists (after the requested removals) is not added
-    # a second time; duplicates inside one request collapse the same way.
-    remaining = {
-        related_edge_key(r.type, r.from_id, r.to, r.extra.get("condition"))
-        for r in view.related
-        if r.id not in seen_removals
-    }
-    effective_adds: list[tuple[int, RelatedSpec]] = []
-    for index, spec in enumerate(add):
-        key = related_edge_key(spec.type, work_id, spec.to, spec.condition)
-        if key in remaining:
-            continue
-        remaining.add(key)
-        effective_adds.append((index, spec))
-
-    identity = {
-        "work_id": work_id,
-        "key": invocation_key
-        or " | ".join([f"+{s.type}:{s.to}" for s in add] + [f"-{r}" for r in remove_relation_ids]),
-    }
+    # Request identity comes from the request alone, so it is known before any
+    # current-state resolution. That ordering is what makes resume correct: a
+    # mutation whose effects are already durably recorded must continue from
+    # those records, not be re-derived from a state those very effects changed.
+    identity = {"work_id": work_id, "key": invocation_key or _related_request_key(add, remove_relation_ids)}
     operation = "work-related-maintenance"
-    if not effective_adds and not removals and not _pending_for(store, operation, identity):
-        return RelatedMaintenanceResult(work_id, (), (), None, gitcmd.head_commit(store.root), changed=False)
-
     before = _related_snapshot(view, work_id)
+    no_change = RelatedMaintenanceResult(work_id, (), (), None, gitcmd.head_commit(store.root), changed=False)
+
+    if not _pending_for(store, operation, identity):
+        # Fresh request: resolve against current state (this is where an
+        # unresolvable or foreign relation ID is refused) and detect a no-op
+        # before any mutation exists.
+        removals, effective_adds = _resolve_related_changes(view, work_id, add, remove_relation_ids)
+        if not removals and not effective_adds:
+            return no_change
+
     mutation = _open(store, operation, identity, [work_id])
     with abandon_on_stop(mutation):
-        additions = [
-            Relation(
-                mutation.reserve_id(f"related:add:{index}", "relation"),
-                spec.type,
-                work_id,
-                spec.to,
-                {"condition": spec.condition} if spec.condition is not None else {},
+        if not mutation.has_stage("related"):
+            # Either a new mutation, or a pending one that crashed before
+            # recording its effects; in both cases nothing has been applied yet,
+            # so current state is still the right thing to resolve against.
+            removals, effective_adds = _resolve_related_changes(view, work_id, add, remove_relation_ids)
+            if not removals and not effective_adds:
+                mutation.abandon()
+                return no_change
+            additions = [
+                Relation(
+                    mutation.reserve_id(f"related:add:{index}", "relation"),
+                    spec.type,
+                    work_id,
+                    spec.to,
+                    {"condition": spec.condition} if spec.condition is not None else {},
+                )
+                for index, spec in effective_adds
+            ]
+            validate_projection(
+                projected_view(
+                    view,
+                    remove_related_ids=tuple(r.id for r in removals),
+                    add_related=additions,
+                ),
+                "related maintenance",
             )
-            for index, spec in effective_adds
-        ]
-        validate_projection(
-            projected_view(
-                view,
-                remove_related_ids=tuple(r.id for r in removals),
-                add_related=additions,
-            ),
-            "related maintenance",
-        )
-
-    if not mutation.has_stage("related"):
-        mutation.add_effects(
-            "related",
-            [Effect.remove_relation(RELATED_FILE, relation) for relation in removals]
-            + [Effect.add_relation(RELATED_FILE, relation) for relation in additions],
-        )
+            mutation.add_effects(
+                "related",
+                [Effect.remove_relation(RELATED_FILE, relation) for relation in removals]
+                + [Effect.add_relation(RELATED_FILE, relation) for relation in additions],
+            )
+    # Recorded effects are the authority from here on. The Mutation Controller
+    # classifies each one as unapplied / applied_matching / applied_mismatch, so
+    # an already-removed relation is "matching", never "unresolvable".
     mutation.apply()
 
     recorded = mutation.stage_effects("related")
