@@ -406,6 +406,20 @@ class BackfillTests(WorklineTestCase):
         remote = git(self.remote_path(), "rev-parse", "main").strip()
         self.assertEqual(local, remote)
 
+    def test_backfilled_bootstrap_reaches_a_clone(self) -> None:
+        """The point of pushing: a fresh clone can route on its own."""
+        store = self._legacy_project(remote=True)
+        bs.backfill_bootstrap(store.root)
+
+        clone = self.tmp / "clone"
+        git(self.tmp, "clone", "-q", str(self.remote_path()), str(clone))
+
+        cloned_bootstrap = clone / BOOTSTRAP_REL_PATH
+        self.assertTrue(cloned_bootstrap.is_file(), cloned_bootstrap)
+        self.assertEqual(bs.bootstrap_state(ProjectStore(clone)), bs.MATCHING)
+        # and the clone still holds the canonical domain state
+        self.assertEqual(validate_project(ProjectStore(clone)), [])
+
     def test_backfill_leaves_other_skills_alone(self) -> None:
         store = self._legacy_project()
         other = store.root / ".claude" / "skills" / "house-style" / "SKILL.md"
