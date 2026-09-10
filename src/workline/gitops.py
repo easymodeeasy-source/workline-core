@@ -88,7 +88,7 @@ def finalize_effects(
     repo = store.root
     effects = [Effect.git_commit(message, sorted(set(paths)), gitcmd.head_commit(repo))]
     if destination is not None:
-        effects.append(Effect.git_push(destination.remote, ensure_git_ready(repo), destination.url))
+        effects.append(Effect.git_push(destination.remote, ensure_git_ready(repo), destination.locator))
     return effects
 
 

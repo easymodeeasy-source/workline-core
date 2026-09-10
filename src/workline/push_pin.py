@@ -27,7 +27,7 @@ from typing import Any, Sequence
 
 from . import gitcmd, gitops, pushurl
 from .bootstrap import is_established_project
-from .destination import DEFAULT_REMOTE, ensure_push_destination, resolve_active_push_url
+from .destination import DEFAULT_REMOTE, ensure_push_destination, resolve_active_push_locator
 from .errors import ReconcileRequired, StopError
 from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
 from .registry import validate_registry
@@ -52,11 +52,15 @@ class PinResult:
 
 
 def _approved(urls: Sequence[str]) -> tuple[str, ...]:
-    """Normalize the human-supplied destinations, refusing credentials.
+    """Take the human-supplied locators as given, refusing credentials.
 
-    Done before anything durable exists: a credential-bearing URL must never
-    reach project.yaml *or* a recovery record, and the recovery record holds
-    the invocation.
+    The secret check happens before anything durable exists: a
+    credential-bearing locator must never reach project.yaml *or* a recovery
+    record, and the recovery record holds the invocation.
+
+    Locators are stored exactly as supplied (surrounding whitespace aside).
+    They are never canonicalized: approving one spelling approves that
+    spelling, not every spelling a particular server would accept.
     """
     if not urls:
         raise StopError(
@@ -64,9 +68,12 @@ def _approved(urls: Sequence[str]) -> tuple[str, ...]:
         )
     accepted: list[str] = []
     for url in urls:
-        normalized = pushurl.accept(url, "approved push destination")
-        if normalized not in accepted:
-            accepted.append(normalized)
+        locator = url.strip()
+        if not locator:
+            raise StopError("an approved push destination is empty", code="push_destination_invalid")
+        pushurl.ensure_no_secret(locator, "approved push destination")
+        if locator not in accepted:
+            accepted.append(locator)
     return tuple(accepted)
 
 
@@ -98,7 +105,7 @@ def pin_push_destination(project_root: Path, urls: Sequence[str], remote: str = 
     # What the human approved must be what Git actually resolves right now.
     if remote not in gitcmd.remotes(root):
         raise StopError(f"this repository has no remote {remote}", code="push_destination_remote_missing")
-    resolved = resolve_active_push_url(root, remote)
+    resolved = resolve_active_push_locator(root, remote)
     if resolved not in approved:
         raise StopError(
             f"remote {remote} pushes to {resolved}, which is not among the destinations given "

@@ -94,10 +94,8 @@ class WorklineTestCase(unittest.TestCase):
         return self.tmp / f"{name}-remote.git"
 
     def remote_url(self, name: str = "proj") -> str:
-        """The pinned (normalized) form of this Project's push destination."""
-        from workline import pushurl
-
-        return pushurl.normalize(str(self.remote_path(name)))
+        """This Project's approved push locator, exactly as Git holds it."""
+        return str(self.remote_path(name))
 
     # roadmap helpers ---------------------------------------------------------
     def simple_roadmap(self, store: ProjectStore, phases: dict[str, tuple[str, str]] | None = None, relations=()) -> rm.RoadmapResult:

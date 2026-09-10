@@ -177,8 +177,8 @@ def remotes(repo: Path) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def push_urls(repo: Path, remote: str) -> list[str]:
-    """Every URL ``git push <remote>`` would actually write to.
+def push_locators(repo: Path, remote: str) -> list[str]:
+    """Every locator ``git push <remote>`` would actually write to.
 
     ``get-url --push --all`` is what Git itself resolves: it applies
     ``remote.<name>.pushurl`` and ``url.<base>.pushInsteadOf`` rewriting, so it
@@ -187,19 +187,22 @@ def push_urls(repo: Path, remote: str) -> list[str]:
     """
     result = run_git(repo, "remote", "get-url", "--push", "--all", remote, check=False)
     if not result.ok:
-        raise GitError(f"cannot resolve the push URL of remote {remote}: {result.stderr.strip() or result.stdout.strip()}")
+        raise GitError(
+            f"cannot resolve the push locator of remote {remote}: {result.stderr.strip() or result.stdout.strip()}"
+        )
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def ls_remote_head(repo: Path, url: str, branch: str) -> str | None:
-    """The branch tip of the repository at ``url`` itself; None when absent.
+def ls_remote_head(repo: Path, locator: str, branch: str) -> str | None:
+    """The branch tip of the repository at ``locator`` itself; None when absent.
 
-    The destination is named by URL, never by remote name, so the answer is
-    about the repository the push will write to — not about whatever a fetch
-    URL or a stale remote-tracking ref happens to say. A failed query raises
-    instead of falling back to local evidence.
+    The destination is named by the exact locator, never by remote name and
+    never by a tidied form of it, so the answer is about the repository the
+    push will write to — not about whatever a fetch URL or a stale
+    remote-tracking ref happens to say. A failed query raises instead of
+    falling back to local evidence.
     """
-    result = run_git(repo, "ls-remote", "--heads", "--", url, f"refs/heads/{branch}", check=False)
+    result = run_git(repo, "ls-remote", "--heads", "--", locator, f"refs/heads/{branch}", check=False)
     if not result.ok:
         raise GitError(f"cannot query the push destination: {result.stderr.strip() or result.stdout.strip()}")
     for line in result.stdout.splitlines():
@@ -209,9 +212,9 @@ def ls_remote_head(repo: Path, url: str, branch: str) -> str | None:
     return None
 
 
-def fetch_url(repo: Path, url: str, branch: str) -> str:
-    """Fetch ``branch`` from the repository at ``url``; return the FETCH_HEAD SHA."""
-    result = run_git(repo, "fetch", "--", url, branch, check=False)
+def fetch_locator(repo: Path, locator: str, branch: str) -> str:
+    """Fetch ``branch`` from the repository at ``locator``; return the FETCH_HEAD SHA."""
+    result = run_git(repo, "fetch", "--", locator, branch, check=False)
     if not result.ok:
         raise GitError(f"cannot fetch from the push destination: {result.stderr.strip() or result.stdout.strip()}")
     head = run_git(repo, "rev-parse", "--verify", "--quiet", "FETCH_HEAD", check=False)

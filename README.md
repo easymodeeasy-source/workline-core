@@ -118,14 +118,17 @@ python -m workline.cli pin-push-destination <project-root> --url <approved push 
 ```
 
 ```text
-入力: 承認するURLを人間が明示（current remoteから自動生成しない）
-検査: credential混入なし / Gitが解決するactive push URLが正確に1件 / 明示URLと一致
+入力: 承認するlocatorを人間が明示（current remoteから自動生成しない）
+検査: credential混入なし / Gitが解決するactive push locatorが正確に1件 /
+      明示locatorと文字列一致
 変更: .workline/project.yaml の git.push だけ（1 commit）
 不変: .workline再初期化なし
       Roadmap / Phase / Work / relations / events変更なし
 他のpending mutationがある: STOP
 再実行: idempotent
 ```
+
+承認先は `git remote get-url --push --all` が返したlocatorそのものを使う。`.git` の有無・trailing slash・case差・HTTPS/SSHの違いをWorklineが同一視することはない（サーバによっては別repositoryになり得るため）。両方を使うなら `--url` を複数渡して人間が明示する。表記が違うだけでSTOPすることは、別repositoryを同一と誤認しないための意図した挙動である。
 
 新規Projectはこの承認をProjectSTART時に行える。
 

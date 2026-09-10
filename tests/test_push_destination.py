@@ -20,7 +20,7 @@ from workline import pushurl
 from workline import roadmap as rm
 from workline import start as st
 from workline.create import WorkSpec, create_standalone_work
-from workline.destination import ensure_push_destination, resolve_active_push_url
+from workline.destination import ensure_push_destination, resolve_active_push_locator
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.mutation import Effect, MutationController, WriteScope
 from workline.project_start import project_start
@@ -35,37 +35,31 @@ SECRET_URL = "https://carol:ghp_supersecrettoken@example.invalid/org/repo.git"
 TOKEN = "ghp_supersecrettoken"
 
 
-class PushUrlNormalizationTests(WorklineTestCase):
-    """Comparison only means something if both sides are written one way."""
+class LocatorInspectionTests(WorklineTestCase):
+    """Locators are inspected for credentials only; identity is never inferred."""
 
-    def test_canonical_forms(self) -> None:
-        self.assertEqual(pushurl.normalize("https://GitHub.com/Owner/Repo.git"), "https://github.com/Owner/Repo")
-        self.assertEqual(pushurl.normalize("https://github.com/Owner/Repo/"), "https://github.com/Owner/Repo")
-        self.assertEqual(pushurl.normalize("git@github.com:Owner/Repo.git"), "ssh://git@github.com/Owner/Repo")
-        self.assertEqual(pushurl.normalize("ssh://git@github.com:22/Owner/Repo.git"), "ssh://git@github.com/Owner/Repo")
-        self.assertEqual(pushurl.normalize("ssh://git@github.com:2222/o/r.git"), "ssh://git@github.com:2222/o/r")
-        self.assertEqual(pushurl.normalize(r"C:\repos\bare.git"), "C:/repos/bare")
+    def test_no_identity_normalization_is_offered(self) -> None:
+        """The footgun is absent, not merely unused."""
+        for removed in ("normalize", "accept", "canonical"):
+            self.assertFalse(hasattr(pushurl, removed), removed)
 
-    def test_path_case_is_never_folded(self) -> None:
-        self.assertNotEqual(
-            pushurl.normalize("https://github.com/Owner/Repo.git"),
-            pushurl.normalize("https://github.com/owner/repo.git"),
-        )
-
-    def test_https_and_ssh_are_not_conflated(self) -> None:
-        self.assertNotEqual(
-            pushurl.normalize("https://github.com/o/r.git"),
-            pushurl.normalize("git@github.com:o/r.git"),
-        )
-
-    def test_secret_detection_and_redaction(self) -> None:
+    def test_secret_detection(self) -> None:
         self.assertTrue(pushurl.is_secret_bearing(SECRET_URL))
         self.assertTrue(pushurl.is_secret_bearing("https://user@example.invalid/o/r.git"))
         self.assertFalse(pushurl.is_secret_bearing("git@github.com:o/r.git"))
         self.assertFalse(pushurl.is_secret_bearing("https://github.com/o/r.git"))
+        self.assertFalse(pushurl.is_secret_bearing(r"C:\repos\bare.git"))
+
+    def test_redaction_masks_only_the_credential(self) -> None:
         self.assertNotIn(TOKEN, pushurl.redact(SECRET_URL))
+        self.assertEqual(pushurl.redact(SECRET_URL), "https://***@example.invalid/org/repo.git")
+        # everything else comes back untouched, the .git suffix included
+        for plain in ("https://github.com/o/r.git", "git@github.com:o/r.git", r"C:\repos\bare.git"):
+            self.assertEqual(pushurl.redact(plain), plain)
+
+    def test_a_credential_bearing_locator_stops(self) -> None:
         with self.assertRaises(StopError) as ctx:
-            pushurl.accept(SECRET_URL, "test")
+            pushurl.ensure_no_secret(SECRET_URL, "test")
         self.assertEqual(ctx.exception.code, "push_destination_secret")
         self.assertNotIn(TOKEN, str(ctx.exception))
 
@@ -79,6 +73,22 @@ class DestinationBase(WorklineTestCase):
     def head_of(self, bare: Path) -> str | None:
         result = git(bare, "rev-parse", "--verify", "--quiet", "refs/heads/main", check=False).strip()
         return result or None
+
+    def bare_at(self, path: Path) -> Path:
+        """A bare repository at exactly ``path`` (no suffix is appended)."""
+        git(self.tmp, "init", "--bare", "-b", "main", str(path))
+        return path
+
+    def seed(self, bare: Path, text: str) -> str | None:
+        """Give ``bare`` a history of its own; return its head."""
+        seed = self.tmp / f"seed-{bare.name}"
+        seed.mkdir()
+        git(seed, "init", "-b", "main")
+        (seed / "seed.txt").write_text(text, encoding="utf-8")
+        git(seed, "add", "seed.txt")
+        git(seed, "commit", "-m", f"seed {text}")
+        git(seed, "push", str(bare), "main:main")
+        return self.head_of(bare)
 
     def push_effects(self, store: ProjectStore) -> list[dict]:
         effects: list[dict] = []
@@ -183,7 +193,7 @@ class EntryCheckTests(DestinationBase):
         git(root, "remote", "add", "upstream", str(bare))
         project_start(root, WORKLINE_ROOT, expected_push_url=str(bare), push_remote="upstream")
         store = ProjectStore(root)
-        self.assertEqual(store.read_push_pin(), PushPin("upstream", (pushurl.normalize(str(bare)),)))
+        self.assertEqual(store.read_push_pin(), PushPin("upstream", (str(bare),)))
 
         create_standalone_work(store, WorkSpec("Upstream", "done"))
         self.assertEqual(git(root, "rev-parse", "HEAD").strip(), self.head_of(bare))
@@ -240,7 +250,7 @@ class ResolutionTests(DestinationBase):
         # the fetch side never received anything and never decided anything:
         # its divergent history would have been read as a mismatch
         self.assertEqual(self.head_of(fetch_remote), fetch_head_before)
-        self.assertEqual(store.read_push_pin(), PushPin("origin", (pushurl.normalize(str(push_remote)),)))
+        self.assertEqual(store.read_push_pin(), PushPin("origin", (str(push_remote),)))
         self.assertEqual(MutationController(store).list_pending(), [])
 
     def test_pin_against_the_fetch_url_stops_when_pushurl_differs(self) -> None:
@@ -259,7 +269,7 @@ class ResolutionTests(DestinationBase):
 
         # Git reports the rewritten destination, so that is what may be pinned.
         self.assertEqual(
-            resolve_active_push_url(root, "origin"), pushurl.normalize(str(rewritten))
+            resolve_active_push_locator(root, "origin"), str(rewritten)
         )
         with self.assertRaises(StopError) as ctx:
             project_start(root, WORKLINE_ROOT, expected_push_url=str(configured))
@@ -307,7 +317,7 @@ class DurablePushEffectTests(DestinationBase):
 
         recorded = self.push_effects(store)
         self.assertEqual(len(recorded), 1)
-        self.assertEqual(recorded[0]["payload"]["url"], self.remote_url())
+        self.assertEqual(recorded[0]["payload"]["locator"], self.remote_url())
         self.assertEqual(recorded[0]["payload"]["remote"], "origin")
         pending = MutationController(store).list_pending()
 
@@ -328,7 +338,7 @@ class DurablePushEffectTests(DestinationBase):
         away = self._stall_push(store, spec)
 
         recorded = self.push_effects(store)
-        self.assertEqual(recorded[0]["payload"]["url"], self.remote_url())
+        self.assertEqual(recorded[0]["payload"]["locator"], self.remote_url())
 
         # The remote now points at the other approved destination: the entry
         # check passes, and the recorded effect is what refuses.
@@ -403,7 +413,7 @@ class OwnerGuardTests(DestinationBase):
 
     def test_a_domain_owner_cannot_change_the_pin(self) -> None:
         store = self.new_project(remote=True)
-        other = pushurl.normalize(str(self.bare("elsewhere")))
+        other = str(self.bare("elsewhere"))
         controller = MutationController(store)
         content = store.project_yaml_with_pin(PushPin("origin", (other,)))
         for owner in ("roadmap", "start", "create-direct", "bootstrap-backfill"):
@@ -515,7 +525,7 @@ class PinMaintenanceTests(DestinationBase):
         # 3. the human approves the new destination explicitly
         result = pin_push_destination(store.root, [str(new)])
         self.assertEqual(result.status, "pinned")
-        self.assertEqual(store.read_push_pin(), PushPin("origin", (pushurl.normalize(str(new)),)))
+        self.assertEqual(store.read_push_pin(), PushPin("origin", (str(new),)))
 
         # 4. ordinary operations resume, against the new destination only
         create_standalone_work(store, WorkSpec("AfterMove", "done"))
@@ -577,5 +587,90 @@ class GuaranteeBoundaryTests(DestinationBase):
     def test_a_verified_destination_says_nothing_about_the_account(self) -> None:
         store = self.new_project(remote=True)
         destination = ensure_push_destination(store)
-        self.assertEqual(destination.url, self.remote_url())
+        self.assertEqual(destination.locator, self.remote_url())
         self.assertFalse(hasattr(destination, "account"))
+
+
+class LocatorIdentityTests(DestinationBase):
+    """A destination is the exact locator Git resolves, not a tidied form of it.
+
+    ``<path>/target`` and ``<path>/target.git`` are two different repositories
+    here, as they may be on any server. Workline must never decide they are the
+    same one, and must never contact one while intending to push to the other.
+    """
+
+    def _pair(self) -> tuple[Path, Path]:
+        plain = self.bare_at(self.tmp / "target")
+        dotgit = self.bare_at(self.tmp / "target.git")
+        self.seed(plain, "a different repository")  # must never be consulted
+        return plain, dotgit
+
+    def _pinned_to(self, locator: str, name: str = "locator-proj") -> ProjectStore:
+        root = self.new_dir(name)
+        git(root, "init", "-b", "main")
+        git(root, "remote", "add", "origin", locator)
+        project_start(root, WORKLINE_ROOT, expected_push_url=locator)
+        return ProjectStore(root)
+
+    def test_target_and_target_dot_git_stay_distinct(self) -> None:
+        plain, dotgit = self._pair()
+        plain_head = self.head_of(plain)
+        store = self._pinned_to(str(dotgit))
+        self.assertEqual(store.read_push_pin(), PushPin("origin", (str(dotgit),)))
+
+        create_standalone_work(store, WorkSpec("Exact", "done"))
+
+        local = git(store.root, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.head_of(dotgit), local)  # ls-remote / ancestry / push
+        self.assertEqual(self.head_of(plain), plain_head)  # never touched
+        recorded = [
+            e["payload"]
+            for e in MutationController(store).list_pending()
+            for e in e["effects"]
+            if e["kind"] == "git_push"
+        ]
+        self.assertEqual(recorded, [])
+        self.assertEqual(validate_project(store), [])
+
+    def test_drift_from_dot_git_to_plain_stops(self) -> None:
+        plain, dotgit = self._pair()
+        store = self._pinned_to(str(dotgit))
+        create_standalone_work(store, WorkSpec("Before", "done"))
+        plain_head = self.head_of(plain)
+
+        git(store.root, "remote", "set-url", "origin", str(plain))
+        with self.assertRaises(StopError) as ctx:
+            create_standalone_work(store, WorkSpec("After", "done"))
+        self.assertEqual(ctx.exception.code, "push_destination_mismatch")
+        self.assertEqual(self.head_of(plain), plain_head)
+        self.assertEqual(MutationController(store).list_pending(), [])
+
+    def test_resume_does_not_follow_an_equivalent_looking_locator(self) -> None:
+        plain, dotgit = self._pair()
+        store = self._pinned_to(str(dotgit))
+        # a human approves both repositories, so the entry check passes either
+        # way and only the recorded locator can refuse
+        pin_push_destination(store.root, [str(dotgit), str(plain)])
+        plain_head = self.head_of(plain)
+
+        away = self.tmp / "target-away.git"
+        dotgit.rename(away)
+        spec = WorkSpec("Drift", "done")
+        with self.assertRaises(StopError):
+            create_standalone_work(store, spec)
+        recorded = self.push_effects(store)
+        self.assertEqual([e["payload"]["locator"] for e in recorded], [str(dotgit)])
+        away.rename(dotgit)  # reachable again: the STOP must be about identity
+
+        git(store.root, "remote", "set-url", "origin", str(plain))
+        with self.assertRaises(ReconcileRequired):
+            create_standalone_work(store, spec)
+        self.assertEqual(self.head_of(plain), plain_head)
+
+    def test_a_trailing_slash_is_not_assumed_equivalent(self) -> None:
+        """A false negative is the accepted price of never guessing identity."""
+        store = self.new_project(remote=True)
+        git(store.root, "remote", "set-url", "origin", str(self.remote_path()) + "/")
+        with self.assertRaises(StopError) as ctx:
+            create_standalone_work(store, WorkSpec("Slash", "done"))
+        self.assertEqual(ctx.exception.code, "push_destination_mismatch")

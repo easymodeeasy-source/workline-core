@@ -134,10 +134,24 @@ git:
   push:
     remote: <remote name>
     allowed_urls:
-      - <normalized push URL>
+      - <人間が明示承認した exact secret-free push locator>
 ```
 
 これはcacheではなくsafety authorityである。Git remote configはclone毎・未追跡・任意のツールが書き換え可能で、それ自身を正とすると「最初から誤ったremote」を検出できない。承認先はcommitされ、fresh cloneへ届き、変更がreviewに現れる。
+
+承認先はrepository identityの推論結果ではなく、**Gitが返したlocatorそのもの**である。比較は文字列一致で行い、次を同一視しない。
+
+```text
+/repo と /repo.git
+/repo と /repo/
+pathのcase差
+HTTPSとSSH
+その他provider依存のrepository path表現
+```
+
+サーバによっては別repositoryになり得るため、Worklineは同一性を推測しない。両方を許可するなら人間が両方を `allowed_urls` へ明示する。同じrepositoryが表記差で拒否されること（false negative）は許容し、別repositoryが同一と判定されること（false positive）は許容しない。
+
+安全検査に使うlocatorと、実際に接続・pushするlocatorは同一でなければならない。`.git` や trailing slash を落とす等、repository pathを書き換えた値をidentity判定・drift判定・network接続のいずれにも使わない。
 
 push系operation ownerは、mutationを開くより前に、networkへ触れるより前に検査する。
 
@@ -151,9 +165,9 @@ resolved URLがallowed_urls外 → STOP
 
 active push destinationはGit自身の解決結果（`pushurl` / `pushInsteadOf` 適用後）を使い、正確に1件でなければならない。複数destinationへのfan-outは扱わない。
 
-`git_push` effectは承認済みdestinationをdurableに保持する。resume時もnetworkより前に、記録済みdestinationとcurrent解決結果の一致を確認する。remote名だけを見て現在の指し先へfetch / pushしない。不一致は `reconcile required`。
+`git_push` effectは承認済みlocatorをそのままdurableに保持する。resume時もnetworkより前に、記録済みlocatorとcurrent解決結果の文字列一致を確認する。remote名だけを見て現在の指し先へfetch / pushしない。不一致は `reconcile required`。
 
-push反映の確認はpush destination自身へ問い合わせる。fetch URL側のstateやremote-tracking refを反映済みの根拠にしない。
+push反映の確認は記録済みlocatorそのものへ問い合わせる。fetch URL側のstate、remote-tracking ref、書き換えたlocatorを反映済みの根拠にしない。
 
 credentialを含むURLは承認先・回復記録・エラーメッセージのいずれにも残さない。検出時はredactしてSTOPする。
 

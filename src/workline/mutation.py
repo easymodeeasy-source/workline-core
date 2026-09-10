@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gitcmd, pushurl, yamlish
-from .destination import resolve_active_push_url, verify_recorded_destination
+from .destination import resolve_active_push_locator, verify_recorded_destination
 from .durable import DurableWriteError, durable_write_text
 from .errors import GitError, ReconcileRequired, StopError, ValidationError
 from .ids import is_valid_id, kind_of, new_id
@@ -107,15 +107,16 @@ class Effect:
         return Effect("git_commit", {"message": message, "paths": list(paths), "base_head": base_head})
 
     @staticmethod
-    def git_push(remote: str, branch: str, url: str) -> "Effect":
+    def git_push(remote: str, branch: str, locator: str) -> "Effect":
         """A push to one named destination.
 
-        ``url`` is the normalized push destination resolved from Git at record
-        time. It is part of the durable payload so a resume verifies the
-        destination instead of following the remote name to wherever it points
-        by then.
+        ``locator`` is the exact push destination Git resolved at record time,
+        stored verbatim. It is part of the durable payload so a resume verifies
+        the destination instead of following the remote name to wherever it
+        points by then — and, because it is compared as text, a differently
+        spelled locator is a change, not a match.
         """
-        return Effect("git_push", {"remote": remote, "branch": branch, "url": url})
+        return Effect("git_push", {"remote": remote, "branch": branch, "locator": locator})
 
 
 @dataclass(frozen=True)
@@ -527,25 +528,23 @@ class MutationController:
                 raise ValidationError("runtime metadata is never committed")
             return
         if kind == "git_push":
-            remote, branch, url = payload.get("remote"), payload.get("branch"), payload.get("url")
-            if not remote or not branch or not url:
-                raise ValidationError("git_push needs remote, branch and the resolved push destination")
-            if pushurl.is_secret_bearing(url):
+            remote, branch, locator = payload.get("remote"), payload.get("branch"), payload.get("locator")
+            if not remote or not branch or not locator:
+                raise ValidationError("git_push needs remote, branch and the resolved push locator")
+            if pushurl.is_secret_bearing(locator):
                 raise ValidationError(
-                    f"git_push destination carries credentials ({pushurl.redact(url)})",
+                    f"git_push destination carries credentials ({pushurl.redact(locator)})",
                     code="push_destination_secret",
                 )
-            if pushurl.normalize(url) != url:
-                raise ValidationError(f"git_push destination is not in canonical form: {url}")
             pin = self.store.read_push_pin()
             if pin is None:
                 raise ValidationError(
                     "git_push cannot be recorded: this Project has no approved push destination",
                     code="push_destination_unpinned",
                 )
-            if remote != pin.remote or url not in pin.allowed_urls:
+            if remote != pin.remote or locator not in pin.allowed_urls:
                 raise ValidationError(
-                    f"git_push {remote} -> {url} is not the Project's approved destination "
+                    f"git_push {remote} -> {locator} is not the Project's approved destination "
                     f"({pin.remote} -> {', '.join(pin.allowed_urls)})",
                     code="push_destination_mismatch",
                 )
@@ -621,27 +620,27 @@ class MutationController:
         contacted, so a mutation never follows a remote name to a destination
         it was not recorded for.
 
-        The evidence then comes from that destination itself (``ls-remote`` on
-        the URL), never from the fetch URL and never from a remote-tracking
-        ref, which survives a failed fetch and would make a stale answer look
-        like a confirmed one.
+        The evidence then comes from that destination itself — ``ls-remote`` on
+        the recorded locator, verbatim — never from the fetch URL, never from a
+        rewritten locator, and never from a remote-tracking ref, which survives
+        a failed fetch and would make a stale answer look like a confirmed one.
         """
         repo = self.store.root
-        branch, url = payload["branch"], payload["url"]
-        verify_recorded_destination(self.store, payload["remote"], url)
+        branch, locator = payload["branch"], payload["locator"]
+        verify_recorded_destination(self.store, payload["remote"], locator)
         head = gitcmd.head_commit(repo)
         if head is None:
             return MISMATCH
-        remote_head = gitcmd.ls_remote_head(repo, url, branch)
+        remote_head = gitcmd.ls_remote_head(repo, locator, branch)
         if remote_head is None:
             return UNAPPLIED  # the branch does not exist at the destination yet
         if remote_head == head:
             return MATCHING
         if not gitcmd.has_commit(repo, remote_head):
-            fetched = gitcmd.fetch_url(repo, url, branch)
+            fetched = gitcmd.fetch_locator(repo, locator, branch)
             if fetched != remote_head:
                 raise ReconcileRequired(
-                    f"push destination {url} moved while it was being inspected "
+                    f"push destination {locator} moved while it was being inspected "
                     f"({remote_head} -> {fetched}): reconcile required"
                 )
         if gitcmd.is_ancestor(repo, remote_head, head):
@@ -681,19 +680,19 @@ class MutationController:
             return
         if kind == "git_push":
             repo = self.store.root
-            remote, url = payload["remote"], payload["url"]
+            remote, locator = payload["remote"], payload["locator"]
             # Re-resolved immediately before the push: the window between the
             # check and the push cannot be closed entirely (Git reads its own
             # configuration when it runs), but it is narrowed to this call.
-            current = resolve_active_push_url(repo, remote)
-            if current != url:
+            current = resolve_active_push_locator(repo, remote)
+            if current != locator:
                 raise StopError(
-                    f"push destination changed just before pushing (expected {url}, remote {remote} now "
-                    f"resolves to {current}): STOP",
+                    f"push destination changed just before pushing (expected {locator}, remote {remote} "
+                    f"now resolves to {current}): STOP",
                     code="push_destination_changed",
                 )
             result = gitcmd.push(repo, remote, payload["branch"])
             if not result.ok:
-                raise GitError(f"push to {url} failed: {result.stderr.strip() or result.stdout.strip()}")
+                raise GitError(f"push to {locator} failed: {result.stderr.strip() or result.stdout.strip()}")
             return
         raise ValidationError(f"unknown effect kind: {kind}")

@@ -29,7 +29,7 @@ from .bootstrap import (
     is_established_project,
     render_bootstrap,
 )
-from .destination import DEFAULT_REMOTE, resolve_active_push_url
+from .destination import DEFAULT_REMOTE, resolve_active_push_locator
 from .errors import StopError
 from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
 from .registry import validate_registry
@@ -62,16 +62,18 @@ def _pin_or_stop(root: Path, expected_push_url: str, remote: str) -> PushPin:
     """Approve ``expected_push_url`` as this Project's push destination.
 
     The human states the destination; Git states what it currently resolves.
-    A pin is written only when the two agree — a remote is never blessed just
-    because it happens to be configured.
+    A pin is written only when the two agree character for character — a remote
+    is never blessed just because it happens to be configured, and two
+    spellings are never assumed to name the same repository.
     """
-    approved = pushurl.accept(expected_push_url, "expected push destination")
+    approved = expected_push_url.strip()
+    pushurl.ensure_no_secret(approved, "expected push destination")
     if remote not in gitcmd.remotes(root):
         raise StopError(
             f"expected push destination was given for remote {remote}, which this repository does not have",
             code="push_destination_remote_missing",
         )
-    resolved = resolve_active_push_url(root, remote)
+    resolved = resolve_active_push_locator(root, remote)
     if resolved != approved:
         raise StopError(
             f"remote {remote} pushes to {resolved}, not to the expected destination {approved}; STOP",

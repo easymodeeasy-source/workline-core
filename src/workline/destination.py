@@ -10,6 +10,13 @@ about **who** authenticates. Two independent statements are compared:
   (``git remote get-url --push --all``, which already applies ``pushurl`` and
   ``pushInsteadOf``).
 
+Both sides are **exact locators**, compared as text. Workline never tidies a
+locator into a canonical form and never decides that two spellings mean the
+same repository: ``https://host/r`` and ``https://host/r.git`` can be two
+different repositories, so treating them as one would defeat the check itself.
+The approved locator is also the locator every command is given, so the
+repository Workline inspects is always the repository it pushes to.
+
 Every check here is a configuration read: no network is touched, so a
 push-performing operation can STOP at its entry — before any domain write,
 before any mutation intent exists and before anything reaches a remote.
@@ -38,30 +45,30 @@ class PushDestination:
     """The single active push destination an operation is authorized to use."""
 
     remote: str
-    url: str  # normalized, secret-free, resolved from Git itself
+    locator: str  # exactly what Git resolved, secret-free, never rewritten
 
 
-def resolve_active_push_url(repo: Path, remote: str) -> str:
-    """The one URL ``git push <remote>`` writes to, normalized.
+def resolve_active_push_locator(repo: Path, remote: str) -> str:
+    """The one locator ``git push <remote>`` writes to, exactly as Git gives it.
 
     v1 supports exactly one active push destination. Fan-out pushes (several
     configured push URLs) are refused rather than half-verified.
     """
-    configured = gitcmd.push_urls(repo, remote)
+    configured = gitcmd.push_locators(repo, remote)
     if not configured:
         raise StopError(
-            f"remote {remote} resolves to no push URL", code="push_destination_unresolved"
+            f"remote {remote} resolves to no push locator", code="push_destination_unresolved"
         )
     if len(configured) > 1:
-        shown = ", ".join(pushurl.redact(url) for url in configured)
+        shown = ", ".join(pushurl.redact(locator) for locator in configured)
         raise StopError(
             f"remote {remote} has {len(configured)} active push destinations ({shown}); "
             "Workline pushes to exactly one destination",
             code="push_destination_multiple",
         )
-    url = configured[0]
-    pushurl.ensure_no_secret(url, f"remote {remote}")
-    return pushurl.normalize(url)
+    locator = configured[0]
+    pushurl.ensure_no_secret(locator, f"remote {remote}")
+    return locator
 
 
 def _check(pin: PushPin, repo: Path) -> PushDestination:
@@ -70,15 +77,16 @@ def _check(pin: PushPin, repo: Path) -> PushDestination:
             f"the Project pins pushes to remote {pin.remote}, which this repository does not have",
             code="push_destination_remote_missing",
         )
-    url = resolve_active_push_url(repo, pin.remote)
-    if url not in pin.allowed_urls:
+    locator = resolve_active_push_locator(repo, pin.remote)
+    if locator not in pin.allowed_urls:
         raise StopError(
-            f"remote {pin.remote} now pushes to {url}, which is not an approved destination of this "
-            f"Project ({', '.join(pin.allowed_urls)}); STOP. This is a Project-specific safety "
-            "setting: change it through the pin maintenance operation, never automatically",
+            f"remote {pin.remote} now pushes to {locator}, which is not an approved destination of "
+            f"this Project ({', '.join(pin.allowed_urls)}); STOP. This is a Project-specific safety "
+            "setting: change it through the pin maintenance operation, never automatically. Two "
+            "spellings of a repository are never assumed to be the same repository",
             code="push_destination_mismatch",
         )
-    return PushDestination(pin.remote, url)
+    return PushDestination(pin.remote, locator)
 
 
 def ensure_push_destination(store: ProjectStore) -> PushDestination | None:
@@ -101,11 +109,12 @@ def ensure_push_destination(store: ProjectStore) -> PushDestination | None:
     return _check(pin, repo)
 
 
-def verify_recorded_destination(store: ProjectStore, remote: str, url: str) -> None:
+def verify_recorded_destination(store: ProjectStore, remote: str, locator: str) -> None:
     """Confirm a recorded ``git_push`` still targets what it was recorded for.
 
-    Runs before any network access on every resume: a mutation never follows
-    a remote name to wherever it happens to point now.
+    Runs before any network access on every resume: a mutation never follows a
+    remote name to wherever it happens to point now, and never accepts a
+    differently spelled locator as "the same place".
     """
     pin = store.read_push_pin()
     if pin is None:
@@ -116,13 +125,14 @@ def verify_recorded_destination(store: ProjectStore, remote: str, url: str) -> N
         raise ReconcileRequired(
             f"recorded push remote {remote} is not the Project's pinned remote {pin.remote}: reconcile required"
         )
-    if url not in pin.allowed_urls:
+    if locator not in pin.allowed_urls:
         raise ReconcileRequired(
-            f"recorded push destination {url} is no longer an approved destination of this Project: reconcile required"
+            f"recorded push destination {locator} is no longer an approved destination of this "
+            "Project: reconcile required"
         )
-    current = resolve_active_push_url(store.root, pin.remote)
-    if current != url:
+    current = resolve_active_push_locator(store.root, pin.remote)
+    if current != locator:
         raise ReconcileRequired(
-            f"push destination changed since this mutation was recorded (recorded {url}, remote "
+            f"push destination changed since this mutation was recorded (recorded {locator}, remote "
             f"{pin.remote} now resolves to {current}): reconcile required, not pushing"
         )

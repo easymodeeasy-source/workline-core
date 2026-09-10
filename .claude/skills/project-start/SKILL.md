@@ -132,10 +132,10 @@ remoteがある場合、`rules/git` のpush destinationを人間確認で決め�
 remoteなし
 → 承認先を作らない。従来どおり成立
 
-remoteあり + expected push URLを人間が明示
+remoteあり + expected push locatorを人間が明示
 → credential混入検査
-→ Gitが解決するactive push URLが正確に1件か検査
-→ 明示URLと一致するときだけ project.yaml へ承認先を書く
+→ Gitが解決するactive push locatorが正確に1件か検査
+→ 明示locatorと文字列一致するときだけ project.yaml へ承認先を書く
 → 初期commitへ含める（pushはしない）
 
 remoteあり + 明示なし
@@ -326,14 +326,16 @@ push destination承認先を持たない既存Projectも、ProjectSTARTの再実
 
 ```text
 対象: valid established Workline Projectのみ
-入力: 承認するpush destinationを人間が明示（configから導出しない）
-検査: credential混入なし / active push URLが正確に1件 / 明示URLと一致
+入力: 承認するpush locatorを人間が明示（configから導出しない）
+検査: credential混入なし / active push locatorが正確に1件 / 明示locatorと文字列一致
 変更: .workline/project.yaml の git.push だけ
 不変: .workline再初期化なし
       Roadmap / Phase / Work / relations / events変更なし
 他のpending mutationがある: STOP（旧承認先向けの進行中operationを壊さない）
 再実行: idempotent
 ```
+
+承認先はGitが返したlocatorそのもの。`.git` の有無・trailing slash・case差・HTTPS/SSHを同一視しない。両方許可するなら人間が両方を明示する。
 
 remote変更の正しい順序:
 

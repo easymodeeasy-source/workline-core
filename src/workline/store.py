@@ -152,11 +152,16 @@ class Relation:
 class PushPin:
     """The Project's approved push destination — a safety pin, not a cache.
 
-    ``allowed_urls`` holds the destinations a human explicitly approved (an
-    https and an ssh form of the same repository, say). It is never derived
-    from the current Git configuration and never auto-refreshed: exactly one
-    of these URLs must be what Git actually resolves as the active push
-    destination, or the operation STOPs.
+    ``allowed_urls`` holds **exact secret-free Git push locators** a human
+    explicitly approved — not a canonical repository identity Workline
+    inferred. One of them must be, character for character, what Git resolves
+    as the active push destination, or the operation STOPs. Two spellings of
+    what a particular server happens to treat as one repository
+    (``…/r`` and ``…/r.git``, a trailing slash, an https and an ssh form) are
+    never assumed equivalent: approving both means listing both.
+
+    It is never derived from the current Git configuration and never
+    auto-refreshed.
     """
 
     remote: str
@@ -188,15 +193,14 @@ def parse_push_pin(data: dict[str, Any]) -> PushPin | None:
     for url in urls:
         if not isinstance(url, str) or not url.strip():
             raise ValidationError("project.yaml git.push.allowed_urls holds an empty entry", code="project_yaml_invalid")
-        if pushurl.is_secret_bearing(url):
+        if url != url.strip():
             raise ValidationError(
-                f"project.yaml git.push.allowed_urls holds a credential-bearing URL ({pushurl.redact(url)})",
+                "project.yaml git.push.allowed_urls holds a padded entry; a locator is stored exactly",
                 code="project_yaml_invalid",
             )
-        canonical = pushurl.normalize(url)
-        if canonical != url:
+        if pushurl.is_secret_bearing(url):
             raise ValidationError(
-                f"project.yaml git.push.allowed_urls is not in canonical form: {url} (expected {canonical})",
+                f"project.yaml git.push.allowed_urls holds a credential-bearing locator ({pushurl.redact(url)})",
                 code="project_yaml_invalid",
             )
         accepted.append(url)
