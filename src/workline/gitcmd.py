@@ -193,43 +193,40 @@ def push_locators(repo: Path, remote: str) -> list[str]:
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
-def ls_remote_head(repo: Path, locator: str, branch: str) -> str | None:
-    """The branch tip of the repository at ``locator`` itself; None when absent.
+@dataclass(frozen=True)
+class PushPreview:
+    """What Git says ``git push <remote> <branch>:<branch>`` would do."""
 
-    The destination is named by the exact locator, never by remote name and
-    never by a tidied form of it, so the answer is about the repository the
-    push will write to — not about whatever a fetch URL or a stale
-    remote-tracking ref happens to say. A failed query raises instead of
-    falling back to local evidence.
+    flag: str  # porcelain status: "=", "*", " ", "!", ...
+    summary: str
+    destination: str  # the ``To <...>`` line, for reporting only
+
+
+def push_dry_run(repo: Path, remote: str, branch: str) -> PushPreview:
+    """Ask Git what the real push would do, over the real push path.
+
+    The remote is named, never a resolved locator: handing a locator back to
+    another Git command re-enters URL rewriting (``url.<base>.insteadOf`` can
+    rewrite the very locator ``pushInsteadOf`` produced), which would inspect a
+    different repository from the one the push writes to. The refspec is
+    identical to the real push, so the answer describes exactly that push.
     """
-    result = run_git(repo, "ls-remote", "--heads", "--", locator, f"refs/heads/{branch}", check=False)
-    if not result.ok:
-        raise GitError(f"cannot query the push destination: {result.stderr.strip() or result.stdout.strip()}")
+    result = run_git(repo, "push", "--dry-run", "--porcelain", remote, f"{branch}:{branch}", check=False)
+    destination = ""
+    preview: PushPreview | None = None
     for line in result.stdout.splitlines():
-        sha, _, ref = line.partition("\t")
-        if ref.strip() == f"refs/heads/{branch}":
-            return sha.strip()
-    return None
-
-
-def fetch_locator(repo: Path, locator: str, branch: str) -> str:
-    """Fetch ``branch`` from the repository at ``locator``; return the FETCH_HEAD SHA."""
-    result = run_git(repo, "fetch", "--", locator, branch, check=False)
+        if line.startswith("To ") and not destination:
+            destination = line[3:].strip()
+            continue
+        fields = line.split("\t")
+        if len(fields) >= 3 and fields[1].endswith(f":refs/heads/{branch}"):
+            preview = PushPreview(fields[0], fields[2].strip(), destination)
+    if preview is not None:
+        return preview
+    detail = result.stderr.strip() or result.stdout.strip()
     if not result.ok:
-        raise GitError(f"cannot fetch from the push destination: {result.stderr.strip() or result.stdout.strip()}")
-    head = run_git(repo, "rev-parse", "--verify", "--quiet", "FETCH_HEAD", check=False)
-    if not head.ok or not head.stdout.strip():
-        raise GitError("fetch from the push destination produced no FETCH_HEAD")
-    return head.stdout.strip()
-
-
-def has_commit(repo: Path, rev: str) -> bool:
-    return run_git(repo, "cat-file", "-e", f"{rev}^{{commit}}", check=False).ok
-
-
-def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
-    result = run_git(repo, "merge-base", "--is-ancestor", ancestor, descendant, check=False)
-    return result.returncode == 0
+        raise GitError(f"cannot preview the push to {remote}: {detail}")
+    raise GitError(f"git push --dry-run said nothing about {branch}: {detail}")
 
 
 def push(repo: Path, remote: str, branch: str) -> GitResult:

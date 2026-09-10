@@ -620,32 +620,35 @@ class MutationController:
         contacted, so a mutation never follows a remote name to a destination
         it was not recorded for.
 
-        The evidence then comes from that destination itself — ``ls-remote`` on
-        the recorded locator, verbatim — never from the fetch URL, never from a
-        rewritten locator, and never from a remote-tracking ref, which survives
-        a failed fetch and would make a stale answer look like a confirmed one.
+        The evidence then comes from the push itself: ``git push --dry-run``
+        over the same remote name and the same refspec the real push uses, so
+        Git applies its own rewriting once and answers about the repository the
+        push would write to. A resolved locator is never handed back to another
+        Git command — ``url.<base>.insteadOf`` can rewrite the very locator
+        ``pushInsteadOf`` produced, which would inspect a different repository
+        — and a remote-tracking ref is never consulted, since it survives a
+        failed fetch and would make a stale answer look confirmed.
         """
         repo = self.store.root
-        branch, locator = payload["branch"], payload["locator"]
-        verify_recorded_destination(self.store, payload["remote"], locator)
-        head = gitcmd.head_commit(repo)
-        if head is None:
+        remote, branch, locator = payload["remote"], payload["branch"], payload["locator"]
+        verify_recorded_destination(self.store, remote, locator)
+        if gitcmd.head_commit(repo) is None:
             return MISMATCH
-        remote_head = gitcmd.ls_remote_head(repo, locator, branch)
-        if remote_head is None:
-            return UNAPPLIED  # the branch does not exist at the destination yet
-        if remote_head == head:
-            return MATCHING
-        if not gitcmd.has_commit(repo, remote_head):
-            fetched = gitcmd.fetch_locator(repo, locator, branch)
-            if fetched != remote_head:
-                raise ReconcileRequired(
-                    f"push destination {locator} moved while it was being inspected "
-                    f"({remote_head} -> {fetched}): reconcile required"
-                )
-        if gitcmd.is_ancestor(repo, remote_head, head):
-            return UNAPPLIED
-        return MISMATCH
+        preview = gitcmd.push_dry_run(repo, remote, branch)
+        if preview.flag == "=":
+            return MATCHING  # up to date
+        if preview.flag in ("*", " "):
+            return UNAPPLIED  # new branch / fast-forward update
+        if preview.flag == "!":
+            raise ReconcileRequired(
+                f"the destination would reject this push ({preview.summary}); the branch at "
+                f"{preview.destination or locator} is not what this mutation left behind: reconcile required"
+            )
+        raise StopError(
+            f"git push --dry-run reported {preview.flag!r} ({preview.summary}), which Workline does not "
+            "act on; STOP rather than guess",
+            code="push_preview_unknown",
+        )
 
     # application ---------------------------------------------------------------
     def apply_effect(self, record: dict[str, Any]) -> None:

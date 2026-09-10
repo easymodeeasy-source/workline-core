@@ -167,7 +167,20 @@ active push destinationはGit自身の解決結果（`pushurl` / `pushInsteadOf`
 
 `git_push` effectは承認済みlocatorをそのままdurableに保持する。resume時もnetworkより前に、記録済みlocatorとcurrent解決結果の文字列一致を確認する。remote名だけを見て現在の指し先へfetch / pushしない。不一致は `reconcile required`。
 
-push反映の確認は記録済みlocatorそのものへ問い合わせる。fetch URL側のstate、remote-tracking ref、書き換えたlocatorを反映済みの根拠にしない。
+push反映の確認は、実pushと同じremote名・同じrefspecの `git push --dry-run` で行い、Git自身に同じrewrite解決を1回だけ通させる。
+
+resolved locatorを別のGit commandへ引数として再投入しない。`url.<base>.insteadOf` が `pushInsteadOf` の生成したlocatorをさらに書き換え、実push先とは別のrepositoryを読み得るためである。fetch URL側のstateやremote-tracking refも反映済みの根拠にしない。
+
+dry-run結果の解釈:
+
+```text
+=   up to date          → 反映済み
+*   new branch          → 未反映
+    fast-forward update → 未反映
+!   rejected            → reconcile required
+その他 / 解釈不能        → STOP（推測しない）
+transport / auth失敗    → STOP
+```
 
 credentialを含むURLは承認先・回復記録・エラーメッセージのいずれにも残さない。検出時はredactしてSTOPする。
 

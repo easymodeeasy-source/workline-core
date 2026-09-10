@@ -16,6 +16,7 @@ from pathlib import Path
 from helpers import WorklineTestCase, completing_executor, git
 
 from workline import bootstrap as bs
+from workline import gitcmd
 from workline import pushurl
 from workline import roadmap as rm
 from workline import start as st
@@ -674,3 +675,90 @@ class LocatorIdentityTests(DestinationBase):
         with self.assertRaises(StopError) as ctx:
             create_standalone_work(store, WorkSpec("Slash", "done"))
         self.assertEqual(ctx.exception.code, "push_destination_mismatch")
+
+
+class ChainedRewriteTests(DestinationBase):
+    """Push evidence must travel the push path, not a locator handed back to Git.
+
+    ``remote.origin.url = A`` with ``url.B.pushInsteadOf = A`` sends the push to
+    B — but B handed to another Git command is rewritten again by
+    ``url.C.insteadOf = B``. Verification by locator would therefore inspect C
+    while the push writes to B.
+    """
+
+    def _chain(self) -> tuple[ProjectStore, Path, Path, Path]:
+        configured = self.bare_at(self.tmp / "A.git")  # what the config shows
+        destination = self.bare_at(self.tmp / "B.git")  # where pushes land
+        decoy = self.bare_at(self.tmp / "C.git")  # what a locator read would hit
+        self.seed(decoy, "a third repository")
+        root = self.new_dir("chain")
+        git(root, "init", "-b", "main")
+        git(root, "remote", "add", "origin", str(configured))
+        git(root, "config", f"url.{destination}.pushInsteadOf", str(configured))
+        git(root, "config", f"url.{decoy}.insteadOf", str(destination))
+        project_start(root, WORKLINE_ROOT, expected_push_url=str(destination))
+        return ProjectStore(root), configured, destination, decoy
+
+    def _classification(self, store: ProjectStore, locator: str) -> str:
+        record = {
+            "kind": "git_push",
+            "payload": {"remote": "origin", "branch": "main", "locator": locator},
+        }
+        return MutationController(store).classify(record)
+
+    def test_no_direct_locator_command_remains(self) -> None:
+        """The locator is never handed back to Git as an argument."""
+        for removed in ("ls_remote_head", "fetch_locator", "has_commit", "is_ancestor"):
+            self.assertFalse(hasattr(gitcmd, removed), removed)
+
+    def test_the_push_and_its_evidence_reach_the_same_repository(self) -> None:
+        store, configured, destination, decoy = self._chain()
+        decoy_head = self.head_of(decoy)
+        self.assertEqual(resolve_active_push_locator(store.root, "origin"), str(destination))
+        # a locator handed back to Git would land on the decoy instead
+        self.assertEqual(
+            git(store.root, "ls-remote", "--heads", "--", str(destination), "refs/heads/main").split()[0],
+            decoy_head,
+        )
+
+        preview = gitcmd.push_dry_run(store.root, "origin", "main")
+        self.assertEqual(preview.destination, str(destination))
+
+        create_standalone_work(store, WorkSpec("Chained", "done"))
+
+        local = git(store.root, "rev-parse", "HEAD").strip()
+        self.assertEqual(self.head_of(destination), local)
+        self.assertEqual(self.head_of(decoy), decoy_head)  # never written to
+        self.assertIsNone(self.head_of(configured))
+        self.assertEqual(validate_project(store), [])
+
+    def test_a_diverged_third_repository_does_not_decide_anything(self) -> None:
+        store, _configured, destination, decoy = self._chain()
+        create_standalone_work(store, WorkSpec("Chained", "done"))
+        local = git(store.root, "rev-parse", "HEAD").strip()
+
+        # destination up to date, decoy diverged -> up to date
+        self.assertNotEqual(self.head_of(decoy), local)
+        self.assertEqual(self._classification(store, str(destination)), "applied_matching")
+
+        # destination behind, decoy exactly at HEAD -> still an unapplied push
+        git(store.root, "push", "-q", "-f", str(decoy), "main:main")
+        self.assertEqual(self.head_of(decoy), local)
+        first = git(store.root, "rev-list", "--max-parents=0", "HEAD").strip().splitlines()[0]
+        git(destination, "update-ref", "refs/heads/main", first)
+        self.assertEqual(self._classification(store, str(destination)), "unapplied")
+
+        # destination diverged -> reconcile required, whatever the decoy holds
+        seed = self.new_dir("diverge")
+        git(seed, "init", "-b", "main")
+        (seed / "d.txt").write_text("diverged\n", encoding="utf-8")
+        git(seed, "add", "d.txt")
+        git(seed, "commit", "-m", "diverged")
+        git(seed, "push", "-q", "-f", str(destination), "main:main")
+        with self.assertRaises(ReconcileRequired):
+            self._classification(store, str(destination))
+
+    def test_a_new_branch_at_the_destination_is_unapplied(self) -> None:
+        store, _configured, destination, _decoy = self._chain()
+        self.assertIsNone(self.head_of(destination))
+        self.assertEqual(self._classification(store, str(destination)), "unapplied")
