@@ -8,11 +8,11 @@ Workline の実装・正式仕様リポジトリ。
 
 ```text
 registry.md
-skills/project-start/SKILL.md
-skills/roadmap/SKILL.md
-skills/phase-create/SKILL.md
-skills/create/SKILL.md
-skills/start/SKILL.md
+.claude/skills/project-start/SKILL.md
+.claude/skills/roadmap/SKILL.md
+.claude/skills/phase-create/SKILL.md
+.claude/skills/create/SKILL.md
+.claude/skills/start/SKILL.md
 ```
 
 旧 `aiproject-vault/new-dev-os-redesign/` の checkpoint / audit / fix / live-spec は設計履歴・rationaleとして保持するが、実装時のnormative sourceとして横断合成しない。

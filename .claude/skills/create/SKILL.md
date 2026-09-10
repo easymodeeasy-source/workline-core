@@ -1,6 +1,6 @@
 ---
 name: create
-description: Register a Work whose meaning has already been decided. Use when Roadmap or START has fixed what Work must exist, or when a human/AI directly requests creation of a standalone Work. CREATE assigns stable identity, writes the Work body, registers already-decided relations and Related data, and for direct standalone invocation wraps registration in its own Direct Work Operation context through Git finalization.
+description: Register a Workline Work whose meaning has already been decided. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml), when Roadmap or START has fixed what Work must exist, or when a human/AI directly requests creation of a standalone Workline Work. CREATE assigns stable identity, writes the Work body, registers already-decided relations and Related data, and for direct standalone invocation wraps registration in its own Direct Work Operation context through Git finalization. Not for creating files, directories, components, branches, or any generic project artifact.
 ---
 
 # CREATE

@@ -1,6 +1,6 @@
 ---
 name: start
-description: Execute an already-registered Work and drive it to the requested execution boundary. Use when a Workline Work must actually be performed, including dependency checks, target/lifecycle handling, derived fix Work creation through CREATE, integration or human-confirmation execution, Git persistence, and same-Phase continuation in explicit outer mode.
+description: Execute an already-registered Workline Work and drive it to the requested execution boundary. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml) when a registered Workline Work must actually be performed, including dependency checks, target/lifecycle handling, derived fix Work creation through CREATE, integration or human-confirmation execution, Git persistence, and same-Phase continuation in explicit outer mode. Not for starting a server, script, build, task, or any generic "start" request.
 ---
 
 # START

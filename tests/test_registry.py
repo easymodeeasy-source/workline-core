@@ -169,8 +169,57 @@ class OwningWorklineRootTests(RegistryFixture):
 
     def test_repository_skill_resolves_to_the_repository_root(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
-        skill = repo_root / "skills" / "project-start" / "SKILL.md"
+        skill = repo_root / ".claude" / "skills" / "project-start" / "SKILL.md"
         self.assertEqual(owning_workline_root(skill), repo_root)
+
+
+class CanonicalSkillLayoutTests(unittest.TestCase):
+    """The canonical Skills live where Claude Code discovers them, exactly once."""
+
+    REPO_ROOT = Path(__file__).resolve().parents[1]
+    SKILL_NAMES = ("project-start", "roadmap", "phase-create", "create", "start")
+
+    def test_skills_are_under_the_claude_skills_directory(self) -> None:
+        for name in self.SKILL_NAMES:
+            with self.subTest(skill=name):
+                skill = self.REPO_ROOT / ".claude" / "skills" / name / "SKILL.md"
+                self.assertTrue(skill.is_file(), skill)
+                self.assertTrue(skill.read_text(encoding="utf-8").strip())
+
+    def test_pre_move_skill_location_is_gone(self) -> None:
+        self.assertFalse((self.REPO_ROOT / "skills").exists())
+
+    def test_each_canonical_skill_exists_exactly_once(self) -> None:
+        for name in self.SKILL_NAMES:
+            with self.subTest(skill=name):
+                found = [
+                    p for p in self.REPO_ROOT.rglob("SKILL.md")
+                    if p.parent.name == name and ".git" not in p.parts
+                ]
+                self.assertEqual(len(found), 1, found)
+
+    def test_registry_routes_every_skill_to_the_claude_skills_directory(self) -> None:
+        text = (self.REPO_ROOT / "registry.md").read_text(encoding="utf-8")
+        for skill_id in REQUIRED_SKILL_IDS:
+            with self.subTest(skill=skill_id):
+                name = skill_id.split("/")[-1]
+                self.assertIn(f"<!-- workline-target: .claude/skills/{name}/SKILL.md -->", text)
+                # identity stays path-independent
+                self.assertIn(f"<!-- workline-id: {skill_id} -->", text)
+
+    def test_non_project_start_skills_require_an_established_project(self) -> None:
+        for name in self.SKILL_NAMES:
+            if name == "project-start":
+                continue
+            with self.subTest(skill=name):
+                text = (self.REPO_ROOT / ".claude" / "skills" / name / "SKILL.md").read_text(encoding="utf-8")
+                description = text.split("---")[1]
+                self.assertIn(".workline/project.yaml", description)
+
+    def test_project_start_is_the_pre_project_skill(self) -> None:
+        text = (self.REPO_ROOT / ".claude" / "skills" / "project-start" / "SKILL.md").read_text(encoding="utf-8")
+        description = text.split("---")[1]
+        self.assertIn("before a Workline Project exists", description)
 
 
 if __name__ == "__main__":

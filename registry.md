@@ -219,20 +219,20 @@ Skill本文はこのregistryに置かない。identityは `workline-id`、現在
 
 ## Project開始
 <!-- workline-id: skills/project-start -->
-<!-- workline-target: skills/project-start/SKILL.md -->
+<!-- workline-target: .claude/skills/project-start/SKILL.md -->
 
 ## Roadmap
 <!-- workline-id: skills/roadmap -->
-<!-- workline-target: skills/roadmap/SKILL.md -->
+<!-- workline-target: .claude/skills/roadmap/SKILL.md -->
 
 ## Phase CREATE
 <!-- workline-id: skills/phase-create -->
-<!-- workline-target: skills/phase-create/SKILL.md -->
+<!-- workline-target: .claude/skills/phase-create/SKILL.md -->
 
 ## CREATE
 <!-- workline-id: skills/create -->
-<!-- workline-target: skills/create/SKILL.md -->
+<!-- workline-target: .claude/skills/create/SKILL.md -->
 
 ## START
 <!-- workline-id: skills/start -->
-<!-- workline-target: skills/start/SKILL.md -->
+<!-- workline-target: .claude/skills/start/SKILL.md -->

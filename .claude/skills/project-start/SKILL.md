@@ -1,6 +1,6 @@
 ---
 name: project-start
-description: Initialize a local folder as a new Workline Project. Use when a folder — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
+description: Initialize a local folder as a new Workline Project. This is the only Workline Skill usable before a Workline Project exists — use it when a folder that has no .workline/project.yaml yet — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
 ---
 
 # Project開始

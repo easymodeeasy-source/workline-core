@@ -1,6 +1,6 @@
 ---
 name: phase-create
-description: Register a Phase whose meaning has already been decided by the Roadmap Skill. Use only as the internal Phase-registration path when Roadmap has fixed the Phase name, desired state, Roadmap membership, and any Phase relations to register.
+description: Register a Workline Phase whose meaning has already been decided by the Roadmap Skill. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml), and only as the internal Phase-registration path when Roadmap has fixed the Phase name, desired state, Roadmap membership, and any Phase relations to register. Not for generic project phases, milestones, or planning stages.
 ---
 
 # Phase CREATE
