@@ -245,8 +245,31 @@ Phaseのeffective current-plan Work集合は、当該Phaseに所属するWorkの
 - rules/gitが要求する危険操作
 - 必須正本が一意解決不能
 - Workline共通ルール / Project固有ルール変更
+- Projectの実行能力・自動実行・外部接続・外部へのデータ開示・書込可能範囲を新たに拡張または変更するtooling / configuration変更
 
 未開始Phase / Workの、上位目的を維持した通常の未来計画調整は一律人間確認にしない。
+
+構成変更の対象例:
+
+```text
+hookの新規有効化
+MCP server / connectorの追加・変更
+project-local Skill / agent automationの追加
+plugin / bridge / routine等、Projectから利用可能な実行能力を増やす構成変更
+external agentの新しい実行modeの導入で、開示範囲または書込境界が変わるもの
+```
+
+対象外:
+
+```text
+承認済みtool / configを、承認済み境界内で通常利用すること
+capability / external exposure / automatic execution boundaryを変えない
+domain configの通常値変更
+```
+
+ProjectSTARTを人間が明示実行した結果としてcanonical Workline bootstrap Skillを配置することは、その明示intentに含まれるため別途の人間確認にしない。成立済みProjectへ後から新しいproject-local Skill / automationを追加し、実行能力を変える場合は対象。
+
+Project固有CONTRACTがより厳しいProject-specific safety boundaryを追加することは妨げない。
 
 `rules/human-confirmation` は「今、人間判断が必要か」を決める。`human_confirmation` Workは「人間確認そのものが成果成立の構造的一部」の場合だけ作る。通常質問・回答待ちではWorkを作らず、元Workは原則in_progress / target維持。
 
