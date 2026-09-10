@@ -3,10 +3,10 @@
 Roadmap is the operation owner for Roadmap meaning, Phase meaning and
 relations, startable Phase selection, Phase entry (Work structure, first
 integration, structural human_confirmation), future-plan maintenance
-(hold / resume / cancel / plan exclusion with replan), and the explicit
-Roadmap achievement judgement. Registration goes through Phase CREATE /
-CREATE and the Mutation Controller; Roadmap never executes Works and never
-lets START cross into the next Phase.
+(hold / resume / cancel / plan exclusion with replan), Phase addition to an
+existing Roadmap, and the explicit Roadmap achievement judgement.
+Registration goes through Phase CREATE / CREATE and the Mutation Controller;
+Roadmap never executes Works and never lets START cross into the next Phase.
 """
 
 from __future__ import annotations
@@ -68,6 +68,16 @@ class RoadmapPlan:
 class RoadmapResult:
     roadmap_id: str
     phase_ids: dict[str, str]
+    mutation_id: str
+    head: str | None
+    resumed: bool
+
+
+@dataclass(frozen=True)
+class PhaseAdditionResult:
+    roadmap_id: str
+    phase_ids: dict[str, str]
+    relation_ids: dict[int, str]
     mutation_id: str
     head: str | None
     resumed: bool
@@ -182,6 +192,56 @@ def _create_roadmap(store: ProjectStore, mutation: Mutation, plan: RoadmapPlan) 
     return RoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed)
 
 
+# --------------------------------------------------------------------------- Phase addition
+
+def add_phases(
+    store: ProjectStore,
+    roadmap_id: str,
+    phases: dict[str, PhaseSpec],
+    relations: tuple[PhaseRelationSpec, ...] = (),
+    *,
+    future_plan_change: bool = False,
+    invocation_key: str | None = None,
+) -> PhaseAdditionResult:
+    """Add already-decided Phases to an existing Roadmap (Roadmap operation).
+
+    This is the formal recovery / replan path the achievement check requires
+    (``not_achieved`` → add Phases / replan *without* changing the desired
+    state). Roadmap owns the mutation, the structural check and the Git
+    finalization; Phase CREATE participates as the child registration. The
+    Roadmap body is never rewritten and existing Phases / relations are never
+    touched: only new Phases and Roadmap-decided Phase relations are added.
+
+    ``relations`` endpoints are spec keys of ``phases`` or existing Phase IDs.
+    A cancelled / achieved Roadmap takes no normal Phase addition; a held
+    Roadmap follows the existing lifecycle rule and needs a decided
+    ``future_plan_change``.
+    """
+    if not phases:
+        raise ValidationError("Phase addition needs at least one decided Phase")
+    view = _stop_on_structure(store, "precheck")
+    if roadmap_id not in view.roadmaps:
+        raise ValidationError(f"Roadmap unresolvable: {roadmap_id}")
+    lifecycle = view.roadmap_lifecycle(roadmap_id)
+    if lifecycle in (CANCELLED, ACHIEVED):
+        raise SpecViolation(f"Roadmap {roadmap_id} is {lifecycle}; no Phase addition")
+    display = view.roadmaps[roadmap_id].display
+
+    identity = {
+        "roadmap_id": roadmap_id,
+        "key": invocation_key or " | ".join(spec.name for spec in phases.values()),
+    }
+    mutation = _open(store, "roadmap-add-phases", identity, [roadmap_id])
+    with abandon_on_stop(mutation):
+        registered = register_phases(
+            mutation, "phases", roadmap_id, phases, list(relations), future_plan_change=future_plan_change
+        )
+        head = _finalize(mutation, f"chore(workline): add phases to roadmap {display}")
+    return PhaseAdditionResult(
+        roadmap_id, registered.phase_ids, registered.relation_ids, mutation.id, head, mutation.resumed
+    )
+
+
 # --------------------------------------------------------------------------- startable Phase
 
 def startable_phases(store: ProjectStore, roadmap_id: str) -> list[Entity]:
@@ -191,17 +251,23 @@ def startable_phases(store: ProjectStore, roadmap_id: str) -> list[Entity]:
 
 
 def select_phase(store: ProjectStore, roadmap_id: str, explicit: str | None = None) -> Entity | None:
-    """Select the Phase to enter. Returns None when there is no candidate."""
+    """Select the Phase to enter.
+
+    Returns None only when nothing was explicitly asked for and there is no
+    startable candidate (the achievement-check / diagnosis path).
+    """
     view = _stop_on_structure(store, "precheck")
     _require_active_roadmap(view, roadmap_id)
     candidates = view.startable_phases(roadmap_id)
-    if not candidates:
-        return None
+    # An explicit Phase is validated first: an invalid explicit choice means the
+    # same thing whether or not other candidates exist.
     if explicit is not None:
         for phase in candidates:
             if phase.id == explicit:
                 return phase
         raise SpecViolation(f"{explicit} is not a startable Phase")
+    if not candidates:
+        return None
     if len(candidates) == 1:
         return candidates[0]
     candidate_ids = {phase.id for phase in candidates}
@@ -488,7 +554,8 @@ def handoff(store: ProjectStore, phase_id: str, executor, entry_work_id: str | N
 
 __all__ = [
     "RoadmapPlan", "RoadmapResult", "WorkDesign", "PhaseEntryDesign", "PhaseEntryResult", "OperationResult",
-    "AchievementResult", "Replan", "create_roadmap", "startable_phases", "select_phase", "diagnose_no_candidate",
+    "PhaseAdditionResult", "AchievementResult", "Replan", "create_roadmap", "add_phases", "startable_phases",
+    "select_phase", "diagnose_no_candidate",
     "enter_phase", "hold_phase", "resume_phase", "cancel_phase", "hold_roadmap", "resume_roadmap", "cancel_roadmap",
     "plan_exclude_phase", "plan_exclude_work", "evaluate_achievement", "handoff",
 ]

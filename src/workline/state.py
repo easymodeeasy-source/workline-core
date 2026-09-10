@@ -24,6 +24,18 @@ COMPLETE = "complete"
 
 EXCLUDED_STATES = (CANCELLED, PLAN_EXCLUDED)
 
+# Work events that prove a Work actually entered its execution lifecycle.
+# ``work_cancelled`` / ``plan_excluded`` are terminal plan decisions and are
+# never on their own evidence that execution began.
+EXECUTION_LIFECYCLE_EVENTS = (
+    "work_started",
+    "work_target_added",
+    "work_target_removed",
+    "work_held",
+    "work_resumed",
+    "work_completed",
+)
+
 
 @dataclass(frozen=True)
 class WorkState:
@@ -131,6 +143,15 @@ class ProjectView:
     def work_state(self, work_id: str) -> WorkState:
         return derive_work_state(self.events_for(work_id))
 
+    def work_entered_execution(self, work_id: str) -> bool:
+        """True when a Work actually entered its execution lifecycle.
+
+        A Work that was only excluded from the current plan (``plan_excluded``)
+        or cancelled without ever being started never entered execution; a Work
+        that was started and later cancelled did.
+        """
+        return any(event.type in EXECUTION_LIFECYCLE_EVENTS for event in self.events_for(work_id))
+
     def phase_lifecycle(self, phase_id: str) -> str:
         return derive_phase_lifecycle(self.events_for(phase_id))
 
@@ -217,8 +238,11 @@ class ProjectView:
             return lifecycle
         if self.phase_completion(phase_id).complete:
             return COMPLETE
-        works = self.phase_works(phase_id)
-        if any(self.work_state(work.id).state != UNSTARTED for work in works):
+        # Only a Work that entered its execution lifecycle makes the Phase
+        # started: a plan_excluded (or never-started cancelled) Work is a
+        # future-plan decision, so an unstarted Phase stays unstarted and can
+        # still be plan-excluded itself.
+        if any(self.work_entered_execution(work.id) for work in self.phase_works(phase_id)):
             return IN_PROGRESS
         return UNSTARTED
 
