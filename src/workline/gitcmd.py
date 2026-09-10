@@ -62,6 +62,30 @@ def init_main(path: Path) -> None:
     run_git(path, "init", "-b", "main")
 
 
+def is_ignored(repo: Path, relpath: str) -> bool | None:
+    """Whether ``relpath`` is ignored by ``repo``'s ignore rules.
+
+    ``--no-index`` asks about the ignore rules alone, so the answer stays
+    independent of what the index happens to track; tracking is a separate
+    observation (:func:`tracked_under`). None means git could not decide and
+    the caller must STOP rather than assume either answer.
+    """
+    result = run_git(repo, "check-ignore", "-q", "--no-index", "--", relpath, check=False)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def tracked_under(repo: Path, relpath: str) -> list[str] | None:
+    """Paths tracked by ``repo`` under ``relpath``; None when undeterminable."""
+    result = run_git(repo, "ls-files", "-z", "--", relpath, check=False)
+    if not result.ok:
+        return None
+    return sorted(p.replace("\\", "/") for p in result.stdout.split("\0") if p)
+
+
 def current_branch(repo: Path) -> str | None:
     result = run_git(repo, "symbolic-ref", "--short", "HEAD", check=False)
     if not result.ok:

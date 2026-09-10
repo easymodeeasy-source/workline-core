@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 from unittest import mock
 
 from helpers import WORKLINE_ROOT, WorklineTestCase, git
-from workline import gitops
+from workline import gitcmd, gitops
 from workline.errors import StopError
 from workline.mutation import MutationController
 from workline.project_start import INITIAL_COMMIT_MESSAGE, project_start
@@ -51,16 +52,82 @@ class ProjectStartTests(WorklineTestCase):
         self.assertEqual(project_start(root, WORKLINE_ROOT).status, "already_initialized")
         self.assertEqual(git(root, "log", "--format=%s").splitlines(), [INITIAL_COMMIT_MESSAGE, "user commit"])
 
-    def test_parent_repo_subdirectory_stops(self) -> None:
+    def test_parent_repo_subdirectory_not_ignored_stops(self) -> None:
         parent = self.new_dir("parent")
         git(parent, "init", "-b", "main")
         child = parent / "child"
         child.mkdir()
+        (child / "a.txt").write_text("a\n", encoding="utf-8")
         with self.assertRaises(StopError) as ctx:
             project_start(child, WORKLINE_ROOT)
         self.assertEqual(ctx.exception.code, "parent_repo")
         self.assertFalse((child / ".workline").exists())
         self.assertFalse((child / ".git").exists())
+
+    def _vault_parent(self) -> tuple[Path, Path]:
+        """A parent repo that ignores ``child/`` and tracks nothing beneath it."""
+        parent = self.new_dir("vault")
+        git(parent, "init", "-b", "main")
+        (parent / ".gitignore").write_text("child/\n", encoding="utf-8")
+        (parent / "note.md").write_text("vault note\n", encoding="utf-8")
+        git(parent, "add", ".gitignore", "note.md")
+        git(parent, "commit", "-m", "vault")
+        child = parent / "child"
+        child.mkdir()
+        return parent, child
+
+    def _assert_parent_untouched(self, parent: Path) -> None:
+        self.assertEqual(git(parent, "log", "--format=%s").splitlines(), ["vault"])
+        self.assertEqual(git(parent, "status", "--porcelain", "--untracked-files=all").strip(), "")
+
+    def test_ignored_child_of_parent_repo_auto_initializes(self) -> None:
+        parent, child = self._vault_parent()
+        (child / "existing.txt").write_text("mine\n", encoding="utf-8")
+
+        result = project_start(child, WORKLINE_ROOT)
+
+        self.assertEqual(result.status, "initialized")
+        self.assertEqual(gitcmd.toplevel(child), child.resolve())
+        self.assertEqual(git(child, "rev-parse", "--abbrev-ref", "HEAD").strip(), "main")
+        self.assertEqual(git(child, "log", "--format=%s").splitlines(), [INITIAL_COMMIT_MESSAGE])
+        self.assertEqual(set(git(child, "ls-files").splitlines()), {
+            ".workline/project.yaml",
+            ".workline/relations/roadmap.yaml",
+            ".workline/relations/related.yaml",
+            ".workline/events/events.jsonl",
+        })
+        self.assertEqual(validate_project(ProjectStore(child)), [])
+        # a file that was already in the child is neither committed nor changed
+        self.assertEqual((child / "existing.txt").read_text(encoding="utf-8"), "mine\n")
+        self.assertIn("?? existing.txt", git(child, "status", "--porcelain", "--untracked-files=all"))
+        self._assert_parent_untouched(parent)
+
+    def test_ignored_child_tracked_by_parent_stops(self) -> None:
+        parent, child = self._vault_parent()
+        (child / "keep.txt").write_text("the vault owns this\n", encoding="utf-8")
+        git(parent, "add", "-f", "child/keep.txt")
+        git(parent, "commit", "-m", "vault tracks the child")
+
+        with self.assertRaises(StopError) as ctx:
+            project_start(child, WORKLINE_ROOT)
+
+        self.assertTrue(ctx.exception.code.startswith("parent_repo"), ctx.exception.code)
+        self.assertFalse((child / ".git").exists())
+        self.assertFalse((child / ".workline").exists())
+        self.assertEqual(git(parent, "ls-files").splitlines(), [".gitignore", "child/keep.txt", "note.md"])
+        self.assertEqual(git(parent, "status", "--porcelain", "--untracked-files=all").strip(), "")
+
+    def test_undeterminable_git_boundary_stops(self) -> None:
+        parent, child = self._vault_parent()
+        for name in ("is_ignored", "tracked_under"):
+            with self.subTest(observation=name):
+                with mock.patch(f"workline.project_start.gitcmd.{name}", return_value=None):
+                    with self.assertRaises(StopError) as ctx:
+                        project_start(child, WORKLINE_ROOT)
+                self.assertEqual(ctx.exception.code, "git_boundary_unclear")
+                self.assertFalse((child / ".git").exists())
+                self.assertFalse((child / ".workline").exists())
+        self._assert_parent_untouched(parent)
 
     def test_dirty_existing_repo_keeps_user_changes(self) -> None:
         root = self.new_dir()

@@ -1,6 +1,6 @@
 """Project開始 (``skills/project-start``).
 
-Initialize a human-provided local folder as a new Workline Project:
+Initialize a local folder as a new Workline Project:
 preflight → Git boundary → registry validation → ``git init -b main`` when
 needed → canonical ``.workline`` structure → ``project.yaml`` → initial
 commit (fixed message, no push) → postcheck.
@@ -38,6 +38,60 @@ def _registry_or_stop(workline_root: Path) -> None:
         raise StopError(f"registry validation failed: {detail}", code="registry_invalid")
 
 
+def _relative_to_parent(root: Path, parent: Path) -> str:
+    try:
+        return root.relative_to(parent).as_posix()
+    except ValueError:
+        raise StopError(
+            f"Project root {root} is not expressible relative to the enclosing Git repository {parent}",
+            code="git_boundary_unclear",
+        ) from None
+
+
+def _git_boundary(root: Path) -> str:
+    """How ``root`` relates to Git — "existing" | "init" — from Git alone.
+
+    ``Project root == Git top-level`` keeps the existing repository, and no
+    enclosing repository means a fresh one. Inside an enclosing repository a
+    fresh repository is created only when Git itself proves the two cannot
+    claim the same files: the whole Project root is ignored by the nearest
+    parent repository *and* that repository tracks nothing beneath it. Any
+    other state — including one Git cannot decide — STOPs. Path shape is never
+    evidence; only what Git reports is.
+    """
+    top = gitcmd.toplevel(root)
+    if top == root:
+        return "existing"
+    if top is None:
+        return "init"
+
+    relative = _relative_to_parent(root, top)
+    ignored = gitcmd.is_ignored(top, relative)
+    if ignored is None:
+        raise StopError(
+            f"cannot determine whether {relative} is ignored by the enclosing Git repository ({top}); STOP",
+            code="git_boundary_unclear",
+        )
+    if not ignored:
+        raise StopError(
+            f"Project root is inside another Git repository ({top}) and is not ignored by it; STOP",
+            code="parent_repo",
+        )
+    tracked = gitcmd.tracked_under(top, relative)
+    if tracked is None:
+        raise StopError(
+            f"cannot determine what the enclosing Git repository ({top}) tracks under {relative}; STOP",
+            code="git_boundary_unclear",
+        )
+    if tracked:
+        raise StopError(
+            f"the enclosing Git repository ({top}) tracks {len(tracked)} path(s) under the Project root "
+            f"(first: {tracked[0]}); STOP",
+            code="parent_repo_tracked",
+        )
+    return "init"
+
+
 def _is_healthy_project(store: ProjectStore) -> bool:
     if not store.project_yaml.is_file():
         return False
@@ -65,9 +119,7 @@ def project_start(project_root: Path, workline_root: Path) -> ProjectStartResult
     workline = workline.resolve()
     _registry_or_stop(workline)
 
-    top = gitcmd.toplevel(root)
-    if top is not None and top != root:
-        raise StopError(f"Project root is inside another Git repository ({top}); STOP", code="parent_repo")
+    boundary = _git_boundary(root)
 
     store = ProjectStore(root)
     controller = MutationController(store)
@@ -77,7 +129,7 @@ def project_start(project_root: Path, workline_root: Path) -> ProjectStartResult
     ]
 
     if store.workline.exists() and not pending_match:
-        if top is not None and _is_healthy_project(store):
+        if boundary == "existing" and _is_healthy_project(store):
             return ProjectStartResult("already_initialized", root, None, gitcmd.head_commit(root))
         raise StopError(
             "broken / partial .workline without a pending Project開始 mutation; not repairing by guess",
@@ -89,10 +141,9 @@ def project_start(project_root: Path, workline_root: Path) -> ProjectStartResult
 
     # Git boundary --------------------------------------------------------
     with abandon_on_stop(mutation):
-        if top is None:
+        if boundary == "init":
             gitcmd.init_main(root)
-            top = gitcmd.toplevel(root)
-            if top != root:
+            if gitcmd.toplevel(root) != root:
                 raise StopError("git init did not make Project root the Git top-level", code="git_init_failed")
         preexisting = gitops.record_preexisting_dirty(mutation, root)
         gitops.ensure_separable(preexisting, owned)

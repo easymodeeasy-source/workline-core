@@ -4,10 +4,18 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from workline.registry import REQUIRED_RULE_IDS, REQUIRED_SKILL_IDS, validate_registry
+from workline.errors import StopError
+from workline.registry import (
+    REQUIRED_RULE_IDS,
+    REQUIRED_SKILL_IDS,
+    owning_workline_root,
+    validate_registry,
+)
 
 
-class RegistryValidationTests(unittest.TestCase):
+class RegistryFixture(unittest.TestCase):
+    """Builds throwaway Workline roots; holds no tests of its own."""
+
     def _root(self) -> Path:
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -26,6 +34,8 @@ class RegistryValidationTests(unittest.TestCase):
             path.write_text(f"# {skill_id}\n", encoding="utf-8")
         (root / "registry.md").write_text("\n".join(lines), encoding="utf-8")
 
+
+class RegistryValidationTests(RegistryFixture):
     def test_valid_registry_passes(self) -> None:
         root = self._root()
         self._write_valid_registry(root)
@@ -89,6 +99,78 @@ class RegistryValidationTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         result = validate_registry(repo_root)
         self.assertTrue(result.ok, result.problems)
+
+
+class OwningWorklineRootTests(RegistryFixture):
+    """Workline root is read off the executing Skill, never searched for."""
+
+    def _root_with_skill(self, name: str = "root") -> tuple[Path, Path]:
+        root = self._root() / name
+        root.mkdir(parents=True)
+        self._write_valid_registry(root)
+        return root, root / "skills" / "project-start" / "SKILL.md"
+
+    def test_resolves_the_root_that_routes_back_to_the_skill(self) -> None:
+        root, skill = self._root_with_skill()
+        self.assertEqual(owning_workline_root(skill), root.resolve())
+
+    def test_sibling_workline_root_is_never_considered(self) -> None:
+        parent = self._root()
+        (parent / "a").mkdir()
+        self._write_valid_registry(parent / "a")
+        root_b = parent / "b"
+        root_b.mkdir()
+        self._write_valid_registry(root_b)
+        # `a` is the older sibling and `b` the newer one; neither fact is consulted
+        self.assertEqual(
+            owning_workline_root(root_b / "skills" / "project-start" / "SKILL.md"),
+            root_b.resolve(),
+        )
+        self.assertEqual(
+            owning_workline_root((parent / "a") / "skills" / "project-start" / "SKILL.md"),
+            (parent / "a").resolve(),
+        )
+
+    def test_routing_that_does_not_return_to_the_skill_is_a_routing_error(self) -> None:
+        root, skill = self._root_with_skill()
+        registry = root / "registry.md"
+        registry.write_text(
+            registry.read_text(encoding="utf-8").replace(
+                "<!-- workline-target: skills/project-start/SKILL.md -->",
+                "<!-- workline-target: skills/start/SKILL.md -->",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(StopError) as ctx:
+            owning_workline_root(skill)
+        self.assertEqual(ctx.exception.code, "routing_error")
+
+    def test_invalid_owning_registry_is_a_routing_error(self) -> None:
+        root, skill = self._root_with_skill()
+        (root / "skills" / "start" / "SKILL.md").unlink()
+        with self.assertRaises(StopError) as ctx:
+            owning_workline_root(skill)
+        self.assertEqual(ctx.exception.code, "routing_error")
+
+    def test_skill_without_an_owning_registry_is_a_routing_error(self) -> None:
+        orphan = self._root() / "skills" / "project-start"
+        orphan.mkdir(parents=True)
+        skill = orphan / "SKILL.md"
+        skill.write_text("# orphan\n", encoding="utf-8")
+        with self.assertRaises(StopError) as ctx:
+            owning_workline_root(skill)
+        self.assertEqual(ctx.exception.code, "routing_error")
+
+    def test_missing_skill_file_is_a_routing_error(self) -> None:
+        root, _ = self._root_with_skill()
+        with self.assertRaises(StopError) as ctx:
+            owning_workline_root(root / "skills" / "project-start" / "ABSENT.md")
+        self.assertEqual(ctx.exception.code, "routing_error")
+
+    def test_repository_skill_resolves_to_the_repository_root(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        skill = repo_root / "skills" / "project-start" / "SKILL.md"
+        self.assertEqual(owning_workline_root(skill), repo_root)
 
 
 if __name__ == "__main__":

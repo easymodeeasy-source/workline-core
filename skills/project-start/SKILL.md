@@ -1,20 +1,62 @@
 ---
 name: project-start
-description: Initialize a human-provided local folder as a new Workline Project. Use when a folder must be connected to the common Workline registry, receive the canonical .workline structure, validate the Git-root boundary, and create the required initial local commit without starting a Roadmap.
+description: Initialize a local folder as a new Workline Project. Use when a folder — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
 ---
 
 # Project開始
 
-人間が指定したlocal folderをWorkline利用可能な新規Projectとして初期化する。
+対象local folderをWorkline利用可能な新規Projectとして初期化する。
 
-## Input
+## Input resolution
 
-必須:
+Project rootとWorkline rootは入力解決規則で決める。どちらも規則から一意解決できた場合、`rules/human-confirmation` に従い、確認のためだけに人間へ返さない。質問は一意解決できなかったときの手段であり、既定の手順ではない。
 
-- Project rootのabsolute path
-- Workline rootのabsolute path
+### Project root
 
-Workline rootを推測・探索しない。
+```text
+A. 呼び出し元 / ユーザーがabsolute Project rootを明示している
+   → その値を使う
+
+B. ユーザーが「このルート」「ここ」「このfolder」「current directory」等、
+   現在の作業directoryを対象として明示している
+   → cwdをProject rootとして使う
+
+C. それ以外で一意に解決不能
+   → 初めて人間へ質問する
+```
+
+A / Bで解決した場合、確認のためだけのAskUserQuestionを出さない。
+
+明示pathとcwdが競合する場合は勝手に選ばず、STOP / clarificationとする。
+
+### Workline root
+
+明示値がある場合、そのrootだけをvalidationする。別rootを探索しない。別registryを探さない。確認質問を出さない。無効なら代替候補を探さずSTOPする。
+
+明示値がない場合、今回実行しているconcrete ProjectSTART SKILL.md自身の所属Workline rootから解決する。
+
+```text
+concrete ProjectSTART SKILL.md
+↓
+そのSkillを所有するWorkline root
+↓
+<root>/registry.md
+↓
+workline://skills/project-start のtargetが
+そのconcrete SKILL.md自身へ戻ることを確認
+↓
+Workline root確定
+```
+
+しない:
+
+- cwd周辺のregistry.md検索
+- 親directory全体 / sibling directoryの探索
+- filename / mtime / Git上の新しさ / 内容類似による候補比較
+- checkpoint / audit / fix / old specを代替正本として探索すること
+- 「どちらのWorkline rootですか？」という候補UI
+
+concrete Skillからowning Workline rootを一意解決できなければ、configuration / routing errorとしてSTOPする。その場合もfilesystemから別Worklineを探して救済しない。
 
 ## Preflight
 
@@ -22,7 +64,7 @@ Workline rootを推測・探索しない。
 2. Workline rootが存在するdirectoryであることを確認する。
 3. `<workline-root>/registry.md` を読み、必須4 rule IDと5 Skill IDを一意解決する。
 4. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。
-5. Git top-levelを確認する。
+5. Git boundaryを確認する。
 
 Git boundary:
 
@@ -30,14 +72,39 @@ Git boundary:
 Project root = Git root
 → 既存repoを使用
 
-Project root配下にGit repoなし、親repoにも含まれない
+Project root配下にrepoなし かつ 親Git repoなし
 → git init -b main
 
 Project rootが親Git repoのsubdirectory
-→ STOP
+→ 追加判定する
 ```
 
-親repoをProject repoとして流用しない。自動でnested repo化しない。
+親repoをProject repoとして流用しない。
+
+親Git repoが存在する場合、次の両方をGit自身から機械的に証明できたときだけ `git init -b main` を自動実行してよい。
+
+```text
+1. Project root directory全体が
+   nearest parent Git repoからignoreされている
+
+AND
+
+2. nearest parent Git repoが
+   Project root配下のpathを1件もtrackしていない
+```
+
+このときAskUserQuestionを出さない。これは無条件nested repo化ではなく、親repoとProject repoのownershipが衝突しないことをGitから確認できた安全経路である。
+
+次のどれかならSTOPする。
+
+```text
+Project rootが親repoからignoreされていない
+親repoがProject root配下を1件以上trackしている
+ignore状態を確実に判定できない
+Git boundaryにその他の曖昧さがある
+```
+
+STOP時に「たぶんVaultだから大丈夫」と推測しない。特定のpathを特別扱い・hardcodeしない。判定はGit観測結果だけから行う。
 
 remoteは任意。GitHub repoを自動作成しない。URLを推測しない。既存remoteを変更しない。
 

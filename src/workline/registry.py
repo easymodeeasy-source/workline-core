@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 
+from .errors import StopError
+
+PROJECT_START_SKILL_ID = "skills/project-start"
+
 REQUIRED_RULE_IDS = (
     "rules/git",
     "rules/ai-decision",
@@ -118,3 +122,48 @@ def validate_registry(root: Path) -> RegistryValidation:
             problems.append(RegistryProblem("skill_target_empty", f"target is empty: {skill_id} -> {target}"))
 
     return RegistryValidation(tuple(problems))
+
+
+def owning_workline_root(skill_file: Path) -> Path:
+    """The Workline root that owns a concrete ``skills/project-start`` SKILL.md.
+
+    Used when no Workline root was given explicitly: the root is read off the
+    Skill that is actually executing, never searched for. Only the nearest
+    ancestor holding a ``registry.md`` is considered, and routing must close
+    the loop — that registry's ``workline://skills/project-start`` target has
+    to resolve back to this very file. No sibling directory, no second
+    registry, no filename / mtime / Git-recency / similarity comparison enters
+    the decision. A root that fails this is a configuration / routing error,
+    not an invitation to look somewhere else.
+    """
+    skill = Path(skill_file).resolve()
+    if not skill.is_file():
+        raise StopError(
+            f"concrete ProjectSTART SKILL.md is not a readable file: {skill}",
+            code="routing_error",
+        )
+
+    root = next((parent for parent in skill.parents if (parent / "registry.md").is_file()), None)
+    if root is None:
+        raise StopError(
+            f"no registry.md owns {skill}; configuration / routing error",
+            code="routing_error",
+        )
+
+    validation = validate_registry(root)
+    if not validation.ok:
+        detail = "; ".join(f"{p.code}: {p.message}" for p in validation.problems)
+        raise StopError(
+            f"registry of the owning Workline root ({root}) is invalid: {detail}",
+            code="routing_error",
+        )
+
+    target = _extract_id_blocks((root / "registry.md").read_text(encoding="utf-8"))[PROJECT_START_SKILL_ID][0]
+    resolved = _safe_target(root, target) if target else None
+    if resolved != skill:
+        raise StopError(
+            f"{root / 'registry.md'} routes workline://{PROJECT_START_SKILL_ID} to {resolved}, "
+            f"not back to the executing Skill {skill}; configuration / routing error",
+            code="routing_error",
+        )
+    return root
