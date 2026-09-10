@@ -212,6 +212,42 @@ started Workを別Phaseへ移さない。
 
 historical `derived` / origin / eventsを書き換えない。
 
+### 既存未開始WorkのRelated maintenance
+
+登録済みWorkのRelated relationもfuture planであり、正式経路で追加・削除できる。
+
+```text
+must_read
+conditional_must_read
+obey
+realizes
+must_update
+conditional_must_update
+```
+
+意味ownerはRoadmap。Phase entry時に `WorkDesign.related` の意味を決めたのがRoadmapである以上、その後の計画修正もRoadmapが所有する。CREATEはregistration coreのままであり、既存Workの意味変更ownerにしない。
+
+対象は「既存の、まだ未開始の、Roadmap配下Work」だけ。
+
+```text
+Work generated state = unstarted
+origin.type = roadmap
+phase_idが解決可能
+Roadmapが通常操作可能
+```
+
+started / held / completed / cancelled / plan_excluded Workのrelated変更はこの経路で行わない（今回定義しない）。standalone Workも対象外。
+
+削除は既存relation IDの指定で行う。対象Workがfromである実在relationだけが削除可能で、別Work所有のrelation IDや解決不能なIDはSTOPする。名前・target・意味類似で補完しない。
+
+`roadmap.yaml` のrelationはこの操作では触らない。Work本文・`origin`・`phase_id`・eventsも書き換えない。
+
+これはlifecycle eventではない。`work_started` / `plan_excluded` / `work_target_added` 等を記録せず、`events.jsonl` は不変。
+
+同一edge（type / from / to / condition が同一）が既に存在する場合は重複追加しない。有効変更が0件ならno-opとして正常終了し、commitもpushもrelation IDの発行も行わない。
+
+**`relations/related.yaml` の手編集は禁止。** Work再作成やplan exclusionでrelated不足を回避しない。Mutation Controller経由の正式経路を使う。
+
 ## Lifecycle
 
 Phase hold:

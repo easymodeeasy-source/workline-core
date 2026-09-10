@@ -66,13 +66,15 @@ def projected_view(
     remove_relation_ids: tuple[str, ...] = (),
     add_relations: list[Relation] = (),
     add_works: dict[str, WorkSpec] | None = None,
+    remove_related_ids: tuple[str, ...] = (),
+    add_related: list[Relation] = (),
 ) -> ProjectView:
     """In-memory projection of ``view`` after the planned changes."""
     projected = ProjectView(view.store)
     projected.works = dict(view.works)
     projected.phases = dict(view.phases)
     projected.roadmaps = dict(view.roadmaps)
-    projected.related = list(view.related)
+    projected.related = [r for r in view.related if r.id not in remove_related_ids] + list(add_related)
     projected.roadmap_relations = [r for r in view.roadmap_relations if r.id not in remove_relation_ids] + list(add_relations)
     projected.events = list(view.events) + [Event(f"evt_{'0' * 26}", t, e, utc_now()) for e, t in add_events]
     for work_id, spec in (add_works or {}).items():

@@ -15,7 +15,8 @@ Direct Work Operation context that owns postcheck / commit / push.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+import json
+from typing import Any, Sequence
 
 from . import gitops
 from .errors import SpecViolation, ValidationError
@@ -90,6 +91,36 @@ def resolve_ref(ref: str, mapping: dict[str, str]) -> str:
     return ref
 
 
+def validate_related_specs(related: "Sequence[RelatedSpec]", context: str) -> None:
+    """Payload rules for related relations, shared by every owner that writes them.
+
+    CREATE applies these when registering a new Work; Roadmap applies the same
+    function when maintaining an unstarted Work's related relations. The rules
+    live here once so the two paths can never drift apart.
+    """
+    for related_spec in related:
+        if related_spec.type not in RELATED_TYPES:
+            raise ValidationError(f"{context}: unknown related type {related_spec.type}")
+        if not related_spec.to.strip():
+            raise ValidationError(f"{context}: related target is empty")
+        if related_spec.type in CONDITIONAL_RELATED_TYPES:
+            message = validate_condition(related_spec.condition)
+            if message:
+                raise ValidationError(f"{context}: {message}")
+        elif related_spec.condition is not None:
+            raise ValidationError(f"{context}: condition is only for conditional relations")
+
+
+def related_edge_key(relation_type: str, from_id: str, to: str, condition: dict[str, Any] | None) -> tuple:
+    """Identity of a related edge for duplicate detection.
+
+    Two edges are the same when type, from, to and condition agree; the
+    relation ID is not part of it, so re-requesting an existing edge is a
+    no-op instead of a second parallel relation.
+    """
+    return (relation_type, from_id, to, json.dumps(condition, sort_keys=True) if condition is not None else None)
+
+
 def _stop_on_problems(problems: list[Problem], context: str) -> None:
     if problems:
         raise ValidationError(context + ": " + "; ".join(f"{p.code}: {p.message}" for p in problems), code="postcheck_failed")
@@ -120,17 +151,7 @@ def _validate_spec(spec: WorkSpec, key: str, view: ProjectView) -> None:
             raise SpecViolation(f"work {key}: cannot add a Work to completed Phase {spec.phase_id}")
         if phase_state in EXCLUDED_STATES:
             raise SpecViolation(f"work {key}: Phase {spec.phase_id} is {phase_state}")
-    for related in spec.related:
-        if related.type not in RELATED_TYPES:
-            raise ValidationError(f"work {key}: unknown related type {related.type}")
-        if not related.to.strip():
-            raise ValidationError(f"work {key}: related target is empty")
-        if related.type in CONDITIONAL_RELATED_TYPES:
-            message = validate_condition(related.condition)
-            if message:
-                raise ValidationError(f"work {key}: {message}")
-        elif related.condition is not None:
-            raise ValidationError(f"work {key}: condition is only for conditional relations")
+    validate_related_specs(spec.related, f"work {key}")
 
 
 def register_works(

@@ -12,10 +12,18 @@ Roadmap never executes Works and never lets START cross into the next Phase.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any
 
 from . import gitcmd, gitops
-from .create import RelatedSpec, RelationSpec, WorkSpec, register_works
+from .create import (
+    RelatedSpec,
+    RelationSpec,
+    WorkSpec,
+    register_works,
+    related_edge_key,
+    validate_related_specs,
+)
 from .errors import SpecViolation, StopError, ValidationError
 from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
 from .ops import (
@@ -38,6 +46,7 @@ from .store import (
     WORKLINE_DIR,
     Entity,
     ProjectStore,
+    Relation,
     render_body,
     render_entity,
 )
@@ -498,6 +507,213 @@ def plan_exclude_work(store: ProjectStore, work_id: str, replan: Replan = Replan
         if view.work_state(work_id).state != UNSTARTED:
             raise SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}")
     return _plan_exclude(store, "work-plan-exclude", work_id, replan, precheck)
+
+
+# --------------------------------------------------------------------------- related maintenance
+
+RELATED_FILE = "related"
+
+
+@dataclass(frozen=True)
+class RelatedMaintenanceResult:
+    work_id: str
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    mutation_id: str | None
+    head: str | None
+    changed: bool
+    resumed: bool = False
+
+
+def _pending_for(store: ProjectStore, operation: str, identity: dict[str, Any]) -> list[dict[str, Any]]:
+    invocation = json.loads(json.dumps({"operation": operation, **identity}, sort_keys=True))
+    return [p for p in MutationController(store).list_pending() if p["owner"] == OWNER and p["invocation"] == invocation]
+
+
+def _unstarted_roadmap_work(view: ProjectView, work_id: str) -> Entity:
+    """The target of related maintenance, or STOP.
+
+    Only an unstarted Work under an operable Roadmap is future plan; anything
+    that already entered its lifecycle is not adjusted by this operation.
+    """
+    work = view.works.get(work_id)
+    if work is None:
+        raise ValidationError(f"Work unresolvable: {work_id}")
+    origin = work.meta.get("origin")
+    if not isinstance(origin, dict) or origin.get("type") != "roadmap":
+        raise SpecViolation(
+            f"{work_id} is not a Roadmap Work; standalone Work related maintenance is outside Roadmap scope"
+        )
+    if work.phase_id is None or work.phase_id not in view.phases:
+        raise ValidationError(f"{work_id}: phase_id unresolvable")
+    roadmap_id = origin.get("roadmap_id")
+    if not isinstance(roadmap_id, str) or roadmap_id not in view.roadmaps:
+        raise ValidationError(f"{work_id}: origin roadmap unresolvable")
+    _require_active_roadmap(view, roadmap_id)
+    state = view.work_state(work_id).state
+    if state != UNSTARTED:
+        raise SpecViolation(
+            f"related maintenance is future planning and applies to unstarted Works only; {work_id} is {state}"
+        )
+    return work
+
+
+def _related_snapshot(view: ProjectView, work_id: str) -> dict[str, Any]:
+    work = view.works[work_id]
+    return {
+        "body": work.body,
+        "meta": json.dumps(work.meta, sort_keys=True, ensure_ascii=False),
+        "state": view.work_state(work_id).state,
+        "events": [e.to_record() for e in view.events],
+        "roadmap_relations": [r.to_record() for r in view.roadmap_relations],
+        "related": {r.id: r.to_record() for r in view.related},
+    }
+
+
+def maintain_work_related(
+    store: ProjectStore,
+    work_id: str,
+    *,
+    add: tuple[RelatedSpec, ...] = (),
+    remove_relation_ids: tuple[str, ...] = (),
+    invocation_key: str | None = None,
+) -> RelatedMaintenanceResult:
+    """Maintain the related relations of an existing, unstarted Roadmap Work.
+
+    Roadmap already owns the meaning of ``WorkDesign.related`` at Phase entry,
+    so it also owns later corrections to that plan. CREATE stays the
+    registration core and never becomes the owner of an existing Work's
+    meaning. ``roadmap.yaml`` future-plan relations already had a maintenance
+    path; this closes the same gap for ``related.yaml``, which previously could
+    only be corrected by editing the file by hand or by discarding and
+    recreating the Work.
+
+    Adds reuse the CREATE payload type and validation. Removals accept
+    relation IDs that actually exist and belong to this Work; anything else
+    STOPs rather than being guessed. Requesting an edge that already exists is
+    a no-op, and an operation with no effective change makes no commit, no
+    push and no relation ID. The Work body, ``origin``, ``phase_id``,
+    lifecycle state, events and ``roadmap.yaml`` are never touched: this is a
+    plan correction, not a lifecycle event.
+    """
+    if not add and not remove_relation_ids:
+        raise ValidationError("related maintenance needs at least one add or remove")
+
+    view = _stop_on_structure(store, "precheck")
+    work = _unstarted_roadmap_work(view, work_id)
+    validate_related_specs(add, f"related maintenance {work_id}")
+
+    existing = {r.id: r for r in view.related}
+    removals: list[Relation] = []
+    seen_removals: set[str] = set()
+    for relation_id in remove_relation_ids:
+        relation = existing.get(relation_id)
+        if relation is None:
+            raise ValidationError(
+                f"related maintenance: relation {relation_id} unresolvable; "
+                "no name / target / similarity fallback is attempted"
+            )
+        if relation.from_id != work_id:
+            raise SpecViolation(
+                f"related maintenance: relation {relation_id} belongs to {relation.from_id}, not {work_id}"
+            )
+        if relation_id not in seen_removals:
+            seen_removals.add(relation_id)
+            removals.append(relation)
+
+    # An edge that already exists (after the requested removals) is not added
+    # a second time; duplicates inside one request collapse the same way.
+    remaining = {
+        related_edge_key(r.type, r.from_id, r.to, r.extra.get("condition"))
+        for r in view.related
+        if r.id not in seen_removals
+    }
+    effective_adds: list[tuple[int, RelatedSpec]] = []
+    for index, spec in enumerate(add):
+        key = related_edge_key(spec.type, work_id, spec.to, spec.condition)
+        if key in remaining:
+            continue
+        remaining.add(key)
+        effective_adds.append((index, spec))
+
+    identity = {
+        "work_id": work_id,
+        "key": invocation_key
+        or " | ".join([f"+{s.type}:{s.to}" for s in add] + [f"-{r}" for r in remove_relation_ids]),
+    }
+    operation = "work-related-maintenance"
+    if not effective_adds and not removals and not _pending_for(store, operation, identity):
+        return RelatedMaintenanceResult(work_id, (), (), None, gitcmd.head_commit(store.root), changed=False)
+
+    before = _related_snapshot(view, work_id)
+    mutation = _open(store, operation, identity, [work_id])
+    with abandon_on_stop(mutation):
+        additions = [
+            Relation(
+                mutation.reserve_id(f"related:add:{index}", "relation"),
+                spec.type,
+                work_id,
+                spec.to,
+                {"condition": spec.condition} if spec.condition is not None else {},
+            )
+            for index, spec in effective_adds
+        ]
+        validate_projection(
+            projected_view(
+                view,
+                remove_related_ids=tuple(r.id for r in removals),
+                add_related=additions,
+            ),
+            "related maintenance",
+        )
+
+    if not mutation.has_stage("related"):
+        mutation.add_effects(
+            "related",
+            [Effect.remove_relation(RELATED_FILE, relation) for relation in removals]
+            + [Effect.add_relation(RELATED_FILE, relation) for relation in additions],
+        )
+    mutation.apply()
+
+    recorded = mutation.stage_effects("related")
+    added_ids = tuple(e["payload"]["record"]["id"] for e in recorded if e["kind"] == "add_relation")
+    removed_ids = tuple(e["payload"]["record"]["id"] for e in recorded if e["kind"] == "remove_relation")
+    _related_postcheck(store, work_id, before, added_ids, removed_ids)
+
+    head = _finalize(mutation, f"chore(workline): update related refs {work.display}")
+    return RelatedMaintenanceResult(
+        work_id, added_ids, removed_ids, mutation.id, head, changed=True, resumed=mutation.resumed
+    )
+
+
+def _related_postcheck(
+    store: ProjectStore,
+    work_id: str,
+    before: dict[str, Any],
+    added_ids: tuple[str, ...],
+    removed_ids: tuple[str, ...],
+) -> None:
+    after_view = _stop_on_structure(store, "postcheck")
+    after = _related_snapshot(after_view, work_id)
+
+    for field_name in ("body", "meta", "state", "events", "roadmap_relations"):
+        if after[field_name] != before[field_name]:
+            raise StopError(
+                f"postcheck: related maintenance changed {field_name} of {work_id}", code="postcheck_failed"
+            )
+
+    expected = {rid: rec for rid, rec in before["related"].items() if rid not in removed_ids}
+    for relation_id in added_ids:
+        relation = next((r for r in after_view.related if r.id == relation_id), None)
+        if relation is None:
+            raise StopError(f"postcheck: added relation {relation_id} missing", code="postcheck_failed")
+        if relation.from_id != work_id:
+            raise StopError(f"postcheck: added relation {relation_id} is not from {work_id}", code="postcheck_failed")
+        expected[relation_id] = relation.to_record()
+    if after["related"] != expected:
+        raise StopError(
+            "postcheck: related.yaml holds changes beyond the requested add / remove", code="postcheck_failed"
+        )
 
 
 # --------------------------------------------------------------------------- achievement
