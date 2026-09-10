@@ -463,10 +463,11 @@ def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> S
     gitops.ensure_git_ready(store.root)
 
     controller = MutationController(store)
-    invocation = {"operation": OWNER, "work_id": work_id}
+    # invocation identity = the required START inputs (stable Work ID and mode);
+    # a pending START mutation on the same Work with another mode is a conflict → reconcile required
+    invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
     mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     with abandon_on_stop(mutation):
-        mutation.set_note("mode", mode)
         gitops.record_preexisting_dirty(mutation, store.root)
         mutation.apply()  # resume: replay every recorded effect before continuing
         state = view.work_state(work_id)

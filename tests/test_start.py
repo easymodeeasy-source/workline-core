@@ -6,7 +6,7 @@ from helpers import WorklineTestCase, completing_executor, git, scripted_executo
 from workline import roadmap as rm
 from workline import start as st
 from workline.create import RelationSpec, WorkSpec, create_standalone_work
-from workline.errors import SpecViolation, StopError
+from workline.errors import ReconcileRequired, SpecViolation, StopError
 from workline.mutation import MutationController
 from workline.ops import Replan
 from workline.state import ProjectView
@@ -339,10 +339,15 @@ class IntegrationOwnershipTests(WorklineTestCase):
         with self.assertRaises(StopError) as ctx:  # a normal derived Work now needs a START-designed re-integration
             st.start(store3, late.id, "single-work", scripted_executor({late.id: [st.Derive({"more": st.DerivedWork("More", "more")})]}))
         self.assertEqual(ctx.exception.code, "reintegration_required")
-        result = st.start(store3, late.id, "outer", scripted_executor({
+        # the STOP left a pending single-work mutation: another mode on the same Work is a conflict, not a resume
+        with self.assertRaises(ReconcileRequired):
+            st.start(store3, late.id, "outer", completing_executor(store3))
+        resumed_late = st.start(store3, late.id, "single-work", scripted_executor({
             late.id: [st.Derive({"more": st.DerivedWork("More", "more")}, integration=st.DerivedWork("I2", "re-integrated")), st.Completed()],
-            "*": [st.Completed()],
         }))
+        self.assertEqual(resumed_late.status, "completed")
+        more = next(w for w in ProjectView.load(store3).works.values() if w.name == "More")
+        result = st.start(store3, more.id, "outer", completing_executor(store3))
         self.assertEqual(result.status, "phase_complete")
         view = ProjectView.load(store3)
         self.assertEqual(events_of(store3, i3).count("work_completed"), 1)  # completed integration was not reopened
