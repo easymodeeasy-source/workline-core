@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .bootstrap import backfill_bootstrap
 from .create import RelatedSpec, WorkSpec, create_standalone_work
 from .errors import StopError
 from .project_start import project_start
@@ -28,6 +29,12 @@ def main(argv: list[str] | None = None) -> int:
 
     check = subparsers.add_parser("validate-project", help="validate a Project's canonical structure")
     check.add_argument("project_root", nargs="?", default=".")
+
+    backfill = subparsers.add_parser(
+        "backfill-bootstrap",
+        help="add the Project-side bootstrap Skill to an established Workline Project (idempotent)",
+    )
+    backfill.add_argument("project_root", nargs="?", default=".")
 
     create = subparsers.add_parser("create-work", help="create a standalone Work (direct CREATE invocation)")
     create.add_argument("project_root")
@@ -63,6 +70,14 @@ def main(argv: list[str] | None = None) -> int:
             for problem in problems:
                 print(f"{problem.code}: {problem.message}")
             return 1
+
+        if args.command == "backfill-bootstrap":
+            result = backfill_bootstrap(Path(args.project_root))
+            print(
+                f"backfill-bootstrap: {result.status} ({result.project_root}) "
+                f"head={result.head} pushed={result.pushed}"
+            )
+            return 0
 
         if args.command == "create-work":
             related = (

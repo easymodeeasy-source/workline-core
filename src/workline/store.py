@@ -35,6 +35,13 @@ RUNTIME_DIR = ".workline/runtime"
 MUTATIONS_DIR = ".workline/runtime/mutations"
 TMP_DIR = ".workline/runtime/tmp"
 
+# The Project-side bootstrap Skill: the single thin entry point Claude Code
+# discovers when a Workline Project is opened directly. It is Project
+# infrastructure, not a domain 正本 and not a copy of any canonical Skill, so
+# it is the one non-``.workline`` path an operation owner may write.
+BOOTSTRAP_REL_PATH = ".claude/skills/workline/SKILL.md"
+INFRA_WRITE_PATHS = (BOOTSTRAP_REL_PATH,)
+
 ENTITY_DIRS = {"roadmap": "roadmaps", "phase": "phases", "work": "works"}
 
 ROADMAP_RELATION_TYPES = ("planned_next", "requires_completion", "derived", "return_to")

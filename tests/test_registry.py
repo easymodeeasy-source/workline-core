@@ -6,9 +6,17 @@ import unittest
 
 from workline.errors import StopError
 from workline.registry import (
+    CONTEXT_PRE_PROJECT,
+    CONTEXT_PROJECT,
+    CONTEXT_ROUTER,
+    PROJECT_ROUTER_SKILL_ID,
+    PROJECT_START_SKILL_ID,
     REQUIRED_RULE_IDS,
     REQUIRED_SKILL_IDS,
     owning_workline_root,
+    resolve_skill,
+    router_candidates,
+    skill_inventory,
     validate_registry,
 )
 
@@ -21,17 +29,32 @@ class RegistryFixture(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         return Path(temp.name)
 
-    def _write_valid_registry(self, root: Path) -> None:
+    def _context_of(self, skill_id: str) -> str:
+        if skill_id == PROJECT_START_SKILL_ID:
+            return CONTEXT_PRE_PROJECT
+        if skill_id == PROJECT_ROUTER_SKILL_ID:
+            return CONTEXT_ROUTER
+        return CONTEXT_PROJECT
+
+    def _add_skill(self, root: Path, lines: list[str], skill_id: str, context: str | None) -> None:
+        target = f"{skill_id}/SKILL.md"
+        lines.extend([f"<!-- workline-id: {skill_id} -->", f"<!-- workline-target: {target} -->"])
+        if context is not None:
+            lines.append(f"<!-- workline-context: {context} -->")
+        lines.append("")
+        path = root / target
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {skill_id}\n", encoding="utf-8")
+
+    def _write_valid_registry(self, root: Path, extra_skills: dict[str, str] | None = None) -> None:
         lines = ["# registry", "", "## Rules"]
         for rule_id in REQUIRED_RULE_IDS:
             lines.extend([f"<!-- workline-id: {rule_id} -->", ""])
         lines.append("## Skills")
         for skill_id in REQUIRED_SKILL_IDS:
-            target = f"{skill_id}/SKILL.md"
-            lines.extend([f"<!-- workline-id: {skill_id} -->", f"<!-- workline-target: {target} -->", ""])
-            path = root / target
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"# {skill_id}\n", encoding="utf-8")
+            self._add_skill(root, lines, skill_id, self._context_of(skill_id))
+        for skill_id, context in (extra_skills or {}).items():
+            self._add_skill(root, lines, skill_id, context)
         (root / "registry.md").write_text("\n".join(lines), encoding="utf-8")
 
 
@@ -177,7 +200,7 @@ class CanonicalSkillLayoutTests(unittest.TestCase):
     """The canonical Skills live where Claude Code discovers them, exactly once."""
 
     REPO_ROOT = Path(__file__).resolve().parents[1]
-    SKILL_NAMES = ("project-start", "roadmap", "phase-create", "create", "start")
+    SKILL_NAMES = ("project-start", "project-router", "roadmap", "phase-create", "create", "start")
 
     def test_skills_are_under_the_claude_skills_directory(self) -> None:
         for name in self.SKILL_NAMES:

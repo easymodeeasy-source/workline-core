@@ -1,6 +1,6 @@
 # Workline Registry
 
-現在仕様のauthorityは、この `registry.md` の4共通ルール本文と、Skill routing先の5 `SKILL.md` のみ。
+現在仕様のauthorityは、この `registry.md` の4共通ルール本文と、registry-routed canonical Skillsの `SKILL.md` のみ。
 checkpoint / audit / fix / old spec はhistory / rationaleであり、実行時正本ではない。
 
 正式marker:
@@ -8,6 +8,15 @@ checkpoint / audit / fix / old spec はhistory / rationaleであり、実行時�
 ```text
 <!-- workline-id: <id> -->
 <!-- workline-target: <relative-path> -->
+<!-- workline-context: <pre-project | project | router> -->
+```
+
+`workline-context` はSkillの適用条件を宣言する。`skills/*` は必須。
+
+```text
+pre-project → Workline Project成立前にだけ使う（初期化）
+project     → established Workline Project内で使う
+router      → Project内entryからのSkill選択自身を担う
 ```
 
 参照:
@@ -17,6 +26,8 @@ workline://<id>
 ```
 
 必須IDは各ちょうど1件。0件・複数件・broken routing時に名前・path・mtime・意味類似で代替しない。
+
+registryに登録された `skills/*` は必須集合に限らずすべてvalidationの対象とする。必須ID集合は「必要なauthorityの欠落検出」であり、存在するSkillの一覧ではない。Skillの追加はこのregistryとcanonical `SKILL.md` の更新だけで完了し、既存Projectを更新しない。
 
 ---
 
@@ -220,19 +231,29 @@ Skill本文はこのregistryに置かない。identityは `workline-id`、現在
 ## Project開始
 <!-- workline-id: skills/project-start -->
 <!-- workline-target: .claude/skills/project-start/SKILL.md -->
+<!-- workline-context: pre-project -->
+
+## Project router
+<!-- workline-id: skills/project-router -->
+<!-- workline-target: .claude/skills/project-router/SKILL.md -->
+<!-- workline-context: router -->
 
 ## Roadmap
 <!-- workline-id: skills/roadmap -->
 <!-- workline-target: .claude/skills/roadmap/SKILL.md -->
+<!-- workline-context: project -->
 
 ## Phase CREATE
 <!-- workline-id: skills/phase-create -->
 <!-- workline-target: .claude/skills/phase-create/SKILL.md -->
+<!-- workline-context: project -->
 
 ## CREATE
 <!-- workline-id: skills/create -->
 <!-- workline-target: .claude/skills/create/SKILL.md -->
+<!-- workline-context: project -->
 
 ## START
 <!-- workline-id: skills/start -->
 <!-- workline-target: .claude/skills/start/SKILL.md -->
+<!-- workline-context: project -->

@@ -7,6 +7,22 @@ description: Initialize a local folder as a new Workline Project. This is the on
 
 対象local folderをWorkline利用可能な新規Projectとして初期化する。
 
+これはpre-project操作である。Workline root側から使用する。established Project（`.workline/project.yaml` を持つroot）を再初期化する経路ではない。
+
+## Canonical implementation first
+
+Workline rootにこのoperationのcanonical implementationが存在する場合は、必ずそれを使用する。
+
+```text
+実装の存在を先に確認する
+→ 存在する: それを実行する
+→ 使用不能: STOPして報告する
+```
+
+このSKILL本文を根拠に `.workline` 構造・project.yaml・bootstrap・mutation metadataを手作業で再実装しない。実装の存在確認より先にfilesystemを書き始めない。
+
+手組みした構造は未検証の再実装であり、canonical implementationからはbroken / partialとして扱われる。implementationが使えないときにmanual fallbackへ進まない。
+
 ## Input resolution
 
 Project rootとWorkline rootは入力解決規則で決める。どちらも規則から一意解決できた場合、`rules/human-confirmation` に従い、確認のためだけに人間へ返さない。質問は一意解決できなかったときの手段であり、既定の手順ではない。
@@ -150,6 +166,53 @@ relations: []
 
 `events.jsonl` は空。
 
+## Project bootstrap Skill
+
+ProjectSTART成功後、対象ProjectはClaude Codeアプリから直接開いて日常運用する。そのため canonical structureに加えてProject側entryを1個だけ設置する。
+
+```text
+.claude/skills/workline/SKILL.md
+```
+
+これはcanonical Skillのコピーではない。非常に薄いbootstrapであり、次だけを持つ。
+
+```text
+.workline/project.yaml の存在確認
+→ configured Workline root解決
+→ registry validation
+→ stable ID skills/project-router の一意解決
+→ canonical SKILL.md読込
+→ 以降はcanonical routerに従う
+```
+
+しない:
+
+- canonical Skill（Roadmap / Phase CREATE / CREATE / START等）の本文コピー
+- 現在のSkill一覧・Skill対応表の保存
+- Workline rootのabsolute pathの埋め込み
+- Workline operation semanticsの複製
+- junction / symlinkによるcanonical Skill群の展開
+
+bootstrapが知るstable IDは `skills/project-router` だけである。Skillがregistryへ追加されても、Project側を変更せずに利用可能でなければならない。
+
+### conflict
+
+```text
+同pathが無い
+→ 作成する
+
+同pathがexpected bootstrapと完全一致
+→ 再作成しない
+
+同pathの内容が異なる
+→ ownership不明としてSTOP
+→ 自動上書きしない
+```
+
+`.claude/skills/` 配下の既存の他Skillは読まない・変更しない。
+
+対象ProjectのGit設定が `.claude/skills/workline/SKILL.md` をignoreしている場合、bootstrapはcommitできずclone先へ届かない。推測で `-f` せずSTOPして報告する。
+
 ## project.yaml
 
 `project.yaml` は、このProjectが使うWorkline rootとrule refsだけを持つ。
@@ -183,7 +246,14 @@ Project開始は初期commitまで責任を持つ。
 chore(workline): initialize project
 ```
 
-Project開始が今回作成した内容だけをstageする。`git add .` を使わない。既存dirtyをcommitしない。安全に分離不能ならSTOP。
+commit対象は、Project開始が今回作成した次だけとする。
+
+```text
+.workline/** のtracked成果物
+.claude/skills/workline/SKILL.md
+```
+
+`git add .` を使わない。既存dirty、既存 `.claude/skills/**` の他Skillをcommitしない。安全に分離不能ならSTOP。
 
 commit前にregistry / routingを再確認する。
 
@@ -200,7 +270,27 @@ commit失敗時は同じmutationをresumeし、既に一致するdomain filesを
 - 4 rulesが一意解決
 - 5 common Skillsが一意解決
 - required central storesが有効
+- Project bootstrap Skillがexpected内容で存在しtrackedである
 - initial commitが成立
 - unrelated user changesをcommit / delete / overwriteしていない
+- `.claude/skills/` の他Skillを変更していない
 
 Project開始成功後にRoadmapを自動作成・開始しない。
+
+## 既存Projectへのbootstrap backfill
+
+bootstrap導入前に初期化されたProjectは、ProjectSTARTの再実行では対応しない。established Projectをこのpre-project経路へ入れない。
+
+backfillはbootstrap / infrastructure責務であり、専用のmaintenance経路で行う。新しいdomain Skillを増やさない。
+
+```text
+対象: valid established Workline Projectのみ
+追加: bootstrap 1ファイルだけ
+不変: .workline再初期化なし / project.yaml書き換えなし
+      Roadmap / Phase / Work / relations / events変更なし
+      .claude/skills の他Skill変更なし
+同path異内容: STOP
+再実行: idempotent
+```
+
+backfillは通常のmaintenanceなので、Project開始の「初期commit必須・push不要」例外を適用しない。remoteがあればcommit後pushまで行う（clone先で利用可能である必要があるため）。

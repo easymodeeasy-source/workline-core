@@ -9,7 +9,7 @@ from workline import gitcmd, gitops
 from workline.errors import StopError
 from workline.mutation import MutationController
 from workline.project_start import INITIAL_COMMIT_MESSAGE, project_start
-from workline.store import ProjectStore
+from workline.store import BOOTSTRAP_REL_PATH, ProjectStore
 from workline.validate import validate_project
 
 
@@ -26,6 +26,7 @@ class ProjectStartTests(WorklineTestCase):
             ".workline/relations/roadmap.yaml",
             ".workline/relations/related.yaml",
             ".workline/events/events.jsonl",
+            BOOTSTRAP_REL_PATH,
         })
         store = ProjectStore(root)
         self.assertEqual(store.workline_root(), WORKLINE_ROOT)
@@ -95,6 +96,7 @@ class ProjectStartTests(WorklineTestCase):
             ".workline/relations/roadmap.yaml",
             ".workline/relations/related.yaml",
             ".workline/events/events.jsonl",
+            BOOTSTRAP_REL_PATH,
         })
         self.assertEqual(validate_project(ProjectStore(child)), [])
         # a file that was already in the child is neither committed nor changed

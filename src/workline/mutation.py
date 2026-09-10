@@ -30,6 +30,7 @@ from .errors import GitError, ReconcileRequired, StopError, ValidationError
 from .ids import is_valid_id, kind_of, new_id
 from .store import (
     ENTITY_DIRS,
+    INFRA_WRITE_PATHS,
     PHASE_EVENTS,
     PHASE_TERMINAL_EVENTS,
     RELATED_TYPES,
@@ -382,7 +383,15 @@ class MutationController:
             raise ValidationError(f"unknown effect kind: {kind}")
         if kind == "write_file":
             path = payload.get("path")
-            if not _safe_relative(path) or not path.startswith(WORKLINE_DIR + "/") or path.startswith(RUNTIME_DIR + "/"):
+            canonical = (
+                _safe_relative(path)
+                and path.startswith(WORKLINE_DIR + "/")
+                and not path.startswith(RUNTIME_DIR + "/")
+            )
+            # ``INFRA_WRITE_PATHS`` is a closed allowlist of Project
+            # infrastructure files (the bootstrap Skill), not a general escape
+            # from the .workline boundary.
+            if not canonical and path not in INFRA_WRITE_PATHS:
                 raise ValidationError(f"write_file path must be a canonical .workline path: {path!r}")
             if not isinstance(payload.get("content"), str):
                 raise ValidationError("write_file content must be text")

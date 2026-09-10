@@ -2,8 +2,14 @@
 
 Initialize a local folder as a new Workline Project:
 preflight → Git boundary → registry validation → ``git init -b main`` when
-needed → canonical ``.workline`` structure → ``project.yaml`` → initial
-commit (fixed message, no push) → postcheck.
+needed → canonical ``.workline`` structure → ``project.yaml`` → Project-side
+bootstrap Skill → initial commit (fixed message, no push) → postcheck.
+
+The bootstrap Skill is what lets the Project be opened directly in Claude
+Code afterwards; it is a thin router entry point, never a copy of a canonical
+Skill (see :mod:`workline.bootstrap`). Projects initialized before it existed
+are handled by ``bootstrap.backfill_bootstrap``, not by re-running this
+pre-project operation.
 """
 
 from __future__ import annotations
@@ -12,10 +18,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import gitcmd, gitops
+from .bootstrap import (
+    ABSENT,
+    CONFLICT,
+    MATCHING,
+    bootstrap_conflict_error,
+    bootstrap_state,
+    bootstrap_tracked,
+    ensure_bootstrap_committable,
+    is_established_project,
+    render_bootstrap,
+)
 from .errors import StopError
 from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
 from .registry import validate_registry
-from .store import ProjectStore, WORKLINE_DIR, render_project_yaml, render_relations
+from .store import BOOTSTRAP_REL_PATH, ProjectStore, WORKLINE_DIR, render_project_yaml, render_relations
 from .validate import validate_project_yaml
 
 OWNER = "project-start"
@@ -92,21 +109,6 @@ def _git_boundary(root: Path) -> str:
     return "init"
 
 
-def _is_healthy_project(store: ProjectStore) -> bool:
-    if not store.project_yaml.is_file():
-        return False
-    if validate_project_yaml(store):
-        return False
-    try:
-        store.read_roadmap_relations()
-        store.read_related()
-        store.read_events()
-    except StopError:
-        return False
-    tracked = gitcmd.run_git(store.root, "ls-files", "--", f"{WORKLINE_DIR}/project.yaml", check=False)
-    return tracked.ok and bool(tracked.stdout.strip())
-
-
 def project_start(project_root: Path, workline_root: Path) -> ProjectStartResult:
     root = Path(project_root)
     workline = Path(workline_root)
@@ -129,15 +131,22 @@ def project_start(project_root: Path, workline_root: Path) -> ProjectStartResult
     ]
 
     if store.workline.exists() and not pending_match:
-        if boundary == "existing" and _is_healthy_project(store):
+        if boundary == "existing" and is_established_project(store):
             return ProjectStartResult("already_initialized", root, None, gitcmd.head_commit(root))
         raise StopError(
             "broken / partial .workline without a pending Project開始 mutation; not repairing by guess",
             code="partial_workline",
         )
 
-    owned = list(store.canonical_relative_paths)
-    mutation = controller.open(OWNER, invocation, WriteScope(files=tuple(owned)))
+    # A file already sitting at the bootstrap path with different content is
+    # ownership-unknown: STOP before anything is written. Other Skills under
+    # .claude/skills are never inspected or touched.
+    state = bootstrap_state(store)
+    if state == CONFLICT:
+        raise bootstrap_conflict_error()
+
+    declared = list(store.canonical_relative_paths) + [BOOTSTRAP_REL_PATH]
+    mutation = controller.open(OWNER, invocation, WriteScope(files=tuple(declared)))
 
     # Git boundary --------------------------------------------------------
     with abandon_on_stop(mutation):
@@ -145,17 +154,28 @@ def project_start(project_root: Path, workline_root: Path) -> ProjectStartResult
             gitcmd.init_main(root)
             if gitcmd.toplevel(root) != root:
                 raise StopError("git init did not make Project root the Git top-level", code="git_init_failed")
-        preexisting = gitops.record_preexisting_dirty(mutation, root)
+        ensure_bootstrap_committable(store)
+        # An untracked file byte-identical to the expected bootstrap is the
+        # artifact this operation owns, not an unrelated user change.
+        owned = list(store.canonical_relative_paths)
+        if state == ABSENT or not bootstrap_tracked(store):
+            owned.append(BOOTSTRAP_REL_PATH)
+        preexisting = gitops.record_preexisting_dirty(
+            mutation, root, exclude=(BOOTSTRAP_REL_PATH,) if state == MATCHING else ()
+        )
         gitops.ensure_separable(preexisting, owned)
 
     # Create Project structure -----------------------------------------------
     if not mutation.has_stage("create"):
-        mutation.add_effects("create", [
+        effects = [
             Effect.write_file(f"{WORKLINE_DIR}/project.yaml", render_project_yaml(workline)),
             Effect.write_file(f"{WORKLINE_DIR}/relations/roadmap.yaml", render_relations([])),
             Effect.write_file(f"{WORKLINE_DIR}/relations/related.yaml", render_relations([])),
             Effect.write_file(f"{WORKLINE_DIR}/events/events.jsonl", ""),
-        ])
+        ]
+        if state == ABSENT:
+            effects.append(Effect.write_file(BOOTSTRAP_REL_PATH, render_bootstrap()))
+        mutation.add_effects("create", effects)
     mutation.apply()
     for name in ("roadmaps", "phases", "works", "derivations"):
         (store.workline / name).mkdir(parents=True, exist_ok=True)
@@ -181,6 +201,10 @@ def _postcheck(store: ProjectStore, workline: Path, owned: list[str], preexistin
         raise StopError("postcheck: " + "; ".join(p.message for p in problems), code="postcheck_failed")
     if store.read_roadmap_relations() != [] or store.read_related() != [] or store.read_events() != []:
         raise StopError("postcheck: central stores are not in initial state", code="postcheck_failed")
+    if bootstrap_state(store) != MATCHING:
+        raise StopError("postcheck: Project bootstrap Skill is missing or not the expected bootstrap", code="postcheck_failed")
+    if not bootstrap_tracked(store):
+        raise StopError("postcheck: Project bootstrap Skill is not tracked", code="postcheck_failed")
     if gitcmd.head_commit(root) is None:
         raise StopError("postcheck: initial commit missing", code="postcheck_failed")
     tracked = gitcmd.run_git(root, "ls-files", "-z", "--", *owned).stdout.split("\0")
