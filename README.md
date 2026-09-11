@@ -15,6 +15,8 @@ canonical Skillの現在の集合は `registry.md` の `workline-id: skills/*` �
 
 旧 `aiproject-vault/new-dev-os-redesign/` の checkpoint / audit / fix / live-spec は設計履歴・rationaleとして保持するが、実装時のnormative sourceとして横断合成しない。
 
+非正本の改善候補一覧は `BACKLOG.md` に置くが、正本は引き続き `registry.md` と canonical Skills だけである。
+
 ## Local clone
 
 想定clone先:
