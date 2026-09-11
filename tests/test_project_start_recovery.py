@@ -517,6 +517,25 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": ["mine.txt"]})
         self.assertEqual(records(root)[path.stem]["notes"], {"preexisting_dirty": [BOOTSTRAP_REL_PATH, "gone.txt"]})
 
+    def test_a_snapshot_holding_a_nested_repository_entry_is_started_again(self) -> None:
+        root = self.new_dir()
+        nested = root / "sub"
+        nested.mkdir()
+        git(nested, "init", "-q", "-b", "main")
+        (nested / "f.txt").write_text("x\n", encoding="utf-8")
+        (root / "plain" / "deep").mkdir(parents=True)
+        (root / "plain" / "deep" / "g.txt").write_text("y\n", encoding="utf-8")
+        # Git reports an untracked nested repository as its directory, with a trailing slash
+        snapshot = ["plain/deep/g.txt", "sub/"]
+        path = self.abandoned_start(root, preexisting=snapshot)
+        old = path.read_bytes()
+
+        result = self.start(root)
+
+        self.assertInitialized(root, result)
+        self.assertEqual(path.read_bytes(), old)
+        self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": snapshot})
+
     def test_an_abandoned_start_next_to_the_repository_it_initialized(self) -> None:
         root = self.new_dir()
         git(root, "init", "-b", "main")
@@ -643,6 +662,19 @@ class UnsafeResidueTests(RecoveryTestCase):
                 root = self.new_dir(slug(label))
                 self.rewrite(self.abandoned_start(root), change)
                 self.assertNotRetried(root)
+
+    def test_a_snapshot_path_workline_could_not_have_recorded_is_not_retried(self) -> None:
+        malformed = ("../outside", "/absolute", "a/./b", "a//b", "./a", "a/..", "a//", "/", "C:/drive", "//server/share")
+        for number, path in enumerate(malformed):
+            with self.subTest(snapshot_path=path):
+                root = self.new_dir(f"snapshot-{number}")
+                record = self.abandoned_start(root, preexisting=[path])
+                old = record_bytes(root)
+
+                self.assertNotRetried(root)
+
+                self.assertEqual(record_bytes(root), old)
+                self.assertEqual(list(records(root)), [record.stem])
 
     def test_each_missing_field_stops_as_partial_or_as_unconfirmed_ownership(self) -> None:
         for field in sorted(CLOSED_INTENT_FIELDS):

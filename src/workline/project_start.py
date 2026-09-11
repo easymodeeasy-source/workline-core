@@ -232,13 +232,22 @@ def _residue_layout_problem(store: ProjectStore) -> str | None:
     return None
 
 
+def _snapshot_path(path: object) -> bool:
+    """Whether ``path`` is a Git worktree-relative path as a recorded snapshot holds it.
+
+    Slash-separated and relative: no backslash, no drive, and no empty, ``.``
+    or ``..`` component. A single trailing slash is the one exception, since
+    Git reports an untracked nested repository as its directory (``sub/``).
+    """
+    if not isinstance(path, str) or not path or "\\" in path or path[1:2] == ":":
+        return False
+    body = path[:-1] if path.endswith("/") else path
+    return all(part not in ("", ".", "..") for part in body.split("/")) and not gitops.is_runtime_path(path)
+
+
 def _snapshot_shaped(value: object) -> bool:
     """Whether ``value`` is shaped like a recorded snapshot of pre-existing changes: sorted, unique Git paths outside runtime."""
-    return (
-        isinstance(value, list)
-        and all(isinstance(path, str) and path and "\\" not in path and not gitops.is_runtime_path(path) for path in value)
-        and value == sorted(set(value))
-    )
+    return isinstance(value, list) and all(_snapshot_path(path) for path in value) and value == sorted(set(value))
 
 
 def _recorded_time(value: object) -> bool:
