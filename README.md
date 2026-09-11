@@ -118,6 +118,8 @@ Claude Codeアプリで D:\AIproject\workline-core を開く
 
 ProjectSTARTだけがWorkline root側から使うpre-project操作である。
 
+Workline root自身はProjectSTARTのtargetにしない（self-hostingは現在サポートしない）。
+
 ProjectSTARTは canonical `.workline` structure に加えて、Project側entryを1個だけ設置する。
 
 ```text

@@ -11,10 +11,12 @@ Before the lock the operation passes the Project context check
 (:mod:`workline.context`): it must have been started from inside the very
 Project it changes. A foreign caller STOPs as ``foreign_project_mutation``
 before the lock directory or file exists, so it creates nothing in the target.
-It then passes the Workline implementation check
-(:mod:`workline.implementation`): the running implementation must be the
-Project's configured Workline root's, or the operation STOPs, again before the
-lock area exists.
+It then passes the unsupported self-hosting check
+(:mod:`workline.self_hosting`) — the Project must be proven to be a different
+directory from its Workline root — and the Workline implementation check
+(:mod:`workline.implementation`) — the running implementation must be the
+Project's configured Workline root's. Either STOPs, again, before the lock
+area exists.
 
 The lock is an OS-managed, non-blocking, exclusive lock on
 ``.workline/runtime/locks/project.lock`` (``msvcrt.locking`` on Windows,
@@ -54,6 +56,7 @@ from .context import authorize_project_mutation
 from .durable import durable_write_text
 from .errors import ProjectOperationBusy, ProjectOperationNested, StopError
 from .implementation import require_configured_implementation
+from .self_hosting import refuse_self_hosting
 from .store import PROJECT_YAML_REL, ProjectStore
 
 HOLDER_MARKER = "workline-operation-holder"
@@ -230,11 +233,15 @@ def project_operation(
             code="not_a_project",
         )
     context = authorize_project_mutation(store.root)
+    configured_root = store.workline_root()
+    # Unsupported self-hosting (rules/git): a Project not proven to be a
+    # different directory from its Workline root is not changed. After the
+    # Project context, so a foreign target is reported as foreign first.
+    refuse_self_hosting(store.root, configured_root)
     # Workline implementation (rules/git): only the configured Workline root's
-    # implementation takes this Project's lock. After the Project context, so a
-    # foreign target is reported as foreign first; before the lock, so a
-    # mismatch leaves nothing behind.
-    require_configured_implementation(store.workline_root())
+    # implementation takes this Project's lock. Both checks come before the
+    # lock, so neither STOP leaves anything behind.
+    require_configured_implementation(configured_root)
     key = _key(store)
     with _held_guard:
         running = _held.get(key)

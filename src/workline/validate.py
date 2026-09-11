@@ -12,6 +12,8 @@ import fnmatch
 from pathlib import Path
 
 from . import registry as registry_module
+from . import self_hosting
+from .errors import ValidationError
 from .ids import is_valid_id
 from .state import EXCLUDED_STATES, ProjectView
 from .store import (
@@ -282,9 +284,25 @@ def _has_cycle(graph: dict[str, list[str]]) -> bool:
     return any(visit(node) for node in list(graph))
 
 
+def _self_hosting_problems(store: ProjectStore) -> list[Problem]:
+    """Unsupported self-hosting (rules/git), reported so that full validation never passes it.
+
+    Only full validation reports it. project.yaml validation, which also decides
+    whether a Project is established and serves as an operation postcheck,
+    stays about the file itself.
+    """
+    try:
+        workline_root = store.workline_root()
+    except ValidationError:
+        return []  # an unreadable project.yaml is already reported by project.yaml validation
+    problem = self_hosting.self_hosting_problem(store.root, workline_root)
+    return [Problem(self_hosting.CODE, problem)] if problem else []
+
+
 def validate_project(store: ProjectStore) -> list[Problem]:
-    """Full validation: project.yaml + registry routing + structure."""
+    """Full validation: project.yaml + registry routing + supported topology + structure."""
     problems = validate_project_yaml(store)
+    problems.extend(_self_hosting_problems(store))
     try:
         view = ProjectView.load(store)
     except Exception as exc:  # ValidationError from store

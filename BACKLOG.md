@@ -44,7 +44,7 @@
 | BL-009 | Historical deleted Related / must_read semantics | VERIFIED |
 | BL-010 | Generated artifact hygiene | VERIFIED |
 | BL-011 | Reusable migration procedure | OPEN |
-| BL-012 | Unsupported self-hosting guard | VERIFIED |
+| BL-012 | Unsupported self-hosting guard | RESOLVED |
 | BL-013 | Self-hosting readiness | DEFERRED |
 | BL-014 | Deterministic tie-break among startable candidates | VERIFIED |
 | BL-015 | Silent no-op on Phase re-entry | VERIFIED |
@@ -229,7 +229,7 @@
 
 - ID: BL-012
 - Title: Unsupported self-hosting guard
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: implementation, spec
 - Problem: Project開始は、Project rootとWorkline rootが同一（Project root == Workline root）であることを拒否しない。self-hostingは正式にサポートされていないが、現状では機械的に初期化できてしまう。
 - Why it matters: 意図せずWorkline root自身がProjectになると、変更対象と、それを統治・回復するrule / 実装が同じ作業ツリーに入る（循環）。さらに、Workline root側から行うpre-project操作と「成立済みProjectの内側」という文脈が衝突する（BL-013）。
@@ -239,6 +239,7 @@
 - Human confirmation likely: yes（Project開始の拒否条件の追加はcanonical Skillの変更）
 - Self-hosting prerequisite: yes（正式サポートまでのguard）
 - Evidence class: code inspection, self-hosting assessment
+- Resolution: Project rootとそのWorkline rootが別の実体directoryだと証明できない配置を、現在のWorkline rulesではサポートしないself-hostingとして扱うguardを入れた。判定はfile identity（`os.path.samefile` 相当）で行い、同じdirectory、または両方存在するのに判定できない場合はfail-closedで `workline_self_hosting_unsupported` としてSTOPする。Project開始はpre-project contextの確認の後、git init・`.workline`・bootstrapより前に止まる。既にこの配置の成立済みProjectでも、state-changing operationはProject contextの後、Workline implementation照合とexecution lockの前に止まり、何も書かない。読み取りは引き続き可能で、validate-projectはこの配置をproblemとして報告しPASSにしない。overrideや自動修復は設けず、project.yaml・bootstrap・intent / event形式は変えず、既存Projectのbackfillは不要。self-hostingの正式サポートはBL-013で扱う。`rules/git` とproject-start Skill、READMEへ反映済み。
 
 ### BL-013 Self-hosting readiness
 

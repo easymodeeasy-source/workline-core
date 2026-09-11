@@ -59,7 +59,7 @@ Phase CREATE / CREATEのregistration coreはGit finalizerではない。呼び�
 
 CREATEがRoadmap / STARTのparent operationなしで直接起動された場合だけ、CREATE entrypoint自身がDirect Work Operation contextを生成し、その外側contextがpostcheck / commit / remoteありならpushまでを所有する。新しいSkillやroutingは増やさない。
 
-各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject context照合、Workline implementation照合、Project execution lock取得の後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
+各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject context照合、self-hosting照合、Workline implementation照合、Project execution lock取得の後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
 
 ### Project context
 
@@ -83,6 +83,7 @@ contextはtop-level operation開始時に確定する。実行中にexecutorや�
 targetがestablished Projectか確認
 → invocation Project contextを解決
 → target Projectと照合（foreignならSTOP）
+→ self-hosting照合（Project rootとWorkline rootが別の実体directoryだと証明できなければSTOP）
 → Workline implementation照合（configured rootのimplementationでなければSTOP）
 → Project execution lock取得
 → pending mutation / Project stateを読む
@@ -104,12 +105,48 @@ Project開始（初期化）はforeign mutationとは別のpre-project operation
 - invocation Project contextが、target以外の成立済みWorkline Projectではない
   （Workline root、Projectではないdirectory / Git repository、target自身やその配下からは実行できる）
 - targetが成立済みWorkline Projectの配下にない（nested Workline Projectは作らない）
+- targetが、project.yamlへ書くWorkline rootとは別の実体directoryだと証明できる（Unsupported self-hosting）
 - 実行中のWorkline implementationが、project.yamlへ書くWorkline rootのものである（Workline implementation）
 ```
 
 Project開始のmutationは、その実行が対象rootに与えた許可の内側でだけopen / resume / 書込みできる。owner名だけでは許可されない。
 
 このcontextは、あるProject contextで作業中に別Projectのpathを誤ってmutation targetへ渡す事故を防ぐmechanical guardであり、security sandboxではない。意図的な作業directoryの変更（`cd` / `chdir`）や、Worklineを経由しないfilesystemへの直接書込みは保証の対象外である。
+
+### Unsupported self-hosting
+
+Workline rootを、それ自身をWorkline rootとするWorkline Projectとして管理するself-hostingは、現在のWorkline rulesではサポートしない。
+
+state-changing operationは、Project rootとWorkline rootが別の実体directoryだと機械的に証明できる場合だけ実行する。Workline rootは、成立済みProjectでは `.workline/project.yaml` の `workline.root`、Project開始では明示されたWorkline rootである。
+
+```text
+同じ実体directory                          → STOP
+別の実体directory                          → この照合は通過
+両方存在するがfile identityを判定できない  → 別directoryだと証明できないためSTOP
+Workline rootが存在しない                  → self-hostingとは扱わない（root不在の既存の扱いに従う）
+```
+
+同一性はfile identity（`os.path.samefile` 相当）で判定し、pathの文字列だけで比較しない。case差、区切り文字、末尾の区切り、`..`、相対path、symlink / junction、短縮名によって照合を抜けない。
+
+STOPは `workline_self_hosting_unsupported` とし、何も書かない。
+
+- Project開始: pre-project contextの確認の後、Workline implementation照合・registry validation・Git boundaryの確認・mutationの前に照合する。Git repositoryでないtargetに `git init` せず、既存repositoryのHEAD・index・config・working treeも変えない。targetが既にこの配置の成立済みProjectでも `already_initialized` とせずSTOPする。
+- 成立済みProjectへのstate-changing operation: Project context照合の後、Workline implementation照合とProject execution lock取得の前に照合する。execution lock・holder情報・mutation intent・event・relation・entityを作らず、Git add / commit / pushも行わない。
+
+```text
+Project context            （foreign_project_mutation）
+→ Unsupported self-hosting （workline_self_hosting_unsupported）
+→ Workline implementation  （workline_implementation_* / workline_python_unsupported）
+→ Project execution lock   （project_operation_busy / project_operation_nested）
+```
+
+foreignなcontextからはtargetの配置を評価しない。配置がsupportedでなければ、正しいimplementationへ切り替えてもoperationを実行できないため、implementation照合より先に報告する。canonical launcher / activateが作業directoryのProjectで別のWorkline rootのlauncherを起動時に拒否するのはWorkline implementationのprocess起動時の照合であり、この順序より先に起きうる。
+
+読み取り（file・state・entity・pending mutationの参照、startable / select / diagnose、記録を伴わない達成判定、registry validation、canonical launcherのactivate）は禁止しない。成立済みProjectのcanonical validationは、この配置を `workline_self_hosting_unsupported` のproblemとして報告してPASSにせず、他のproblemも併記する。project.yamlの形式検査やProject成立判定そのものには含めない。
+
+この配置を許可するoverride（flag・引数・環境変数・owner名・人間確認による例外・専用mode）は設けない。既存のこの配置を自動修復・解除しない（project.yamlを書き換えず、`.workline` やpending mutationを削除しない）。
+
+これはself-hostingを正式にサポートするまでの暫定guardであり、サポートを判断する際に再評価する。Workline rootとProject rootが親子関係にある配置や、別のWorkline rootがWorkline rootを統治する配置はこの照合の対象外である（nested Workline Projectの扱いはProject contextに従う）。
 
 ### Workline implementation
 
@@ -215,17 +252,17 @@ workline_implementation_unavailable : <R>/src/workline が無い、またはload
 launcherを経由しない経路でimplementationがimportされた場合も、implementation自身が、実際にloadされているimplementationとconfigured rootを次の時点で照合する。
 
 ```text
-成立済みProjectへのstate-changing operation : Project context照合の後、Project execution lock取得の前
-Project開始                                  : pre-project contextの確認の後、registry validationとmutationの前
+成立済みProjectへのstate-changing operation : Project context照合とself-hosting照合の後、Project execution lock取得の前
+Project開始                                  : pre-project contextの確認とself-hosting照合の後、registry validationとmutationの前
                                                （実行中implementationのroot == 明示されたWorkline root）
 成立済みProjectのcanonical validation        : configured rootのimplementationでなければPASSさせない
 ```
 
-照合に失敗したoperationは、execution lock・holder情報・mutation intent・event・relation・entityを作らず、Git add / commit / pushも行わない。Project contextの不一致とimplementationの不一致が両方ある場合は、Project context（`foreign_project_mutation`）を先に報告する。
+照合に失敗したoperationは、execution lock・holder情報・mutation intent・event・relation・entityを作らず、Git add / commit / pushも行わない。Project contextの不一致やUnsupported self-hostingにも当たる場合は、それらをimplementationの不一致より先に報告する（Unsupported self-hostingの節の順序）。
 
 照合を回避するoverride（flag・引数・環境変数）は設けない。
 
-Project contextは「どのProjectへ書くか」、Workline implementationは「どのimplementationが書くか」、Project execution lockは「同時に動くwriterがいくつか」を決める。三者を混ぜない。
+Project contextは「どのProjectへ書くか」、Unsupported self-hostingは「そのProjectとWorkline rootの配置がsupportedか」、Workline implementationは「どのimplementationが書くか」、Project execution lockは「同時に動くwriterがいくつか」を決める。これらを混ぜない。
 
 これはsupported interpreterとconfigured rootのimplementationを取り違えないためのmechanical guardであり、security sandboxではない。選んだinterpreterのstartup code（`.pth` / sitecustomize）の実行そのもの、sys.modules・finder・照合処理の意図的な書き換え、driverやexecutorが実行する任意のコードは保証の対象外である。
 
@@ -238,6 +275,7 @@ Project contextは「どのProjectへ書くか」、Workline implementationは�
 ```text
 top-level operation開始
 → Project context照合（foreignならSTOP。lockを作らない）
+→ self-hosting照合（STOPならlockを作らない）
 → Workline implementation照合（STOPならlockを作らない）
 → lock取得（待たない）
 → pending mutation / Project state / push destination / dirty stateを読む

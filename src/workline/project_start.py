@@ -35,6 +35,7 @@ from .errors import StopError
 from .implementation import require_configured_implementation
 from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
 from .registry import validate_registry
+from .self_hosting import refuse_self_hosting
 from .store import (
     BOOTSTRAP_REL_PATH,
     ProjectStore,
@@ -170,6 +171,10 @@ def project_start(
     # and never a Workline Project inside an established one, decided before
     # anything is written.
     require_pre_project_context(root)
+    # Unsupported self-hosting (rules/git): a Workline root is never initialized
+    # as a Project of its own, nor is a folder not proven to be a different
+    # directory — decided before Git, .workline or the bootstrap are touched.
+    refuse_self_hosting(root, workline)
     # Workline implementation (rules/git): the implementation that writes this
     # Workline root into project.yaml must be that root's own.
     require_configured_implementation(workline)

@@ -13,6 +13,7 @@ The hierarchy mirrors the stop contracts of ``rules/git``:
 * ``PythonUnsupported``      the interpreter is older than the Python Workline requires
 * ``ImplementationUnverified`` the origin of the running implementation cannot be proven
 * ``ImplementationMismatch`` the running implementation is not the configured Workline root's
+* ``SelfHostingUnsupported`` a Project is not proven to be a different directory from its Workline root
 """
 
 from __future__ import annotations
@@ -95,6 +96,18 @@ class ForeignProjectMutation(StopError):
         super().__init__(message, code="foreign_project_mutation")
         self.context_root = context_root
         self.target_root = target_root
+
+
+class SelfHostingUnsupported(StopError):
+    """A state-changing operation on a Project not proven to be a different directory from its Workline root.
+
+    Self-hosting is unsupported under the current Workline rules. Raised after
+    the Project context and before the Workline implementation check and the
+    Project execution lock, so nothing was written.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="workline_self_hosting_unsupported")
 
 
 class PythonUnsupported(StopError):

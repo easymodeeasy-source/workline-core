@@ -57,6 +57,8 @@ A / Bで解決した場合、確認のためだけのAskUserQuestionを出さな
 
 明示pathとcwdが競合する場合は勝手に選ばず、STOP / clarificationとする。
 
+Workline rootをClaude Codeで開いたsessionで「ここ」「このroot」等からcwdをProject rootに解決すると、Project rootがWorkline root自身になる。これはself-hostingでありサポートしないため、canonical implementationは `workline_self_hosting_unsupported` でSTOPする。別のfolderを推測してtargetにしない。
+
 ### Workline root
 
 明示値がある場合、そのrootだけをvalidationする。別rootを探索しない。別registryを探さない。確認質問を出さない。無効なら代替候補を探さずSTOPする。
@@ -90,10 +92,11 @@ concrete Skillからowning Workline rootを一意解決できなければ、conf
 
 1. Project rootが存在するdirectoryであることを確認する。
 2. Workline rootが存在するdirectoryであることを確認する。
-3. 実行中のWorkline implementationがそのWorkline rootのものであることを確認する（`rules/git` のWorkline implementation。不一致なら何も書かずSTOP）。
-4. `<workline-root>/registry.md` を読み、必須4 rule IDと5 Skill IDを一意解決する。
-5. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。
-6. Git boundaryを確認する。
+3. Project rootとWorkline rootが別の実体directoryであることを確認する（`rules/git` のUnsupported self-hosting。同じ実体directory、または別だと証明できない場合は `workline_self_hosting_unsupported` で何も書かずSTOP）。
+4. 実行中のWorkline implementationがそのWorkline rootのものであることを確認する（`rules/git` のWorkline implementation。不一致なら何も書かずSTOP）。
+5. `<workline-root>/registry.md` を読み、必須4 rule IDと5 Skill IDを一意解決する。
+6. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。
+7. Git boundaryを確認する。
 
 Git boundary:
 
