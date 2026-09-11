@@ -53,9 +53,11 @@ PROJECT_YAML_REL = f"{WORKLINE_DIR}/project.yaml"
 PIN_OWNERS = ("project-start", "push-destination-pin")
 
 # Initial Project開始 runs before a Project is established and is outside the
-# Project execution lock. Every other owner opens, resumes and writes its
-# mutation only while holding that lock; the Mutation Controller enforces it.
-LOCK_EXEMPT_OWNERS = ("project-start",)
+# Project execution lock. Its mutation is opened, resumed and written only
+# inside the pre-project authorization a running Project開始 grants for its own
+# target root; the owner name alone authorizes nothing. Every other owner works
+# only while its operation holds that lock. The Mutation Controller enforces both.
+PRE_PROJECT_OWNERS = ("project-start",)
 
 ENTITY_DIRS = {"roadmap": "roadmaps", "phase": "phases", "work": "works"}
 

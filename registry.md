@@ -59,7 +59,55 @@ Phase CREATE / CREATEのregistration coreはGit finalizerではない。呼び�
 
 CREATEがRoadmap / STARTのparent operationなしで直接起動された場合だけ、CREATE entrypoint自身がDirect Work Operation contextを生成し、その外側contextがpostcheck / commit / remoteありならpushまでを所有する。新しいSkillやroutingは増やさない。
 
-各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject execution lockを取得した後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
+各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject context照合とProject execution lock取得の後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
+
+### Project context
+
+成立済みWorkline Projectへ書き込むstate-changing operationは、invocation Project contextがtarget Projectと一致する場合だけ実行する。一致しなければ `foreign_project_mutation` としてSTOPする。
+
+invocation Project contextは、top-level operation開始時のprocess作業directoryから1回だけ解決する。session identity・引数・環境変数・promptの記述からは決めない。
+
+```text
+作業directoryを実体pathへ解決し、上方向へ探索する（各directoryで次の順に判定）
+1. .workline/project.yaml がある → そのestablished Workline Project
+2. .git（file / directory）がある → Projectではない Git repository境界。ここで探索を止める
+3. どちらもない → 親directoryへ
+rootまで見つからない → Project contextなし
+```
+
+同じdirectoryに `.workline/project.yaml` と `.git` の両方がある場合はWorkline Projectとする。最も近いGit境界を越えて親のWorkline Projectを探さない。contextとtarget Projectは、文字列ではなく実体のdirectoryとして照合する。
+
+contextはtop-level operation開始時に確定する。実行中にexecutorや子processが作業directoryを変えても、進行中operationの許可は変わらない。新しいtop-level operationは、その時点の作業directoryから改めて解決する。QuestionWait後のresumeも新しいinvocationとして照合する。同じsessionである必要はなく、同じProject contextから実行されればよい。
+
+```text
+targetがestablished Projectか確認
+→ invocation Project contextを解決
+→ target Projectと照合（foreignならSTOP）
+→ Project execution lock取得
+→ pending mutation / Project stateを読む
+→ mutation open / resume → effects → validation → commit / push
+```
+
+foreign STOPは、execution lock・holder情報・mutation intent・event・relation・entityを作らず、Git add / commit / pushも行わない。
+
+別Projectのread-only参照（validation、state / entityの読取、候補確認、診断、pending mutationの読取、記録を伴わない判定、Git情報の読取）は許可し、この照合を行わない。
+
+foreign mutationを許可するoverride（flag・引数・環境変数・owner名・promptの記述）は設けない。成立済みProjectへの操作は、そのProjectのcontextから行う。
+
+Mutation Controllerは、成立済みProjectのmutationを、この照合を通ったtop-level operationのexecution lockの内側でだけopen / resume / 書込みする。
+
+Project開始（初期化）はforeign mutationとは別のpre-project operationとして、次をすべて満たす場合だけ実行する。
+
+```text
+- 明示されたtarget folderに対する、Project開始のcanonical implementationの実行である
+- invocation Project contextが、target以外の成立済みWorkline Projectではない
+  （Workline root、Projectではないdirectory / Git repository、target自身やその配下からは実行できる）
+- targetが成立済みWorkline Projectの配下にない（nested Workline Projectは作らない）
+```
+
+Project開始のmutationは、その実行が対象rootに与えた許可の内側でだけopen / resume / 書込みできる。owner名だけでは許可されない。
+
+このcontextは、あるProject contextで作業中に別Projectのpathを誤ってmutation targetへ渡す事故を防ぐmechanical guardであり、security sandboxではない。意図的な作業directoryの変更（`cd` / `chdir`）や、Worklineを経由しないfilesystemへの直接書込みは保証の対象外である。
 
 ### Project execution lock
 
@@ -67,6 +115,7 @@ CREATEがRoadmap / STARTのparent operationなしで直接起動された場合�
 
 ```text
 top-level operation開始
+→ Project context照合（foreignならSTOP。lockを作らない）
 → lock取得（待たない）
 → pending mutation / Project state / push destination / dirty stateを読む
 → mutation open / resume / begin

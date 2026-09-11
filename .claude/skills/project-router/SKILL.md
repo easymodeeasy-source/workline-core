@@ -41,6 +41,14 @@ Project側bootstrapからの委譲先。established Workline Project内のreques
 
 `.workline/project.yaml` が無ければestablished Workline Projectではない。STOPして報告する。ここで初期化しない。
 
+## Project context
+
+Project rootは、`rules/git` のinvocation Project context（作業directoryから解決される成立済みWorkline Project）とする。requestの文面に書かれたpathからは決めない。
+
+成立済みProjectのoperationは、現在のProject contextのProjectを対象にする。requestが別のWorkline Projectへのmutationなら、ここから実行しない。そのProjectを直接開く（そのProjectのcontextへ移る）よう人間へ返す。`foreign_project_mutation` を回避する手段を探さない。
+
+別Projectのread-only参照は行ってよい。
+
 ## Skill inventory
 
 現在のSkill一覧をこのファイルへ固定で書かない。毎回registryから取得する。

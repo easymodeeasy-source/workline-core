@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from typing import Iterator
 import unittest
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -49,6 +51,22 @@ def git(repo: Path, *args: str, check: bool = True) -> str:
     return completed.stdout
 
 
+@contextmanager
+def cwd(path: Path) -> Iterator[Path]:
+    """Run the block from inside ``path``.
+
+    The working directory is the invocation context Workline resolves for an
+    operation (``rules/git``: Project context), so this is how a test works in
+    a Project or in the Workline root. It bypasses no authorization.
+    """
+    previous = os.getcwd()
+    os.chdir(path)
+    try:
+        yield Path(path)
+    finally:
+        os.chdir(previous)
+
+
 class WorklineTestCase(unittest.TestCase):
     """Base class with an isolated temp dir and git identity."""
 
@@ -58,6 +76,9 @@ class WorklineTestCase(unittest.TestCase):
         os.environ.update(GIT_ENV)
         self.tmp = Path(tempfile.mkdtemp(prefix="workline-test-"))
         self.addCleanup(self._cleanup)
+        # Runs before _cleanup: Windows cannot remove a directory that is the
+        # working directory, and a test may have entered one of its Projects.
+        self.addCleanup(os.chdir, os.getcwd())
 
     def _cleanup(self) -> None:
         rmtree(self.tmp)
@@ -73,11 +94,18 @@ class WorklineTestCase(unittest.TestCase):
         path.mkdir(parents=True)
         return path
 
-    def new_project(self, name: str = "proj", *, remote: bool = False, pin: bool = True) -> ProjectStore:
-        """A Workline Project; with ``remote`` its push destination is pinned.
+    def enter(self, path: Path) -> None:
+        """Work from inside ``path`` for the rest of the test, as a session opened on it would."""
+        os.chdir(path)
 
-        ``pin=False`` produces the state an existing Project is in before the
-        one-time pin backfill: a remote with no approved destination.
+    def new_project(self, name: str = "proj", *, remote: bool = False, pin: bool = True) -> ProjectStore:
+        """A Workline Project, entered as the test's working context.
+
+        Project開始 runs from the Workline root, as it does in real use, and the
+        test then works from inside the new Project. With ``remote`` its push
+        destination is pinned; ``pin=False`` produces the state an existing
+        Project is in before the one-time pin backfill: a remote with no
+        approved destination.
         """
         root = self.new_dir(name)
         expected = None
@@ -87,7 +115,9 @@ class WorklineTestCase(unittest.TestCase):
             git(root, "init", "-b", "main")
             git(root, "remote", "add", "origin", str(bare))
             expected = str(bare) if pin else None
-        project_start(root, WORKLINE_ROOT, expected_push_url=expected)
+        with cwd(WORKLINE_ROOT):
+            project_start(root, WORKLINE_ROOT, expected_push_url=expected)
+        self.enter(root)
         return ProjectStore(root)
 
     def remote_path(self, name: str = "proj") -> Path:

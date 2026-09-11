@@ -13,7 +13,10 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   operation as ``reconcile required``;
 * a mutation of an established Project is opened, resumed and written only
   while its operation holds the Project execution lock
-  (:mod:`workline.oplock`); initial Project開始 is the one owner outside it;
+  (:mod:`workline.oplock`), which an operation receives only after passing the
+  Project context check (:mod:`workline.context`); initial Project開始 is
+  outside the lock, and its mutation is written only inside the authorization
+  a running Project開始 grants for its own target root;
 * the controller validates and physically writes decided payloads. It never
   decides domain meaning.
 """
@@ -28,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import gitcmd, oplock, pushurl, yamlish
+from .context import pre_project_authorized, same_directory
 from .destination import resolve_active_push_locator, verify_recorded_destination
 from .durable import DurableWriteError, durable_write_text
 from .errors import GitError, ReconcileRequired, StopError, ValidationError
@@ -35,7 +39,7 @@ from .ids import is_valid_id, kind_of, new_id
 from .store import (
     ENTITY_DIRS,
     INFRA_WRITE_PATHS,
-    LOCK_EXEMPT_OWNERS,
+    PRE_PROJECT_OWNERS,
     PHASE_EVENTS,
     PHASE_TERMINAL_EVENTS,
     PIN_OWNERS,
@@ -346,18 +350,29 @@ class MutationController:
             raise ReconcileRequired(f"mutation record missing: {mutation_id}")
         return Mutation(self, self._load_intent(path), resumed=True)
 
-    # execution lock ------------------------------------------------------------
+    # operation authorization ---------------------------------------------------
     def require_execution_lock(self, owner: str) -> None:
-        """STOP unless the running operation holds this Project's execution lock.
+        """STOP unless this mutation runs inside its operation's authorization.
 
-        Initial Project開始 is the one owner outside the lock (``rules/git``).
-        Every other owner opens, resumes and writes a mutation only while its
-        top-level operation holds the Project execution lock, so no two
-        processes ever work on the same recovery records or ledgers at once.
+        Initial Project開始 is outside the execution lock, but its mutation is
+        opened, resumed and written only inside the authorization a running
+        project_start() grants for exactly this root; the owner name alone
+        authorizes nothing (``rules/git``: Project context). Every other owner
+        works only while its top-level operation holds this Project's execution
+        lock, which an operation receives only after passing the Project context
+        check: no other context writes these records, and no two processes work
+        on them at once.
         """
-        if owner in LOCK_EXEMPT_OWNERS:
+        if owner in PRE_PROJECT_OWNERS:
+            if not pre_project_authorized(self.store.root):
+                raise StopError(
+                    f"{owner} cannot open or write a mutation outside Project開始 of this folder; only a running "
+                    "project_start() authorizes it, for its own target root",
+                    code="pre_project_authorization_required",
+                )
             return
-        if oplock.held_lock(self.store) is None:
+        lock = oplock.held_lock(self.store)
+        if lock is None or not same_directory(lock.context_root, self.store.root):
             raise StopError(
                 f"{owner} cannot open or write a mutation without this Project's execution lock; "
                 "the top-level Workline operation takes it at its entry",
@@ -399,7 +414,7 @@ class MutationController:
             mutation = Mutation(self, matches[0], resumed=True)
         else:
             mutation = self.begin(owner, invocation, scope)
-        if owner not in LOCK_EXEMPT_OWNERS:
+        if owner not in PRE_PROJECT_OWNERS:
             oplock.note_mutation(self.store, mutation.id)
         return mutation
 

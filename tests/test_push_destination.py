@@ -194,6 +194,7 @@ class EntryCheckTests(DestinationBase):
         git(root, "init", "-b", "main")
         git(root, "remote", "add", "upstream", str(bare))
         project_start(root, WORKLINE_ROOT, expected_push_url=str(bare), push_remote="upstream")
+        self.enter(root)
         store = ProjectStore(root)
         self.assertEqual(store.read_push_pin(), PushPin("upstream", (str(bare),)))
 
@@ -239,6 +240,7 @@ class ResolutionTests(DestinationBase):
         git(root, "remote", "add", "origin", str(fetch_remote))
         git(root, "remote", "set-url", "--push", "origin", str(push_remote))
         project_start(root, WORKLINE_ROOT, expected_push_url=str(push_remote))
+        self.enter(root)
         return ProjectStore(root), fetch_remote, push_remote
 
     def test_pushurl_decides_the_destination_and_the_evidence(self) -> None:
@@ -278,6 +280,7 @@ class ResolutionTests(DestinationBase):
         self.assertEqual(ctx.exception.code, "push_destination_mismatch")
 
         project_start(root, WORKLINE_ROOT, expected_push_url=str(rewritten))
+        self.enter(root)
         store = ProjectStore(root)
         create_standalone_work(store, WorkSpec("Rewritten", "done"))
         self.assertEqual(git(root, "rev-parse", "HEAD").strip(), self.head_of(rewritten))
@@ -364,6 +367,7 @@ class CloneTests(DestinationBase):
 
         cloned = ProjectStore(clone)
         self.assertEqual(cloned.read_push_pin(), store.read_push_pin())
+        self.enter(clone)  # a clone is worked on from inside it, like any Project
         create_standalone_work(cloned, WorkSpec("FromClone", "done"))
         self.assertEqual(git(clone, "rev-parse", "HEAD").strip(), self.head_of(self.remote_path()))
 
@@ -376,6 +380,7 @@ class CloneTests(DestinationBase):
         git(self.tmp, "clone", "-q", str(copy), str(clone))
 
         head_before = self.head_of(copy)
+        self.enter(clone)
         with self.assertRaises(StopError) as ctx:
             create_standalone_work(ProjectStore(clone), WorkSpec("Fork", "done"))
         self.assertEqual(ctx.exception.code, "push_destination_mismatch")
@@ -614,6 +619,7 @@ class LocatorIdentityTests(DestinationBase):
         git(root, "init", "-b", "main")
         git(root, "remote", "add", "origin", locator)
         project_start(root, WORKLINE_ROOT, expected_push_url=locator)
+        self.enter(root)
         return ProjectStore(root)
 
     def test_target_and_target_dot_git_stay_distinct(self) -> None:
@@ -700,6 +706,7 @@ class ChainedRewriteTests(DestinationBase):
         git(root, "config", f"url.{destination}.pushInsteadOf", str(configured))
         git(root, "config", f"url.{decoy}.insteadOf", str(destination))
         project_start(root, WORKLINE_ROOT, expected_push_url=str(destination))
+        self.enter(root)
         return ProjectStore(root), configured, destination, decoy
 
     def _classification(self, store: ProjectStore, locator: str) -> str:

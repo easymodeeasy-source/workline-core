@@ -1,8 +1,11 @@
-"""Child process driven by test_operation_lock.py (not a test module itself).
+"""Child process driven by the execution lock and Project context tests (not a test module itself).
 
 It runs one Workline operation against a Project in a separate process and
 reports how that ended as one JSON line, so a test can hold the Project
-execution lock in one process while another process tries to use the Project.
+execution lock in one process while another process tries to use the Project,
+or continue an operation from a process of its own. The child works from the
+directory the test starts it in: that is the invocation context Workline
+resolves for it.
 """
 
 from __future__ import annotations
@@ -48,17 +51,21 @@ def main() -> None:
         ready.write_text("ready", encoding="utf-8")
         _wait_for(release)
 
-    def complete_after_release(ctx: st.ExecutionContext):
-        block()
+    def complete_now(ctx: st.ExecutionContext):
         name = f"result_{ctx.work.display}.txt"
         (store.root / name).write_text(f"{ctx.work.name}\n", encoding="utf-8")
         return st.Completed((name,))
+
+    def complete_after_release(ctx: st.ExecutionContext):
+        block()
+        return complete_now(ctx)
 
     def crash(ctx: st.ExecutionContext):
         ready.write_text("ready", encoding="utf-8")
         os._exit(3)
 
     scenario = spec["scenario"]
+    mutation_id = None
     try:
         if scenario == "hold_lock":
             with project_operation(store, "test-holder"):
@@ -66,6 +73,9 @@ def main() -> None:
             outcome = "released"
         elif scenario == "start_blocking":
             outcome = st.start(store, spec["work_id"], spec.get("mode", "single-work"), complete_after_release).status
+        elif scenario == "start_complete":
+            result = st.start(store, spec["work_id"], spec.get("mode", "single-work"), complete_now)
+            outcome, mutation_id = result.status, result.mutation_id
         elif scenario == "start_crash":
             st.start(store, spec["work_id"], "single-work", crash)
             outcome = "did not crash"
@@ -85,7 +95,7 @@ def main() -> None:
     except StopError as exc:
         print(json.dumps({"outcome": "stop", "code": exc.code, "message": exc.message}), flush=True)
         return
-    print(json.dumps({"outcome": outcome, "code": None}), flush=True)
+    print(json.dumps({"outcome": outcome, "code": None, "mutation_id": mutation_id}), flush=True)
 
 
 if __name__ == "__main__":

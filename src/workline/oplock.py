@@ -7,6 +7,11 @@ resume, effects, validation, commit and push until it returns. A START that
 returns a question wait lets go as well: its mutation stays pending, and the
 invocation that later resumes it takes the lock afresh.
 
+Before the lock the operation passes the Project context check
+(:mod:`workline.context`): it must have been started from inside the very
+Project it changes. A foreign caller STOPs as ``foreign_project_mutation``
+before the lock directory or file exists, so it creates nothing in the target.
+
 The lock is an OS-managed, non-blocking, exclusive lock on
 ``.workline/runtime/locks/project.lock`` (``msvcrt.locking`` on Windows,
 ``fcntl.flock`` elsewhere). Holding it is the only proof of ownership. The OS
@@ -41,6 +46,7 @@ import socket
 import threading
 from typing import Any, Iterator
 
+from .context import authorize_project_mutation
 from .durable import durable_write_text
 from .errors import ProjectOperationBusy, ProjectOperationNested, StopError
 from .store import PROJECT_YAML_REL, ProjectStore
@@ -105,6 +111,7 @@ class ProjectLock:
     operation: str
     details: dict[str, Any]
     acquired_at: str
+    context_root: Path  # the Project the operation was started from: always this lock's Project
     fd: int = field(repr=False)
     mutation_id: str | None = None
 
@@ -198,6 +205,11 @@ def project_operation(
 ) -> Iterator[ProjectLock]:
     """Hold the Project execution lock for one top-level operation, or STOP.
 
+    Every established-Project mutation entry comes through here, so this is
+    where its Project context is decided: once, from the working directory at
+    this moment. An operation started anywhere but inside this Project STOPs
+    as ``foreign_project_mutation`` before the lock area exists.
+
     The lock is taken without waiting. When another process holds it, the
     operation STOPs as ``project_operation_busy`` having written nothing; when
     this process already runs an operation on the Project, it STOPs as
@@ -212,6 +224,7 @@ def project_operation(
             f"not an established Workline Project ({PROJECT_YAML_REL} is missing): {store.root}",
             code="not_a_project",
         )
+    context = authorize_project_mutation(store.root)
     key = _key(store)
     with _held_guard:
         running = _held.get(key)
@@ -245,7 +258,7 @@ def project_operation(
             code="project_lock_unavailable",
         )
 
-    lock = ProjectLock(store, operation, dict(details or {}), _utc_now(), fd)
+    lock = ProjectLock(store, operation, dict(details or {}), _utc_now(), context.root, fd)
     with _held_guard:
         _held[key] = lock
     _write_holder(lock)

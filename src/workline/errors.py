@@ -9,10 +9,12 @@ The hierarchy mirrors the stop contracts of ``rules/git``:
 * ``SpecViolation``          a caller asked for something the live spec forbids
 * ``ProjectOperationBusy``   another process holds the Project execution lock
 * ``ProjectOperationNested`` a top-level operation started inside a running one
+* ``ForeignProjectMutation`` an operation targets a Project other than the one it runs in
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 
@@ -75,3 +77,18 @@ class ProjectOperationNested(StopError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="project_operation_nested")
+
+
+class ForeignProjectMutation(StopError):
+    """A state-changing operation targets a Project other than the one it was started in.
+
+    Raised before the Project execution lock is taken, so nothing was written.
+    ``context_root`` is the Workline Project or Git repository the operation was
+    started from (None when it was inside neither); ``target_root`` is the
+    folder it would have changed.
+    """
+
+    def __init__(self, message: str, *, context_root: Path | None = None, target_root: Path | None = None) -> None:
+        super().__init__(message, code="foreign_project_mutation")
+        self.context_root = context_root
+        self.target_root = target_root

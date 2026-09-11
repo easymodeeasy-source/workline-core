@@ -213,7 +213,7 @@ START caller
 → START owns Git
 
 Direct standalone invocation
-→ CREATE entrypointがProject execution lockを取得
+→ CREATE entrypointがProject contextを照合し（foreignならforeign_project_mutationでSTOP）、Project execution lockを取得
 → CREATE entrypointがDirect Work Operation mutationを開始
 → registration coreを同mutationで実行
 → entrypoint contextがpostcheck / commit / remoteありなら承認先へpush

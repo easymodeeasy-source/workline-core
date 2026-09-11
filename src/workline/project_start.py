@@ -29,6 +29,7 @@ from .bootstrap import (
     is_established_project,
     render_bootstrap,
 )
+from .context import _pre_project_authorization, require_pre_project_context
 from .destination import DEFAULT_REMOTE, resolve_active_push_locator
 from .errors import StopError
 from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
@@ -45,7 +46,9 @@ from .validate import validate_project_yaml
 
 # Initial Project開始 is outside the Project execution lock (rules/git): the
 # Project does not exist yet, and starting the same Project twice at once is
-# not supported. store.LOCK_EXEMPT_OWNERS names this owner.
+# not supported. Its mutation is written only inside the pre-project
+# authorization project_start() grants for its own target root
+# (store.PRE_PROJECT_OWNERS names the owner; the name alone authorizes nothing).
 OWNER = "project-start"
 INITIAL_COMMIT_MESSAGE = "chore(workline): initialize project"
 
@@ -162,6 +165,10 @@ def project_start(
         raise StopError(f"Workline root is not a directory: {workline}", code="workline_root_missing")
     root = root.resolve()
     workline = workline.resolve()
+    # Project context (rules/git): never from inside another established Project
+    # and never a Workline Project inside an established one, decided before
+    # anything is written.
+    require_pre_project_context(root)
     _registry_or_stop(workline)
 
     boundary = _git_boundary(root)
@@ -216,6 +223,23 @@ def project_start(
         raise bootstrap_conflict_error()
 
     declared = list(store.canonical_relative_paths) + [BOOTSTRAP_REL_PATH]
+    # The pre-project checks have passed: only this call may now open, resume
+    # and write the Project開始 mutation, and only for this root.
+    with _pre_project_authorization(root):
+        return _initialize(store, controller, invocation, declared, boundary, state, pin, root, workline)
+
+
+def _initialize(
+    store: ProjectStore,
+    controller: MutationController,
+    invocation: dict,
+    declared: list[str],
+    boundary: str,
+    state: str,
+    pin: PushPin | None,
+    root: Path,
+    workline: Path,
+) -> ProjectStartResult:
     mutation = controller.open(OWNER, invocation, WriteScope(files=tuple(declared)))
 
     # Git boundary --------------------------------------------------------

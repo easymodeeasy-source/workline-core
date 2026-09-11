@@ -9,6 +9,8 @@ description: Initialize a local folder as a new Workline Project. This is the on
 
 これはpre-project操作である。Workline root側から使用する。established Project（`.workline/project.yaml` を持つroot）を再初期化する経路ではない。
 
+`rules/git` のProject contextに従い、別の成立済みWorkline Projectのcontextから対象folderをProject開始しない。成立済みWorkline Projectの配下に新しいWorkline Projectを作らない（nested Workline Projectは作らない）。canonical implementationはどちらも書き込む前にSTOPする（`foreign_project_mutation` / `nested_workline_project`）。Project開始のmutationは、その実行が対象rootに与えた許可の内側でだけ書き込まれ、owner名だけでは許可されない。
+
 ## Canonical implementation first
 
 Workline rootにこのoperationのcanonical implementationが存在する場合は、必ずそれを使用する。

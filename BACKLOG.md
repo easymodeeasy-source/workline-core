@@ -33,7 +33,7 @@
 
 | ID | Title | Status |
 |---|---|---|
-| BL-001 | Foreign Project mutation boundary | VERIFIED |
+| BL-001 | Foreign Project mutation boundary | RESOLVED |
 | BL-002 | Work completion automatic review | OPEN |
 | BL-003 | Phase completion automatic review | OPEN |
 | BL-004 | Review finding classification / convergence | OPEN |
@@ -62,7 +62,7 @@
 
 - ID: BL-001
 - Title: Foreign Project mutation boundary
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: design, spec, implementation
 - Problem: あるrepository（Workline rootや別のProject）を開いたsessionから、別のWorkline Projectへのmutation（Project開始、Roadmap操作、bootstrap backfill等）をそのまま実行できる。現行の仕様・実装にはsessionとProjectの対応（session/Project affinity）という概念がなく、各operationは渡された任意のProject rootへ書き込む。別Projectをreadすることは許容し得るが、readとwriteの境界、別Projectへのwriteに明示的なoverrideを要求するかどうかが定義されていない。
 - Why it matters: 意図しないProjectへの書込み、operation ownerや実行文脈の取り違え、canonical implementationを使わない手作業の構造再現につながる。real-project migrationでは、別のrepositoryを開いたsessionから移行対象Projectへのmutationが行われ、手作業での構造再現（後に巻き戻し）も発生した。
@@ -72,6 +72,7 @@
 - Human confirmation likely: yes（共通ルールの変更、書込可能範囲の変更）
 - Self-hosting prerequisite: yes（BL-013 の session / Project context rule）
 - Evidence class: real-project migration, code inspection, design deferral, self-hosting assessment
+- Resolution: 成立済みProjectへのstate-changing operationを、top-level operation開始時の作業directoryから1回だけ解決するinvocation Project contextがtarget Projectと一致する場合だけ許可した（session identityは使わない）。一致しなければProject execution lockより前に `foreign_project_mutation` でSTOPし、lock・mutation intent・event・relation・entity・Gitのいずれにも書き込まない。照合の後にexecution lockを取り、その後でmutationを行う。別Projectのread-only参照は許可する。Project開始は、別の成立済みProjectのcontextからでなく、成立済みProjectの配下でもないtargetに限るpre-project例外とし、そのmutationはProject開始の実行が対象rootに与えた許可の内側でだけ受け付ける（owner名だけによる免除は廃止）。overrideは設けない。作業directory由来のcontextは誤操作を防ぐmechanical guardであり、security sandboxではない。multi-repo Projectの設計は扱っていない。`rules/git` とcanonical Skillsへ反映済み。
 
 ### BL-002 Work completion automatic review
 

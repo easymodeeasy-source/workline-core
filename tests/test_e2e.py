@@ -90,6 +90,7 @@ class EndToEndTests(WorklineTestCase):
     def test_full_scenario_without_remote(self) -> None:
         root = self.new_dir()
         self.assertEqual(project_start(root, WORKLINE_ROOT).status, "initialized")
+        self.enter(root)
         self._run(ProjectStore(root))
 
     def test_full_scenario_with_local_remote(self) -> None:
@@ -101,10 +102,11 @@ class EndToEndTests(WorklineTestCase):
         root = self.new_dir()
         env = dict(__import__("os").environ)
         env["PYTHONPATH"] = str(WORKLINE_ROOT / "src")
-        run = lambda *args: subprocess.run([sys.executable, "-m", "workline.cli", *args], capture_output=True, text=True, encoding="utf-8", env=env)
+        run = lambda *args, cwd=WORKLINE_ROOT: subprocess.run([sys.executable, "-m", "workline.cli", *args], capture_output=True, text=True, encoding="utf-8", env=env, cwd=cwd)
         started = run("project-start", str(root), "--workline-root", str(WORKLINE_ROOT))
         self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
-        created = run("create-work", str(root), "--name", "Doc", "--desired-state", "docs exist", "--must-read", "README.md")
+        # an established Project is changed from inside it; validation below reads it from the Workline root
+        created = run("create-work", str(root), "--name", "Doc", "--desired-state", "docs exist", "--must-read", "README.md", cwd=root)
         self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
         checked = run("validate-project", str(root))
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)

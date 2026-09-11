@@ -35,7 +35,7 @@ from workline.mutation import INTENT_VERSION, MutationController, WriteScope
 from workline.phase_create import PhaseSpec
 from workline.push_pin import pin_push_destination
 from workline.state import ProjectView
-from workline.store import LOCK_EXEMPT_OWNERS, ProjectStore
+from workline.store import PRE_PROJECT_OWNERS, ProjectStore
 from workline.validate import validate_project
 
 CHILD = Path(__file__).resolve().parent / "lock_child.py"
@@ -70,7 +70,10 @@ class ExecutionLockTestCase(WorklineTestCase):
         self._children = 0
 
     # child processes -----------------------------------------------------------
-    def spawn(self, scenario: str, store: ProjectStore, name: str, **extra) -> subprocess.Popen:
+    def spawn(
+        self, scenario: str, store: ProjectStore, name: str, *, cwd: Path | None = None, env: dict | None = None, **extra
+    ) -> subprocess.Popen:
+        """A child process running one scenario, working from inside ``cwd`` (the Project by default)."""
         self._children += 1
         spec = {"scenario": scenario, "root": str(store.root), "name": name, "signal_dir": str(self.signals), **extra}
         spec_path = self.signals / f"spec-{self._children}-{name}.json"
@@ -81,6 +84,8 @@ class ExecutionLockTestCase(WorklineTestCase):
             stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
+            cwd=str(cwd or store.root),
+            env=env,
         )
         self.addCleanup(self._reap, child, name)
         return child
@@ -430,7 +435,7 @@ class AchievementLockTests(ExecutionLockTestCase):
 
 class ProjectStartAndCompatibilityTests(ExecutionLockTestCase):
     def test_project_start_stays_outside_the_execution_lock(self) -> None:
-        self.assertEqual(LOCK_EXEMPT_OWNERS, (ps.OWNER,))
+        self.assertEqual(PRE_PROJECT_OWNERS, (ps.OWNER,))
         root = self.new_dir()
         self.assertEqual(ps.project_start(root, WORKLINE_ROOT).status, "initialized")
         store = ProjectStore(root)

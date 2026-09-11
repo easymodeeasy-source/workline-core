@@ -38,6 +38,8 @@ Standalone Workのouterはstandalone scope内だけ。
 ## Start flow
 
 ```text
+Project context照合（foreignならSTOP）
+↓
 Project execution lock取得
 ↓
 stable Work resolve
@@ -68,6 +70,8 @@ mode=outerなら同一Phase内の次startable Workを再計算
 ↓
 return時にlock解放
 ```
+
+`rules/git` のProject contextに従い、START（resumeを含む）は対象Projectのcontextから実行する。invocation Project contextが対象Projectと一致しなければ、lockを取得する前に `foreign_project_mutation` でSTOPし、何も書かない。
 
 `rules/git` のProject execution lockに従う。Work state・dependency・pending mutation・push destination・dirty stateはlock取得後に読み、lock取得前に読んだstateをmutation判断へ使わない。executorもlockの内側で実行される。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。executorの中から同じProjectの別top-level Workline operationを開始しない（`project_operation_nested`）。
 
