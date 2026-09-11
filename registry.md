@@ -75,7 +75,9 @@ top-level operation開始
 → lock解放
 ```
 
-lock取得前に読んだProject stateをmutation判断へ使わない。書込みを伴う判定（`roadmap_achieved` の記録等）はlock取得後の現在stateで再評価する。書込みを伴わない参照・診断はlockを必要としない。
+operationは、write判断に使うWorkline structural state（pending mutation・lifecycle・dependency・push destination等）をlock取得後に読み、lock取得前に読んだものを使い回さない。書込みを伴わない参照・診断はlockを必要としない。
+
+`roadmap_achieved` を記録する場合、Roadmapの「達成したい状態」を満たしたというsemantic judgementはcallerによるexplicit evaluationであり、execution lockはこの判断をlock内で再実行しない。execution lockが保証するのは、記録直前にWorkline canonical stateのstructural precondition（Roadmapが通常操作可能・全active Phase complete）をlock内で再確認し、成立しなければ記録しないことまでである。Workline canonical state外のdomain evidence（判断に用いた成果物・verification結果等）までatomic snapshotにする保証はない。
 
 pending mutationとexecution lockは別物である。pending mutationはdurableなrecovery状態、execution lockは「いまこのProjectでwriterが実行中である」ことだけを表す。QuestionWait等でoperationが戻る時はlockを解放し、pending mutationは維持する。resumeは新しいinvocationがlockを取得してから行う。
 

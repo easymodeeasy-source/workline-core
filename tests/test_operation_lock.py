@@ -3,10 +3,11 @@
 The Project execution lock is held by one process at a time. The busy side
 STOPs without writing anything, a question wait releases the lock while its
 mutation stays pending, a crash releases it with no cleanup of any kind, child
-registration joins the running operation, a write-bearing achievement is
-decided on the state current under the lock, and initial Project開始 stays
-outside it. Several tests hold the lock in a child process (``lock_child.py``)
-so that the contention is real: separate processes on the running OS.
+registration joins the running operation, recording an achievement rechecks
+its structural precondition under the lock without re-running the caller's
+judgement, and initial Project開始 stays outside it. Several tests hold the
+lock in a child process (``lock_child.py``) so that the contention is real:
+separate processes on the running OS.
 """
 
 from __future__ import annotations
@@ -389,7 +390,7 @@ class AchievementLockTests(ExecutionLockTestCase):
         self.assertTrue(ProjectView.load(store).all_active_phases_complete(roadmap.roadmap_id))
         return store, roadmap
 
-    def test_recording_achievement_reevaluates_the_state_under_the_lock(self) -> None:
+    def test_recording_achievement_rechecks_the_structural_precondition_under_the_lock(self) -> None:
         store, roadmap = self._completed_single_phase()
         real = rm.project_operation
         added: dict[str, str] = {}
