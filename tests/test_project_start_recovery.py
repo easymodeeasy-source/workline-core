@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import textwrap
 import unittest
@@ -517,6 +519,23 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": ["mine.txt"]})
         self.assertEqual(records(root)[path.stem]["notes"], {"preexisting_dirty": [BOOTSTRAP_REL_PATH, "gone.txt"]})
 
+    def test_a_colon_name_is_retried_only_where_it_is_a_filename(self) -> None:
+        root = self.new_dir()
+        record = self.abandoned_start(root, preexisting=["a:b"])
+        old = record_bytes(root)
+
+        with mock.patch.object(ps, "_PATH_RULES", ntpath):  # a drive-qualified name on Windows
+            self.assertNotRetried(root)
+        self.assertEqual(record_bytes(root), old)
+
+        with mock.patch.object(ps, "_PATH_RULES", posixpath):  # an ordinary filename on POSIX
+            result = self.start(root)
+
+        self.assertInitialized(root, result)
+        self.assertFalse(result.resumed)
+        self.assertNotEqual(result.mutation_id, record.stem)
+        self.assertEqual(record_bytes(root)[record.name], old[record.name])
+
     def test_a_snapshot_holding_a_nested_repository_entry_is_started_again(self) -> None:
         root = self.new_dir()
         nested = root / "sub"
@@ -664,7 +683,9 @@ class UnsafeResidueTests(RecoveryTestCase):
                 self.assertNotRetried(root)
 
     def test_a_snapshot_path_workline_could_not_have_recorded_is_not_retried(self) -> None:
-        malformed = ("../outside", "/absolute", "a/./b", "a//b", "./a", "a/..", "a//", "/", "C:/drive", "//server/share")
+        # invalid under every platform's rules; drive-qualified paths are platform-dependent and
+        # are covered by test_snapshot_paths_follow_the_platform_the_project_is_on
+        malformed = ("../outside", "/absolute", "a/./b", "a//b", "./a", "a/..", "a//", "/", "//server/share", "a\\b")
         for number, path in enumerate(malformed):
             with self.subTest(snapshot_path=path):
                 root = self.new_dir(f"snapshot-{number}")
@@ -865,6 +886,32 @@ class RecoveryContractTests(RecoveryTestCase):
         self.assertEqual(set(pending), CLOSED_INTENT_FIELDS - {"completed_at"})
         result = self.start(started)
         self.assertEqual(set(records(started)[result.mutation_id]), CLOSED_INTENT_FIELDS)
+
+    def test_snapshot_paths_follow_the_platform_the_project_is_on(self) -> None:
+        # path -> (accepted under POSIX rules, accepted under Windows rules)
+        cases = {
+            "a:b": (True, False),  # an ordinary filename on POSIX; a drive on Windows
+            "C:/x": (True, False),
+            "C:x": (True, False),
+            "sub/": (True, True),  # Git reports an untracked nested repository as its directory
+            "plain/deep/g.txt": (True, True),
+            "a file/b c.txt": (True, True),
+            "../outside": (False, False),
+            "/absolute": (False, False),
+            "a/./b": (False, False),
+            "a//b": (False, False),
+            "a\\b": (False, False),
+            "//server/share": (False, False),
+            ".workline/runtime/mut.yaml": (False, False),
+            "": (False, False),
+        }
+        for path, accepted in cases.items():
+            for rules, expected in zip((posixpath, ntpath), accepted):
+                with self.subTest(path=path, rules=rules.__name__):
+                    with mock.patch.object(ps, "_PATH_RULES", rules):
+                        self.assertEqual(ps._snapshot_path(path), expected)
+                        self.assertEqual(ps._snapshot_shaped([path]), expected)
+        self.assertIs(ps._PATH_RULES, ntpath if os.name == "nt" else posixpath)
 
     def test_what_a_retried_start_writes_is_unchanged(self) -> None:
         root = self.new_dir()

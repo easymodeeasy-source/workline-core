@@ -25,8 +25,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import stat
 from typing import Callable
 
@@ -232,14 +234,21 @@ def _residue_layout_problem(store: ProjectStore) -> str | None:
     return None
 
 
+# What counts as a drive — and so as an absolute path — is the rule of the
+# platform the Project is on: Windows reads "C:/x" and "C:x" as a drive, while
+# on POSIX a colon is an ordinary character in a filename ("a:b").
+_PATH_RULES = ntpath if os.name == "nt" else posixpath
+
+
 def _snapshot_path(path: object) -> bool:
     """Whether ``path`` is a Git worktree-relative path as a recorded snapshot holds it.
 
-    Slash-separated and relative: no backslash, no drive, and no empty, ``.``
-    or ``..`` component. A single trailing slash is the one exception, since
-    Git reports an untracked nested repository as its directory (``sub/``).
+    Slash-separated and relative: no backslash, no drive under the running
+    platform's rules, and no empty, ``.`` or ``..`` component. A single
+    trailing slash is the one exception, since Git reports an untracked nested
+    repository as its directory (``sub/``).
     """
-    if not isinstance(path, str) or not path or "\\" in path or path[1:2] == ":":
+    if not isinstance(path, str) or not path or "\\" in path or _PATH_RULES.splitdrive(path)[0]:
         return False
     body = path[:-1] if path.endswith("/") else path
     return all(part not in ("", ".", "..") for part in body.split("/")) and not gitops.is_runtime_path(path)
