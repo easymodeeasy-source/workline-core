@@ -1,9 +1,18 @@
 """Project開始 (``skills/project-start``).
 
 Initialize a local folder as a new Workline Project:
-preflight → Git boundary → registry validation → ``git init -b main`` when
-needed → canonical ``.workline`` structure → ``project.yaml`` → Project-side
-bootstrap Skill → initial commit (fixed message, no push) → postcheck.
+preflight → registry validation → Git boundary → pre-effect checks
+(``git init -b main`` when needed, bootstrap committability, separable
+pre-existing changes) → recovery intent → canonical ``.workline`` structure →
+``project.yaml`` → Project-side bootstrap Skill → initial commit (fixed
+message, no push) → postcheck.
+
+A new Project開始 settles its predictable pre-effect STOPs before its recovery
+intent exists, so they leave no ``.workline`` behind. A pending Project開始
+resumes as the same mutation. A ``.workline`` proven to hold nothing but
+Project開始 intents for this folder, each abandoned before its first effect, is
+started again as a new mutation with those records left as they are; any other
+partial ``.workline`` is not repaired by guess.
 
 The bootstrap Skill is what lets the Project be opened directly in Claude
 Code afterwards; it is a thin router entry point, never a copy of a canonical
@@ -15,7 +24,11 @@ pre-project operation.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+import os
 from pathlib import Path
+import stat
+from typing import Callable
 
 from . import gitcmd, gitops, pushurl
 from .bootstrap import (
@@ -32,12 +45,16 @@ from .bootstrap import (
 from .context import _pre_project_authorization, require_pre_project_context
 from .destination import DEFAULT_REMOTE, resolve_active_push_locator
 from .errors import StopError
+from .ids import is_valid_id
 from .implementation import require_configured_implementation
-from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
+from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
 from .registry import validate_registry
 from .self_hosting import refuse_self_hosting
 from .store import (
     BOOTSTRAP_REL_PATH,
+    MUTATIONS_DIR,
+    RUNTIME_DIR,
+    TMP_DIR,
     ProjectStore,
     PushPin,
     WORKLINE_DIR,
@@ -151,6 +168,168 @@ def _git_boundary(root: Path) -> str:
     return "init"
 
 
+# Abandoned pre-effect residue ---------------------------------------------------
+
+# Every field of a recovery intent Project開始 opened (MutationController.begin)
+# and then closed (Mutation.abandon). A record with any other set of fields is
+# not proven to be one this operation left behind.
+_CLOSED_INTENT_FIELDS = frozenset({
+    "workline", "version", "mutation_id", "owner", "status", "created_at", "updated_at",
+    "invocation", "write_scope", "reserved_ids", "notes", "effects", "completed_at",
+})
+
+
+def _plain_entry(path: Path, is_kind: Callable[[int], bool]) -> bool:
+    """Whether ``path`` itself is of that kind: not a symlink, junction or other reparse point."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return is_kind(info.st_mode)
+
+
+def _entry_names(directory: Path) -> set[str]:
+    return {entry.name for entry in directory.iterdir()}
+
+
+def _residue_layout_problem(store: ProjectStore) -> str | None:
+    """Why ``.workline`` is not laid out as recovery records alone; None when it is.
+
+    Allowed: ``runtime/mutations/`` holding one or more ``<mutation_id>.yaml``
+    regular files, and an empty ``runtime/tmp/``. Nothing else — no canonical
+    file or directory, not even an empty one, no lock area, no indirection.
+    """
+    if not _plain_entry(store.workline, stat.S_ISDIR):
+        return f"{WORKLINE_DIR} is not a plain directory"
+    names = _entry_names(store.workline)
+    if names != {"runtime"}:
+        extra = sorted(names - {"runtime"})
+        return f"{WORKLINE_DIR} holds {extra[0]}" if extra else f"{WORKLINE_DIR} holds no recovery record"
+    if not _plain_entry(store.runtime, stat.S_ISDIR):
+        return f"{RUNTIME_DIR} is not a plain directory"
+    names = _entry_names(store.runtime)
+    extra = sorted(names - {"mutations", "tmp"})
+    if extra:
+        return f"{RUNTIME_DIR} holds {extra[0]}"
+    if "tmp" in names:
+        if not _plain_entry(store.tmp, stat.S_ISDIR):
+            return f"{TMP_DIR} is not a plain directory"
+        if _entry_names(store.tmp):
+            return f"{TMP_DIR} is not empty"
+    if "mutations" not in names:
+        return f"{RUNTIME_DIR} holds no recovery record"
+    if not _plain_entry(store.mutations, stat.S_ISDIR):
+        return f"{MUTATIONS_DIR} is not a plain directory"
+    names = _entry_names(store.mutations)
+    if not names:
+        return f"{MUTATIONS_DIR} holds no recovery record"
+    for name in sorted(names):
+        stem = name[: -len(".yaml")] if name.endswith(".yaml") else ""
+        if not is_valid_id(stem, "mutation") or not _plain_entry(store.mutations / name, stat.S_ISREG):
+            return f"{MUTATIONS_DIR} holds {name}, which is not a plain recovery record"
+    return None
+
+
+def _snapshot_shaped(value: object) -> bool:
+    """Whether ``value`` is shaped like a recorded snapshot of pre-existing changes: sorted, unique Git paths outside runtime."""
+    return (
+        isinstance(value, list)
+        and all(isinstance(path, str) and path and "\\" not in path and not gitops.is_runtime_path(path) for path in value)
+        and value == sorted(set(value))
+    )
+
+
+def _recorded_time(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _abandoned_before_effect_problem(record: dict, invocation: dict, scope: dict) -> str | None:
+    """Why ``record`` is not proven to be a Project開始 intent for this folder closed before its first effect.
+
+    ``Mutation.abandon`` refuses a mutation that recorded an effect, so an
+    abandoned intent without effects never got as far as one.
+    """
+    name = f"recovery record {record['mutation_id']}"
+    if set(record) != _CLOSED_INTENT_FIELDS or type(record["version"]) is not int:
+        return f"{name} does not have the fields of a closed Project開始 intent"
+    if record["owner"] != OWNER:
+        return f"{name} belongs to {record['owner']}"
+    if record["status"] != "abandoned":
+        return f"{name} is {record['status']}"
+    if record["invocation"] != invocation:
+        return f"{name} was not recorded for Project開始 of this folder"
+    if record["write_scope"] != scope:
+        return f"{name} does not declare the Project開始 write scope"
+    if record["effects"] != []:
+        return f"{name} recorded effects"
+    if record["reserved_ids"] != {}:
+        return f"{name} reserved IDs"
+    notes = record["notes"]
+    if not isinstance(notes, dict) or not set(notes) <= {"preexisting_dirty"}:
+        return f"{name} holds notes other than a snapshot of pre-existing changes"
+    if "preexisting_dirty" in notes and not _snapshot_shaped(notes["preexisting_dirty"]):
+        return f"{name} holds a snapshot of pre-existing changes Workline does not record"
+    if not all(_recorded_time(record[key]) for key in ("created_at", "updated_at", "completed_at")):
+        return f"{name} does not hold valid timestamps"
+    return None
+
+
+def _residue_tracked_problem(root: Path) -> str | None:
+    """Why Git does not prove the Project repository holds nothing under ``.workline``; None when it does."""
+    tracked = gitcmd.tracked_under(root, WORKLINE_DIR)
+    if tracked is None:
+        return f"cannot determine what the Project repository tracks under {WORKLINE_DIR}"
+    if tracked:
+        return f"the Project repository tracks {tracked[0]}"
+    if gitcmd.head_commit(root) is None:
+        return None
+    held = gitcmd.run_git(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", WORKLINE_DIR, check=False)
+    if not held.ok:
+        return f"cannot determine what HEAD holds under {WORKLINE_DIR}"
+    paths = sorted(path for path in held.stdout.split("\0") if path)
+    return f"HEAD holds {paths[0]}" if paths else None
+
+
+def _abandoned_start_residue_problem(
+    store: ProjectStore, controller: MutationController, invocation: dict, declared: list[str], boundary: str
+) -> str | None:
+    """Why this ``.workline`` is not proven to be abandoned pre-effect Project開始 residue; None when it is.
+
+    Proven residue is recovery records alone (:func:`_residue_layout_problem`),
+    each confirmed by the Mutation Controller and each a Project開始 intent for
+    exactly this folder and write scope, abandoned with no reserved ID and no
+    effect (:func:`_abandoned_before_effect_problem`), in a Project repository —
+    when there is one — that holds nothing under ``.workline``. A record the
+    Mutation Controller cannot confirm has already stopped discovery as
+    ``reconcile required``.
+    """
+    try:
+        layout = _residue_layout_problem(store)
+    except OSError as exc:
+        return f"cannot inspect {WORKLINE_DIR}: {exc}"
+    if layout is not None:
+        return layout
+    records = controller.list_records()
+    if not records:
+        return f"{MUTATIONS_DIR} holds no recovery record"
+    scope = WriteScope(files=tuple(declared)).to_record()
+    for record in records:
+        problem = _abandoned_before_effect_problem(record, invocation, scope)
+        if problem is not None:
+            return problem
+    if boundary == "existing":
+        return _residue_tracked_problem(store.root)
+    return None
+
+
 def project_start(
     project_root: Path,
     workline_root: Path,
@@ -198,6 +377,7 @@ def project_start(
     store = ProjectStore(root)
     controller = MutationController(store)
     invocation = {"operation": OWNER, "project_root": str(root)}
+    declared = list(store.canonical_relative_paths) + [BOOTSTRAP_REL_PATH]
     pending_match = [
         p for p in controller.list_pending() if p["owner"] == OWNER and p["invocation"] == invocation
     ]
@@ -219,10 +399,16 @@ def project_start(
                 pinned_url=existing.allowed_urls[0] if existing else None,
                 unpinned_remotes=() if existing else tuple(gitcmd.remotes(root)),
             )
-        raise StopError(
-            "broken / partial .workline without a pending Project開始 mutation; not repairing by guess",
-            code="partial_workline",
-        )
+        # The one partial .workline started again: Project開始 intents for this
+        # folder alone, each proven abandoned before its first effect. They are
+        # left as they are, and a new mutation is opened below.
+        residue = _abandoned_start_residue_problem(store, controller, invocation, declared, boundary)
+        if residue is not None:
+            raise StopError(
+                f"broken / partial .workline without a pending Project開始 mutation ({residue}); "
+                "not repairing by guess",
+                code="partial_workline",
+            )
 
     # A file already sitting at the bootstrap path with different content is
     # ownership-unknown: STOP before anything is written. Other Skills under
@@ -231,43 +417,87 @@ def project_start(
     if state == CONFLICT:
         raise bootstrap_conflict_error()
 
-    declared = list(store.canonical_relative_paths) + [BOOTSTRAP_REL_PATH]
     # The pre-project checks have passed: only this call may now open, resume
     # and write the Project開始 mutation, and only for this root.
     with _pre_project_authorization(root):
-        return _initialize(store, controller, invocation, declared, boundary, state, pin, root, workline)
+        mutation, owned, preexisting = _open_mutation(
+            store, controller, invocation, declared, boundary, state, resume=bool(pending_match)
+        )
+        return _initialize(store, mutation, owned, preexisting, state, pin, root, workline)
 
 
-def _initialize(
+def _prepare_repository(store: ProjectStore, boundary: str) -> None:
+    """Give the Project root its own repository when its Git boundary calls for one; prove the bootstrap committable."""
+    root = store.root
+    if boundary == "init":
+        gitcmd.init_main(root)
+        if gitcmd.toplevel(root) != root:
+            raise StopError("git init did not make Project root the Git top-level", code="git_init_failed")
+    ensure_bootstrap_committable(store)
+
+
+def _owned_paths(store: ProjectStore, state: str) -> list[str]:
+    # An untracked file byte-identical to the expected bootstrap is the
+    # artifact this operation owns, not an unrelated user change.
+    owned = list(store.canonical_relative_paths)
+    if state == ABSENT or not bootstrap_tracked(store):
+        owned.append(BOOTSTRAP_REL_PATH)
+    return owned
+
+
+def _open_mutation(
     store: ProjectStore,
     controller: MutationController,
     invocation: dict,
     declared: list[str],
     boundary: str,
     state: str,
+    *,
+    resume: bool,
+) -> tuple[Mutation, list[str], list[str]]:
+    """Open the Project開始 mutation with its pre-effect checks settled.
+
+    A pending Project開始 resumes as the same mutation and runs the checks inside
+    it; the snapshot of pre-existing changes it already recorded stays the
+    authority.
+
+    A new one settles every predictable pre-effect STOP before its recovery
+    intent exists — ``git init`` is not a domain effect — and records the very
+    snapshot it checked before any effect. Such a STOP leaves no ``.workline``;
+    a repository it initialized stays and is the existing one next time.
+    """
+    root = store.root
+    scope = WriteScope(files=tuple(declared))
+    exclude = (BOOTSTRAP_REL_PATH,) if state == MATCHING else ()
+    if resume:
+        mutation = controller.open(OWNER, invocation, scope)
+        with abandon_on_stop(mutation):
+            _prepare_repository(store, boundary)
+            owned = _owned_paths(store, state)
+            preexisting = gitops.record_preexisting_dirty(mutation, root, exclude=exclude)
+            gitops.ensure_separable(preexisting, owned)
+        return mutation, owned, preexisting
+
+    _prepare_repository(store, boundary)
+    owned = _owned_paths(store, state)
+    preexisting = gitops.preexisting_dirty_snapshot(root, exclude=exclude)
+    gitops.ensure_separable(preexisting, owned)
+    mutation = controller.open(OWNER, invocation, scope)
+    with abandon_on_stop(mutation):
+        mutation.set_note("preexisting_dirty", preexisting)
+    return mutation, owned, preexisting
+
+
+def _initialize(
+    store: ProjectStore,
+    mutation: Mutation,
+    owned: list[str],
+    preexisting: list[str],
+    state: str,
     pin: PushPin | None,
     root: Path,
     workline: Path,
 ) -> ProjectStartResult:
-    mutation = controller.open(OWNER, invocation, WriteScope(files=tuple(declared)))
-
-    # Git boundary --------------------------------------------------------
-    with abandon_on_stop(mutation):
-        if boundary == "init":
-            gitcmd.init_main(root)
-            if gitcmd.toplevel(root) != root:
-                raise StopError("git init did not make Project root the Git top-level", code="git_init_failed")
-        ensure_bootstrap_committable(store)
-        # An untracked file byte-identical to the expected bootstrap is the
-        # artifact this operation owns, not an unrelated user change.
-        owned = list(store.canonical_relative_paths)
-        if state == ABSENT or not bootstrap_tracked(store):
-            owned.append(BOOTSTRAP_REL_PATH)
-        preexisting = gitops.record_preexisting_dirty(
-            mutation, root, exclude=(BOOTSTRAP_REL_PATH,) if state == MATCHING else ()
-        )
-        gitops.ensure_separable(preexisting, owned)
-
     # Create Project structure -----------------------------------------------
     if not mutation.has_stage("create"):
         effects = [

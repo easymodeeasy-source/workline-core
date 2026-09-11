@@ -332,17 +332,23 @@ class MutationController:
             raise ReconcileRequired(f"cannot confirm Workline ownership of recovery record {path.name}")
         return data
 
-    def list_pending(self) -> list[dict[str, Any]]:
+    def list_records(self) -> list[dict[str, Any]]:
+        """Every recovery record in the runtime mutation area, whatever its status.
+
+        Each record passes the same ownership and version checks as pending
+        discovery. Read-only: nothing is repaired, closed or removed.
+        """
         if not self.store.mutations.is_dir():
             return []
-        pending: list[dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
         for path in sorted(self.store.mutations.glob("*.yaml")):
             if not is_valid_id(path.stem, "mutation"):
                 raise ReconcileRequired(f"unexpected file in runtime mutation area: {path.name}")
-            data = self._load_intent(path)
-            if data["status"] == "pending":
-                pending.append(data)
-        return pending
+            records.append(self._load_intent(path))
+        return records
+
+    def list_pending(self) -> list[dict[str, Any]]:
+        return [record for record in self.list_records() if record["status"] == "pending"]
 
     def load(self, mutation_id: str) -> Mutation:
         path = self.intent_path(mutation_id)

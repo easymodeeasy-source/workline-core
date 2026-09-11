@@ -54,7 +54,7 @@
 | BL-019 | Runtime recovery record retention and ignore policy | INVESTIGATE |
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
 | BL-021 | Concurrent operation exclusion | RESOLVED |
-| BL-022 | ProjectSTART abandoned pre-effect recovery | VERIFIED |
+| BL-022 | ProjectSTART abandoned pre-effect recovery | RESOLVED |
 
 ## Items
 
@@ -388,7 +388,7 @@
 
 - ID: BL-022
 - Title: ProjectSTART abandoned pre-effect recovery
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: implementation, spec
 - Problem: Project開始がrecovery intentを作成した後、domain effectを適用する前にSTOPすると（例: bootstrap pathがGitにignoreされている、既存の未commit変更と重なる）、intentはabandonedとして残り、`.workline/` にはruntime recordだけが存在する状態になる。原因を解消して再実行しても、pending mutationがなく成立済みProjectでもないため `partial_workline` としてSTOPし、正式な経路では再開も再初期化もできない。
 - Why it matters: 一時的な前提条件の不備だけで、そのfolderをWorkline Projectとして開始できなくなる。回復には手作業での削除が必要になり、推測修復を禁じる規則とも衝突する。使い捨てのrepositoryで再現を確認している。
@@ -398,3 +398,4 @@
 - Human confirmation likely: yes（Project開始の判定規則とcanonical Skillの変更）
 - Self-hosting prerequisite: no
 - Evidence class: code inspection
+- Resolution: 新しいProject開始は、git initを含むpre-effect検査（Git boundary、bootstrapのcommit可否、pre-existing dirtyの分離可能性）をrecovery intentの作成より前に終え、そこでのSTOPでは `.workline` を作らないようにした（`.git` だけが残り得るが削除せず、次回は既存repositoryとして扱う）。dirty snapshotは検査時にcaptureし、intent作成直後・最初のeffectより前に同じsnapshotを記録する。`.workline` が、そのfolderに対するProject開始がeffectを1件も記録する前にabandonedになったrecovery recordだけから成ると既存のfieldから機械的に証明できる場合は、それらのrecordを変更・削除・resumeせずに残したまま、新しいmutationとしてやり直す。それ以外のpartial `.workline` は `partial_workline`、ownershipを確認できないrecordは `reconcile_required` のままSTOPする。pending Project開始のresumeは変更していない。intent version・record schema・project.yaml・bootstrap・eventは変更せず、recordのcleanup・保持期間・runtime ignore（BL-019）とProject開始の同時実行（BL-021）は扱っていない。`skills/project-start` へ反映済み。

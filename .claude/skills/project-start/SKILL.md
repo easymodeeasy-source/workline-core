@@ -165,7 +165,7 @@ current remoteを見て承認先を自動生成しない。誤ったremoteが最
 
 既存Projectへ承認先を後から入れるのはProject開始の再実行ではなく、pin maintenanceで行う。
 
-既に正常なWorkline Projectなら二重初期化しない。pending Project開始 mutationが無いbroken / partial `.workline` は推測修復せずSTOPする。
+既に正常なWorkline Projectなら二重初期化しない。pending Project開始 mutationが無いbroken / partial `.workline` は推測修復せずSTOPする（例外は、下記Mutationのとおり機械的に証明できるabandoned pre-effect Project開始 residueだけ）。
 
 ## Mutation
 
@@ -176,6 +176,49 @@ Project開始がoperation owner。Project開始の下位writeは同じoperation 
 Project開始（初期化）は `rules/git` のProject execution lockの対象外である。同じProjectへProject開始を同時に複数実行することはサポートしない。
 
 途中失敗後にpending Project開始 mutationが入力Projectと一意一致する場合はresumeする。新規初期化として上書きしない。
+
+### Pre-effect checksとretry
+
+新しいProject開始は、domain effectへ進むための予測可能な検査を、recovery intentの作成より前に終える。
+
+```text
+bootstrap conflict確認
+→ Git boundaryがgit initなら git init -b main → Git top-level = Project root を確認
+→ bootstrapがcommit可能か（ignoreされていないか）
+→ pre-existing dirtyを1回capture
+→ operation所有pathと分離可能か
+→ recovery intentを作成し、同じdirty snapshotをeffectより前に記録
+→ effects
+```
+
+1. これらの検査でSTOPした場合、`.workline` を新しく作らない。
+2. git initはdomain effectではないため、intentより前に行う。その後のSTOP / crashで `.git` だけが残ることがある。自動削除しない。次回はその時点のGit状態を再評価し、Project root = Git top-levelなら既存repositoryとして扱う。
+3. matching pending Project開始 mutationは同じmutation IDでresumeする。検査はそのmutationの内側で行い、記録済みのpre-existing dirty snapshotをauthorityとし、新しいsnapshotで置き換えない。resume中のpre-effect STOPでeffect未記録のmutationがabandonedになる動作は変えない。
+4. `.workline` が、このfolderに対するProject開始がeffectを1件も記録する前にabandonedになったrecovery recordだけから成ると機械的に証明できる場合は、それらのrecordを変更・削除・resumeせず、noteも引き継がずに残したまま、新しいProject開始 mutationとしてやり直す（pre-effect checksとdirty snapshotも新しく行う）。
+5. それ以外のpartial `.workline` は推測修復せず `partial_workline` でSTOPする。
+6. Workline ownershipまたはintent versionを確認できないrecovery record、mutation IDではない `*.yaml` は `reconcile_required` でSTOPする。
+
+4.の証明に必要な状態（すべて満たす）:
+
+```text
+.workline/ 直下は runtime/ だけ
+runtime/ 直下は mutations/ と、空の tmp/ だけ
+mutations/ は <mutation_id>.yaml のregular file 1件以上だけ
+symlink / junction等の間接参照を含まない
+Project repositoryがあれば、.workline/ 配下をindexにもHEADにも持たない
+各recordについて:
+  Workline ownershipとintent versionを確認できる
+  top-level fieldが、閉じたProject開始 intentのfield setと完全一致
+  owner = project-start、status = abandoned
+  invocation = このProject rootに対するProject開始そのもの（別root・追加fieldなし）
+  write scope = 現在のProject開始の宣言pathのcanonical listと完全一致（entityなし）
+  reserved IDなし、effectなし
+  notesは空、またはcanonicalなpre-existing dirty snapshotだけ
+```
+
+canonical file / directory（空directoryを含む）、effectやreserved IDを持つrecord、他owner・他invocation・他write scopeのrecord、completed / pendingのrecord、record 0件、非空tmp、locks等の未知の内容、trackedな `.workline`、移動したfolderに残ったrecordは、いずれも証明にならない。
+
+4.の場合もbootstrap conflictは優先してSTOPし、push destinationの事前確認も迂回しない。abandoned recordのcleanup・保持期間はここでは定めない。
 
 ## Create Project structure
 

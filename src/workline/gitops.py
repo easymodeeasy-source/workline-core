@@ -30,6 +30,7 @@ __all__ = [
     "finalize",
     "finalize_effects",
     "is_runtime_path",
+    "preexisting_dirty_snapshot",
     "record_preexisting_dirty",
 ]
 
@@ -43,18 +44,27 @@ def capture_preexisting_dirty(repo: Path) -> list[str]:
     return sorted(p for p in gitcmd.dirty_paths(repo) if not is_runtime_path(p))
 
 
-def record_preexisting_dirty(mutation: Mutation, repo: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
-    """Capture pre-existing dirty paths once per mutation (stable across resume).
+def preexisting_dirty_snapshot(repo: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
+    """The pre-existing dirty paths an operation records as its snapshot.
 
     ``exclude`` drops paths the operation has already proven it owns — an
     untracked file byte-identical to an artifact this operation would write is
     not an unrelated user change, so it may be committed instead of blocking
-    the operation. The exclusion is applied when the note is first recorded, so
-    every later reader (including the Git stage) sees the same list on resume.
+    the operation.
+    """
+    return [p for p in capture_preexisting_dirty(repo) if p not in exclude]
+
+
+def record_preexisting_dirty(mutation: Mutation, repo: Path, *, exclude: tuple[str, ...] = ()) -> list[str]:
+    """Capture pre-existing dirty paths once per mutation (stable across resume).
+
+    The snapshot (:func:`preexisting_dirty_snapshot`, ``exclude`` applied) is
+    taken when the note is first recorded, so every later reader (including the
+    Git stage) sees the same list on resume.
     """
     noted = mutation.note("preexisting_dirty")
     if noted is None:
-        noted = [p for p in capture_preexisting_dirty(repo) if p not in exclude]
+        noted = preexisting_dirty_snapshot(repo, exclude=exclude)
         mutation.set_note("preexisting_dirty", noted)
     return list(noted)
 
