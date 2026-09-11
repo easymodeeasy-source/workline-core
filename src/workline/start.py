@@ -22,6 +22,7 @@ from . import gitcmd, gitops
 from .create import RelatedSpec, RelationSpec, WorkSpec, register_works
 from .errors import SpecViolation, StopError, ValidationError
 from .mutation import Mutation, MutationController, WriteScope, abandon_on_stop
+from .oplock import project_operation
 from .ops import (
     Replan,
     apply_replan,
@@ -507,6 +508,15 @@ class _Session:
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
+    # Project execution lock (rules/git): everything that decides a write is read
+    # under it, the executor runs inside it, and it is released when START
+    # returns. A question wait releases it too; the mutation stays pending for
+    # the invocation that resumes it under a fresh lock.
+    with project_operation(store, OWNER, {"work_id": work_id, "mode": mode}):
+        return _start_locked(store, work_id, mode, executor)
+
+
+def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     work = store.read_entity("work", work_id)  # stable resolve; no fallback
     view = _structure_or_stop(store, "start precheck")
     gitops.ensure_git_ready(store.root)
@@ -567,6 +577,11 @@ def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> S
 
 def plan_exclude_standalone_work(store: ProjectStore, work_id: str, replan: Replan = Replan()):
     """START-owned plan exclusion of an unstarted standalone Work."""
+    with project_operation(store, "start-plan-exclude", {"work_id": work_id}):
+        return _plan_exclude_standalone_locked(store, work_id, replan)
+
+
+def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: Replan):
     view = _structure_or_stop(store, "precheck")
     work = view.works.get(work_id)
     if work is None:

@@ -168,6 +168,7 @@ SKILL本文を根拠に `.workline` 構造・project.yaml・bootstrap・registry
 - implementation: core implemented (registry / mutation / project-start / project-router / bootstrap + backfill / phase-create / create / start / roadmap)
 - post-project Skill discovery: implemented (Project-side bootstrap → canonical router → dynamic registry inventory)
 - push destination identity: implemented (project.yaml pin → entry check → durable git_push destination → pin maintenance)
+- project execution lock: implemented (one active writer per established Project; busy → `project_operation_busy`; a question wait releases the lock; initial ProjectSTART is outside it)
 
 ## Tests
 

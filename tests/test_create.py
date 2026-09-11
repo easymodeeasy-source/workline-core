@@ -7,6 +7,7 @@ from workline import start as st
 from workline.create import RelatedSpec, RelationSpec, WorkSpec, create_standalone_work, register_works
 from workline.errors import SpecViolation, StopError, ValidationError
 from workline.mutation import MutationController, WriteScope
+from workline.oplock import project_operation
 from workline.state import ProjectView
 from workline.validate import validate_project
 
@@ -17,6 +18,10 @@ class CreateRegistrationCoreTests(WorklineTestCase):
         roadmap = self.simple_roadmap(store)
         phase_id = roadmap.phase_ids["a"]
         head = git(store.root, "rev-parse", "HEAD").strip()
+        # the registration core joins the Project execution lock its caller holds
+        lock = project_operation(store, "registration-test")
+        lock.__enter__()
+        self.addCleanup(lock.__exit__, None, None, None)
         controller = MutationController(store)
         mutation = controller.open("roadmap", {"operation": "phase-entry", "phase_id": phase_id}, WriteScope(entities=(phase_id,)))
         spec = WorkSpec("W1", "w1 done", phase_id=phase_id, roadmap_id=roadmap.roadmap_id,
@@ -47,6 +52,9 @@ class CreateRegistrationCoreTests(WorklineTestCase):
         store = self.new_project()
         roadmap = self.simple_roadmap(store)
         phase_id = roadmap.phase_ids["a"]
+        lock = project_operation(store, "registration-test")
+        lock.__enter__()
+        self.addCleanup(lock.__exit__, None, None, None)
         mutation = MutationController(store).open("roadmap", {"operation": "phase-entry", "phase_id": phase_id}, WriteScope())
         with self.assertRaises(ValidationError):  # vague condition
             register_works(mutation, "s1", {"w": WorkSpec("W", "d", phase_id=phase_id, roadmap_id=roadmap.roadmap_id,

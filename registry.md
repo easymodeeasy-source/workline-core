@@ -42,7 +42,7 @@ remoteなしは正常。localがremoteに対して単純behindなら安全確認
 
 既存untrackedファイルの編集・上書き・削除は人間確認へ返す。
 
-`.workline/runtime/` はWorkline-owned non-domain runtime補助領域とする。Worklineが作成・管理するrecovery metadataを同一mutationの期待値に従って作成・更新する場合は前項の既存untracked保護の対象外だが、Workline ownershipを確認できないrecordや期待値不一致のrecordは自動上書きせず `reconcile required` として停止する。
+`.workline/runtime/` はWorkline-owned non-domain runtime補助領域とする。Worklineが作成・管理するrecovery metadataを同一mutationの期待値に従って作成・更新する場合は前項の既存untracked保護の対象外だが、Workline ownershipを確認できないrecordや期待値不一致のrecordは自動上書きせず `reconcile required` として停止する。`.workline/runtime/locks/` に置くProject execution lock（lock fileと診断用holder情報）も同じruntime補助領域であり、commitせず、domain正本やevidenceとして扱わない。
 
 ### Operation Owner
 
@@ -59,7 +59,35 @@ Phase CREATE / CREATEのregistration coreはGit finalizerではない。呼び�
 
 CREATEがRoadmap / STARTのparent operationなしで直接起動された場合だけ、CREATE entrypoint自身がDirect Work Operation contextを生成し、その外側contextがpostcheck / commit / remoteありならpushまでを所有する。新しいSkillやroutingは増やさない。
 
-各state-changing operationのentryで、operation ownerはcurrent invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
+各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject execution lockを取得した後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
+
+### Project execution lock
+
+成立済みWorkline Projectへ書き込むstate-changing operationは、Project単位のactive execution lockを保持している間だけ実行する。同一Projectで同時に実行中のwriterは1つだけとする。
+
+```text
+top-level operation開始
+→ lock取得（待たない）
+→ pending mutation / Project state / push destination / dirty stateを読む
+→ mutation open / resume / begin
+→ effects → validation → commit → push
+→ mutation complete / QuestionWait / STOP処理
+→ lock解放
+```
+
+lock取得前に読んだProject stateをmutation判断へ使わない。書込みを伴う判定（`roadmap_achieved` の記録等）はlock取得後の現在stateで再評価する。書込みを伴わない参照・診断はlockを必要としない。
+
+pending mutationとexecution lockは別物である。pending mutationはdurableなrecovery状態、execution lockは「いまこのProjectでwriterが実行中である」ことだけを表す。QuestionWait等でoperationが戻る時はlockを解放し、pending mutationは維持する。resumeは新しいinvocationがlockを取得してから行う。
+
+他processがlockを保持している場合は待たずに `project_operation_busy` としてSTOPする。これは `reconcile required` ではない。busy側はmutation intent・event・relation・entityを書かず、Git add / commit / pushも行わない。
+
+lockはOSが管理する排他file lock（`.workline/runtime/locks/project.lock`）とし、所有の正本はlockの保持そのものである。並置するholder情報は診断用であり、所有判定に使わない。process終了時にlockは解放される。persistent lease・TTL・強制解除・stale lock cleanupは設けない。crash後は次のoperationがlockを取得し、既存のpending mutation recoveryに従う。
+
+lockを取得するのはtop-level operation ownerだけである。Phase CREATE / CREATEのregistration coreは呼び出し元operationのlockとmutationへ参加し、lockを取り直さない。同一processで、同じProjectのlockを保持したまま別のtop-level operationを開始した場合は `project_operation_nested` としてSTOPする。
+
+Mutation Controllerは、Project開始以外のoperation ownerについて、execution lockを保持していないmutationのopen / resume / 書込みを拒否する。
+
+Project開始（初期化）はexecution lockの対象外であり、同じProjectへProject開始を同時に複数実行することはサポートしない。成立済みProjectに対するmaintenance（bootstrap backfill、push destination pin等）はexecution lockの対象である。
 
 ### Mutation Controller
 

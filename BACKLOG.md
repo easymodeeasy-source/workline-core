@@ -16,6 +16,7 @@
   - `VERIFIED`: 問題（欠落・欠陥）の実在を、現行実装または実運用で確認済み。解決済みという意味ではない。
   - `INVESTIGATE`: 問題の実在・原因・規模・方針のいずれかを、先に調査する必要がある。
   - `DEFERRED`: 実例や前提条件が揃うまで、意図的に保留している。
+  - `RESOLVED`: 対応がcanonical authority（`registry.md` / canonical Skills）と実装へ反映済み。以後の正本はcanonical authorityであり、この項目は経緯の記録として残す。
 - `Evidence class`:
   - `real-project migration`: 既存の実ProjectをWorklineへ移行した際に観測した。
   - `smoke test`: Workline検証用Projectでのsmoke testで観測した。
@@ -52,7 +53,8 @@
 | BL-018 | Unused assignment in Phase expansion | VERIFIED |
 | BL-019 | Runtime recovery record retention and ignore policy | INVESTIGATE |
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
-| BL-021 | Concurrent operation exclusion | INVESTIGATE |
+| BL-021 | Concurrent operation exclusion | RESOLVED |
+| BL-022 | ProjectSTART abandoned pre-effect recovery | VERIFIED |
 
 ## Items
 
@@ -367,7 +369,7 @@
 
 - ID: BL-021
 - Title: Concurrent operation exclusion
-- Status: INVESTIGATE
+- Status: RESOLVED
 - Kind: implementation, design
 - Problem: Mutation Controllerは、pending mutationの検出とwrite scopeのoverlap判定で競合を防ぐが、複数のprocessが同じProjectで同時にoperationを開始した場合の排他（lock / mutex / queue等）は実装されていない。pending mutationの検出からrecovery recordの作成までの間や、ledgerファイルの読み込みから書き戻しまでの間に、別processが割り込む余地がある。
 - Why it matters: 複数のsessionやagentが同じProjectを並行して操作すると、互いのpending mutationを検出できないまま同じ正本を更新し、更新の取りこぼしが起き得る。現時点で発生は確認していない。
@@ -377,3 +379,19 @@
 - Human confirmation likely: no（前提の明文化や実装内の排他だけの場合。共通ルールを変える場合はyes）
 - Self-hosting prerequisite: no
 - Evidence class: design deferral, code inspection
+- Resolution: 成立済みProjectにProject単位のactive execution lock（OS管理の排他file lock、one active writer per Project）を導入した。operationはlock取得後にpending mutation・Project state・push destinationを読み、他processが実行中なら待たずに `project_operation_busy` でSTOPして何も書かない。QuestionWaitではlockを解放しpending mutationを維持する。crash時はOSがlockを解放し、既存のpending mutation recoveryで再開する。Mutation ControllerはProject開始以外のownerについてlockなしのmutationを拒否する。initial Project開始の同時実行は対象外（非サポート）。`rules/git` とcanonical Skillsへ反映済み。
+
+### BL-022 ProjectSTART abandoned pre-effect recovery
+
+- ID: BL-022
+- Title: ProjectSTART abandoned pre-effect recovery
+- Status: VERIFIED
+- Kind: implementation, spec
+- Problem: Project開始がrecovery intentを作成した後、domain effectを適用する前にSTOPすると（例: bootstrap pathがGitにignoreされている、既存の未commit変更と重なる）、intentはabandonedとして残り、`.workline/` にはruntime recordだけが存在する状態になる。原因を解消して再実行しても、pending mutationがなく成立済みProjectでもないため `partial_workline` としてSTOPし、正式な経路では再開も再初期化もできない。
+- Why it matters: 一時的な前提条件の不備だけで、そのfolderをWorkline Projectとして開始できなくなる。回復には手作業での削除が必要になり、推測修復を禁じる規則とも衝突する。使い捨てのrepositoryで再現を確認している。
+- Likely scope: Project開始の「partial .workline」判定（canonical fileを含まずruntime領域だけがある状態の扱い）、abandonedになったProject開始intentの扱い、STOP時の孤立生成物cleanup（`rules/git` のcleanup定義との整合）、`skills/project-start` の記述とtest
+- Cross-project impact: あり（Project開始の経路）
+- Backfill likely: no
+- Human confirmation likely: yes（Project開始の判定規則とcanonical Skillの変更）
+- Self-hosting prerequisite: no
+- Evidence class: code inspection

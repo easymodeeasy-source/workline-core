@@ -30,6 +30,7 @@ from .bootstrap import is_established_project
 from .destination import DEFAULT_REMOTE, ensure_push_destination, resolve_active_push_locator
 from .errors import ReconcileRequired, StopError
 from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .oplock import project_operation
 from .registry import validate_registry
 from .store import PROJECT_YAML_REL, ProjectStore, PushPin
 from .validate import validate_project_yaml
@@ -91,6 +92,11 @@ def pin_push_destination(project_root: Path, urls: Sequence[str], remote: str = 
             f"Project root is not the Git top-level; pin maintenance needs an established Project repository: {root}",
             code="not_a_project",
         )
+    with project_operation(store, OWNER, {"remote": remote}):
+        return _pin_locked(store, root, approved, remote)
+
+
+def _pin_locked(store: ProjectStore, root: Path, approved: tuple[str, ...], remote: str) -> PinResult:
     if not is_established_project(store):
         raise StopError(
             "not a valid established Workline Project (project.yaml missing, invalid or untracked); "

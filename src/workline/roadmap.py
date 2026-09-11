@@ -26,6 +26,7 @@ from .create import (
 )
 from .errors import SpecViolation, StopError, ValidationError
 from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .oplock import project_operation
 from .ops import (
     Replan,
     apply_replan,
@@ -186,10 +187,11 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
         raise ValidationError("Roadmap needs name, background and desired state")
     if not plan.phases:
         raise ValidationError("a new Roadmap registers all of its Phases; none were decided")
-    _stop_on_structure(store, "precheck")
-    mutation, destination = _open(store, "roadmap-create", {"name": plan.name})
-    with abandon_on_stop(mutation):
-        return _create_roadmap(store, mutation, destination, plan)
+    with project_operation(store, "roadmap-create", {"name": plan.name}):
+        _stop_on_structure(store, "precheck")
+        mutation, destination = _open(store, "roadmap-create", {"name": plan.name})
+        with abandon_on_stop(mutation):
+            return _create_roadmap(store, mutation, destination, plan)
 
 
 def _create_roadmap(
@@ -243,6 +245,18 @@ def add_phases(
     """
     if not phases:
         raise ValidationError("Phase addition needs at least one decided Phase")
+    with project_operation(store, "roadmap-add-phases", {"roadmap_id": roadmap_id}):
+        return _add_phases_locked(store, roadmap_id, phases, relations, future_plan_change, invocation_key)
+
+
+def _add_phases_locked(
+    store: ProjectStore,
+    roadmap_id: str,
+    phases: dict[str, PhaseSpec],
+    relations: tuple[PhaseRelationSpec, ...],
+    future_plan_change: bool,
+    invocation_key: str | None,
+) -> PhaseAdditionResult:
     view = _stop_on_structure(store, "precheck")
     if roadmap_id not in view.roadmaps:
         raise ValidationError(f"Roadmap unresolvable: {roadmap_id}")
@@ -324,6 +338,11 @@ def diagnose_no_candidate(store: ProjectStore, roadmap_id: str) -> str:
 # --------------------------------------------------------------------------- Phase entry
 
 def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
+    with project_operation(store, "phase-entry", {"phase_id": phase_id}):
+        return _enter_phase_locked(store, phase_id, design)
+
+
+def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
     view = _stop_on_structure(store, "precheck")
     phase = view.phases.get(phase_id)
     if phase is None:
@@ -424,6 +443,12 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
 # --------------------------------------------------------------------------- lifecycle
 
 def _lifecycle(store: ProjectStore, operation: str, entity_id: str, event_type: str, precheck) -> OperationResult:
+    with project_operation(store, operation, {"entity": entity_id}):
+        return _record_lifecycle(store, operation, entity_id, event_type, precheck)
+
+
+def _record_lifecycle(store: ProjectStore, operation: str, entity_id: str, event_type: str, precheck) -> OperationResult:
+    """Record one lifecycle event; the caller holds the Project execution lock."""
     view = _stop_on_structure(store, "precheck")
     precheck(view)
     mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
@@ -481,6 +506,11 @@ def cancel_roadmap(store: ProjectStore, roadmap_id: str) -> OperationResult:
 
 
 def _plan_exclude(store: ProjectStore, operation: str, entity_id: str, replan: Replan, precheck) -> OperationResult:
+    with project_operation(store, operation, {"entity": entity_id}):
+        return _plan_exclude_locked(store, operation, entity_id, replan, precheck)
+
+
+def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, replan: Replan, precheck) -> OperationResult:
     view = _stop_on_structure(store, "precheck")
     precheck(view)
     mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
@@ -674,7 +704,19 @@ def maintain_work_related(
     """
     if not add and not remove_relation_ids:
         raise ValidationError("related maintenance needs at least one add or remove")
+    with project_operation(store, "work-related-maintenance", {"work_id": work_id}):
+        return _maintain_work_related_locked(store, work_id, add, remove_relation_ids, invocation_key)
 
+
+def _maintain_work_related_locked(
+    store: ProjectStore,
+    work_id: str,
+    add: tuple[RelatedSpec, ...],
+    remove_relation_ids: tuple[str, ...],
+    invocation_key: str | None,
+) -> RelatedMaintenanceResult:
+    # Every read below, the no-op decision included, sees the state current
+    # under the Project execution lock.
     view = _stop_on_structure(store, "precheck")
     work = _unstarted_roadmap_work(view, work_id)
     validate_related_specs(add, f"related maintenance {work_id}")
@@ -794,21 +836,36 @@ def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, d
 
     All active Phases complete is a precondition, never the conclusion. The
     ``judgement`` is the explicit evaluation of the Roadmap's desired state.
-    Only ``achieved`` records ``roadmap_achieved``.
+    Only ``achieved`` records ``roadmap_achieved``, and recording it is a write:
+    its precondition is evaluated on the state current under the Project
+    execution lock, never on a read taken before the lock. The other judgements
+    only report and take no lock.
     """
     if judgement not in JUDGEMENTS:
         raise ValidationError(f"unknown judgement: {judgement}")
-    view = _stop_on_structure(store, "precheck")
-    _require_active_roadmap(view, roadmap_id)
-    if not view.all_active_phases_complete(roadmap_id):
-        return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
-    if judgement == "human_confirmation":
-        return AchievementResult("human_confirmation_required", roadmap_id, detail=detail)
-    if judgement == "not_achieved":
-        return AchievementResult("not_achieved", roadmap_id, detail=detail or "add Phases / replan without changing the desired state")
-    if judgement == "desired_state_change":
+    if judgement != "achieved":
+        view = _stop_on_structure(store, "precheck")
+        _require_active_roadmap(view, roadmap_id)
+        if not view.all_active_phases_complete(roadmap_id):
+            return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
+        if judgement == "human_confirmation":
+            return AchievementResult("human_confirmation_required", roadmap_id, detail=detail)
+        if judgement == "not_achieved":
+            return AchievementResult("not_achieved", roadmap_id, detail=detail or "add Phases / replan without changing the desired state")
         return AchievementResult("desired_state_change_required", roadmap_id, detail=detail)
-    result = _lifecycle(store, "roadmap-achievement", roadmap_id, "roadmap_achieved", lambda v: None)
+
+    with project_operation(store, "roadmap-achievement", {"entity": roadmap_id}):
+        view = _stop_on_structure(store, "precheck")
+        _require_active_roadmap(view, roadmap_id)
+        if not view.all_active_phases_complete(roadmap_id):
+            return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
+
+        def still_achievable(current: ProjectView) -> None:
+            _require_active_roadmap(current, roadmap_id)
+            if not current.all_active_phases_complete(roadmap_id):
+                raise StopError(f"Roadmap {roadmap_id} is no longer ready for achievement", code="achievement_not_ready")
+
+        result = _record_lifecycle(store, "roadmap-achievement", roadmap_id, "roadmap_achieved", still_achievable)
     return AchievementResult("achieved", roadmap_id, result.mutation_id, result.head, detail)
 
 

@@ -34,6 +34,10 @@ WORKLINE_DIR = ".workline"
 RUNTIME_DIR = ".workline/runtime"
 MUTATIONS_DIR = ".workline/runtime/mutations"
 TMP_DIR = ".workline/runtime/tmp"
+# Project execution lock (``rules/git``): the OS-locked file and the holder's
+# diagnostic description. Runtime data like the recovery records: not a domain
+# 正本, never committed, never evidence.
+LOCKS_DIR = ".workline/runtime/locks"
 
 # The Project-side bootstrap Skill: the single thin entry point Claude Code
 # discovers when a Workline Project is opened directly. It is Project
@@ -47,6 +51,11 @@ PROJECT_YAML_REL = f"{WORKLINE_DIR}/project.yaml"
 # Only these operation owners may write the ``git.push`` pin. The Mutation
 # Controller enforces it; it is not left to Skill prose.
 PIN_OWNERS = ("project-start", "push-destination-pin")
+
+# Initial Project開始 runs before a Project is established and is outside the
+# Project execution lock. Every other owner opens, resumes and writes its
+# mutation only while holding that lock; the Mutation Controller enforces it.
+LOCK_EXEMPT_OWNERS = ("project-start",)
 
 ENTITY_DIRS = {"roadmap": "roadmaps", "phase": "phases", "work": "works"}
 
@@ -304,6 +313,9 @@ class ProjectStore:
         self.runtime = self.root / RUNTIME_DIR
         self.mutations = self.root / MUTATIONS_DIR
         self.tmp = self.root / TMP_DIR
+        self.locks = self.root / LOCKS_DIR
+        self.lock_file = self.locks / "project.lock"
+        self.lock_holder = self.locks / "holder.json"
 
     # paths ---------------------------------------------------------------
     def entity_dir(self, kind: str) -> Path:

@@ -26,6 +26,7 @@ from pathlib import Path
 from . import gitcmd, gitops
 from .errors import StopError
 from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
+from .oplock import project_operation
 from .registry import PROJECT_ROUTER_SKILL_ID, validate_registry
 from .store import BOOTSTRAP_REL_PATH, WORKLINE_DIR, ProjectStore
 from .validate import validate_project_yaml
@@ -195,6 +196,11 @@ def backfill_bootstrap(project_root: Path) -> BackfillResult:
             f"Project root is not the Git top-level; backfill needs an established Project repository: {root}",
             code="not_a_project",
         )
+    with project_operation(store, OWNER):
+        return _backfill_locked(store, root)
+
+
+def _backfill_locked(store: ProjectStore, root: Path) -> BackfillResult:
     if not is_established_project(store):
         raise StopError(
             "not a valid established Workline Project (project.yaml missing, invalid or untracked); "

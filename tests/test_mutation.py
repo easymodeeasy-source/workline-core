@@ -7,6 +7,7 @@ from helpers import WorklineTestCase, git
 from workline.durable import DurableWriteError
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.mutation import MATCHING, UNAPPLIED, Effect, MutationController, WriteScope
+from workline.oplock import project_operation
 from workline.store import WORKLINE_DIR, Event, Relation
 
 SCOPE = WriteScope(entities=("w_01ARZ3NDEKTSV4RRFFQ69G5FAV",), files=(f"{WORKLINE_DIR}/events/events.jsonl",))
@@ -21,6 +22,11 @@ class MutationControllerTests(WorklineTestCase):
         super().setUp()
         self.store = self.new_project()
         self.controller = MutationController(self.store)
+        # These tests drive the Mutation Controller directly, as a top-level
+        # operation does: while holding the Project execution lock.
+        lock = project_operation(self.store, "mutation-controller-test")
+        lock.__enter__()
+        self.addCleanup(lock.__exit__, None, None, None)
 
     def _begin(self, owner: str = "start", invocation: dict | None = None):
         return self.controller.open(owner, invocation or {"operation": "start", "work_id": "w_x"}, SCOPE)

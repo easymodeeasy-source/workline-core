@@ -157,6 +157,8 @@ current remoteを見て承認先を自動生成しない。誤ったremoteが最
 
 Project開始がoperation owner。Project開始の下位writeは同じoperation mutationへ属する。
 
+Project開始（初期化）は `rules/git` のProject execution lockの対象外である。同じProjectへProject開始を同時に複数実行することはサポートしない。
+
 途中失敗後にpending Project開始 mutationが入力Projectと一意一致する場合はresumeする。新規初期化として上書きしない。
 
 ## Create Project structure
@@ -316,6 +318,7 @@ backfillはbootstrap / infrastructure責務であり、専用のmaintenance経�
       .claude/skills の他Skill変更なし
 同path異内容: STOP
 再実行: idempotent
+lock: 成立済みProjectのexecution lockを取得して行う（他processが実行中なら project_operation_busy）
 ```
 
 backfillは通常のmaintenanceなので、Project開始の「初期commit必須・push不要」例外を適用しない。remoteがあればcommit後pushまで行う（clone先で利用可能である必要があるため）。
@@ -332,6 +335,7 @@ push destination承認先を持たない既存Projectも、ProjectSTARTの再実
 不変: .workline再初期化なし
       Roadmap / Phase / Work / relations / events変更なし
 他のpending mutationがある: STOP（旧承認先向けの進行中operationを壊さない）
+lock: 成立済みProjectのexecution lockを取得して行う（他processが実行中なら project_operation_busy）
 再実行: idempotent
 ```
 

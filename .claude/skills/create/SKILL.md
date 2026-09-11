@@ -213,10 +213,13 @@ START caller
 → START owns Git
 
 Direct standalone invocation
+→ CREATE entrypointがProject execution lockを取得
 → CREATE entrypointがDirect Work Operation mutationを開始
 → registration coreを同mutationで実行
 → entrypoint contextがpostcheck / commit / remoteありなら承認先へpush
 ```
+
+Roadmap / STARTから呼ばれるregistration coreは、呼び出し元operationが保持するProject execution lockの内側で実行し、lockを取り直さない。
 
 途中失敗後は同じmutation ID / Work ID / relation IDをresumeする。新IDで重複CREATEしない。
 

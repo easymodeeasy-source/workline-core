@@ -38,6 +38,8 @@ Standalone Workのouterはstandalone scope内だけ。
 ## Start flow
 
 ```text
+Project execution lock取得
+↓
 stable Work resolve
 ↓
 generated state確認
@@ -63,7 +65,11 @@ Git保存
 terminal finalization
 ↓
 mode=outerなら同一Phase内の次startable Workを再計算
+↓
+return時にlock解放
 ```
+
+`rules/git` のProject execution lockに従う。Work state・dependency・pending mutation・push destination・dirty stateはlock取得後に読み、lock取得前に読んだstateをmutation判断へ使わない。executorもlockの内側で実行される。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。executorの中から同じProjectの別top-level Workline operationを開始しない（`project_operation_nested`）。
 
 ## Generated Work lifecycle
 
@@ -116,6 +122,8 @@ state fieldをWork本体へ保存しない。
 - target原則維持
 - lifecycle eventなし
 - ad hoc質問のためhuman_confirmation Workを作らない
+- START invocationはProject execution lockを解放して戻り、START mutationはpendingのまま残る
+- 再開は新しいSTART invocationがlockを取得してからpending mutationをresumeする
 
 一時的に別Workへ移る:
 

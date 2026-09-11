@@ -11,6 +11,9 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
 * on resume every recorded effect is classified against reality as
   unapplied / applied-matching / applied-mismatch, and a mismatch stops the
   operation as ``reconcile required``;
+* a mutation of an established Project is opened, resumed and written only
+  while its operation holds the Project execution lock
+  (:mod:`workline.oplock`); initial Project開始 is the one owner outside it;
 * the controller validates and physically writes decided payloads. It never
   decides domain meaning.
 """
@@ -24,7 +27,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import gitcmd, pushurl, yamlish
+from . import gitcmd, oplock, pushurl, yamlish
 from .destination import resolve_active_push_locator, verify_recorded_destination
 from .durable import DurableWriteError, durable_write_text
 from .errors import GitError, ReconcileRequired, StopError, ValidationError
@@ -32,6 +35,7 @@ from .ids import is_valid_id, kind_of, new_id
 from .store import (
     ENTITY_DIRS,
     INFRA_WRITE_PATHS,
+    LOCK_EXEMPT_OWNERS,
     PHASE_EVENTS,
     PHASE_TERMINAL_EVENTS,
     PIN_OWNERS,
@@ -178,7 +182,12 @@ class Mutation:
         return list(self.record.get("effects") or [])
 
     # durable intent -------------------------------------------------------
+    def _writable(self) -> None:
+        """Checked before any in-memory change a later save would persist."""
+        self.controller.require_execution_lock(self.owner)
+
     def _save(self) -> None:
+        self._writable()
         self.record["updated_at"] = utc_now()
         try:
             durable_write_text(self.path, yamlish.dump(self.record), tmp_dir=self.store.tmp)
@@ -187,6 +196,7 @@ class Mutation:
 
     # reserved IDs -----------------------------------------------------------
     def reserve_id(self, key: str, kind: str) -> str:
+        self._writable()
         reserved = self.record.setdefault("reserved_ids", {})
         if key in reserved:
             existing = str(reserved[key])
@@ -207,10 +217,12 @@ class Mutation:
         return (self.record.get("notes") or {}).get(key)
 
     def set_note(self, key: str, value: Any) -> None:
+        self._writable()
         self.record.setdefault("notes", {})[key] = value
         self._save()
 
     def extend_scope(self, entities: list[str] = (), files: list[str] = ()) -> None:
+        self._writable()
         scope = self.scope
         merged = WriteScope(tuple(scope.entities) + tuple(entities), tuple(scope.files) + tuple(files))
         self.record["write_scope"] = merged.to_record()
@@ -225,6 +237,7 @@ class Mutation:
 
     def add_effects(self, stage: str, effects: list[Effect]) -> None:
         """Validate ``effects`` and append them durably to the intent (before any run)."""
+        self._writable()
         if self.status != "pending":
             raise StopError(f"mutation {self.id} is {self.status}", code="mutation_not_pending")
         if self.has_stage(stage):
@@ -242,6 +255,7 @@ class Mutation:
 
     def apply(self) -> list[tuple[int, str]]:
         """Classify every recorded effect in order and apply the unapplied ones."""
+        self._writable()
         if self.status != "pending":
             raise StopError(f"mutation {self.id} is {self.status}", code="mutation_not_pending")
         outcomes: list[tuple[int, str]] = []
@@ -260,12 +274,14 @@ class Mutation:
         return outcomes
 
     def complete(self) -> None:
+        self._writable()
         self.record["status"] = "completed"
         self.record["completed_at"] = utc_now()
         self._save()
 
     def abandon(self) -> None:
         """Close an intent that never recorded an effect (nothing to resume)."""
+        self._writable()
         if self.effects:
             raise StopError(f"mutation {self.id} has recorded effects and cannot be abandoned", code="mutation_has_effects")
         self.record["status"] = "abandoned"
@@ -330,6 +346,24 @@ class MutationController:
             raise ReconcileRequired(f"mutation record missing: {mutation_id}")
         return Mutation(self, self._load_intent(path), resumed=True)
 
+    # execution lock ------------------------------------------------------------
+    def require_execution_lock(self, owner: str) -> None:
+        """STOP unless the running operation holds this Project's execution lock.
+
+        Initial Project開始 is the one owner outside the lock (``rules/git``).
+        Every other owner opens, resumes and writes a mutation only while its
+        top-level operation holds the Project execution lock, so no two
+        processes ever work on the same recovery records or ledgers at once.
+        """
+        if owner in LOCK_EXEMPT_OWNERS:
+            return
+        if oplock.held_lock(self.store) is None:
+            raise StopError(
+                f"{owner} cannot open or write a mutation without this Project's execution lock; "
+                "the top-level Workline operation takes it at its entry",
+                code="operation_lock_required",
+            )
+
     # discovery ----------------------------------------------------------------
     def open(self, owner: str, invocation: dict[str, Any], scope: WriteScope) -> Mutation:
         """Resume the unique matching pending mutation or begin a new one.
@@ -338,7 +372,11 @@ class MutationController:
         * none → begin a new mutation
         * several matches, or any other pending mutation whose write scope is
           not provably independent → ``reconcile required``
+
+        The caller holds the Project execution lock, so the pending records
+        read here cannot change before the chosen mutation is resumed or begun.
         """
+        self.require_execution_lock(owner)
         pending = self.list_pending()
         invocation = json.loads(json.dumps(invocation, sort_keys=True))
         matches = [p for p in pending if p["owner"] == owner and p["invocation"] == invocation]
@@ -358,8 +396,12 @@ class MutationController:
                     f"pending mutation {other['mutation_id']} (owner {other['owner']}) overlaps the planned write scope: reconcile required"
                 )
         if matches:
-            return Mutation(self, matches[0], resumed=True)
-        return self.begin(owner, invocation, scope)
+            mutation = Mutation(self, matches[0], resumed=True)
+        else:
+            mutation = self.begin(owner, invocation, scope)
+        if owner not in LOCK_EXEMPT_OWNERS:
+            oplock.note_mutation(self.store, mutation.id)
+        return mutation
 
     def begin(self, owner: str, invocation: dict[str, Any], scope: WriteScope) -> Mutation:
         mutation_id = new_id("mutation")

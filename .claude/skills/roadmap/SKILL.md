@@ -339,6 +339,8 @@ Roadmapの「達成したい状態」を明示評価
 
 desired state自体の変更が必要 → human confirmation
 
+`roadmap_achieved` を記録する場合は、Project execution lock取得後の現在stateで前提（Roadmapが通常操作可能・全active Phase complete）を再評価し、成立する時だけ記録する。lock取得前の判定結果をそのまま記録の根拠にしない。記録を伴わない判定・診断はlockを取らない。
+
 Roadmap start event / Phase completion eventは作らない。stateは生成する。
 
 ## Mutation / Git
@@ -352,3 +354,5 @@ Phase展開後、STARTへ渡す前にRoadmap-owned structural changesをcommit�
 pushする場合の宛先は `rules/git` のpush destinationに従う。各Roadmap operationはmutationを開くより前・networkより前に承認先一致を検査し、承認先なし / 不一致はSTOPする。Roadmap操作で承認先を変更しない。
 
 途中失敗は同じmutationをresume。期待値不一致ならreconcile required。
+
+Roadmap operationは `rules/git` のProject execution lockを取得してから、Roadmap / Phase / Work state・dependency・pending mutation・push destinationを読む。lock取得前に読んだstateをmutation判断へ使わない。Phase CREATE / CREATEは同じlockとmutationへ参加し、lockを取り直さない。STARTへのhandoffはRoadmap operationが戻ってlockを解放した後に行う。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。

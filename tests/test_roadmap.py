@@ -7,6 +7,7 @@ from workline import roadmap as rm
 from workline import start as st
 from workline.errors import SpecViolation, StopError, ValidationError
 from workline.mutation import MutationController, WriteScope
+from workline.oplock import project_operation
 from workline.ops import Replan
 from workline.phase_create import PhaseRelationSpec, PhaseSpec, register_phases
 from workline.state import ProjectView
@@ -40,24 +41,27 @@ class RoadmapTests(WorklineTestCase):
         store = self.new_project()
         result = self.simple_roadmap(store)
         controller = MutationController(store)
-        mutation = controller.open("roadmap", {"operation": "test"}, WriteScope())
-        with self.assertRaises(ValidationError):
-            register_phases(mutation, "p1", "r_01ARZ3NDEKTSV4RRFFQ69G5FAV", {"x": PhaseSpec("X", "x")})
-        with self.assertRaises(ValidationError):
-            register_phases(mutation, "p2", result.roadmap_id, {"x": PhaseSpec("X", "")})
-        with self.assertRaises(ValidationError):  # mixed Phase↔Work relation
-            register_phases(mutation, "p3", result.roadmap_id, {"x": PhaseSpec("X", "x")}, [PhaseRelationSpec("planned_next", "x", "w_01ARZ3NDEKTSV4RRFFQ69G5FAV")])
-        registered = register_phases(mutation, "p4", result.roadmap_id, {"x": PhaseSpec("X", "x")}, [PhaseRelationSpec("requires_completion", result.phase_ids["a"], "x")])
-        again = register_phases(mutation, "p4", result.roadmap_id, {"x": PhaseSpec("X", "x")}, [PhaseRelationSpec("requires_completion", result.phase_ids["a"], "x")])
-        self.assertEqual(registered.phase_ids, again.phase_ids)
-        self.assertEqual(len(ProjectView.load(store).phases), 2)
-        mutation.complete()
+        # Phase CREATE joins the Project execution lock its Roadmap caller holds
+        with project_operation(store, "phase-create-test"):
+            mutation = controller.open("roadmap", {"operation": "test"}, WriteScope())
+            with self.assertRaises(ValidationError):
+                register_phases(mutation, "p1", "r_01ARZ3NDEKTSV4RRFFQ69G5FAV", {"x": PhaseSpec("X", "x")})
+            with self.assertRaises(ValidationError):
+                register_phases(mutation, "p2", result.roadmap_id, {"x": PhaseSpec("X", "")})
+            with self.assertRaises(ValidationError):  # mixed Phase↔Work relation
+                register_phases(mutation, "p3", result.roadmap_id, {"x": PhaseSpec("X", "x")}, [PhaseRelationSpec("planned_next", "x", "w_01ARZ3NDEKTSV4RRFFQ69G5FAV")])
+            registered = register_phases(mutation, "p4", result.roadmap_id, {"x": PhaseSpec("X", "x")}, [PhaseRelationSpec("requires_completion", result.phase_ids["a"], "x")])
+            again = register_phases(mutation, "p4", result.roadmap_id, {"x": PhaseSpec("X", "x")}, [PhaseRelationSpec("requires_completion", result.phase_ids["a"], "x")])
+            self.assertEqual(registered.phase_ids, again.phase_ids)
+            self.assertEqual(len(ProjectView.load(store).phases), 2)
+            mutation.complete()
         rm.hold_roadmap(store, result.roadmap_id)
-        mutation = controller.open("roadmap", {"operation": "test2"}, WriteScope())
-        with self.assertRaises(SpecViolation):
-            register_phases(mutation, "p5", result.roadmap_id, {"y": PhaseSpec("Y", "y")})
-        register_phases(mutation, "p5", result.roadmap_id, {"y": PhaseSpec("Y", "y")}, future_plan_change=True)
-        mutation.complete()
+        with project_operation(store, "phase-create-test"):
+            mutation = controller.open("roadmap", {"operation": "test2"}, WriteScope())
+            with self.assertRaises(SpecViolation):
+                register_phases(mutation, "p5", result.roadmap_id, {"y": PhaseSpec("Y", "y")})
+            register_phases(mutation, "p5", result.roadmap_id, {"y": PhaseSpec("Y", "y")}, future_plan_change=True)
+            mutation.complete()
 
     def test_phase_dependency_and_selection(self) -> None:
         store = self.new_project()

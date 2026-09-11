@@ -24,6 +24,7 @@ from workline.create import WorkSpec, create_standalone_work
 from workline.destination import ensure_push_destination, resolve_active_push_locator
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.mutation import Effect, MutationController, WriteScope
+from workline.oplock import project_operation
 from workline.project_start import project_start
 from workline.push_pin import pin_push_destination
 from workline.state import ProjectView
@@ -418,20 +419,22 @@ class OwnerGuardTests(DestinationBase):
         controller = MutationController(store)
         content = store.project_yaml_with_pin(PushPin("origin", (other,)))
         for owner in ("roadmap", "start", "create-direct", "bootstrap-backfill"):
-            mutation = controller.open(owner, {"operation": f"{owner}-guard-probe"}, WriteScope(files=(PROJECT_YAML_REL,)))
-            with self.assertRaises(ValidationError) as ctx:
-                mutation.add_effects("pin", [Effect.write_file(PROJECT_YAML_REL, content)])
-            self.assertEqual(ctx.exception.code, "push_pin_owner")
-            mutation.abandon()
+            with project_operation(store, f"{owner}-guard-probe"):
+                mutation = controller.open(owner, {"operation": f"{owner}-guard-probe"}, WriteScope(files=(PROJECT_YAML_REL,)))
+                with self.assertRaises(ValidationError) as ctx:
+                    mutation.add_effects("pin", [Effect.write_file(PROJECT_YAML_REL, content)])
+                self.assertEqual(ctx.exception.code, "push_pin_owner")
+                mutation.abandon()
         self.assertEqual(store.read_push_pin(), PushPin("origin", (self.remote_url(),)))
 
     def test_a_domain_owner_may_rewrite_project_yaml_without_touching_the_pin(self) -> None:
         store = self.new_project(remote=True)
         unchanged = store.project_yaml_with_pin(store.read_push_pin())
-        mutation = MutationController(store).open("roadmap", {"operation": "unchanged-probe"}, WriteScope(files=(PROJECT_YAML_REL,)))
-        mutation.add_effects("same", [Effect.write_file(PROJECT_YAML_REL, unchanged)])
-        mutation.apply()
-        mutation.complete()
+        with project_operation(store, "unchanged-probe"):
+            mutation = MutationController(store).open("roadmap", {"operation": "unchanged-probe"}, WriteScope(files=(PROJECT_YAML_REL,)))
+            mutation.add_effects("same", [Effect.write_file(PROJECT_YAML_REL, unchanged)])
+            mutation.apply()
+            mutation.complete()
         self.assertEqual(store.read_push_pin(), PushPin("origin", (self.remote_url(),)))
 
 

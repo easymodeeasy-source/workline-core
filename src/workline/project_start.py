@@ -43,6 +43,9 @@ from .store import (
 )
 from .validate import validate_project_yaml
 
+# Initial Project開始 is outside the Project execution lock (rules/git): the
+# Project does not exist yet, and starting the same Project twice at once is
+# not supported. store.LOCK_EXEMPT_OWNERS names this owner.
 OWNER = "project-start"
 INITIAL_COMMIT_MESSAGE = "chore(workline): initialize project"
 

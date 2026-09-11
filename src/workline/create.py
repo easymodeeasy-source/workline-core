@@ -22,6 +22,7 @@ from . import gitops
 from .errors import SpecViolation, ValidationError
 from .ids import is_valid_id
 from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .oplock import project_operation
 from .state import COMPLETE, EXCLUDED_STATES, ProjectView
 from .store import (
     CONDITIONAL_RELATED_TYPES,
@@ -310,6 +311,11 @@ def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_ke
         raise SpecViolation("direct CREATE only creates standalone Works (origin.type = standalone)")
     if spec.work_kind is not None:
         raise SpecViolation("direct CREATE does not create special Phase Works")
+    with project_operation(store, DIRECT_OWNER, {"name": spec.name}):
+        return _create_standalone_locked(store, spec, invocation_key)
+
+
+def _create_standalone_locked(store: ProjectStore, spec: WorkSpec, invocation_key: str | None) -> CreateResult:
     controller = MutationController(store)
     invocation = {"operation": DIRECT_OWNER, "name": spec.name, "key": invocation_key or spec.name}
     scope = WriteScope(files=(
