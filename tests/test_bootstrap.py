@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import unittest
 
-from helpers import WORKLINE_ROOT, WorklineTestCase, git
+from helpers import WORKLINE_ROOT, WorklineTestCase, copy_workline_root, git, launcher_command, run_python
 from workline import bootstrap as bs
 from workline.errors import StopError
 from workline.project_start import INITIAL_COMMIT_MESSAGE, project_start
@@ -216,9 +216,12 @@ class DynamicDiscoveryTests(WorklineTestCase, SyntheticRootMixin):
 
     def test_new_central_skill_needs_no_project_change(self) -> None:
         """The most important guarantee of this design."""
-        wl = self.synthetic_root()
+        wl = copy_workline_root(self.tmp / "wl")
+        self.write_registry(wl)
         project = self.new_dir("proj")
-        project_start(project, wl)
+        # a Project is configured for a Workline root only by that root's own implementation
+        started = run_python(launcher_command(wl, "project-start", project, "--workline-root", wl), cwd=wl)
+        self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
         bootstrap = project / BOOTSTRAP_REL_PATH
         before_bytes = bootstrap.read_bytes()
         before_head = git(project, "rev-parse", "HEAD").strip()

@@ -25,6 +25,16 @@ Workline rootにこのoperationのcanonical implementationが存在する場合�
 
 手組みした構造は未検証の再実装であり、canonical implementationからはbroken / partialとして扱われる。implementationが使えないときにmanual fallbackへ進まない。
 
+起動は `rules/git` のWorkline implementationに従い、Workline root自身のcanonical launcherから行う。
+
+```text
+Windows: py -3 -I -B "<R>\run-workline.py" project-start <project-root> --workline-root <R>
+POSIX:   python3 -I -B "<R>/run-workline.py" project-start <project-root> --workline-root <R>
+R = 下記の入力解決で決まったWorkline root
+```
+
+実行中launcherのRと `--workline-root` が一致しなければ `workline_implementation_mismatch` でSTOPし、何も書かない。launcherが使えない場合（Python 3.11未満、`-I` なし、implementationの不在・不一致）はSTOPして報告し、`python -m workline.cli`・PYTHONPATHの手組み・editable installへfallbackしない。targetへinterpreter / launcher等のruntime情報を書かない。
+
 ## Input resolution
 
 Project rootとWorkline rootは入力解決規則で決める。どちらも規則から一意解決できた場合、`rules/human-confirmation` に従い、確認のためだけに人間へ返さない。質問は一意解決できなかったときの手段であり、既定の手順ではない。
@@ -80,9 +90,10 @@ concrete Skillからowning Workline rootを一意解決できなければ、conf
 
 1. Project rootが存在するdirectoryであることを確認する。
 2. Workline rootが存在するdirectoryであることを確認する。
-3. `<workline-root>/registry.md` を読み、必須4 rule IDと5 Skill IDを一意解決する。
-4. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。
-5. Git boundaryを確認する。
+3. 実行中のWorkline implementationがそのWorkline rootのものであることを確認する（`rules/git` のWorkline implementation。不一致なら何も書かずSTOP）。
+4. `<workline-root>/registry.md` を読み、必須4 rule IDと5 Skill IDを一意解決する。
+5. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。
+6. Git boundaryを確認する。
 
 Git boundary:
 
@@ -321,6 +332,7 @@ backfillはbootstrap / infrastructure責務であり、専用のmaintenance経�
 同path異内容: STOP
 再実行: idempotent
 lock: 成立済みProjectのexecution lockを取得して行う（他processが実行中なら project_operation_busy）
+起動: 対象Projectの中から <R>/run-workline.py backfill-bootstrap .（rules/git のWorkline implementation）
 ```
 
 backfillは通常のmaintenanceなので、Project開始の「初期commit必須・push不要」例外を適用しない。remoteがあればcommit後pushまで行う（clone先で利用可能である必要があるため）。
@@ -339,6 +351,7 @@ push destination承認先を持たない既存Projectも、ProjectSTARTの再実
 他のpending mutationがある: STOP（旧承認先向けの進行中operationを壊さない）
 lock: 成立済みProjectのexecution lockを取得して行う（他processが実行中なら project_operation_busy）
 再実行: idempotent
+起動: 対象Projectの中から <R>/run-workline.py pin-push-destination . --url <承認するlocator>（rules/git のWorkline implementation）
 ```
 
 承認先はGitが返したlocatorそのもの。`.git` の有無・trailing slash・case差・HTTPS/SSHを同一視しない。両方許可するなら人間が両方を明示する。

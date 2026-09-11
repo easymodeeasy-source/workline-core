@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 import unittest
 
-from helpers import WORKLINE_ROOT, WorklineTestCase, git
+from helpers import WORKLINE_ROOT, WorklineTestCase, git, launcher_command
 from workline import roadmap as rm
 from workline import start as st
 from workline.create import RelatedSpec
@@ -100,9 +99,8 @@ class EndToEndTests(WorklineTestCase):
 
     def test_cli_entry_points(self) -> None:
         root = self.new_dir()
-        env = dict(__import__("os").environ)
-        env["PYTHONPATH"] = str(WORKLINE_ROOT / "src")
-        run = lambda *args, cwd=WORKLINE_ROOT: subprocess.run([sys.executable, "-m", "workline.cli", *args], capture_output=True, text=True, encoding="utf-8", env=env, cwd=cwd)
+        # the canonical invocation: this Workline root's launcher, isolated and without bytecode, no PYTHONPATH
+        run = lambda *args, cwd=WORKLINE_ROOT: subprocess.run(launcher_command(WORKLINE_ROOT, *args), capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd)
         started = run("project-start", str(root), "--workline-root", str(WORKLINE_ROOT))
         self.assertEqual(started.returncode, 0, started.stdout + started.stderr)
         # an established Project is changed from inside it; validation below reads it from the Workline root

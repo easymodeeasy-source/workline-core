@@ -40,7 +40,7 @@
 | BL-005 | Review / achievement evidence durability | VERIFIED |
 | BL-006 | Read-only status/context command | OPEN |
 | BL-007 | Cold-start recovery performance | INVESTIGATE |
-| BL-008 | Python interpreter resolution | VERIFIED |
+| BL-008 | Python interpreter resolution | RESOLVED |
 | BL-009 | Historical deleted Related / must_read semantics | VERIFIED |
 | BL-010 | Generated artifact hygiene | VERIFIED |
 | BL-011 | Reusable migration procedure | OPEN |
@@ -168,7 +168,7 @@
 
 - ID: BL-008
 - Title: Python interpreter resolution
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: interface, procedure
 - Problem: 実装は `requires-python >=3.11` を要求するが、環境の既定 `python` がそれ未満の場合がある。READMEの起動手順は `python -m workline.cli` だけで、install方式や使うinterpreterを定めていないため、実行のたびに対応するinterpreterの探索とimport path（`PYTHONPATH` 等）の指定が必要になる。Roadmap / START等の操作にはCLI entryがなく、Python APIを直接呼ぶ必要もある。
 - Why it matters: Claude等のAIが毎回interpreter探索とimport path設定をやり直すことになり、誤ったinterpreterでの失敗や、どの実装コードが実行されたかの曖昧さが生じる。canonical implementation firstの原則上、実装を起動できなければSTOPになるため、起動手順の不安定さがそのまま作業停止につながる。smoke testとreal-project migrationの双方で都度の起動設定が必要になり、既定interpreterでは実装をimportできない失敗も発生した。
@@ -178,6 +178,7 @@
 - Human confirmation likely: yes（実行環境・launcher等のtooling構成の変更）
 - Self-hosting prerequisite: partial（BL-013 の runtime / development separation と関係する）
 - Evidence class: smoke test, real-project migration, code inspection
+- Resolution: Workline root直下のcanonical source launcher（`run-workline.py`）から起動する形を正式にした。installせずWorkline rootの `src/workline` を実行し、Python 3.11以上（exact versionは固定しない）とisolated invocation（`-I`、bytecodeを書かない）を要求する。launcherと実装内の照合は、実際にloadされたimplementationのoriginとconfigured Workline rootを比べ、不一致・証明不能は成立済みProjectのexecution lockより前に何も書かずSTOPする（Project開始・validate-projectも同様）。CLIの無いoperationは、同じprocessでactivateした後にだけAPIをimportする。ambient install・editable install・PYTHONPATHには依存せず、project.yaml schema・bootstrap・intent / event形式は変えず、既存Projectのbackfillは不要。committed / released versionやruntime / development separationは扱っていない（BL-013）。security sandboxではない。`rules/git` とcanonical Skills、READMEへ反映済み。
 
 ### BL-009 Historical deleted Related / must_read semantics
 

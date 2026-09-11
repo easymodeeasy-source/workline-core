@@ -59,7 +59,7 @@ Phase CREATE / CREATEのregistration coreはGit finalizerではない。呼び�
 
 CREATEがRoadmap / STARTのparent operationなしで直接起動された場合だけ、CREATE entrypoint自身がDirect Work Operation contextを生成し、その外側contextがpostcheck / commit / remoteありならpushまでを所有する。新しいSkillやroutingは増やさない。
 
-各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject context照合とProject execution lock取得の後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
+各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject context照合、Workline implementation照合、Project execution lock取得の後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
 
 ### Project context
 
@@ -83,6 +83,7 @@ contextはtop-level operation開始時に確定する。実行中にexecutorや�
 targetがestablished Projectか確認
 → invocation Project contextを解決
 → target Projectと照合（foreignならSTOP）
+→ Workline implementation照合（configured rootのimplementationでなければSTOP）
 → Project execution lock取得
 → pending mutation / Project stateを読む
 → mutation open / resume → effects → validation → commit / push
@@ -103,11 +104,132 @@ Project開始（初期化）はforeign mutationとは別のpre-project operation
 - invocation Project contextが、target以外の成立済みWorkline Projectではない
   （Workline root、Projectではないdirectory / Git repository、target自身やその配下からは実行できる）
 - targetが成立済みWorkline Projectの配下にない（nested Workline Projectは作らない）
+- 実行中のWorkline implementationが、project.yamlへ書くWorkline rootのものである（Workline implementation）
 ```
 
 Project開始のmutationは、その実行が対象rootに与えた許可の内側でだけopen / resume / 書込みできる。owner名だけでは許可されない。
 
 このcontextは、あるProject contextで作業中に別Projectのpathを誤ってmutation targetへ渡す事故を防ぐmechanical guardであり、security sandboxではない。意図的な作業directoryの変更（`cd` / `chdir`）や、Worklineを経由しないfilesystemへの直接書込みは保証の対象外である。
+
+### Workline implementation
+
+Workline operationは、supported interpreter上で、configured Workline rootに由来するimplementationだけが実行する。configured Workline root（以下 `R`）は、成立済みProjectでは `.workline/project.yaml` の `workline.root`、Project開始では明示されたWorkline rootである。
+
+interpreter identityとimplementation identityは別の要件である。
+
+```text
+interpreter     : Python 3.11以上（exact versionは要求しない）
+implementation  : <R>/src/workline（Rのworking tree）
+canonical entry : <R>/run-workline.py
+```
+
+implementationはinstallせず、runtime copyも持たない。ambient install・editable install・site-packagesのworklineはcanonical runtimeではない。Rのworking treeが更新されると、次に起動したcanonical processからその内容が実行される。
+
+CLI subcommandがあるoperationは、必ずlauncherから起動する。成立済みProjectのoperationはそのProjectの中から、Project開始はWorkline root等から起動する（Project context）。
+
+```text
+Windows: py -3 -I -B "<R>\run-workline.py" <command> ...
+POSIX:   python3 -I -B "<R>/run-workline.py" <command> ...
+```
+
+CLI subcommandが無いoperation（Roadmap、START、related maintenance、achievement等）はPython APIを使い、次のinvariantに従う。
+
+```text
+isolated Python processを開始
+→ 同じprocessで <R>/run-workline.py の activate() を実行
+→ activate PASS
+→ その後にだけ workline APIをimport
+→ operation
+```
+
+Windows PowerShell（5.1 / 7共通）:
+
+```powershell
+& {
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+    @'
+import runpy
+
+activate = runpy.run_path(r"<R>\run-workline.py")["activate"]
+activate()
+
+# only after activation:
+from workline import roadmap as rm, start as st
+
+# operation...
+'@ | py -3 -I -B -
+}
+```
+
+Windows PowerShell 5.1は、`$OutputEncoding` を明示しないとdriver本文の非ASCII文字を `?` に変えてPythonへ渡す。scriptblockの中で設定するので、呼び出し側の設定は変わらない。cmdにはAPI driverの正式な例を置かない（CLIはcmdでも使える）。
+
+POSIX:
+
+```sh
+python3 -I -B - <<'PY'
+import runpy
+
+activate = runpy.run_path(r"<R>/run-workline.py")["activate"]
+activate()
+
+# only after activation:
+from workline import roadmap as rm, start as st
+
+# operation...
+PY
+```
+
+`activate()` より前に `workline` をimportしない。activateはprocess-localであり、token・authorization・import path・環境変数・fileを別processへ引き継がない。子processでWorkline APIを使う場合は、その子processが自分でactivateする。activateはProject context・Workline implementation照合・Project execution lockの代わりではなく、各top-level operationはそれらを従来どおり評価する。
+
+`python -m workline.cli`、console script、`PYTHONPATH` の手作業設定、editable installを前提にしたimport、site-packagesのworklineの直接起動は、動いてもcanonicalではない。launcherやactivateが使えない場合はSTOPして報告し、これらへfallbackしない。
+
+`-I` は、`PYTHONPATH` を含む `PYTHON*` 環境変数、user site-packages（user側の `.pth` / usercustomize）、作業directory / script directory由来のimport pathの混入を抑える。system site-packagesとその `.pth`、sitecustomize、startup codeが追加するfinder、venvのsite-packagesは残り得る。`-I` はidentityの保証ではない。
+
+`-B` と、launcherがWorkline codeのimport前に設定する `sys.dont_write_bytecode` により、canonical runtimeはWorkline rootへPython bytecode cacheを書かない。
+
+identityを保証するのはorigin verificationである。launcherとactivateは次の順で検査する。
+
+```text
+Python version（3.11未満 → workline_python_unsupported）
+→ isolated mode（-Iなし → workline_invocation_not_isolated）
+→ bytecode書込みを無効化
+→ 既にloadされている workline / workline.* のoriginを全件検査
+→ <R>/src をimport sourceとして設定し、worklineをload
+→ load済みの workline / workline.* のoriginを全件再検査
+→ 作業directoryが成立済みProjectなら、その workline.root が R であることを照合
+→ CLIへdispatch / activateはreturn
+```
+
+PASS条件は、`workline.__path__` が `<R>/src/workline` だけの1要素であり、load済みの `workline` / `workline.*` のoriginがすべてその配下の `.py` であること。directoryの同一性は実体（real path / file identity）で判定し、文字列だけで比較しない。`<R>/src` をimport pathの先頭へ置くこと自体はidentityの証明ではない。
+
+```text
+workline_implementation_unverified  : originを一意に証明できない
+                                      （namespace / frozen / built-in / sourceless pyc / extension、出所の混在）
+workline_implementation_mismatch    : 単一のpackage directoryだが <R>/src/workline ではない
+workline_implementation_unavailable : <R>/src/workline が無い、またはloadできない
+```
+
+別rootのmoduleが既にloadされていても、sys.modulesから消して読み直さない。実行済みコードの副作用は取り消せないためSTOPする。同じRのmoduleが既にloadされている場合は受け入れる。
+
+launcherを経由しない経路でimplementationがimportされた場合も、implementation自身が、実際にloadされているimplementationとconfigured rootを次の時点で照合する。
+
+```text
+成立済みProjectへのstate-changing operation : Project context照合の後、Project execution lock取得の前
+Project開始                                  : pre-project contextの確認の後、registry validationとmutationの前
+                                               （実行中implementationのroot == 明示されたWorkline root）
+成立済みProjectのcanonical validation        : configured rootのimplementationでなければPASSさせない
+```
+
+照合に失敗したoperationは、execution lock・holder情報・mutation intent・event・relation・entityを作らず、Git add / commit / pushも行わない。Project contextの不一致とimplementationの不一致が両方ある場合は、Project context（`foreign_project_mutation`）を先に報告する。
+
+照合を回避するoverride（flag・引数・環境変数）は設けない。
+
+Project contextは「どのProjectへ書くか」、Workline implementationは「どのimplementationが書くか」、Project execution lockは「同時に動くwriterがいくつか」を決める。三者を混ぜない。
+
+これはsupported interpreterとconfigured rootのimplementationを取り違えないためのmechanical guardであり、security sandboxではない。選んだinterpreterのstartup code（`.pth` / sitecustomize）の実行そのもの、sys.modules・finder・照合処理の意図的な書き換え、driverやexecutorが実行する任意のコードは保証の対象外である。
+
+保証するのは、configured rootのworking treeのimplementationであることまでである。committed revision・main branch・clean tree・released version・process間のrevision一致・実行中にsourceが変更されないことは保証しない。
 
 ### Project execution lock
 
@@ -116,6 +238,7 @@ Project開始のmutationは、その実行が対象rootに与えた許可の内�
 ```text
 top-level operation開始
 → Project context照合（foreignならSTOP。lockを作らない）
+→ Workline implementation照合（STOPならlockを作らない）
 → lock取得（待たない）
 → pending mutation / Project state / push destination / dirty stateを読む
 → mutation open / resume / begin

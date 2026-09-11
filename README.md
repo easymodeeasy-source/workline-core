@@ -25,6 +25,85 @@ canonical Skillの現在の集合は `registry.md` の `workline-id: skills/*` �
 D:\AIproject\workline-core
 ```
 
+## Runtime
+
+Workline implementationはinstallせず、Workline rootのsourceをそのまま実行する。以下 `<R>` はconfigured Workline root（成立済みProjectでは `.workline/project.yaml` の `workline.root`）。正式な規則は `registry.md` の `rules/git`（Workline implementation）にある。
+
+```text
+Python      : 3.11以上（exact versionは固定しない）
+Windows     : py -3
+POSIX       : python3
+entry       : <R>/run-workline.py
+runtime源   : <R>/src/workline（working tree。install・venv・runtime依存なし）
+```
+
+CLIがあるoperationはlauncherから起動する。`-I -B` は必須。
+
+```text
+Windows: py -3 -I -B "<R>\run-workline.py" <command> ...
+POSIX:   python3 -I -B "<R>/run-workline.py" <command> ...
+```
+
+CLIが無いoperation（Roadmap / START等）はPython APIを使う。isolated processで先に `<R>/run-workline.py` の `activate()` を実行し、その後にだけ `workline` をimportする。activateはそのprocessだけで有効で、別processへは何も引き継がない。
+
+Windows PowerShell（5.1 / 7）:
+
+```powershell
+& {
+    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+    @'
+import runpy
+
+activate = runpy.run_path(r"<R>\run-workline.py")["activate"]
+activate()
+
+# only after activation:
+from workline import roadmap as rm, start as st
+
+# operation...
+'@ | py -3 -I -B -
+}
+```
+
+POSIX:
+
+```sh
+python3 -I -B - <<'PY'
+import runpy
+
+activate = runpy.run_path(r"<R>/run-workline.py")["activate"]
+activate()
+
+# only after activation:
+from workline import roadmap as rm, start as st
+
+# operation...
+PY
+```
+
+正式な起動ではないもの（動いてもcanonicalではない）:
+
+```text
+python -m workline.cli ...
+workline（console script）
+PYTHONPATHの手作業設定
+editable install（pip install -e）を前提にしたimport
+site-packagesのworklineの直接起動
+```
+
+保証すること:
+
+```text
+Python 3.11以上で起動する
+実際にloadされたworkline（全moduleのorigin）が <R>/src/workline であることを検査する
+成立済みProjectの操作は、そのProjectのconfigured rootのimplementationでなければSTOPし、lockも書込みも作らない
+```
+
+`-I` はPYTHONPATH・user site-packages・作業directory由来のimportを抑えるが、system site-packagesやその `.pth` は残り得る。identityを保証するのは `-I` ではなく、load済みmoduleのorigin検証である。これはsecurity sandboxではない。`-B`（とlauncher自身の設定）により、canonical runtimeはWorkline rootへbytecode cacheを書かない。
+
+保証しないこと（`BACKLOG.md` BL-013）: committed revision・main branch・clean tree・released version・dev / runtime分離・process間のrevision一致・実行中のsource変更。`<R>` のworking treeが、未commitの変更も含めてそのまま実行される。
+
 ## Claude Codeアプリ運用
 
 ### 新規Project
@@ -95,8 +174,10 @@ Skill追加の影響範囲  : Workline rootのみ
 
 bootstrap導入前に初期化されたProjectには、maintenance経路でbootstrapだけを追加する。ProjectSTARTの再実行では行わない（established Projectをpre-project経路へ入れない）。
 
-```bash
-python -m workline.cli backfill-bootstrap <project-root>
+対象Projectを直接開き、作業directoryをProject内にして実行する（`<R>` はそのProjectのconfigured Workline root。Runtime参照）。
+
+```powershell
+py -3 -I -B "<R>\run-workline.py" backfill-bootstrap .
 ```
 
 ```text
@@ -113,10 +194,10 @@ backfillは通常のmaintenanceなので、Project開始の「初期commit必須
 
 ### Push destination pin
 
-remoteがあるProjectのpushは、Project正本が承認したdestinationと一致するときだけ行う（`rules/git`）。承認先を持たない既存Projectは、push系operationで `push_destination_unpinned` としてSTOPする。1回だけ次を実行する。
+remoteがあるProjectのpushは、Project正本が承認したdestinationと一致するときだけ行う（`rules/git`）。承認先を持たない既存Projectは、push系operationで `push_destination_unpinned` としてSTOPする。対象Projectを直接開き、Project内で1回だけ次を実行する。
 
-```bash
-python -m workline.cli pin-push-destination <project-root> --url <approved push URL>
+```powershell
+py -3 -I -B "<R>\run-workline.py" pin-push-destination . --url <approved push URL>
 ```
 
 ```text
@@ -132,10 +213,10 @@ python -m workline.cli pin-push-destination <project-root> --url <approved push 
 
 承認先は `git remote get-url --push --all` が返したlocatorそのものを使う。`.git` の有無・trailing slash・case差・HTTPS/SSHの違いをWorklineが同一視することはない（サーバによっては別repositoryになり得るため）。両方を使うなら `--url` を複数渡して人間が明示する。表記が違うだけでSTOPすることは、別repositoryを同一と誤認しないための意図した挙動である。
 
-新規Projectはこの承認をProjectSTART時に行える。
+新規Projectはこの承認をProjectSTART時に行える（Workline rootから実行する）。
 
-```bash
-python -m workline.cli project-start <project-root> --workline-root <workline-root> --expected-push-url <approved push URL>
+```powershell
+py -3 -I -B "<R>\run-workline.py" project-start <project-root> --workline-root <R> --expected-push-url <approved push URL>
 ```
 
 remoteを正式に変更する場合の順序:
@@ -161,6 +242,8 @@ canonical implementationが存在する処理を、Skill実行者が独自に再
 
 SKILL本文を根拠に `.workline` 構造・project.yaml・bootstrap・registry parsingを手作業で再現しない。手組みした構造は未検証の再実装であり、canonical implementationからはbroken / partialとして扱われる。
 
+implementationは [Runtime](#runtime) の起動形だけで起動する。`python -m workline.cli`・PYTHONPATHの手組み・editable installへfallbackしない。
+
 ## Status
 
 - design review: converged for implementation
@@ -171,6 +254,8 @@ SKILL本文を根拠に `.workline` 構造・project.yaml・bootstrap・registry
 
 ## Tests
 
-```bash
-python -m pytest tests -q
+Windowsの開発環境では、ambientの `python` ではなくPython launcherで3.11以上を選ぶ（そのinterpreterにpytestが必要）。これはtestの実行例であり、Workline runtimeの起動方法ではない。
+
+```powershell
+py -3 -m pytest tests -q
 ```

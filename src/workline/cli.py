@@ -7,6 +7,7 @@ import sys
 from .bootstrap import backfill_bootstrap
 from .create import RelatedSpec, WorkSpec, create_standalone_work
 from .errors import StopError
+from .implementation import require_configured_implementation
 from .project_start import project_start
 from .push_pin import pin_push_destination
 from .registry import validate_registry
@@ -16,6 +17,19 @@ from .validate import validate_project
 
 def _related(items: list[str] | None, rel_type: str) -> list[RelatedSpec]:
     return [RelatedSpec(rel_type, target) for target in (items or [])]
+
+
+def _require_project_implementation(store: ProjectStore) -> None:
+    """A Project's canonical validation never PASSes under another Workline implementation.
+
+    A project.yaml without a readable Workline root cannot PASS either; its
+    validation reports that problem itself.
+    """
+    try:
+        configured_root = store.workline_root()
+    except StopError:
+        return
+    require_configured_implementation(configured_root)
 
 
 def _tolerant_output() -> None:
@@ -115,7 +129,9 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         if args.command == "validate-project":
-            problems = validate_project(ProjectStore(Path(args.project_root)))
+            store = ProjectStore(Path(args.project_root))
+            _require_project_implementation(store)
+            problems = validate_project(store)
             if not problems:
                 print("project validation: PASS")
                 return 0

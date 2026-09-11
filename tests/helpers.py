@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import locale
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +13,12 @@ import sys
 import tempfile
 from typing import Iterator
 import unittest
+
+if sys.version_info < (3, 11):
+    raise RuntimeError(
+        "the Workline tests need Python 3.11 or newer; run them with a supported interpreter "
+        "(Windows: py -3 -m pytest tests -q)"
+    )
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
@@ -24,6 +31,7 @@ from workline.project_start import project_start  # noqa: E402
 from workline.store import ProjectStore  # noqa: E402
 
 WORKLINE_ROOT = Path(__file__).resolve().parents[1]
+LAUNCHER_NAME = "run-workline.py"
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "workline-test",
@@ -42,6 +50,49 @@ def _force_remove(function, path, _exc_info):
 def rmtree(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path, onerror=_force_remove)
+
+
+def copy_workline_root(dest: Path, *, registry: str | None = None) -> Path:
+    """Another Workline root: this root's registry, canonical Skills, launcher and ``src/workline`` sources.
+
+    Nothing is installed and no bytecode, packaging metadata or tests come
+    along, so the copy runs from source like a fresh checkout. ``registry``
+    replaces its registry.md.
+    """
+    dest = Path(dest)
+    dest.mkdir(parents=True)
+    shutil.copy2(WORKLINE_ROOT / "registry.md", dest / "registry.md")
+    shutil.copy2(WORKLINE_ROOT / LAUNCHER_NAME, dest / LAUNCHER_NAME)
+    shutil.copytree(WORKLINE_ROOT / ".claude" / "skills", dest / ".claude" / "skills")
+    package = dest / "src" / "workline"
+    package.mkdir(parents=True)
+    for source in sorted((WORKLINE_ROOT / "src" / "workline").glob("*.py")):
+        shutil.copy2(source, package / source.name)
+    if registry is not None:
+        (dest / "registry.md").write_text(registry, encoding="utf-8")
+    return dest.resolve()
+
+
+def launcher_command(
+    root: Path, *args: object, python: object = sys.executable, flags: tuple[str, ...] = ("-I", "-B")
+) -> list[str]:
+    """The canonical CLI invocation of ``root``'s launcher (isolated, no bytecode), run by ``python``."""
+    return [str(python), *flags, str(Path(root) / LAUNCHER_NAME), *(str(arg) for arg in args)]
+
+
+def run_python(
+    command: list[str], *, cwd: Path, stdin: str | None = None, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    """Run a Python process from ``cwd``; ``stdin`` is sent as UTF-8 source text and output is decoded leniently."""
+    feed = {"stdin": subprocess.DEVNULL} if stdin is None else {"input": stdin.encode("utf-8")}
+    completed = subprocess.run(command, cwd=str(cwd), capture_output=True, env=env, timeout=600, **feed)
+    encoding = locale.getpreferredencoding(False)
+    return subprocess.CompletedProcess(
+        completed.args,
+        completed.returncode,
+        completed.stdout.decode(encoding, "replace"),
+        completed.stderr.decode(encoding, "replace"),
+    )
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:

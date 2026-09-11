@@ -357,4 +357,6 @@ pushする場合の宛先は `rules/git` のpush destinationに従う。各Roadm
 
 Roadmap operationは `rules/git` のProject contextに従い、対象Projectのcontextから実行する。invocation Project contextが対象Projectと一致しなければ、lockを取得する前に `foreign_project_mutation` でSTOPし、何も書かない。
 
+Roadmap operationにはCLIが無い。`rules/git` のWorkline implementationに従い、対象Projectの中でisolated Python processを開始し、同じprocessで `<R>/run-workline.py` の `activate()` を実行してから、RoadmapのPython APIをimportする（R = configured Workline root）。Project contextの照合の後、実行中のimplementationがconfigured rootのものでなければ、lockを取得する前にSTOPし、何も書かない。PYTHONPATHの手組みや別のimplementationへfallbackしない。
+
 Roadmap operationは `rules/git` のProject execution lockを取得してから、Roadmap / Phase / Work state・dependency・pending mutation・push destinationを読む。lock取得前に読んだWorkline structural stateをwrite判断へ使い回さない。Phase CREATE / CREATEは同じlockとmutationへ参加し、lockを取り直さない。STARTへのhandoffはRoadmap operationが戻ってlockを解放した後に行う。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。

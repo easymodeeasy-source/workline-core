@@ -96,6 +96,19 @@ registry validation / Skill inventory / stable ID解決
 
 canonical implementationが使用不能な場合は、manual fallbackへ進まずSTOPして報告する。
 
+implementationの起動は `rules/git` のWorkline implementationに従う。`R` は `.workline/project.yaml` の `workline.root`。
+
+```text
+CLIがあるoperation（registry validation等）
+→ Windows: py -3 -I -B "<R>\run-workline.py" <command> ...
+→ POSIX:   python3 -I -B "<R>/run-workline.py" <command> ...
+
+CLIが無いoperation（委譲先Skillが使うPython API）
+→ isolated processを開始し、同じprocessで <R>/run-workline.py の activate() を実行してから workline をimportする
+```
+
+`python -m workline.cli`、PYTHONPATHの手組み、editable installを前提にしたimportへfallbackしない。`workline_python_unsupported`・`workline_invocation_not_isolated`・`workline_implementation_*` のSTOPは報告して止まる。
+
 ## Mutation / Git
 
 routerは自身ではdomain writeを行わず、Git finalizerでもない。

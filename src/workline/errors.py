@@ -10,6 +10,9 @@ The hierarchy mirrors the stop contracts of ``rules/git``:
 * ``ProjectOperationBusy``   another process holds the Project execution lock
 * ``ProjectOperationNested`` a top-level operation started inside a running one
 * ``ForeignProjectMutation`` an operation targets a Project other than the one it runs in
+* ``PythonUnsupported``      the interpreter is older than the Python Workline requires
+* ``ImplementationUnverified`` the origin of the running implementation cannot be proven
+* ``ImplementationMismatch`` the running implementation is not the configured Workline root's
 """
 
 from __future__ import annotations
@@ -92,3 +95,39 @@ class ForeignProjectMutation(StopError):
         super().__init__(message, code="foreign_project_mutation")
         self.context_root = context_root
         self.target_root = target_root
+
+
+class PythonUnsupported(StopError):
+    """The interpreter is older than the Python version Workline requires."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="workline_python_unsupported")
+
+
+class ImplementationUnverified(StopError):
+    """No single source origin of the running Workline implementation can be proven."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="workline_implementation_unverified")
+
+
+class ImplementationMismatch(StopError):
+    """The running Workline implementation is not the one of the configured Workline root."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="workline_implementation_mismatch")
+
+
+_IMPLEMENTATION_ERRORS = {
+    "workline_python_unsupported": PythonUnsupported,
+    "workline_implementation_unverified": ImplementationUnverified,
+    "workline_implementation_mismatch": ImplementationMismatch,
+}
+
+
+def implementation_error(problem: Any) -> StopError:
+    """The STOP for a :class:`workline.implementation.IdentityProblem`."""
+    error_class = _IMPLEMENTATION_ERRORS.get(problem.code)
+    if error_class is None:
+        return StopError(problem.message, code=problem.code)
+    return error_class(problem.message)

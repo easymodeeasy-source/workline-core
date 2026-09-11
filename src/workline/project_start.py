@@ -32,6 +32,7 @@ from .bootstrap import (
 from .context import _pre_project_authorization, require_pre_project_context
 from .destination import DEFAULT_REMOTE, resolve_active_push_locator
 from .errors import StopError
+from .implementation import require_configured_implementation
 from .mutation import Effect, MutationController, WriteScope, abandon_on_stop
 from .registry import validate_registry
 from .store import (
@@ -169,6 +170,9 @@ def project_start(
     # and never a Workline Project inside an established one, decided before
     # anything is written.
     require_pre_project_context(root)
+    # Workline implementation (rules/git): the implementation that writes this
+    # Workline root into project.yaml must be that root's own.
+    require_configured_implementation(workline)
     _registry_or_stop(workline)
 
     boundary = _git_boundary(root)

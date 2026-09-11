@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-from helpers import WORKLINE_ROOT, WorklineTestCase, git
+from helpers import WORKLINE_ROOT, WorklineTestCase, copy_workline_root, git, launcher_command, run_python
 from workline import gitcmd, gitops
 from workline.errors import StopError
 from workline.mutation import MutationController
@@ -195,10 +195,11 @@ class ProjectStartTests(WorklineTestCase):
 
     def test_registry_failure_stops_before_any_write(self) -> None:
         root = self.new_dir()
-        bad_root = self.new_dir("bad-workline")
-        with self.assertRaises(StopError) as ctx:
-            project_start(root, bad_root)
-        self.assertEqual(ctx.exception.code, "registry_invalid")
+        # a Workline root with its own implementation but a broken registry, run through its own launcher
+        bad_root = copy_workline_root(self.tmp / "bad-workline", registry="# not a Workline registry\n")
+        result = run_python(launcher_command(bad_root, "project-start", root, "--workline-root", bad_root), cwd=bad_root)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("STOP [registry_invalid]", result.stdout)
         self.assertEqual(list(root.iterdir()), [])
 
 

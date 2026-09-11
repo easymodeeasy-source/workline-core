@@ -213,13 +213,15 @@ START caller
 → START owns Git
 
 Direct standalone invocation
-→ CREATE entrypointがProject contextを照合し（foreignならforeign_project_mutationでSTOP）、Project execution lockを取得
+→ CREATE entrypointがProject contextを照合し（foreignならforeign_project_mutationでSTOP）、Workline implementationを照合し（configured rootのimplementationでなければSTOP）、Project execution lockを取得
 → CREATE entrypointがDirect Work Operation mutationを開始
 → registration coreを同mutationで実行
 → entrypoint contextがpostcheck / commit / remoteありなら承認先へpush
 ```
 
-Roadmap / STARTから呼ばれるregistration coreは、呼び出し元operationが保持するProject execution lockの内側で実行し、lockを取り直さない。
+Direct standalone invocationは `create-work` CLIで起動する。`rules/git` のWorkline implementationに従い、対象Projectの中から `py -3 -I -B "<R>\run-workline.py" create-work . --name <name> --desired-state <state>`（POSIXは `python3 -I -B "<R>/run-workline.py" create-work ...`、R = configured Workline root）を使う。
+
+Roadmap / STARTから呼ばれるregistration coreは、呼び出し元operationがactivateしたprocessの中で、そのoperationが保持するProject execution lockの内側で実行し、lockを取り直さない。
 
 途中失敗後は同じmutation ID / Work ID / relation IDをresumeする。新IDで重複CREATEしない。
 

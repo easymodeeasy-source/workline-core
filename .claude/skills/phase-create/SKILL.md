@@ -116,7 +116,7 @@ Phase CREATE自身が `planned_next` / `requires_completion` / `derived` / `retu
 
 `rules/git` に従う。
 
-Phase CREATEは独立Git operation ownerではない。Roadmapのparent mutationへ参加し、Mutation Controller経由で書く。RoadmapがProject contextの照合を通って保持するProject execution lockの内側で実行し、照合もlockの取得もやり直さない。
+Phase CREATEは独立Git operation ownerではない。Roadmapのparent mutationへ参加し、Mutation Controller経由で書く。RoadmapがProject contextとWorkline implementationの照合を通って保持するProject execution lockの内側で、Roadmapがactivateしたprocessの中で実行し、照合もlockの取得もやり直さない。
 
 途中失敗後は同じmutation context / Phase IDをresumeする。新Phase IDを発行して重複作成しない。
 
