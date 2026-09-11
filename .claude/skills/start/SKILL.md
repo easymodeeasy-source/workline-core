@@ -279,6 +279,23 @@ Phase completeはeventではなく生成する。
 
 成立しないWorkを完了扱いにするためdesired stateを書き換えない。
 
+### Work result
+
+Work resultには、作成・更新したresultと、意図的に削除したtracked fileの両方があり得る。両者は別々に宣言する。
+
+```text
+通常result   → 完了時にfilesystem上に存在すること
+deletion result → 明示宣言し、tracked fileであり、完了時に不存在であること
+```
+
+存在しないはずのresultを「たぶん削除された」と推測しない。宣言のないmissing resultは未達成として扱う。
+
+Workのchanged result集合は「通常result ∪ deletion result」とする。したがってmust_update / applicable conditional_must_updateのtargetは、更新でも意図的削除でも満たせる。realizesはtarget実在を要求する意味のままで、deletionでは満たされない。
+
+deletion resultも通常resultと同じくcurrent START operation-owned changeとして扱う。pre-existing dirty保護（START開始前から削除されていたtracked fileを今回の成果として横取りしない）と、exact pathでのGit finalizationを同じく受ける。
+
+directory名をdeletion resultとして宣言しない。実際にtrackedされているfile pathを列挙する。
+
 ## Future relation maintenance
 
 START内でbranch / fix / return計画を変えた場合、STARTがWork間future relation正規化の意味owner。

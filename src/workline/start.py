@@ -51,8 +51,21 @@ LEDGER_FILES = (
 
 @dataclass(frozen=True)
 class Completed:
+    """A finished Work and the changes it owns.
+
+    ``result_paths`` are the files the Work created or modified; they must
+    exist when it completes. ``deleted_paths`` are tracked files the Work
+    deliberately removed; they must be absent and must have been tracked.
+    The two are declared separately on purpose — a result path that has gone
+    missing is a failed Work, never an inferred deletion.
+
+    ``deleted_paths`` is last so the existing positional form
+    ``Completed(paths, message)`` keeps working.
+    """
+
     result_paths: tuple[str, ...] = ()
     message: str | None = None
+    deleted_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -183,10 +196,22 @@ def _registry_ids(root) -> set[str]:
         return set()
 
 
-def completion_precheck(store: ProjectStore, view: ProjectView, work: Entity, result_paths: tuple[str, ...]) -> None:
-    """Work completion precheck (mechanically checkable part of the spec list)."""
+def completion_precheck(
+    store: ProjectStore,
+    view: ProjectView,
+    work: Entity,
+    result_paths: tuple[str, ...],
+    deleted_paths: tuple[str, ...] = (),
+) -> None:
+    """Work completion precheck (mechanically checkable part of the spec list).
+
+    The Work's changed set is ``result_paths | deleted_paths``, so deleting a
+    ``must_update`` target counts as having updated it. ``realizes`` keeps its
+    meaning untouched: it asks whether the target exists, so a deletion can
+    never satisfy it.
+    """
     problems: list[str] = []
-    paths = set(result_paths)
+    paths = set(result_paths) | set(deleted_paths)
     for relation in view.related_from(work.id, "must_update"):
         if relation.to not in paths:
             problems.append(f"must_update not satisfied: {relation.to}")
@@ -203,6 +228,15 @@ def completion_precheck(store: ProjectStore, view: ProjectView, work: Entity, re
     for path in result_paths:
         if not (store.root / path).exists():
             problems.append(f"result path missing: {path}")
+    overlap = sorted(set(result_paths) & set(deleted_paths))
+    if overlap:
+        problems.append("declared both as a result and as a deletion: " + ", ".join(overlap))
+    for path in deleted_paths:
+        if (store.root / path).exists():
+            problems.append(f"deleted path still exists: {path}")
+        if not gitcmd.tracked_file(store.root, path):
+            # never tracked, or a directory standing in for the files under it
+            problems.append(f"deleted path is not a tracked file: {path}")
     structural = validate_structure(view)
     if structural:
         problems.append("structure invalid: " + problems_text(structural))
@@ -333,11 +367,16 @@ class _Session:
     # completion ------------------------------------------------------------
     def _complete(self, view: ProjectView, work: Entity, outcome: Completed) -> StartResult:
         result_paths = tuple(p.replace("\\", "/") for p in outcome.result_paths)
-        completion_precheck(self.store, view, work, result_paths)
-        if result_paths:
+        deleted_paths = tuple(p.replace("\\", "/") for p in outcome.deleted_paths)
+        completion_precheck(self.store, view, work, result_paths, deleted_paths)
+        # Created, modified and deleted results are one owned set: they are
+        # protected from pre-existing changes together and finalized in the
+        # same commit, by exact path.
+        owned = sorted(set(result_paths) | set(deleted_paths))
+        if owned:
             preexisting = gitops.record_preexisting_dirty(self.mutation, self.store.root)
-            gitops.ensure_separable(preexisting, list(result_paths))
-            self._commit(f"{work.id}:results", outcome.message or f"feat(workline): {work.display} {work.name}", list(result_paths), include_canonical=False)
+            gitops.ensure_separable(preexisting, owned)
+            self._commit(f"{work.id}:results", outcome.message or f"feat(workline): {work.display} {work.name}", owned, include_canonical=False)
         self._lifecycle(work, ["work_target_removed", "work_completed"])
         self._commit(f"{work.id}:finalize", f"chore(workline): complete {work.display}", [])
         after = ProjectView.load(self.store)

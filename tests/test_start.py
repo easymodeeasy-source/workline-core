@@ -5,7 +5,7 @@ import unittest
 from helpers import WorklineTestCase, completing_executor, git, scripted_executor
 from workline import roadmap as rm
 from workline import start as st
-from workline.create import RelationSpec, WorkSpec, create_standalone_work
+from workline.create import RelatedSpec, RelationSpec, WorkSpec, create_standalone_work
 from workline.errors import ReconcileRequired, SpecViolation, StopError
 from workline.mutation import MutationController
 from workline.ops import Replan
@@ -359,3 +359,197 @@ class IntegrationOwnershipTests(WorklineTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DeletionResultTests(WorklineTestCase):
+    """A Work may own the removal of a tracked file, not only its creation."""
+
+    def _phase(self, store, works=None, **kwargs):
+        roadmap = self.simple_roadmap(store)
+        entry = self.simple_entry(store, roadmap.phase_ids["a"], works, **kwargs)
+        return roadmap, entry
+
+    def _phase_with_related(self, store, related):
+        roadmap = self.simple_roadmap(store)
+        design = rm.PhaseEntryDesign(
+            {"w1": rm.WorkDesign("W1", "one", related)},
+            rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
+        )
+        return rm.enter_phase(store, roadmap.phase_ids["a"], design)
+
+    def _with_tracked(self, store, files, message="seed tracked files"):
+        for name, text in files.items():
+            path = store.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        git(store.root, "add", "--", *files)
+        git(store.root, "commit", "-m", message)
+
+    def _deleting_executor(self, store, *, delete=(), write=None, declare=None):
+        """Executor that removes tracked files and reports them as results."""
+
+        def execute(ctx: st.ExecutionContext):
+            for name in delete:
+                (store.root / name).unlink()
+            for name, text in (write or {}).items():
+                (store.root / name).write_text(text, encoding="utf-8")
+            return st.Completed(
+                result_paths=tuple(write or ()),
+                deleted_paths=tuple(delete if declare is None else declare),
+            )
+
+        return execute
+
+    def test_deletion_only_completion(self) -> None:
+        store = self.new_project(remote=True)
+        self._with_tracked(store, {"obsolete.txt": "gone soon\n"})
+        git(store.root, "push", "-q", "origin", "main")
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+
+        result = st.start(store, w1, "single-work", self._deleting_executor(store, delete=("obsolete.txt",)))
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            events_of(store, w1),
+            ["work_started", "work_target_added", "work_target_removed", "work_completed"],
+        )
+        self.assertFalse((store.root / "obsolete.txt").exists())
+        self.assertNotIn("obsolete.txt", git(store.root, "ls-files"))
+        self.assertEqual(git(store.root, "show", "--name-status", "--format=", "HEAD~1").split(), ["D", "obsolete.txt"])
+        self.assertEqual(MutationController(store).list_pending(), [])
+        self.assertEqual(validate_project(store), [])
+        # the deletion reached the remote together with the rest of the Work
+        self.assertEqual(
+            git(store.root, "rev-parse", "HEAD").strip(),
+            git(self.remote_path(), "rev-parse", "main").strip(),
+        )
+
+    def test_modification_and_deletion_are_one_result(self) -> None:
+        store = self.new_project()
+        self._with_tracked(store, {"changed.txt": "before\n", "obsolete.txt": "gone soon\n"})
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+
+        result = st.start(
+            store,
+            w1,
+            "single-work",
+            self._deleting_executor(store, delete=("obsolete.txt",), write={"changed.txt": "after\n"}),
+        )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            set(git(store.root, "show", "--name-status", "--format=", "HEAD~1").split()),
+            {"M", "changed.txt", "D", "obsolete.txt"},
+        )
+        self.assertEqual((store.root / "changed.txt").read_text(encoding="utf-8"), "after\n")
+        self.assertEqual(validate_project(store), [])
+
+    def test_a_declared_deletion_that_still_exists_fails(self) -> None:
+        store = self.new_project()
+        self._with_tracked(store, {"obsolete.txt": "still here\n"})
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+
+        def executor(ctx: st.ExecutionContext):
+            return st.Completed(deleted_paths=("obsolete.txt",))  # never actually removed
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(store, w1, "single-work", executor)
+        self.assertEqual(ctx.exception.code, "completion_precheck_failed")
+        self.assertIn("deleted path still exists", str(ctx.exception))
+        self.assertNotIn("work_completed", events_of(store, w1))
+
+    def test_a_never_tracked_deletion_is_refused(self) -> None:
+        store = self.new_project()
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+
+        def executor(ctx: st.ExecutionContext):
+            return st.Completed(deleted_paths=("never-existed.txt",))
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(store, w1, "single-work", executor)
+        self.assertEqual(ctx.exception.code, "completion_precheck_failed")
+        self.assertIn("not a tracked file", str(ctx.exception))
+        self.assertNotIn("work_completed", events_of(store, w1))
+
+    def test_a_directory_is_not_a_deletion_result(self) -> None:
+        store = self.new_project()
+        self._with_tracked(store, {"skills/a/SKILL.md": "a\n", "skills/b/SKILL.md": "b\n"})
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(
+                store,
+                w1,
+                "single-work",
+                self._deleting_executor(store, delete=("skills/a/SKILL.md", "skills/b/SKILL.md"), declare=("skills",)),
+            )
+        self.assertEqual(ctx.exception.code, "completion_precheck_failed")
+        self.assertIn("not a tracked file", str(ctx.exception))
+
+        # naming the tracked files themselves is what the Work must declare
+        result = st.start(
+            store,
+            w1,
+            "single-work",
+            self._deleting_executor(store, declare=("skills/a/SKILL.md", "skills/b/SKILL.md")),
+        )
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(git(store.root, "ls-files", "--", "skills").strip(), "")
+
+    def test_a_missing_result_path_is_still_a_failure(self) -> None:
+        """Deletion support must not soften the rule for ordinary results."""
+        store = self.new_project()
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+
+        def executor(ctx: st.ExecutionContext):
+            return st.Completed(result_paths=("never-written.txt",))
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(store, w1, "single-work", executor)
+        self.assertEqual(ctx.exception.code, "completion_precheck_failed")
+        self.assertIn("result path missing", str(ctx.exception))
+        self.assertNotIn("work_completed", events_of(store, w1))
+
+    def test_a_pre_existing_deletion_is_not_taken_over(self) -> None:
+        store = self.new_project()
+        self._with_tracked(store, {"someone-elses.txt": "not mine\n"})
+        roadmap, entry = self._phase(store)
+        w1 = entry.work_ids["w1"]
+        # removed before START runs: another actor's change, not this Work's
+        (store.root / "someone-elses.txt").unlink()
+
+        def executor(ctx: st.ExecutionContext):
+            return st.Completed(deleted_paths=("someone-elses.txt",))
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(store, w1, "single-work", executor)
+        self.assertEqual(ctx.exception.code, "dirty_overlap")
+        self.assertNotIn("work_completed", events_of(store, w1))
+        self.assertIn("someone-elses.txt", git(store.root, "status", "--porcelain"))
+
+    def test_deleting_a_must_update_target_satisfies_it(self) -> None:
+        store = self.new_project()
+        self._with_tracked(store, {"doomed.md": "obsolete doc\n"})
+        entry = self._phase_with_related(store, (RelatedSpec("must_update", "doomed.md"),))
+        w1 = entry.work_ids["w1"]
+
+        result = st.start(store, w1, "single-work", self._deleting_executor(store, delete=("doomed.md",)))
+        self.assertEqual(result.status, "completed")
+        self.assertNotIn("doomed.md", git(store.root, "ls-files"))
+
+    def test_a_deleted_path_does_not_satisfy_realizes(self) -> None:
+        store = self.new_project()
+        self._with_tracked(store, {"target.md": "realized\n"})
+        entry = self._phase_with_related(store, (RelatedSpec("realizes", "target.md"),))
+        w1 = entry.work_ids["w1"]
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(store, w1, "single-work", self._deleting_executor(store, delete=("target.md",)))
+        self.assertEqual(ctx.exception.code, "completion_precheck_failed")
+        self.assertIn("realizes target does not exist", str(ctx.exception))

@@ -86,6 +86,19 @@ def tracked_under(repo: Path, relpath: str) -> list[str] | None:
     return sorted(p.replace("\\", "/") for p in result.stdout.split("\0") if p)
 
 
+def tracked_file(repo: Path, relpath: str) -> bool:
+    """Whether ``relpath`` is tracked as exactly this file.
+
+    The index is the authority, not the worktree: a tracked file the executor
+    unlinked still has its index entry until the deletion is staged, which is
+    what lets a completed Work declare it as a deletion result. A directory
+    lists its children instead of itself and is therefore never accepted in
+    place of the files it holds.
+    """
+    tracked = tracked_under(repo, relpath)
+    return tracked == [relpath.replace("\\", "/")]
+
+
 def current_branch(repo: Path) -> str | None:
     result = run_git(repo, "symbolic-ref", "--short", "HEAD", check=False)
     if not result.ok:
