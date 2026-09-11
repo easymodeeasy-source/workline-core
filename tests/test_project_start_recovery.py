@@ -783,6 +783,23 @@ class UnsafeResidueTests(RecoveryTestCase):
                 self.skipTest("file symlinks are refused here")
             self.assertNotRetried(root)
 
+    def test_a_dangling_workline_link_is_not_retried(self) -> None:
+        root = self.new_dir()
+        target = self.tmp / "workline-link-target"
+        target.mkdir()
+        if not self.directory_link(target, root / ".workline"):
+            self.skipTest("directory links are refused here")
+        target.rmdir()  # the link now points nowhere
+        self.assertFalse((root / ".workline").exists())
+        self.assertTrue(os.path.lexists(root / ".workline"))
+
+        self.assertNotRetried(root)
+
+        self.assertFalse((root / ".git").exists())
+        self.assertFalse(target.exists())
+        self.assertEqual(sorted(entry.name for entry in root.iterdir()), [".workline"])
+        self.assertEqual(MutationController(ProjectStore(root)).list_records(), [])
+
     def test_records_left_in_a_folder_that_has_moved_are_not_retried(self) -> None:
         before_move = self.new_dir("before-move")
         path = self.abandoned_start(before_move)

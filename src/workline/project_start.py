@@ -391,7 +391,9 @@ def project_start(
         p for p in controller.list_pending() if p["owner"] == OWNER and p["invocation"] == invocation
     ]
 
-    if store.workline.exists() and not pending_match:
+    # Presence is lexical: a .workline that is a dangling or otherwise indirect
+    # link is still there, and is classified like any other partial .workline.
+    if os.path.lexists(store.workline) and not pending_match:
         if boundary == "existing" and is_established_project(store):
             if expected_push_url is not None:
                 raise StopError(
