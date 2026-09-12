@@ -83,6 +83,8 @@ STARTにはCLIが無い。`rules/git` のWorkline implementationに従い、対�
 
 terminal Work（completed / cancelled / plan_excluded）のRelatedは当時のhistorical evidenceであり、現在のread obligationではない。targetが後から正式に削除されても、その事実だけでProject structureをinvalidとしない。
 
+他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetのうち、今回の実行で壊された場合に元へ戻せないもの（directory / link / 読めないfile等）があるときは、lifecycle eventやexecutorより前に `related_target_unprotectable` でSTOPする。壊してから報告する順序にしない。
+
 ## Generated Work lifecycle
 
 Unstarted開始:
@@ -317,7 +319,7 @@ deletion resultも通常resultと同じくcurrent START operation-owned change�
 
 directory名をdeletion resultとして宣言しない。実際にtrackedされているfile pathを列挙する。
 
-deletion resultは、他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを消さない。実行直後にこの喪失を検出し、消えたtargetをexecutor開始前の状態（未commitのローカル内容を含む）へ戻したうえで `related_target_removed` でSTOPする。STOPするだけで消えたまま残さない。戻すのは消えた保護対象pathだけであり、他の変更やworking tree全体を戻さない。未開始Workの計画修正はRoadmapのRelated maintenanceで行い、terminal Workのhistorical Relatedは書き換えない。
+deletion resultは、他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを消さない。executorが正常に終わっても例外で終わっても、その直後に喪失を検出し、消えたtargetをexecutor開始前の状態（未commitのローカル内容を含む）へ戻す。正常終了なら `related_target_removed` でSTOPし、executorが例外で終わった場合は戻したうえでその失敗をそのまま伝える。戻せなかった場合だけ、元の失敗を隠さずに別途報告する。STOPするだけで消えたまま残さない。戻すのは消えた保護対象pathだけであり、他の変更やworking tree全体を戻さない。未開始Workの計画修正はRoadmapのRelated maintenanceで行い、terminal Workのhistorical Relatedは書き換えない。
 
 ## Future relation maintenance
 

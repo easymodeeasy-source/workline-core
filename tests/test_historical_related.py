@@ -16,8 +16,10 @@ added here; the Roadmap route stays unstarted-only.
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git, scripted_executor
 from workline import gitcmd
@@ -76,6 +78,34 @@ class HistoricalRelatedCase(WorklineTestCase):
         def execute(ctx: st.ExecutionContext):
             seen.append(list(ctx.reading_plan))
             return st.Completed()
+
+        return execute
+
+    def reader_and_deleter(self, store: ProjectStore, content: str = "authority\n") -> tuple[str, str]:
+        self.seed(store, {AUTHORITY: content})
+        entry = self.phase_with(store, {"reader": (RelatedSpec("must_read", AUTHORITY),), "deleter": ()})
+        return entry.work_ids["reader"], entry.work_ids["deleter"]
+
+    def hold(self, store: ProjectStore, work_id: str) -> None:
+        held = st.start(store, work_id, "single-work", scripted_executor({"*": [st.Hold("waiting")]}))
+        self.assertEqual((held.status, ProjectView.load(store).work_state(work_id).state), ("held", "held"))
+
+    def removing_executor(self, store: ProjectStore, outcome):
+        """Executor that removes the protected file and then reports ``outcome``."""
+
+        def execute(ctx: st.ExecutionContext):
+            (store.root / AUTHORITY).unlink()
+            return outcome
+
+        return execute
+
+    def failing_executor(self, store: ProjectStore, *, remove: bool = True):
+        """Executor that removes the protected file and then fails."""
+
+        def execute(ctx: st.ExecutionContext):
+            if remove:
+                (store.root / AUTHORITY).unlink()
+            raise RuntimeError("boom")
 
         return execute
 
@@ -214,24 +244,6 @@ class CurrentObligationTests(HistoricalRelatedCase):
 class DeletionGuardTests(HistoricalRelatedCase):
     """Workline's own execution never leaves a started Work's read target removed."""
 
-    def reader_and_deleter(self, store: ProjectStore, content: str = "authority\n") -> tuple[str, str]:
-        self.seed(store, {AUTHORITY: content})
-        entry = self.phase_with(store, {"reader": (RelatedSpec("must_read", AUTHORITY),), "deleter": ()})
-        return entry.work_ids["reader"], entry.work_ids["deleter"]
-
-    def hold(self, store: ProjectStore, work_id: str) -> None:
-        held = st.start(store, work_id, "single-work", scripted_executor({"*": [st.Hold("waiting")]}))
-        self.assertEqual((held.status, ProjectView.load(store).work_state(work_id).state), ("held", "held"))
-
-    def removing_executor(self, store: ProjectStore, outcome):
-        """Executor that removes the protected file and then reports ``outcome``."""
-
-        def execute(ctx: st.ExecutionContext):
-            (store.root / AUTHORITY).unlink()
-            return outcome
-
-        return execute
-
     def assertRefusedAndPutBack(self, store: ProjectStore, reader: str, deleter: str, executor, content: str) -> None:
         """The execution is refused and the protected file is back exactly as it stood."""
         head = gitcmd.head_commit(store.root)
@@ -344,6 +356,178 @@ class DeletionGuardTests(HistoricalRelatedCase):
         with self.assertRaises(StopError) as ctx:
             st.start(store, reader, "single-work", completing_executor(store))
         self.assertReadTargetMissing(ctx.exception, reader, AUTHORITY, "must_read")
+
+
+class ExecutionFailureTests(HistoricalRelatedCase):
+    """An executor that fails still does not leave a started Work's read target removed."""
+
+    def assertFailedAndPutBack(self, store: ProjectStore, reader: str, deleter: str, content: str) -> None:
+        head = gitcmd.head_commit(store.root)
+        status_before = git(store.root, "status", "--porcelain", "--", AUTHORITY)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            st.start(store, deleter, "single-work", self.failing_executor(store))
+
+        self.assertEqual(str(ctx.exception), "boom", "the executor's own failure is what travels on")
+        path = store.root / AUTHORITY
+        self.assertTrue(path.exists(), "the protected file is back on disk")
+        self.assertEqual(path.read_text(encoding="utf-8"), content, "put back as it stood before the executor ran")
+        status_after = git(store.root, "status", "--porcelain", "--", AUTHORITY)
+        self.assertEqual(status_after, status_before, "no deletion is left in the working tree")
+        self.assertNotIn(" D ", status_after)
+        self.assertEqual(gitcmd.head_commit(store.root), head, "nothing was committed")
+        self.assertNotEqual(ProjectView.load(store).work_state(deleter).state, "completed")
+        self.assertEqual(related_of(store, reader), [("must_read", AUTHORITY)], "no Related edge was rewritten")
+
+    def test_a_held_readers_target_survives_a_failing_executor(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.hold(store, reader)
+
+        self.assertFailedAndPutBack(store, reader, deleter, "authority\n")
+
+    def test_an_in_progress_readers_target_survives_a_failing_executor(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        moved = st.start(
+            store,
+            reader,
+            "single-work",
+            scripted_executor({"*": [st.Derive({"fix": st.DerivedWork("Fix", "fixed")}, move=True)]}),
+        )
+        self.assertEqual((moved.status, ProjectView.load(store).work_state(reader).state), ("moved", "in_progress"))
+
+        self.assertFailedAndPutBack(store, reader, deleter, "authority\n")
+
+    def test_a_pre_existing_local_edit_survives_a_failing_executor(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store, "base\n")
+        edited = "human local edit\n"
+        (store.root / AUTHORITY).write_text(edited, encoding="utf-8")  # uncommitted, nobody else's business
+        self.hold(store, reader)
+
+        self.assertFailedAndPutBack(store, reader, deleter, edited)
+
+        self.assertEqual(git(store.root, "show", f"HEAD:{AUTHORITY}"), "base\n", "never restored from HEAD")
+
+    def test_unrelated_changes_survive_a_failing_executor(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.seed(store, {"B.md": "committed\n"})
+        (store.root / "B.md").write_text("someone else is editing this\n", encoding="utf-8")
+        (store.root / "C.txt").write_text("untracked work in progress\n", encoding="utf-8")
+        self.hold(store, reader)
+        unrelated = {name: (store.root / name).read_text(encoding="utf-8") for name in ("B.md", "C.txt")}
+        status_before = git(store.root, "status", "--porcelain", "--", "B.md", "C.txt")
+
+        self.assertFailedAndPutBack(store, reader, deleter, "authority\n")
+
+        self.assertEqual({name: (store.root / name).read_text(encoding="utf-8") for name in unrelated}, unrelated)
+        self.assertEqual(git(store.root, "status", "--porcelain", "--", "B.md", "C.txt"), status_before)
+
+    def test_a_failed_put_back_is_reported_without_hiding_the_failure(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.hold(store, reader)
+        real_write_bytes = Path.write_bytes
+
+        def refuse_to_write(self, data):  # noqa: ANN001 - patched method
+            if self.name == AUTHORITY:
+                raise OSError(13, "cannot write it back")
+            return real_write_bytes(self, data)
+
+        with mock.patch.object(Path, "write_bytes", refuse_to_write):
+            with self.assertRaises(StopError) as ctx:
+                st.start(store, deleter, "single-work", self.failing_executor(store))
+
+        self.assertEqual(ctx.exception.code, "related_target_unrestored")
+        self.assertIn(AUTHORITY, ctx.exception.message)
+        self.assertIsInstance(ctx.exception.__cause__, RuntimeError, "the executor's failure is not hidden")
+        self.assertEqual(str(ctx.exception.__cause__), "boom")
+
+    def test_a_failing_executor_that_touches_nothing_keeps_its_own_failure(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.hold(store, reader)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            st.start(store, deleter, "single-work", self.failing_executor(store, remove=False))
+
+        self.assertEqual(str(ctx.exception), "boom")
+        self.assertEqual((store.root / AUTHORITY).read_text(encoding="utf-8"), "authority\n")
+
+
+class UnprotectableTargetTests(HistoricalRelatedCase):
+    """A target that could not be put back stops the Work before it runs, not after."""
+
+    def reader_of(self, store: ProjectStore, target: str) -> tuple[str, str]:
+        entry = self.phase_with(store, {"reader": (RelatedSpec("must_read", target),), "runner": ()})
+        reader, runner = entry.work_ids["reader"], entry.work_ids["runner"]
+        self.hold(store, reader)
+        return reader, runner
+
+    def assertRefusedBeforeRunning(self, store: ProjectStore, reader: str, runner: str, target: str, reason: str):
+        ran: list[str] = []
+        head = gitcmd.head_commit(store.root)
+
+        with self.assertRaises(StopError) as ctx:
+            st.start(store, runner, "single-work", self.recording_executor(ran))
+
+        self.assertEqual(ctx.exception.code, "related_target_unprotectable")
+        for expected in (runner, reader, target, reason):
+            self.assertIn(expected, ctx.exception.message)
+        self.assertRegex(ctx.exception.message, r"relation rel_")
+        self.assertEqual(ran, [], "the executor never ran")
+        self.assertEqual(events_of(store, runner), [], "no lifecycle event was written")
+        self.assertEqual(ProjectView.load(store).work_state(runner).state, "unstarted")
+        self.assertEqual(gitcmd.head_commit(store.root), head)
+        self.assertTrue((store.root / target).exists(), "the target is untouched")
+        return ctx.exception
+
+    def test_a_directory_read_target_stops_the_work_before_it_runs(self) -> None:
+        store = self.new_project()
+        self.seed(store, {"docs/one.md": "one\n", "docs/two.md": "two\n"})
+        reader, runner = self.reader_of(store, "docs")
+
+        self.assertRefusedBeforeRunning(store, reader, runner, "docs", "it is a directory")
+
+        self.assertEqual(sorted(p.name for p in (store.root / "docs").iterdir()), ["one.md", "two.md"])
+
+    def test_an_unreadable_read_target_stops_the_work_before_it_runs(self) -> None:
+        store = self.new_project()
+        reader, runner = self.reader_and_deleter(store)
+        self.hold(store, reader)
+        real_read_bytes = Path.read_bytes
+
+        def refuse_to_read(self):  # noqa: ANN001 - patched method
+            if self.name == AUTHORITY:
+                raise PermissionError(13, "permission denied")
+            return real_read_bytes(self)
+
+        with mock.patch.object(Path, "read_bytes", refuse_to_read):
+            self.assertRefusedBeforeRunning(store, reader, runner, AUTHORITY, "it cannot be read")
+
+    def test_a_link_read_target_stops_the_work_before_it_runs(self) -> None:
+        store = self.new_project()
+        self.seed(store, {"real.md": "authority\n"})
+        link = store.root / "link.md"
+        try:
+            os.symlink(store.root / "real.md", link)
+        except OSError:
+            self.skipTest("file symlinks are refused here")
+        reader, runner = self.reader_of(store, "link.md")
+
+        self.assertRefusedBeforeRunning(store, reader, runner, "link.md", "it is a link")
+
+    def test_a_registry_read_target_is_not_treated_as_a_file_to_protect(self) -> None:
+        store = self.new_project()
+        entry = self.phase_with(store, {"reader": (RelatedSpec("obey", "workline://rules/git"),), "runner": ()})
+        reader, runner = entry.work_ids["reader"], entry.work_ids["runner"]
+        self.hold(store, reader)
+
+        result = st.start(store, runner, "single-work", completing_executor(store))
+
+        self.assertEqual(result.status, "completed", "a registry reference is not a file this Work could delete")
 
 
 class ScopeTests(HistoricalRelatedCase):

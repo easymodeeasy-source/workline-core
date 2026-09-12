@@ -387,6 +387,9 @@ class _Session:
                 code="dependency_unsatisfied",
             )
         require_read_targets(self.store, view, work)
+        # Refuse here, before this Work writes anything, when a target another started
+        # Work must read could not be put back if this execution removed it.
+        self._protected_read_targets(view, work_id)
         plan = reading_plan(self.store, view, work)
         self.mutation.extend_scope(entities=[work_id])
 
@@ -406,7 +409,11 @@ class _Session:
             roadmap = view.roadmaps.get(phase.roadmap_id or "") if phase else None
             context = ExecutionContext(self.store, view, work, view.work_state(work_id), phase, roadmap, plan, self.mutation.id, self.mode, attempt)
             protected = self._protected_read_targets(view, work_id)
-            outcome = self.executor(context)
+            try:
+                outcome = self.executor(context)
+            except BaseException as failure:
+                self._put_back_after_failure(protected, failure)
+                raise
             self._keep_protected_read_targets(view, work_id, protected)
             if isinstance(outcome, Completed):
                 return self._complete(view, work, outcome)
@@ -434,17 +441,22 @@ class _Session:
             raise ValidationError(f"executor returned an unknown outcome: {outcome!r}")
 
     # protected read targets -------------------------------------------------
-    def _protected_read_targets(self, view: ProjectView, work_id: str) -> dict[str, tuple[bytes, int] | None]:
+    def _protected_read_targets(self, view: ProjectView, work_id: str) -> dict[str, tuple[bytes, int]]:
         """What other started Works must currently read, as it stands before the executor runs.
 
-        Only files that exist right now, and only the ones this rule protects:
-        the current read obligations of Works that entered execution and have
-        not finished. The content comes from the working tree, not from Git, so
-        uncommitted local content is what would be put back. ``None`` marks a
-        target that cannot be copied back (a directory, a link, or an unreadable
-        file); its loss is still refused, just not repaired.
+        Only what this rule protects: the current read obligations of Works that
+        entered execution and have not finished. The content comes from the
+        working tree, not from Git, so uncommitted local content is what would
+        be put back. A ``workline://`` target is not a file this execution can
+        delete, and a target that is already gone is the reader's own STOP
+        rather than this Work's doing; neither is carried here.
+
+        A target that exists but could not be put back the same way — a
+        directory, a link, a file that cannot be read — STOPs the Work here,
+        before it writes or runs anything, instead of after an executor has
+        destroyed it.
         """
-        snapshot: dict[str, tuple[bytes, int] | None] = {}
+        snapshot: dict[str, tuple[bytes, int]] = {}
         tracked = _tracked_files(self.store)
         for other_id in sorted(view.works):
             if other_id == work_id:
@@ -457,49 +469,84 @@ class _Session:
                     continue
                 target = self.store.root / relation.to
                 if not target.exists():
-                    continue  # already gone before this execution: the reader's own START refuses it
-                try:
-                    readable = target.is_file() and not target.is_symlink()
-                    snapshot[relation.to] = (target.read_bytes(), target.stat().st_mode) if readable else None
-                except OSError:
-                    snapshot[relation.to] = None
+                    continue
+                if target.is_symlink():
+                    reason = "it is a link"
+                elif target.is_dir():
+                    reason = "it is a directory"
+                else:
+                    try:
+                        snapshot[relation.to] = (target.read_bytes(), target.stat().st_mode)
+                        continue
+                    except OSError as exc:
+                        reason = f"it cannot be read ({exc.strerror or exc})"
+                raise StopError(
+                    f"Work {work_id} cannot run while {other_id} must read {relation.to} "
+                    f"(relation {relation.id}): {reason}, so Workline could not put it back "
+                    "if this execution removed it",
+                    code="related_target_unprotectable",
+                )
         return snapshot
 
+    def _put_back_protected(self, snapshot: dict[str, tuple[bytes, int]]) -> tuple[list[str], list[str]]:
+        """Write back the protected targets that are gone; return what was and was not put back.
+
+        Exactly the protected paths that disappeared are written, byte for byte
+        as they stood when the executor started. Nothing else in the working
+        tree is read, restored or reverted, and Git is not asked to check
+        anything out.
+        """
+        restored: list[str] = []
+        unrestored: list[str] = []
+        for path in sorted(snapshot):
+            target = self.store.root / path
+            if target.exists():
+                continue
+            content, mode = snapshot[path]
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                os.chmod(target, stat.S_IMODE(mode))
+                restored.append(path)
+            except OSError:
+                unrestored.append(path)
+        return restored, unrestored
+
     def _keep_protected_read_targets(
-        self, view: ProjectView, work_id: str, snapshot: dict[str, tuple[bytes, int] | None]
+        self, view: ProjectView, work_id: str, snapshot: dict[str, tuple[bytes, int]]
     ) -> None:
         """Put back what this execution removed from another started Work, then STOP.
 
         Refusing the Work is not enough: the Project must not be left without a
-        file another started Work still has to read. Exactly the protected paths
-        that disappeared are written back, byte for byte as they stood when the
-        executor started, so pre-existing local edits survive. Nothing else in
-        the working tree is read, restored or reverted, and Git is not asked to
-        check anything out.
+        file another started Work still has to read.
         """
-        lost = [path for path in sorted(snapshot) if not (self.store.root / path).exists()]
+        restored, unrestored = self._put_back_protected(snapshot)
+        lost = sorted(restored + unrestored)
         if not lost:
             return
-        restored: list[str] = []
-        kept_lost: list[str] = []
-        for path in lost:
-            saved = snapshot[path]
-            if saved is None:
-                kept_lost.append(path)
-                continue
-            content, mode = saved
-            target = self.store.root / path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
-            os.chmod(target, stat.S_IMODE(mode))
-            restored.append(path)
         detail = "; ".join(_deletion_blocked_by_readers(self.store, view, work_id, tuple(lost)))
         message = f"Work {work_id} removed what another started Work must read: {detail}"
         if restored:
-            message += "; put back as it was before this execution: " + ", ".join(restored)
-        if kept_lost:
-            message += "; could not be put back: " + ", ".join(kept_lost)
+            message += "; put back as it stood before this execution: " + ", ".join(restored)
+        if unrestored:
+            message += "; could not be put back: " + ", ".join(unrestored)
         raise StopError(message, code="related_target_removed")
+
+    def _put_back_after_failure(self, snapshot: dict[str, tuple[bytes, int]], failure: BaseException) -> None:
+        """Put back what a failed execution removed, without taking over its failure.
+
+        The executor failing is its own outcome and keeps its own meaning, so a
+        successful put-back says nothing and lets that failure travel on. Only
+        when the Project cannot be put back does it become a STOP of its own,
+        raised from the original failure so that neither is hidden.
+        """
+        _, unrestored = self._put_back_protected(snapshot)
+        if unrestored:
+            raise StopError(
+                "the Work failed and Workline could not put back what another started Work must read: "
+                + ", ".join(unrestored),
+                code="related_target_unrestored",
+            ) from failure
 
     # completion ------------------------------------------------------------
     def _complete(self, view: ProjectView, work: Entity, outcome: Completed) -> StartResult:
