@@ -38,7 +38,7 @@ from .ops import (
     validate_projection,
 )
 from .phase_create import PhaseRelationSpec, PhaseSpec, register_phases
-from .state import ACHIEVED, ACTIVE, CANCELLED, COMPLETE, HELD, PLAN_EXCLUDED, UNSTARTED, ProjectView
+from .state import ACHIEVED, ACTIVE, CANCELLED, COMPLETE, COMPLETED, HELD, PLAN_EXCLUDED, UNSTARTED, ProjectView
 from .store import (
     ROADMAP_BACKGROUND_HEADING,
     ROADMAP_DESIRED_HEADING,
@@ -362,7 +362,23 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
         )
 
     if view.phase_works(phase_id):
-        # Already expanded: do not expand again; inspect the current structure.
+        interrupted = _pending_for(store, "phase-entry", {"phase_id": phase_id})
+        if not interrupted:
+            # This Phase already holds its Works, so there is nothing for a design
+            # to register. Taking the design as read would let a caller believe a
+            # different plan had been recorded, so it is refused rather than
+            # ignored: what this Phase holds is read through the Project's
+            # read-only state, and a formal change to it belongs to the Roadmap's
+            # own maintenance (``rules/ai-decision``).
+            raise StopError(
+                f"Phase {phase_id} is already expanded, so a new entry design is not accepted; "
+                "read the current structure instead, and change it through Roadmap maintenance",
+                code="phase_already_expanded",
+            )
+        # An interrupted expansion of this very Phase, not a caller re-entry: its
+        # pending mutation is recovery state. Left exactly as it was found -
+        # neither abandoned, removed nor reported as a design mismatch. Resuming
+        # it is BL-023's subject and is deliberately not attempted here.
         startable = view.startable_works(phase_id)
         entry = startable[0].id if startable else None
         integration = next((w.id for w in view.integrations(phase_id)), None)
@@ -374,10 +390,47 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
     for key in design.works:
         if key in ("integration", "confirmation"):
             raise ValidationError(f"reserved Work key: {key}")
+    _require_startable_entry(view, design)
 
     mutation, destination = _open(store, "phase-entry", {"phase_id": phase_id}, [phase_id])
     with abandon_on_stop(mutation):
         return _expand_phase(store, mutation, destination, phase, phase_id, roadmap_id, design)
+
+
+def _require_startable_entry(view: ProjectView, design: PhaseEntryDesign) -> None:
+    """Refuse an explicit entry that this expansion could not start, before it writes.
+
+    Whether the named Work can be the one to start is decided by the design and
+    the Works that already exist, so it is decided here - before the intent, the
+    reserved IDs, the entities and the commit - rather than discovered once the
+    expansion is finalized. Every Work this expansion creates is unstarted and in
+    the effective set, and the Phase lifecycle has already been checked, so
+    startability comes down to the incoming ``requires_completion`` the design
+    asks for: a predecessor this same expansion creates cannot be complete yet,
+    and an existing one has to be complete already.
+    """
+    if design.entry is None:
+        return
+    if design.entry not in design.works:
+        raise SpecViolation(f"entry Work {design.entry} is not one of this design's Works")
+    blocking: list[str] = []
+    for predecessor, successor in design.requires_completion:
+        if successor != design.entry:
+            continue
+        if predecessor in design.works:
+            blocking.append(f"{predecessor} (created by this expansion)")
+            continue
+        label = view.entity_state_label(predecessor)
+        if label == "unresolvable":
+            continue  # an unresolvable endpoint is refused by the registration core
+        if label not in (COMPLETED, COMPLETE):
+            blocking.append(f"{predecessor} ({label})")
+    if blocking:
+        raise SpecViolation(
+            f"entry Work {design.entry} cannot be started by this expansion: it requires "
+            + ", ".join(blocking)
+            + " to complete first"
+        )
 
 
 def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, phase: Entity, phase_id: str, roadmap_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
@@ -432,9 +485,15 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
     after = ProjectView.load(store)
     startable = after.startable_works(phase_id)
     if design.entry is not None:
-        entry = normal.work_ids.get(design.entry)
-        if entry is None or entry not in {w.id for w in startable}:
-            raise SpecViolation(f"entry Work {design.entry} is not startable")
+        # Already established before anything was written
+        # (:func:`_require_startable_entry`); reaching here with an unstartable
+        # entry would mean the expansion did not produce what it projected.
+        entry = normal.work_ids[design.entry]
+        if entry not in {w.id for w in startable}:
+            raise StopError(
+                f"postcheck: entry Work {design.entry} is not startable after expansion",
+                code="postcheck_failed",
+            )
     else:
         entry = startable[0].id if startable else None
     return PhaseEntryResult(phase_id, normal.work_ids, integration_id, confirmation_id, entry, True, mutation.id, head)

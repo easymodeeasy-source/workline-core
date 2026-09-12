@@ -47,7 +47,7 @@
 | BL-012 | Unsupported self-hosting guard | RESOLVED |
 | BL-013 | Self-hosting readiness | DEFERRED |
 | BL-014 | Deterministic tie-break among startable candidates | VERIFIED |
-| BL-015 | Silent no-op on Phase re-entry | VERIFIED |
+| BL-015 | Silent no-op on Phase re-entry | RESOLVED |
 | BL-016 | Default result commit message type | VERIFIED |
 | BL-017 | Declared write scope broader than actual writes | VERIFIED |
 | BL-018 | Unused assignment in Phase expansion | VERIFIED |
@@ -55,6 +55,7 @@
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
 | BL-021 | Concurrent operation exclusion | RESOLVED |
 | BL-022 | ProjectSTART abandoned pre-effect recovery | RESOLVED |
+| BL-023 | Phase expansion cannot resume after an interruption | VERIFIED |
 
 ## Items
 
@@ -283,7 +284,7 @@
 
 - ID: BL-015
 - Title: Silent no-op on Phase re-entry
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: interface, implementation
 - Problem: 既にWorkが展開されたPhaseへPhase entryを再実行すると、重複展開はしない（仕様どおり）が、渡したWork設計が既存構造と食い違っていても検証も警告もされずに無視される。結果には「展開しなかった」ことを示すflagがあるだけで、呼び出し側が見落とすと、意図したWorkが登録されたと誤認し得る。
 - Why it matters: 別Phaseの設計を取り違えて渡す等の誤りを検出できず、計画と正本がずれたまま実行へ進む可能性がある。
@@ -293,6 +294,7 @@
 - Human confirmation likely: no（診断を追加するだけの場合。STOPへ変える場合はyes）
 - Self-hosting prerequisite: no
 - Evidence class: smoke test, code inspection
+- Resolution: 既にWorkが展開されたPhaseへ新しいentry designを渡すPhase entryの再実行を、state変更より前に `phase_already_expanded` でSTOPすることにした。designを黙って無視せず、既存entryへ差し替えず、通常成功として返さず、ID発行・mutation開始・canonical state変更・commitも行わない。診断にはPhase IDと「既に展開済みなので新しいentry designを受け付けない」ことを含める。Roadmapがactiveでない場合、Phaseがcomplete / held / cancelled / plan_excludedの場合、dependencyが未充足の場合は、従来からあるそれぞれの診断が優先する（そちらの方が具体的な理由を示すため、順序は変更していない）。いずれの経路でもcanonical stateは変更しない。「既存構造と同じdesignか」の機械照合は実装していない（graph同型判定・対応付け探索・design key復元を含む）。設計調査の結果、designの比較はlabel付きgraph同型判定に相当し、endpoint解決順序・特殊Work比較・曖昧性・探索の完全性という独立した正しさの要件を伴うため、欠陥の規模に対して複雑すぎると判断した。展開済みPhaseの現在構造はread-onlyで読み、計画の正式変更はRoadmap側の経路で行う。併せて、明示entryの妥当性をdomain write・mutation effect・Git commit / pushより前へ移した。従来は初回展開をfinalizeした後に「entry Workがstartableでない」と判明して例外を返しており、成功してcommit済みのoperationにAPIが失敗を返していた（再現済み: HEAD進行・Work commit済み・mutation completed・validate_project PASSと同時にSpecViolation）。新しい検査はdesignと既存Workの状態だけから判定する: entryがdesignのWork keyにない場合、この展開が作るWorkの完了を待つ場合はSTOPし、既存Workの完了を待つ場合はそれがcompletedなら妥当とする。rollbackでは直していない。空design・reserved keyの検査も展開済み判定の後へ揃え、初回とre-entryで意味が逆転しないようにした。BL-014の一般tie-break（entry=None時の複数startable候補選択）は変更していない。このPhase自身のPhase entryが中断してpending mutationが残っている状態は呼び出し側の再実行と区別し、`phase_already_expanded` として扱わず、pending recordをabandon・削除しない。その中断状態のresume自体はBL-023が扱う。schema・event・relation type・project.yamlは変更しておらず、backfillは不要。`skills/roadmap` へ反映済み。
 
 ### BL-016 Default result commit message type
 
@@ -354,6 +356,21 @@
 - Self-hosting prerequisite: partial（BL-013 の intent format compatibility policy と関係する）
 - Evidence class: design deferral, smoke test, real-project migration, code inspection
 - Resolution: closeしたrecovery recordはresumeの対象ではないため、completedとしてcloseしたmutationが、自分が今回作成したrecord自身を削除することにした。削除は次をすべて機械的に示せる場合に限る: 今回の実行が作成し既存recordをresumeしていない / top-level fieldがcloseしたrecordのfield setと完全一致しversionがint型そのものである / 通常のregular fileであり間接参照でない / Gitのindexにも HEADにも存在しない（判定できないgit呼び出しは「存在する」として扱う）/ 内容がそのmutationが最後に書いたものと完全一致する。1つでも示せなければrecordを残す。resumeしたmutationのrecordを削除しないのは、operationが待っている間に第三者が加えた変更がloadで許容されsaveで書き戻されるため、最終的な内容が作成者の証明にならないからである。indexとHEADを別に問うのは、`git rm --cached` でindexから外れてもHEADが保持しているrecordを削除するとcommit済みの変更を消すことになるからである。削除はoperation自身の後始末でありresultではないため、全effect・Git stage・構造postcheckの後に行い、失敗してもoperationは成功のままとし、そのためにdomain effectを再実行しない。cleanupが中断して残ったcompleted recordは次回も通常どおり読める。pending record、abandoned record、resumeしたmutationのrecord、他のmutationが残したrecordは削除しない。abandoned recordを残すのは、Project開始がそのfolderをやり直してよいと判断できる唯一の証拠だからである（BL-022）。既存Projectに既に蓄積したrecordは今回の対象とせず、保持期間・件数上限・一括cleanup・maintenance commandは設けない。Git ignore設定（Project rootの `.gitignore`、`.git/info/exclude`、runtime配下のignore file等）はWorkline側で作成・変更せず、Projectの既存ignore設定はProject側の所有物として扱う。schema、intent version、project.yaml、event、relation typeは変更しておらず、backfillは不要。残る論点の分離: 狭いwrite scopeを持つ `bootstrap-backfill` / `push-destination-pin` のpending recordは通常作業を止めないため気付かれずに残り得る（その可視化はBL-006のpending mutation報告の範囲）、残存recordのintent format互換方針はBL-013、cold-start性能全体はBL-007、workline-core自身の生成物hygieneはBL-010。`rules/git` とproject-start Skillへ反映済み。
+
+### BL-023 Phase expansion cannot resume after an interruption
+
+- ID: BL-023
+- Title: Phase expansion cannot resume after an interruption
+- Status: VERIFIED
+- Kind: implementation, design
+- Problem: Phase entryの展開が、通常Work適用後・integration適用前などで中断すると、pending mutationが残ったままProjectが進めなくなる。再実行したPhase entryは、そのPhase自身のpending phase-entry mutationをrecovery stateとして識別するものの、既にWorkがある場合はresumeせずそのまま返すため、integrationは作られない。一方で他のoperationはそのpending mutationとwrite scopeが重なるため `reconcile_required` で停止する。実測では `add_phases` とWork STARTの両方が停止し、`validate_project` は問題を報告しなかった。
+- Why it matters: Project全体が進行不能になり、Workline経由で回復する経路がない。中断したoperationは同じmutationをresumeするという `rules/git` の前提（`registry.md` Multi-write mutation）と `skills/roadmap` の記述が、この経路では成立していない。
+- Likely scope: 中断したPhase expansionのrecovery semantics。実測した障害は少なくとも3点: `register_works()` のprojection check（integration invariant等）が `has_stage` guardより前に走るため、適用済みintegrationを持つPhaseで記録済みintegration stageを再投影すると `integration invariant: would have 2 unfinished integrations` で衝突する。`roadmap._open()` が戻る前に `mutation.apply()` を呼ぶため、resume時に記録済みeffectが照合より前に適用される。`abandon_on_stop()` が `mutation.resumed` を見ないため、resumeしたmutationをabandonし得る経路がある。registration coreは共有であり、Phase entry / add_phases / standalone CREATE / STARTのderiveへの横断影響を調べる必要がある。pending recordにdesignを束縛する（または記録済み決定を正本とする）方法、designを伴わない legacy pending recordの扱いも決める。rollbackでは直さない。
+- Cross-project impact: あり（全Projectの回復可能性）
+- Backfill likely: 可能性あり（既に詰まっているProjectの回復手順）
+- Human confirmation likely: yes（recovery semanticsとMutation Controller契約に触れる）
+- Self-hosting prerequisite: no
+- Evidence class: code inspection, smoke test
 
 ### BL-020 Correction of mis-recorded historical facts
 

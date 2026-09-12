@@ -84,10 +84,12 @@ class RoadmapTests(WorklineTestCase):
         # selection does not enter the Phase; entry expands Works only once
         self.assertEqual(ProjectView.load(store).phase_works(b), [])
         first = self.simple_entry(store, b)
-        second = self.simple_entry(store, b)
+        # A Phase that already holds its Works does not accept another design: it
+        # is refused rather than quietly ignored (BL-015).
+        with self.assertRaises(StopError) as refused:
+            self.simple_entry(store, b)
+        self.assertEqual(refused.exception.code, "phase_already_expanded")
         self.assertTrue(first.expanded)
-        self.assertFalse(second.expanded)
-        self.assertEqual(second.entry_work_id, first.entry_work_id)
         self.assertEqual(len(ProjectView.load(store).phase_works(b)), 2)
 
     def test_phase_entry_structure(self) -> None:

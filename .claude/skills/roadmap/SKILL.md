@@ -148,6 +148,12 @@ cancelled / plan_excluded前提はrequires_completionを満たさない。depend
 
 WorkはPhaseへ実際に入る時だけ展開する。
 
+既にWorkが展開されたPhaseへ、新しいentry designを渡してPhase entryを再実行しない。展開済みPhaseにはdesignが登録する対象がなく、渡されたdesignを黙って無視すれば、呼び出し側が別の計画が登録されたと誤認し得る。Phase entryはこれを `phase_already_expanded` でSTOPし、design無視・既存entryへの差し替え・通常成功としての返却・ID発行・mutation開始・canonical state変更・commitのいずれも行わない。展開済みPhaseの現在構造はread-onlyで読み、計画の正式変更はRoadmapのRelated maintenance等から行う（`rules/ai-decision`）。なお、Roadmapがactiveでない場合、Phaseがcomplete / held / cancelled / plan_excludedの場合、Phaseのdependencyが未充足の場合は、従来どおりそれぞれの理由でSTOPし、`phase_already_expanded` より優先する。どの経路でもcanonical stateは変更しない。
+
+ただしこのPhase自身のPhase entryがeffect記録後に中断してpending mutationが残っている状態は、呼び出し側の再実行ではなくrecovery stateであり、`phase_already_expanded` として扱わない。その場合pending recordをabandon・削除せず、現状のまま返す。
+
+明示entryの妥当性は、domain write・mutation effect・Git commit / pushより前に検査する。designのWork keyに存在しないentry、およびこの展開が作るWorkの完了を待つことになるentryは、展開前にSTOPする。既存Workの完了を待つentryは、その既存Workが既にcompletedなら妥当である。
+
 Work:
 
 > その部分だけで何が成立したかを言え、別々に着手・中断・派生・完了を管理する意味がある単位。
@@ -157,9 +163,9 @@ Work:
 ```text
 Phase成立状態を読む
 ↓
-既に展開済みなら重複展開せず現在構造を検査
+既に展開済みならread-onlyで現在構造を検査し、Phase entryを再実行しない
 ↓
-通常Work群を設計
+未展開の場合だけ通常Work群を設計
 ↓
 CREATE 通常Work群
 ↓
