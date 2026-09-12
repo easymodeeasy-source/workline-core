@@ -16,6 +16,8 @@ the structural rules the live specification assigns to it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
+import stat
 from typing import Callable
 
 from . import gitcmd, gitops
@@ -266,6 +268,8 @@ def completion_precheck(
         if not gitcmd.tracked_file(store.root, path):
             # never tracked, or a directory standing in for the files under it
             problems.append(f"deleted path is not a tracked file: {path}")
+    # The session refuses such a removal right after the executor returns, where it can
+    # still put the file back; this keeps the condition true for a direct caller too.
     problems.extend(_deletion_blocked_by_readers(store, view, work.id, deleted_paths))
     structural = validate_structure(view)
     if structural:
@@ -401,7 +405,9 @@ class _Session:
             work = view.works[work_id]
             roadmap = view.roadmaps.get(phase.roadmap_id or "") if phase else None
             context = ExecutionContext(self.store, view, work, view.work_state(work_id), phase, roadmap, plan, self.mutation.id, self.mode, attempt)
+            protected = self._protected_read_targets(view, work_id)
             outcome = self.executor(context)
+            self._keep_protected_read_targets(view, work_id, protected)
             if isinstance(outcome, Completed):
                 return self._complete(view, work, outcome)
             if isinstance(outcome, QuestionWait):
@@ -426,6 +432,74 @@ class _Session:
                 self._commit("commit", f"chore(workline): {work.display} NG; fix planned", [])
                 return StartResult("moved", work_id, self.mutation.id, phase_id=work.phase_id, head=gitcmd.head_commit(self.store.root))
             raise ValidationError(f"executor returned an unknown outcome: {outcome!r}")
+
+    # protected read targets -------------------------------------------------
+    def _protected_read_targets(self, view: ProjectView, work_id: str) -> dict[str, tuple[bytes, int] | None]:
+        """What other started Works must currently read, as it stands before the executor runs.
+
+        Only files that exist right now, and only the ones this rule protects:
+        the current read obligations of Works that entered execution and have
+        not finished. The content comes from the working tree, not from Git, so
+        uncommitted local content is what would be put back. ``None`` marks a
+        target that cannot be copied back (a directory, a link, or an unreadable
+        file); its loss is still refused, just not repaired.
+        """
+        snapshot: dict[str, tuple[bytes, int] | None] = {}
+        tracked = _tracked_files(self.store)
+        for other_id in sorted(view.works):
+            if other_id == work_id:
+                continue
+            state = view.work_state(other_id)
+            if state.terminal or state.state == UNSTARTED:
+                continue
+            for relation in read_obligations(self.store, view, other_id, tracked=tracked):
+                if relation.to in snapshot or relation.to.startswith("workline://"):
+                    continue
+                target = self.store.root / relation.to
+                if not target.exists():
+                    continue  # already gone before this execution: the reader's own START refuses it
+                try:
+                    readable = target.is_file() and not target.is_symlink()
+                    snapshot[relation.to] = (target.read_bytes(), target.stat().st_mode) if readable else None
+                except OSError:
+                    snapshot[relation.to] = None
+        return snapshot
+
+    def _keep_protected_read_targets(
+        self, view: ProjectView, work_id: str, snapshot: dict[str, tuple[bytes, int] | None]
+    ) -> None:
+        """Put back what this execution removed from another started Work, then STOP.
+
+        Refusing the Work is not enough: the Project must not be left without a
+        file another started Work still has to read. Exactly the protected paths
+        that disappeared are written back, byte for byte as they stood when the
+        executor started, so pre-existing local edits survive. Nothing else in
+        the working tree is read, restored or reverted, and Git is not asked to
+        check anything out.
+        """
+        lost = [path for path in sorted(snapshot) if not (self.store.root / path).exists()]
+        if not lost:
+            return
+        restored: list[str] = []
+        kept_lost: list[str] = []
+        for path in lost:
+            saved = snapshot[path]
+            if saved is None:
+                kept_lost.append(path)
+                continue
+            content, mode = saved
+            target = self.store.root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+            os.chmod(target, stat.S_IMODE(mode))
+            restored.append(path)
+        detail = "; ".join(_deletion_blocked_by_readers(self.store, view, work_id, tuple(lost)))
+        message = f"Work {work_id} removed what another started Work must read: {detail}"
+        if restored:
+            message += "; put back as it was before this execution: " + ", ".join(restored)
+        if kept_lost:
+            message += "; could not be put back: " + ", ".join(kept_lost)
+        raise StopError(message, code="related_target_removed")
 
     # completion ------------------------------------------------------------
     def _complete(self, view: ProjectView, work: Entity, outcome: Completed) -> StartResult:

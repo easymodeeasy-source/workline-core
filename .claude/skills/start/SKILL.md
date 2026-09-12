@@ -317,7 +317,7 @@ deletion resultも通常resultと同じくcurrent START operation-owned change�
 
 directory名をdeletion resultとして宣言しない。実際にtrackedされているfile pathを列挙する。
 
-deletion resultは、他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを消さない。該当する場合はcompletion precheckで失敗させ、Workline自身がbroken stateを作らない。未開始Workの計画修正はRoadmapのRelated maintenanceで行い、terminal Workのhistorical Relatedは書き換えない。
+deletion resultは、他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを消さない。実行直後にこの喪失を検出し、消えたtargetをexecutor開始前の状態（未commitのローカル内容を含む）へ戻したうえで `related_target_removed` でSTOPする。STOPするだけで消えたまま残さない。戻すのは消えた保護対象pathだけであり、他の変更やworking tree全体を戻さない。未開始Workの計画修正はRoadmapのRelated maintenanceで行い、terminal Workのhistorical Relatedは書き換えない。
 
 ## Future relation maintenance
 

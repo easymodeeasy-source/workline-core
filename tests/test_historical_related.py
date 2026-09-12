@@ -212,34 +212,56 @@ class CurrentObligationTests(HistoricalRelatedCase):
 
 
 class DeletionGuardTests(HistoricalRelatedCase):
-    """Workline's own deletion never takes away what a started Work still has to read."""
+    """Workline's own execution never leaves a started Work's read target removed."""
 
-    def reader_and_deleter(self, store: ProjectStore) -> tuple[str, str]:
-        self.seed(store, {AUTHORITY: "authority\n"})
+    def reader_and_deleter(self, store: ProjectStore, content: str = "authority\n") -> tuple[str, str]:
+        self.seed(store, {AUTHORITY: content})
         entry = self.phase_with(store, {"reader": (RelatedSpec("must_read", AUTHORITY),), "deleter": ()})
         return entry.work_ids["reader"], entry.work_ids["deleter"]
 
-    def assertDeletionRefused(self, store: ProjectStore, reader: str, deleter: str) -> None:
+    def hold(self, store: ProjectStore, work_id: str) -> None:
+        held = st.start(store, work_id, "single-work", scripted_executor({"*": [st.Hold("waiting")]}))
+        self.assertEqual((held.status, ProjectView.load(store).work_state(work_id).state), ("held", "held"))
+
+    def removing_executor(self, store: ProjectStore, outcome):
+        """Executor that removes the protected file and then reports ``outcome``."""
+
+        def execute(ctx: st.ExecutionContext):
+            (store.root / AUTHORITY).unlink()
+            return outcome
+
+        return execute
+
+    def assertRefusedAndPutBack(self, store: ProjectStore, reader: str, deleter: str, executor, content: str) -> None:
+        """The execution is refused and the protected file is back exactly as it stood."""
         head = gitcmd.head_commit(store.root)
+        status_before = git(store.root, "status", "--porcelain", "--", AUTHORITY)
 
         with self.assertRaises(StopError) as ctx:
-            st.start(store, deleter, "single-work", self.deleting_executor(store, delete=(AUTHORITY,)))
+            st.start(store, deleter, "single-work", executor)
 
-        self.assertEqual(ctx.exception.code, "completion_precheck_failed")
+        self.assertEqual(ctx.exception.code, "related_target_removed")
         for expected in (AUTHORITY, reader, "must_read"):
             self.assertIn(expected, ctx.exception.message)
-        self.assertNotEqual(ProjectView.load(store).work_state(deleter).state, "completed")
-        self.assertEqual(gitcmd.head_commit(store.root), head, "the deletion was not committed")
+        path = store.root / AUTHORITY
+        self.assertTrue(path.exists(), "the protected file is back on disk")
+        self.assertEqual(path.read_text(encoding="utf-8"), content, "restored as it stood before the executor ran")
+        status_after = git(store.root, "status", "--porcelain", "--", AUTHORITY)
+        self.assertEqual(status_after, status_before, "no deletion is left in the working tree")
+        self.assertNotIn(" D ", status_after)
+        self.assertEqual(gitcmd.head_commit(store.root), head, "nothing was committed")
         self.assertIn(AUTHORITY, git(store.root, "ls-files").split(), "the file is still tracked")
+        self.assertNotEqual(ProjectView.load(store).work_state(deleter).state, "completed")
         self.assertEqual(related_of(store, reader), [("must_read", AUTHORITY)], "no Related edge was rewritten")
 
     def test_a_held_works_current_read_target_cannot_be_deleted(self) -> None:
         store = self.new_project()
         reader, deleter = self.reader_and_deleter(store)
-        held = st.start(store, reader, "single-work", scripted_executor({"*": [st.Hold("waiting")]}))
-        self.assertEqual((held.status, ProjectView.load(store).work_state(reader).state), ("held", "held"))
+        self.hold(store, reader)
 
-        self.assertDeletionRefused(store, reader, deleter)
+        self.assertRefusedAndPutBack(
+            store, reader, deleter, self.deleting_executor(store, delete=(AUTHORITY,)), "authority\n"
+        )
 
     def test_an_in_progress_works_current_read_target_cannot_be_deleted(self) -> None:
         store = self.new_project()
@@ -252,7 +274,64 @@ class DeletionGuardTests(HistoricalRelatedCase):
         )
         self.assertEqual((moved.status, ProjectView.load(store).work_state(reader).state), ("moved", "in_progress"))
 
-        self.assertDeletionRefused(store, reader, deleter)
+        self.assertRefusedAndPutBack(
+            store, reader, deleter, self.deleting_executor(store, delete=(AUTHORITY,)), "authority\n"
+        )
+
+    def test_a_pre_existing_local_edit_of_the_protected_file_survives(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store, "base\n")
+        edited = "human local edit\n"
+        (store.root / AUTHORITY).write_text(edited, encoding="utf-8")  # uncommitted, nobody else's business
+        self.hold(store, reader)
+        self.assertEqual(git(store.root, "status", "--porcelain", "--", AUTHORITY).strip(), f"M {AUTHORITY}")
+
+        self.assertRefusedAndPutBack(
+            store, reader, deleter, self.deleting_executor(store, delete=(AUTHORITY,)), edited
+        )
+
+        self.assertNotEqual(
+            (store.root / AUTHORITY).read_text(encoding="utf-8"), "base\n", "never restored from HEAD"
+        )
+        self.assertEqual(git(store.root, "show", f"HEAD:{AUTHORITY}"), "base\n", "HEAD itself is untouched")
+
+    def test_unrelated_pre_existing_changes_are_untouched(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.seed(store, {"B.md": "committed\n"})
+        (store.root / "B.md").write_text("someone else is editing this\n", encoding="utf-8")
+        (store.root / "C.txt").write_text("untracked work in progress\n", encoding="utf-8")
+        self.hold(store, reader)
+        unrelated = {name: (store.root / name).read_text(encoding="utf-8") for name in ("B.md", "C.txt")}
+        status_before = git(store.root, "status", "--porcelain", "--", "B.md", "C.txt")
+
+        self.assertRefusedAndPutBack(
+            store, reader, deleter, self.deleting_executor(store, delete=(AUTHORITY,)), "authority\n"
+        )
+
+        self.assertEqual({name: (store.root / name).read_text(encoding="utf-8") for name in unrelated}, unrelated)
+        self.assertEqual(git(store.root, "status", "--porcelain", "--", "B.md", "C.txt"), status_before)
+
+    def test_an_undeclared_removal_is_refused_and_put_back(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.hold(store, reader)
+
+        # the executor removes the file without declaring it as a deletion result
+        self.assertRefusedAndPutBack(
+            store, reader, deleter, self.removing_executor(store, st.Completed()), "authority\n"
+        )
+
+    def test_removing_a_protected_target_is_refused_even_without_a_completion(self) -> None:
+        store = self.new_project()
+        reader, deleter = self.reader_and_deleter(store)
+        self.hold(store, reader)
+
+        # the outcome is a hold, not a completion: the removal is still refused and undone
+        self.assertRefusedAndPutBack(
+            store, reader, deleter, self.removing_executor(store, st.Hold("stopping here")), "authority\n"
+        )
+        self.assertEqual(ProjectView.load(store).work_state(deleter).state, "in_progress")
 
     def test_an_unstarted_works_target_may_still_be_deleted_and_stops_that_work_later(self) -> None:
         store = self.new_project()
