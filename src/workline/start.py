@@ -36,7 +36,7 @@ from .ops import (
 )
 from .registry import validate_registry
 from .state import ACTIVE, COMPLETED, HELD, IN_PROGRESS, UNSTARTED, ProjectView, WorkState
-from .store import WORKLINE_DIR, Entity, ProjectStore
+from .store import WORKLINE_DIR, Entity, ProjectStore, Relation
 from .validate import condition_applies, validate_structure
 
 OWNER = "start"
@@ -162,6 +162,41 @@ def _tracked_files(store: ProjectStore) -> list[str]:
     return [p.replace("\\", "/") for p in result.stdout.split("\0") if p] if result.ok else []
 
 
+def read_obligations(
+    store: ProjectStore, view: ProjectView, work_id: str, *, tracked: list[str] | None = None
+) -> list[Relation]:
+    """The Related edges a Work has to read, in the canonical reading order.
+
+    ``must_read``, every ``conditional_must_read`` whose condition currently
+    applies, then the ``obey`` chain (``rules/information-tracing``). They are
+    *current* obligations only while the Work can still run: the same edges on
+    a terminal Work are historical evidence of what that Work had to read when
+    it ran, and are never revived as a present duty.
+    """
+    obligations = list(view.related_from(work_id, "must_read"))
+    conditional = view.related_from(work_id, "conditional_must_read")
+    if conditional:
+        if tracked is None:
+            tracked = _tracked_files(store)
+        obligations += [r for r in conditional if condition_applies(r.extra.get("condition") or {}, tracked)]
+    obligations += view.related_from(work_id, "obey")
+    return obligations
+
+
+def require_read_targets(store: ProjectStore, view: ProjectView, work: Entity) -> None:
+    """STOP unless every current read obligation of ``work`` resolves.
+
+    A Work about to run must be able to read what it was told to read. A
+    target that is gone is never worked around: no filename, directory, mtime
+    or similarity fallback, and no assumption that an old target no longer
+    matters (``rules/information-tracing``).
+    """
+    missing = [r for r in read_obligations(store, view, work.id) if not _ref_resolves(store, r.to)]
+    if missing:
+        detail = ", ".join(f"{r.type} {r.to} (relation {r.id})" for r in missing)
+        raise StopError(f"Work {work.id} cannot resolve what it must read: {detail}", code="related_target_missing")
+
+
 def reading_plan(store: ProjectStore, view: ProjectView, work: Entity) -> list[str]:
     """Work → Phase → Roadmap → must_read → applicable conditional_must_read → obey chain."""
     plan = [work.path]
@@ -171,14 +206,7 @@ def reading_plan(store: ProjectStore, view: ProjectView, work: Entity) -> list[s
         roadmap = view.roadmaps.get(phase.roadmap_id or "")
         if roadmap is not None:
             plan.append(roadmap.path)
-    plan += [r.to for r in view.related_from(work.id, "must_read")]
-    tracked = _tracked_files(store)
-    for relation in view.related_from(work.id, "conditional_must_read"):
-        condition = relation.extra.get("condition") or {}
-        if condition_applies(condition, tracked):
-            plan.append(relation.to)
-    plan += [r.to for r in view.related_from(work.id, "obey")]
-    return plan
+    return plan + [relation.to for relation in read_obligations(store, view, work.id)]
 
 
 def _ref_resolves(store: ProjectStore, target: str) -> bool:
@@ -238,11 +266,44 @@ def completion_precheck(
         if not gitcmd.tracked_file(store.root, path):
             # never tracked, or a directory standing in for the files under it
             problems.append(f"deleted path is not a tracked file: {path}")
+    problems.extend(_deletion_blocked_by_readers(store, view, work.id, deleted_paths))
     structural = validate_structure(view)
     if structural:
         problems.append("structure invalid: " + problems_text(structural))
     if problems:
         raise StopError("completion precheck failed: " + "; ".join(problems), code="completion_precheck_failed")
+
+
+def _deletion_blocked_by_readers(
+    store: ProjectStore, view: ProjectView, work_id: str, deleted_paths: tuple[str, ...]
+) -> list[str]:
+    """Started Works, other than this one, that currently must read a path this Work deletes.
+
+    Workline does not create the state its own rule then refuses to run in: a
+    Work that entered execution and has not finished still needs what it was
+    told to read. The deleting Work itself is not one of them, since it started
+    while the target was there. Unstarted Works are future plan, maintained
+    through the Roadmap route, and a terminal Work's edges are historical
+    evidence, which a later deletion never invalidates.
+    """
+    if not deleted_paths:
+        return []
+    targets = set(deleted_paths)
+    tracked = _tracked_files(store)
+    problems: list[str] = []
+    for other_id in sorted(view.works):
+        if other_id == work_id:
+            continue
+        state = view.work_state(other_id)
+        if state.terminal or state.state == UNSTARTED:
+            continue
+        for relation in read_obligations(store, view, other_id, tracked=tracked):
+            if relation.to in targets:
+                problems.append(
+                    f"deleted path {relation.to} is a current read target of {other_id} "
+                    f"({relation.type}, relation {relation.id})"
+                )
+    return problems
 
 
 def standalone_scope(view: ProjectView, work_id: str) -> list[Entity]:
@@ -321,6 +382,7 @@ class _Session:
                 f"Work {work_id} has unresolved requires_completion: " + ", ".join(f"{r.from_id} ({label})" for r, label in unsatisfied),
                 code="dependency_unsatisfied",
             )
+        require_read_targets(self.store, view, work)
         plan = reading_plan(self.store, view, work)
         self.mutation.extend_scope(entities=[work_id])
 
@@ -624,5 +686,6 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
 
 __all__ = [
     "Completed", "QuestionWait", "Hold", "Cancel", "DerivedWork", "Derive", "HumanNG", "ExecutionContext",
-    "StartResult", "start", "plan_exclude_standalone_work", "reading_plan", "completion_precheck", "standalone_scope",
+    "StartResult", "start", "plan_exclude_standalone_work", "reading_plan", "read_obligations",
+    "require_read_targets", "completion_precheck", "standalone_scope",
 ]

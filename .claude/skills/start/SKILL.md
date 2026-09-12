@@ -79,6 +79,10 @@ STARTにはCLIが無い。`rules/git` のWorkline implementationに従い、対�
 
 `rules/git` のProject execution lockに従う。Work state・dependency・pending mutation・push destination・dirty stateはlock取得後に読み、lock取得前に読んだstateをmutation判断へ使わない。executorもlockの内側で実行される。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。executorの中から同じProjectの別top-level Workline operationを開始しない（`project_operation_nested`）。
 
+`rules/information-tracing` に従い、Related / common rules読取のtargetは実行前に一意解決できなければならない。must_read、条件が現在成立しているconditional_must_read、obey chainのtargetが解決できない場合は、target / lifecycle処理・executor実行・Git書込みより前に `related_target_missing` でSTOPする。「たぶん不要」「古いfileだろう」と推測して無視せず、filename / directory / mtime / 意味類似で代替も探さない。自動修復もしない。
+
+terminal Work（completed / cancelled / plan_excluded）のRelatedは当時のhistorical evidenceであり、現在のread obligationではない。targetが後から正式に削除されても、その事実だけでProject structureをinvalidとしない。
+
 ## Generated Work lifecycle
 
 Unstarted開始:
@@ -289,6 +293,7 @@ Phase completeはeventではなく生成する。
 - applicable conditional_must_updateを満たす
 - 必要tests / verification PASS
 - unresolved required dependencyなし
+- 他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを、deletion resultとして消していない
 - canonical refs valid
 - 新たなstructural human_confirmation要否を評価済み
 - Workline structure valid
@@ -311,6 +316,8 @@ Workのchanged result集合は「通常result ∪ deletion result」とする。
 deletion resultも通常resultと同じくcurrent START operation-owned changeとして扱う。pre-existing dirty保護（START開始前から削除されていたtracked fileを今回の成果として横取りしない）と、exact pathでのGit finalizationを同じく受ける。
 
 directory名をdeletion resultとして宣言しない。実際にtrackedされているfile pathを列挙する。
+
+deletion resultは、他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを消さない。該当する場合はcompletion precheckで失敗させ、Workline自身がbroken stateを作らない。未開始Workの計画修正はRoadmapのRelated maintenanceで行い、terminal Workのhistorical Relatedは書き換えない。
 
 ## Future relation maintenance
 

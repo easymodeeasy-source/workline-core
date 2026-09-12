@@ -463,6 +463,8 @@ return_to
 
 は正式経路から変更可能。`derived` はhistorical factとして保護する。
 
+terminal Work（completed / cancelled / plan_excluded）のRelatedも、そのWorkが当時読む / 満たす必要があったもののhistorical factとして保護する。後続Workがtargetを正式に削除しても、edgeを削除・書換えしない。現在のread obligationはterminalでないWorkのRelatedだけである。
+
 `cancelled` / `plan_excluded` は `completed` ではない。前提entityがcancelled / plan_excludedでも `requires_completion` は満たされない。operation ownerがreplanする。
 
 Phaseのeffective current-plan Work集合は、当該Phaseに所属するWorkのうち `cancelled` / `plan_excluded` を除いたものから生成する。これは新しいmembership正本ではない。cancel / plan exclusionを決めたoperation ownerは、影響する `requires_completion` / integration / `planned_next` / `return_to` をreplanし、構造validationを通す責任を持つ。`plan_excluded` は未開始未来計画にだけ使い、開始済みWorkはcancelで扱う。
@@ -543,6 +545,23 @@ Work
 ```
 
 単独Workでは存在しないPhase / Roadmapを補わない。
+
+Relatedのread obligationは、from Workが実行し得る間だけ現在の義務である。
+
+```text
+from Workがterminal（completed / cancelled / plan_excluded）
+→ そのRelatedは当時何を読む必要があったかのhistorical evidence
+→ 記録のまま保持し、現在のfilesystemへ合わせて書き換えない
+→ targetが現存しないことだけを理由にbroken referenceとしない
+
+from Workがterminalでない
+→ 現在のread obligation
+→ must_read / 条件が現在成立しているconditional_must_read / obey chainのtargetは
+   そのWorkを実行する前に一意解決できなければならない
+→ 解決できなければSTOPし、推測で無視せず代替も探さない
+```
+
+Workline自身のoperationは、実行し得るWorkの現在のread obligationを壊す状態を自分で作らない。
 
 implementation searchではdefinition、reference、usage、tests、dependency、impact、error path等を必要範囲で自由に検索してよい。ただし検索結果を正式なRoadmap / Phase / Work / rule / relation正本へ勝手に昇格しない。
 

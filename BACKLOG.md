@@ -41,7 +41,7 @@
 | BL-006 | Read-only status/context command | OPEN |
 | BL-007 | Cold-start recovery performance | INVESTIGATE |
 | BL-008 | Python interpreter resolution | RESOLVED |
-| BL-009 | Historical deleted Related / must_read semantics | VERIFIED |
+| BL-009 | Historical deleted Related / must_read semantics | RESOLVED |
 | BL-010 | Generated artifact hygiene | VERIFIED |
 | BL-011 | Reusable migration procedure | OPEN |
 | BL-012 | Unsupported self-hosting guard | RESOLVED |
@@ -184,7 +184,7 @@
 
 - ID: BL-009
 - Title: Historical deleted Related / must_read semantics
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: spec, implementation
 - Problem: completed Workの `must_read` 等のRelated targetが、後続のWorkで意図的に削除された場合の意味が定義されていない。historical evidence（そのWorkが当時何を読んだか）と、現在の参照が有効か（current validity）を区別する規則がなく、構造validationはRelated targetの存在を検査しない。意図的なtracked file削除はWork resultとして扱えるようになり、must_update / realizesでの扱いは定義済みだが、must_readを含む履歴側Relatedの扱いは未定義のまま。started / completed等のWorkに対するRelated maintenanceも、現行仕様では定義していない。
 - Why it matters: 削除済みtargetを指す履歴参照を「壊れた参照」と誤判定するか、逆に死んだ参照を現在の読取計画に残すかの判断が場当たりになる。旧authorityを退役させる移行では、履歴Relatedのtarget削除が必ず起きる。real-project migrationでは、completed Workのmust_read targetが後続Workで意図的に削除され、その扱いを都度判断した。
@@ -194,6 +194,7 @@
 - Human confirmation likely: yes（canonical semanticsの変更）
 - Self-hosting prerequisite: no
 - Evidence class: real-project migration, code inspection
+- Resolution: Related edgeを、from Workが実行し得る間の現在のread obligationと、terminal Work（completed / cancelled / plan_excluded）のhistorical evidenceに分けた。historical側は記録のまま保持し、後続Workがtargetを正式に削除してもedgeを削除・書換えせず、targetの不在だけでstructure validationをfailさせない。現在側は、STARTがWorkを実行する前にmust_read / 条件が現在成立しているconditional_must_read / obey chainのtargetを解決し、解決できなければlifecycle event・executor実行・Git書込みより前に `related_target_missing` でSTOPする（推測で無視せず、filename / mtime / 意味類似での代替も自動修復もしない）。Workline自身がこの状態を作らないよう、deletion resultが他のstarted（in_progress / held）non-terminal Workの現在のread targetを消す場合はcompletion precheckで失敗させる。削除するWork自身はtargetが存在する状態で開始しているため対象外。未開始Workは従来どおりRoadmapのRelated maintenanceで計画修正し、started Work用のRelated編集経路は新設していない。既存Projectへも即時適用し、grace periodやlegacy modeは設けない。historical record自体の訂正はBL-020へ要件として追記した。relation type・record schema・project.yaml・event・backfillの変更なし。`rules/information-tracing` / `rules/ai-decision` と `skills/start` / `skills/roadmap` へ反映済み。
 
 ### BL-010 Generated artifact hygiene
 
@@ -362,6 +363,11 @@
 - Problem: 正しい手順で記録されたevent、derived relation、origin等の「起きた事実」が、後から内容として誤りだったと分かった場合の正式な訂正方式がない。これらは書換え・物理削除をしない原則で保護されている。
 - Why it matters: 誤記録が見つかった時に、書換え禁止を守ったまま現在の解釈を正す手段がなく、手編集の誘惑や、誤った履歴を前提にした判断が残る。
 - Likely scope: 訂正eventや注記の方式、generated stateへの反映、`rules/ai-decision`（起きた事実は現在計画に合わせて書き換えない）との整合。設計段階で「実例が出るまで保留」とした論点であり、実例が出た時点で設計する。
+- Tracked requirements (BL-009由来): BL-009でterminal Workのhistorical Relatedを「当時の証拠」として保持すると確定した。その記録自体が誤りだった場合（例: そもそもそのWorkはそのfileを読む必要がなかった）の訂正はここで扱い、最低限次を満たすこと。
+  - 元の記録を物理削除・書換えしない
+  - 訂正自体を正式な記録として残す
+  - downstream readerが訂正の存在を機械的に判定できる（人間向けのREADMEメモだけでは不足）
+  - superseded / invalidatedなhistorical factを現在の真実として扱わない（後続WorkやAIが元記録だけを事実として再利用しない）
 - Cross-project impact: あり
 - Backfill likely: no
 - Human confirmation likely: yes（共通ルール / event schemaの変更）

@@ -30,6 +30,11 @@ class RelatedMaintenanceCase(WorklineTestCase):
 
     def entered_project(self, name: str = "proj", *, remote: bool = False) -> tuple[ProjectStore, rm.PhaseEntryResult]:
         store = self.new_project(name, remote=remote)
+        # W2 reads CONTRACT.md, so the Project really holds it: a Work whose current
+        # read target is missing cannot start at all (BL-009).
+        (store.root / CONTRACT).write_text("the contract\n", encoding="utf-8")
+        git(store.root, "add", "--", CONTRACT)
+        git(store.root, "commit", "-m", "seed the contract")
         if remote:
             git(store.root, "push", "-u", "origin", "main")
         roadmap = self.simple_roadmap(store)

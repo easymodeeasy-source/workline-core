@@ -236,7 +236,11 @@ phase_idが解決可能
 Roadmapが通常操作可能
 ```
 
-started / held / completed / cancelled / plan_excluded Workのrelated変更はこの経路で行わない（今回定義しない）。standalone Workも対象外。
+started / held / completed / cancelled / plan_excluded Workのrelated変更はこの経路で行わない。standalone Workも対象外。
+
+terminal Work（completed / cancelled / plan_excluded）のRelatedは、そのWorkが当時読む / 満たす必要があったもののhistorical evidenceである。後続Workがtargetを正式に削除しても、そのedgeを削除・書換えせず、targetの不在だけでbroken扱いにもしない。
+
+started（in_progress / held）Workのrelated変更経路は設けない。代わりに、Workline自身のoperationがその不整合を作らない（`skills/start` のWork result / completion precheck）。外部操作でtargetが失われた場合は、次のSTARTが `related_target_missing` でSTOPする。
 
 削除は既存relation IDの指定で行う。対象Workがfromである実在relationだけが削除可能で、別Work所有のrelation IDや解決不能なIDはSTOPする。名前・target・意味類似で補完しない。
 
