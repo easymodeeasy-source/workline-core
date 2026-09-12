@@ -256,8 +256,8 @@ implementationは [Runtime](#runtime) の起動形だけで起動する。`pytho
 
 ## Tests
 
-Windowsの開発環境では、ambientの `python` ではなくPython launcherで3.11以上を選ぶ（そのinterpreterにpytestが必要）。これはtestの実行例であり、Workline runtimeの起動方法ではない。
+Windowsの開発環境では、ambientの `python` ではなくPython launcherで3.11以上を選ぶ（そのinterpreterにpytestが必要）。これはtestの実行例であり、Workline runtimeの起動方法ではない。`-B` はdevelopment testがworking treeへbytecode cacheを残さないためのもので、[Runtime](#runtime) の起動条件とは別である。
 
 ```powershell
-py -3 -m pytest tests -q
+py -3 -B -m pytest tests -q
 ```

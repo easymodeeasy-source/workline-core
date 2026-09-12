@@ -42,7 +42,7 @@
 | BL-007 | Cold-start recovery performance | INVESTIGATE |
 | BL-008 | Python interpreter resolution | RESOLVED |
 | BL-009 | Historical deleted Related / must_read semantics | RESOLVED |
-| BL-010 | Generated artifact hygiene | VERIFIED |
+| BL-010 | Generated artifact hygiene | RESOLVED |
 | BL-011 | Reusable migration procedure | OPEN |
 | BL-012 | Unsupported self-hosting guard | RESOLVED |
 | BL-013 | Self-hosting readiness | DEFERRED |
@@ -202,7 +202,7 @@
 
 - ID: BL-010
 - Title: Generated artifact hygiene
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: hygiene
 - Problem: workline-coreに `.gitignore` がなく、test実行やpackage metadata生成で作られる `__pycache__/`、`*.egg-info/` 等がuntrackedとして作業ツリーに残る。
 - Why it matters: `git status` のdirty noiseになり、意図した変更の確認を読みにくくし、誤ってcommitされる余地を残す。
@@ -212,6 +212,7 @@
 - Human confirmation likely: no
 - Self-hosting prerequisite: no
 - Evidence class: code inspection, self-hosting assessment
+- Resolution: repository rootへ `.gitignore` を追加し、実測で生成を確認した `__pycache__/`、`.pytest_cache/`、`*.egg-info/` の3 patternだけをignore対象にした。genericなPython templateは使わず、このrepositoryが生成しない `build/`、`dist/`、`.coverage`、`.mypy_cache/` 等は入れていない。READMEのdevelopment test例も `py -3 -B -m pytest tests -q` にし、`-B` はworking treeへbytecode cacheを残さないためのdevelopment hygieneであって、Runtimeの起動条件ではないことを明記した。ただし主たる修正は `.gitignore` である。test suiteはcanonicalでない起動形を検証する子processを起動するため、`-B` を付けたfull runでも `src/workline/__pycache__` に23件が残ることを実測した。tracked file全件がignoreされないことを機械的に確認しており、正本である `registry.md` とcanonical Skillsが隠れることはない。既にworking treeにある生成物は削除していない。このrepositoryの履歴で一度もtrackedになっていないためindexから外す必要がなく、手元のcopyは各開発者の持ち物だからである。`pyproject.toml`、`registry.md`、canonical Skillsは変更しておらず、canonical runtimeのsemanticsは変わらない。canonical runtimeが `-B` の有無にかかわらずbytecode cacheを書かないのは、launcherがWorkline importの前に `sys.dont_write_bytecode` を設定するためであり、既存のcanonical記述が正しいことを実測で確認した。workline-core repository自身のdevelopment hygieneであり、Projectへ及ぶ影響はない（Workline operationがProjectのignore設定を書かない規則はBL-019）。
 
 ### BL-011 Reusable migration procedure
 
