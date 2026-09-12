@@ -55,7 +55,8 @@
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
 | BL-021 | Concurrent operation exclusion | RESOLVED |
 | BL-022 | ProjectSTART abandoned pre-effect recovery | RESOLVED |
-| BL-023 | Phase expansion cannot resume after an interruption | VERIFIED |
+| BL-023 | Phase expansion cannot resume after an interruption | RESOLVED |
+| BL-024 | Resume invocation does not bind decided content | VERIFIED |
 
 ## Items
 
@@ -361,7 +362,7 @@
 
 - ID: BL-023
 - Title: Phase expansion cannot resume after an interruption
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: implementation, design
 - Problem: Phase entryの展開が、通常Work適用後・integration適用前などで中断すると、pending mutationが残ったままProjectが進めなくなる。再実行したPhase entryは、そのPhase自身のpending phase-entry mutationをrecovery stateとして識別するものの、既にWorkがある場合はresumeせずそのまま返すため、integrationは作られない。一方で他のoperationはそのpending mutationとwrite scopeが重なるため `reconcile_required` で停止する。実測では `add_phases` とWork STARTの両方が停止し、`validate_project` は問題を報告しなかった。
 - Why it matters: Project全体が進行不能になり、Workline経由で回復する経路がない。中断したoperationは同じmutationをresumeするという `rules/git` の前提（`registry.md` Multi-write mutation）と `skills/roadmap` の記述が、この経路では成立していない。
@@ -369,6 +370,22 @@
 - Cross-project impact: あり（全Projectの回復可能性）
 - Backfill likely: 可能性あり（既に詰まっているProjectの回復手順）
 - Human confirmation likely: yes（recovery semanticsとMutation Controller契約に触れる）
+- Self-hosting prerequisite: no
+- Evidence class: code inspection, smoke test
+- Resolution: Phase entryが、最初のID予約より前に、展開対象のPhaseEntryDesignをmutationのinvocationへcanonicalな形で記録するようにした（通常Workの宣言順・key・name・成立状態・Related、integration、human_confirmationの有無と内容、planned_next、requires_completion、明示entry、記録形式version）。digestではなく内容そのものを保持するため、人がrecordを読んで何を展開していたか分かる。通常Workの順序はdisplay番号を決めるため意味として扱い、並べ替えは別designとする。これにより、中断した展開が「どのdesignに束縛されているか」が最初のdurable recordの時点で確定する。再実行のdesignが一致する場合だけpending mutationをresumeし、既に記録済みのstageはcaller specから決め直さず記録済みeffectをclassify / applyし、IDと結果は記録済みreserved ID / effectから再構成する。未記録stageだけを同一性確認済みのcaller designから決めるため、前半が旧design・後半が新designという混在が構造的に作れない。一致しない再実行は `reconcile_required` とし、pending recordを一切変更しない。実測: 中断点 P0（intent作成直後）/ P1（ID予約後）/ P2（works記録・未適用）/ P4（works適用済み）/ P5（integration記録・未適用）/ P7（integration適用済み）/ P8（confirmation記録・適用）/ P9（finalize前）/ P10（commit後・complete前）のすべてで、同じmutation IDのまま前進して完了し、Work・integration・confirmation・relationの重複なし、validate_projectもclean。以前はP4以降が回復不能で、pending中は `add_phases`・Work START・`hold_phase` がいずれも `reconcile_required` で停止していた。併せて次の2点を直した: 展開済みPhaseの早期returnが `_open` より前にあり pending mutationへ到達できなかった点（このPhase自身のpending phase-entryがある場合はresume pathへ入れる。BL-015の `phase_already_expanded` は、pendingが無い展開済みPhaseに対して従来どおり）。`register_works()` が記録済みstageでもspec由来のreserve / projectionを先に行い、適用済みintegrationを二重計上して `integration invariant: would have 2 unfinished integrations` で衝突していた点（記録済みstageはregistration coreを呼ばずに再構成する。registration core自体は変更していない）。`abandon_on_stop()` はglobalには変更していない: BL-022がresumeしたeffect 0件のmutationをabandonする動作に依存しているため（`test_a_stop_while_resuming_is_retried_as_a_new_mutation`）、Phase entryの内側でのみ、resumeしたmutationをabandonしないようにした。designを記録していない旧実装のpending recordはどの位置でも自動resumeせず `reconcile_required` とし、record・effects・reserved IDs・statusをそのまま保持する（P8 / P10も例外にしない。effect completenessは証明できても、過去に別designが混ざっていないことを証明できないため）。`INTENT_VERSION` とgeneric mutation schemaは変更していない: 記録はphase-entry invocationのoperation-localな意味追加であり、既存のrecord形式でそのまま往復する。明示entryもdesign記録に含むため、resume後の `entry_work_id` は元のdesign.entryから決まる。BL-014の一般tie-breakは変更していない。standalone CREATE / add_phases の共有binding欠陥はBL-024。`skills/roadmap` へ反映済み。
+
+### BL-024 Resume invocation does not bind decided content
+
+- ID: BL-024
+- Title: Resume invocation does not bind decided content
+- Status: VERIFIED
+- Kind: implementation, design
+- Problem: 中断したoperationをresumeするかどうかは、mutationのinvocationが一致するかで決まる。しかしinvocationは「何を決めたか」を含んでいないため、同じinvocation identityで内容の違うrequestを再実行すると、記録済みの旧決定を保持したまま新requestへsuccessを返す。実測: standalone CREATEで同じname / keyのまま異なる成立状態を渡して再実行すると、successが返るがstoreされているWorkは旧内容のまま（`create.py` のinvocationは operation / name / key だけで、postcheckも存在確認しか行わない）。`add_phases` も同様に、同じPhase名で異なる成立状態を渡すとD1のPhase本文を保持したままsuccessを返す。
+- Why it matters: 呼び出し側は自分が渡した内容が登録されたと解釈するが、正本は別の内容のままになる。中断・resumeが絡む経路でのみ起きるため気付きにくい。
+- Likely scope: resume identityが「決定内容」を束縛するための共通契約。Phase entryではBL-023でoperation-localに解決済み（designをinvocationへ記録し、不一致は `reconcile_required`）。同じ考え方をcaller横断の共通contractにするか、各ownerでoperation-localに解くかを決める必要がある。対象は少なくとも standalone CREATE（`create.py` の direct owner invocation）と `add_phases`（`roadmap.py` の invocation key）。postcheckが存在確認しか行わず内容一致を見ていない点も併せて扱う。rollbackでは直さない。
+- Cross-project impact: あり（resumeを伴う全operation）
+- Backfill likely: 可能性あり（既存pending recordの扱い）
+- Human confirmation likely: yes（共通resume contractに触れる）
 - Self-hosting prerequisite: no
 - Evidence class: code inspection, smoke test
 

@@ -379,9 +379,12 @@ class RefusalPrecedenceTests(PhaseEntryCase):
 class InterruptedExpansionTests(PhaseEntryCase):
     """An interrupted expansion is recovery state, not a caller re-entry.
 
-    BL-015 does not repair it - resuming is BL-023 - but it must not make it any
-    worse: the pending record is neither removed, abandoned, nor reported as an
-    already-expanded Phase.
+    It is never reported as an already-expanded Phase, and its pending record is
+    never abandoned or removed. Since BL-023 it is also carried forward: the same
+    design finishes the expansion on the same mutation, and a different design is
+    refused with the record left exactly as it was. The full resume behaviour is
+    covered in ``test_phase_expansion_resume``; what matters here is that Phase
+    entry keeps telling these two situations apart.
     """
 
     def interrupt_after_the_normal_works(self) -> dict:
@@ -398,22 +401,18 @@ class InterruptedExpansionTests(PhaseEntryCase):
         (pending,) = MutationController(self.store).list_pending()
         return pending
 
-    def test_j_the_pending_record_is_left_exactly_as_it_was(self) -> None:
+    def test_j_the_same_design_carries_the_expansion_forward(self) -> None:
         pending = self.interrupt_after_the_normal_works()
-        path = MutationController(self.store).intent_path(pending["mutation_id"])
-        recorded = path.read_bytes()
         self.assertTrue(ProjectView.load(self.store).phase_works(self.phase))
 
         result = rm.enter_phase(self.store, self.phase, D1)
 
-        self.assertFalse(result.expanded)
-        self.assertTrue(path.is_file())
-        self.assertEqual(path.read_bytes(), recorded)
-        self.assertEqual(yamlish.load(path.read_text(encoding="utf-8"))["status"], "pending")
-        self.assertEqual([p["mutation_id"] for p in MutationController(self.store).list_pending()],
-                         [pending["mutation_id"]])
+        self.assertTrue(result.expanded)
+        self.assertEqual(result.mutation_id, pending["mutation_id"])  # the same mutation
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+        self.assertEqual(len(ProjectView.load(self.store).phase_works(self.phase)), 3)
 
-    def test_j_a_changed_design_does_not_abandon_the_pending_record_either(self) -> None:
+    def test_j_a_changed_design_never_touches_the_pending_record(self) -> None:
         pending = self.interrupt_after_the_normal_works()
         path = MutationController(self.store).intent_path(pending["mutation_id"])
         recorded = path.read_bytes()
@@ -422,12 +421,11 @@ class InterruptedExpansionTests(PhaseEntryCase):
             {"x": rm.WorkDesign("Work X", "X が成立する")},
             rm.WorkDesign("Integration Z", "Z の統合確認"),
         )
-        result = rm.enter_phase(self.store, self.phase, other)
+        with self.assertRaises(StopError) as raised:
+            rm.enter_phase(self.store, self.phase, other)
 
-        # Today's behaviour, unchanged: no comparison, no refusal, and above all
-        # the recovery state survives untouched.
-        self.assertFalse(result.expanded)
-        self.assertEqual(path.read_bytes(), recorded)
+        self.assertEqual(raised.exception.code, "reconcile_required")
+        self.assertEqual(path.read_bytes(), recorded)  # byte for byte
         self.assertEqual(yamlish.load(path.read_text(encoding="utf-8"))["status"], "pending")
 
     def test_j_an_interrupted_expansion_is_not_reported_as_already_expanded(self) -> None:
@@ -435,7 +433,8 @@ class InterruptedExpansionTests(PhaseEntryCase):
 
         result = rm.enter_phase(self.store, self.phase, D1)
 
-        self.assertFalse(result.expanded)  # no phase_already_expanded for recovery state
+        # Recovery state is carried forward, never refused as a settled Phase.
+        self.assertTrue(result.expanded)
 
     def test_a_pending_mutation_of_another_operation_does_not_excuse_re_entry(self) -> None:
         """The exception needs this Phase's own phase-entry, not just its Phase ID.

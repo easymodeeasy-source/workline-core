@@ -17,6 +17,7 @@ from typing import Any
 
 from . import gitcmd, gitops
 from .create import (
+    RegistrationResult,
     RelatedSpec,
     RelationSpec,
     WorkSpec,
@@ -24,7 +25,7 @@ from .create import (
     related_edge_key,
     validate_related_specs,
 )
-from .errors import SpecViolation, StopError, ValidationError
+from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
 from .oplock import project_operation
 from .ops import (
@@ -337,6 +338,142 @@ def diagnose_no_candidate(store: ProjectStore, roadmap_id: str) -> str:
 
 # --------------------------------------------------------------------------- Phase entry
 
+# The shape of the Phase-entry design as the mutation records it. Bumped only
+# when the recorded shape changes meaning; it is operation-local to Phase entry
+# and is not the intent record's own version.
+DESIGN_IDENTITY_VERSION = 1
+
+
+def design_identity(design: PhaseEntryDesign) -> dict[str, Any]:
+    """What this Phase expansion is expanding, in the form the mutation records.
+
+    An interrupted expansion can only be continued if it is provable that the
+    continuation is expanding the same plan. Nothing in the Project's own files
+    says which design a half-finished expansion belonged to - the design's keys
+    are never persisted, and a stage that was never recorded left no trace at
+    all - so the plan is written into the mutation's invocation, which
+    ``MutationController.begin`` makes durable before a single ID is reserved.
+
+    It holds the design itself rather than a digest of it, so a record can be
+    read and understood by a human reconciling it. The declared order of the
+    normal Works is kept: it decides their display numbers, so reordering them
+    is a different plan, not the same one written differently. Sequences are
+    lists of mappings because the recovery record's format does not nest
+    sequences.
+    """
+
+    def related(specs: "tuple[RelatedSpec, ...]") -> list[dict[str, Any]]:
+        return [{"type": r.type, "to": r.to, "condition": r.condition} for r in specs]
+
+    def work(w: WorkDesign) -> dict[str, Any]:
+        # The desired state is stripped because that is what rendering keeps
+        # (``store.render_body``), so two designs whose desired states differ
+        # only in surrounding whitespace really are the same plan. The name is
+        # kept verbatim: rendering writes it as given, so its whitespace does
+        # reach the Project's files.
+        return {"name": w.name, "desired_state": w.desired_state.strip(), "related": related(w.related)}
+
+    def pairs(items: "tuple[tuple[str, str], ...]") -> list[dict[str, str]]:
+        return [{"from": a, "to": b} for a, b in items]
+
+    return {
+        "version": DESIGN_IDENTITY_VERSION,
+        "works": [{"key": key, **work(w)} for key, w in design.works.items()],
+        "integration": work(design.integration),
+        "confirmation": work(design.human_confirmation) if design.human_confirmation is not None else None,
+        "planned_next": pairs(design.planned_next),
+        "requires_completion": pairs(design.requires_completion),
+        "entry": design.entry,
+    }
+
+
+def _pending_phase_entry(store: ProjectStore, phase_id: str) -> list[dict[str, Any]]:
+    """This Phase's own unfinished Phase entries, whatever design they carry."""
+    return [
+        record
+        for record in MutationController(store).list_pending()
+        if record["owner"] == OWNER
+        and record["invocation"].get("operation") == "phase-entry"
+        and record["invocation"].get("phase_id") == phase_id
+    ]
+
+
+def _same_design(recorded: object, identity: dict[str, Any]) -> bool:
+    """Whether a record is expanding this very design, compared as it is written.
+
+    Compared on the canonical encoding rather than as Python objects, because
+    Python reads ``True`` and ``1`` as the same value while the record - and a
+    Related condition built from it - keeps them apart. A recorded design that
+    cannot be encoded at all is not a design this run can claim to match.
+    """
+    try:
+        return json.dumps(recorded, sort_keys=True) == json.dumps(identity, sort_keys=True)
+    except (TypeError, ValueError):
+        return False
+
+
+def _require_resumable(pending: list[dict[str, Any]], phase_id: str, identity: dict[str, Any]) -> None:
+    """STOP unless this interrupted expansion is provably the one now being asked for.
+
+    Continuing one plan's half-applied expansion with another plan would leave a
+    Phase that is partly one design and partly another, which no later reader
+    could untangle. Where that cannot be ruled out the expansion is left exactly
+    as it is, for a human to reconcile: nothing is abandoned, removed, replaced
+    or rolled back.
+    """
+    legacy = [record for record in pending if record["invocation"].get("design") is None]
+    if legacy:
+        raise ReconcileRequired(
+            "legacy pending Phase entry "
+            + ", ".join(sorted(record["mutation_id"] for record in legacy))
+            + f" of Phase {phase_id}: the record is still pending but was written before Phase entry "
+            "wrote down which design it was expanding, so the design identity needed to resume it "
+            "automatically is missing and no continuation can be shown to be the same plan; it is "
+            "left untouched: reconcile required"
+        )
+    if len(pending) > 1:
+        raise ReconcileRequired(
+            f"Phase {phase_id} has {len(pending)} unfinished Phase entries "
+            f"({', '.join(sorted(record['mutation_id'] for record in pending))}): reconcile required"
+        )
+    record = pending[0]
+    if not _same_design(record["invocation"].get("design"), identity):
+        raise ReconcileRequired(
+            f"the unfinished Phase entry {record['mutation_id']} of Phase {phase_id} is expanding a "
+            "different design from the one now given; an interrupted expansion is never continued "
+            "with another plan, and it is left untouched: reconcile required"
+        )
+
+
+def _recorded_registration(mutation: Mutation, stage: str, keys: list[str]) -> RegistrationResult:
+    """What a stage already recorded, read back instead of decided a second time.
+
+    ``_open`` has already classified and applied every recorded effect, so this
+    stage is done. Asking the registration core again would reserve its IDs
+    again, validate its specs against a Project that already contains them, and
+    project a structure that already exists - which is how a recorded
+    integration comes to be counted twice. The stage's own reservations and
+    effects say everything the rest of the expansion needs from it.
+    """
+    work_ids: dict[str, str] = {}
+    for key in keys:
+        work_id = mutation.reserved(f"{stage}:work:{key}")
+        if work_id is None:
+            raise ReconcileRequired(
+                f"the unfinished Phase entry {mutation.id} recorded stage {stage!r} without "
+                f"reserving {key!r}: reconcile required"
+            )
+        work_ids[key] = work_id
+    effects = mutation.stage_effects(stage)
+    paths = [effect["payload"]["path"] for effect in effects if effect["kind"] == "write_file"]
+    files = {effect["payload"]["file"] for effect in effects if effect["kind"] == "add_relation"}
+    if "roadmap" in files:
+        paths.append(f"{WORKLINE_DIR}/relations/roadmap.yaml")
+    if "related" in files:
+        paths.append(f"{WORKLINE_DIR}/relations/related.yaml")
+    return RegistrationResult(work_ids, {}, tuple(paths))
+
+
 def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
     with project_operation(store, "phase-entry", {"phase_id": phase_id}):
         return _enter_phase_locked(store, phase_id, design)
@@ -361,8 +498,14 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
             code="phase_blocked",
         )
 
+    identity = design_identity(design)
+    interrupted = _pending_phase_entry(store, phase_id)
+    if interrupted:
+        # An expansion of this Phase is unfinished. It is continued only where
+        # it is provably the same plan; otherwise it is left for reconciliation
+        # rather than hidden behind the already-expanded refusal.
+        _require_resumable(interrupted, phase_id, identity)
     if view.phase_works(phase_id):
-        interrupted = _pending_for(store, "phase-entry", {"phase_id": phase_id})
         if not interrupted:
             # This Phase already holds its Works, so there is nothing for a design
             # to register. Taking the design as read would let a caller believe a
@@ -375,16 +518,6 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
                 "read the current structure instead, and change it through Roadmap maintenance",
                 code="phase_already_expanded",
             )
-        # An interrupted expansion of this very Phase, not a caller re-entry: its
-        # pending mutation is recovery state. Left exactly as it was found -
-        # neither abandoned, removed nor reported as a design mismatch. Resuming
-        # it is BL-023's subject and is deliberately not attempted here.
-        startable = view.startable_works(phase_id)
-        entry = startable[0].id if startable else None
-        integration = next((w.id for w in view.integrations(phase_id)), None)
-        confirmation = next((w.id for w in view.effective_works(phase_id) if w.work_kind == "human_confirmation"), None)
-        return PhaseEntryResult(phase_id, {}, integration, confirmation, entry, False, None, gitcmd.head_commit(store.root))
-
     if not design.works:
         raise ValidationError("Phase entry needs at least one normal Work")
     for key in design.works:
@@ -392,7 +525,13 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
             raise ValidationError(f"reserved Work key: {key}")
     _require_startable_entry(view, design)
 
-    mutation, destination = _open(store, "phase-entry", {"phase_id": phase_id}, [phase_id])
+    mutation, destination = _open(store, "phase-entry", {"phase_id": phase_id, "design": identity}, [phase_id])
+    if mutation.resumed:
+        # An expansion that already exists is carried forward, never given up:
+        # abandoning it would strand the IDs it reserved and the effects it
+        # recorded. Only a Phase entry that this run started may be abandoned
+        # before its first effect.
+        return _expand_phase(store, mutation, destination, phase, phase_id, roadmap_id, design)
     with abandon_on_stop(mutation):
         return _expand_phase(store, mutation, destination, phase, phase_id, roadmap_id, design)
 
@@ -440,7 +579,12 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
     }
     normal_relations = [RelationSpec("planned_next", a, b) for a, b in design.planned_next]
     normal_relations += [RelationSpec("requires_completion", a, b) for a, b in design.requires_completion]
-    normal = register_works(mutation, "works", normal_specs, normal_relations)
+    def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
+        if mutation.has_stage(stage):
+            return _recorded_registration(mutation, stage, list(specs))
+        return register_works(mutation, stage, specs, relations)
+
+    normal = registered("works", normal_specs, normal_relations)
 
     integration_spec = WorkSpec(
         design.integration.name,
@@ -450,8 +594,7 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
         work_kind="phase_integration_check",
         related=tuple(design.integration.related),
     )
-    integration = register_works(
-        mutation,
+    integration = registered(
         "integration",
         {"integration": integration_spec},
         [RelationSpec("requires_completion", work_id, "integration") for work_id in normal.work_ids.values()],
@@ -470,8 +613,7 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
             confirmation_target=integration_id,
             related=tuple(design.human_confirmation.related),
         )
-        confirmation = register_works(
-            mutation,
+        confirmation = registered(
             "confirmation",
             {"confirmation": confirmation_spec},
             [RelationSpec("requires_completion", integration_id, "confirmation")],

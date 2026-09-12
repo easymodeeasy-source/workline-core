@@ -150,7 +150,15 @@ WorkはPhaseへ実際に入る時だけ展開する。
 
 既にWorkが展開されたPhaseへ、新しいentry designを渡してPhase entryを再実行しない。展開済みPhaseにはdesignが登録する対象がなく、渡されたdesignを黙って無視すれば、呼び出し側が別の計画が登録されたと誤認し得る。Phase entryはこれを `phase_already_expanded` でSTOPし、design無視・既存entryへの差し替え・通常成功としての返却・ID発行・mutation開始・canonical state変更・commitのいずれも行わない。展開済みPhaseの現在構造はread-onlyで読み、計画の正式変更はRoadmapのRelated maintenance等から行う（`rules/ai-decision`）。なお、Roadmapがactiveでない場合、Phaseがcomplete / held / cancelled / plan_excludedの場合、Phaseのdependencyが未充足の場合は、従来どおりそれぞれの理由でSTOPし、`phase_already_expanded` より優先する。どの経路でもcanonical stateは変更しない。
 
-ただしこのPhase自身のPhase entryがeffect記録後に中断してpending mutationが残っている状態は、呼び出し側の再実行ではなくrecovery stateであり、`phase_already_expanded` として扱わない。その場合pending recordをabandon・削除せず、現状のまま返す。
+ただしこのPhase自身のPhase entryが中断してpending mutationが残っている状態は、呼び出し側の再実行ではなくrecovery stateであり、`phase_already_expanded` として扱わない。中断した展開は同じmutationで前へ進めて完了させる。
+
+Phase entryは、最初のID予約より前に、展開対象のdesignをmutationのinvocationへ記録する。記録する内容は、通常Workの宣言順・key・name・成立状態・Related（type / to / condition）、integration、human_confirmationの有無と内容、`planned_next`、`requires_completion`、明示entry、およびこの記録形式のversionとする。通常Workの順序はdisplay番号を決めるため意味を持ち、並べ替えを同一designとして扱わない。
+
+再実行のdesignが記録済みdesignと一致する場合だけ、そのpending mutationをresumeする。既に記録済みのstageはcaller specから決め直さず、記録済みeffectをclassify / applyし、そのstageのIDと結果は記録済みreserved ID / effectから再構成する。未記録のstageだけを、同一性が確認されたcaller designから決める。記録済みのdesignと一致しない再実行は `reconcile_required` とし、既存のpending mutationを別のdesignで継続しない。前半は記録済みdesign、後半は再実行designという混在を作らない。
+
+designを記録していない旧実装のpending phase-entry recordは自動resumeしない。どの中断位置でも `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationへの差し替えは行わない。診断にはmutation id、Phase id、legacy phase-entry pendingであること、自動resumeにはdesign記録が不足していることを含める。
+
+中断した展開のmutationは、resume中のSTOPでabandonしない。今回の実行が新しく開いたPhase entryがeffect記録前にSTOPした場合にabandonする既存の動作は変えない。
 
 明示entryの妥当性は、domain write・mutation effect・Git commit / pushより前に検査する。designのWork keyに存在しないentry、およびこの展開が作るWorkの完了を待つことになるentryは、展開前にSTOPする。既存Workの完了を待つentryは、その既存Workが既にcompletedなら妥当である。
 
