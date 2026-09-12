@@ -56,7 +56,7 @@
 | BL-021 | Concurrent operation exclusion | RESOLVED |
 | BL-022 | ProjectSTART abandoned pre-effect recovery | RESOLVED |
 | BL-023 | Phase expansion cannot resume after an interruption | RESOLVED |
-| BL-024 | Resume invocation does not bind decided content | VERIFIED |
+| BL-024 | Resume invocation does not bind decided content | RESOLVED |
 
 ## Items
 
@@ -378,7 +378,7 @@
 
 - ID: BL-024
 - Title: Resume invocation does not bind decided content
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: implementation, design
 - Problem: 中断したoperationをresumeするかどうかは、mutationのinvocationが一致するかで決まる。しかしinvocationは「何を決めたか」を含んでいないため、同じinvocation identityで内容の違うrequestを再実行すると、記録済みの旧決定を保持したまま新requestへsuccessを返す。実測: standalone CREATEで同じname / keyのまま異なる成立状態を渡して再実行すると、successが返るがstoreされているWorkは旧内容のまま（`create.py` のinvocationは operation / name / key だけで、postcheckも存在確認しか行わない）。`add_phases` も同様に、同じPhase名で異なる成立状態を渡すとD1のPhase本文を保持したままsuccessを返す。
 - Why it matters: 呼び出し側は自分が渡した内容が登録されたと解釈するが、正本は別の内容のままになる。中断・resumeが絡む経路でのみ起きるため気付きにくい。
@@ -388,6 +388,7 @@
 - Human confirmation likely: yes（共通resume contractに触れる）
 - Self-hosting prerequisite: no
 - Evidence class: code inspection, smoke test
+- Resolution: callerが内容を決める4つのowner（direct standalone CREATE / Roadmap作成 / Phase追加 / 既存未開始WorkのRelated maintenance）が、最初のID予約より前に、決定内容の正規identityを自分のinvocationへ `request` として記録するようにした。`MutationController.begin` がそれをdurableに書いてからID予約が始まるため、中断したoperationがどのrequestに束縛されているかは最初のdurable recordの時点で確定する。共有helperは `mutation.py` の `same_request`（canonical JSON比較。Pythonが `True` と `1` を同一視する一方recordは区別するため、objectではなくencodingで比較する）、`pending_for_slot`（invocationのうち「どれを対象にしているか」を言うslot部分だけで未完了recordを探す。内容が違うrequestでも、本来resumeしていたはずのrecordを必ず見つけて拒否できるようにするため）、`require_same_request`（legacy record / 複数件 / 内容不一致のいずれも `reconcile_required`）。identityはdigestではなく内容そのもので、人がrecordを読んで何を決めていたか分かる。正規化はrenderingに合わせた: section本文になる値はstrip（`store.render_body` がstripする）、nameはverbatim（renderingがそのまま書く）、Roadmapの任意sectionは有無と内容を別に記録（renderingがtruthinessで含める）、`derivation_detail` は無しと空を区別。宣言順はdisplay番号とID予約の対応を決めるため保持し、並べ替えは別requestとする。検査位置は、mutationを開くより前・記録済みeffectをreplayするより前（`roadmap._open` は戻る前にapplyする）で、Related maintenanceではno-op fast pathより前（D1の適用済みedgeの部分集合をD2が要求すると、D1をpendingのまま「やることなし」と返してしまうため）。実測（baseline `5e6580b`）: standalone CREATEは同じname / keyで別の成立状態を渡すとsuccessを返し正本はD1のまま、roadmap-createはD1の本文 + D2のPhaseという混ざったRoadmapをsuccessで返し、add_phasesはD1の成立状態を保持したままsuccess、Related maintenanceは明示keyで別のaddを渡すとD1のedgeを保持したままsuccess。いずれも修正後は `reconcile_required` となり、正本もpending recordも変わらない。同一requestの再実行は、intentだけ / 記録済み未適用 / 適用済みのどの中断点でも同じmutation・同じreserved IDで前進し、重複entity・重複relation・取り残しreservationはない。`_related_request_key` はrequest文字列を区切り文字で連結しescapeしないため別内容が同じ文字列になり得ることを実測で確認し（`(must_read, "a: | +obey:b")` と `(must_read,"a") + (obey,"b")` が同一label）、identityはlabelではなく構造で持つようにした。requestが自分自身の中に持つ重複（同一edge・同一removal id）は `_resolve_related_changes` がもともと1件として扱うので、identityを作るより前・request解決より前に畳み、畳んだ位置からrelation IDを予約する（`related:add:<index>` はrequest内の位置がkeyのため、畳まないと `(E, E, F)` と `(E, F)` でFのreservationが取り残される）。畳むとdefault labelが変わるので、畳む前のlabelの下も探す（そうしないと、以前の実装が `(E, E)` で作ったlegacy pending recordを唯一見つけられるはずの再実行がno-opを返して取り残す）。`future_plan_change` はidentityへ含めない（held Roadmapを通すかどうかだけを決めeffectに到達しないため、含めるとactive Roadmapで同一内容の再実行を拒否してしまう）。代わりにrequest一致検査の後・mutationを開くより前に検査し、継続できないrecordの存在をlifecycle factで隠さず、拒否された再実行が既存のpending mutationをabandonしないようにした。requestを記録していない旧実装のpending recordはどの中断位置でも自動resumeせず `reconcile_required` とし、record・effects・reserved IDs・statusをそのまま保持する（rollback・abandon・削除・差し替え・新規mutationのいずれも行わない）。これにより、従来default keyで自動resumeできていたRelated maintenanceのpending recordは、以後は人の照合対象になる。変更しなかったowner: `start`（決定はattemptごとで、attemptごとに新しいstageを開く。2回目のattemptが別の結果を決めて同じmutationを完了できることを確認）、`start-plan-exclude` / `phase-plan-exclude` / `work-plan-exclude`（eventのpayloadは対象entityに対する `plan_excluded` で固定。replan effectを記録する `apply_replan` はterminal eventをapplyした後にしか走らないため、replan effectが記録されている＝eventが適用済み＝次の呼び出しはunstarted prechekで止まる。唯一通る窓〈eventが記録済み・未適用〉でも、正本には再実行自身の内容だけが残り最初のrequestの内容は残らないことを3 operation × 2窓で実測）、`roadmap-achievement`（eventは `roadmap_achieved` 固定、`detail` は返すだけ）、Roadmap / Phase lifecycle（event種別固定）、`project-start`（内容不一致はpostcheckが拒否）、`bootstrap-backfill`（payloadは定数）、`push-destination-pin`（決定内容は既にinvocationにある）。どのidentityもそのownerのinvocation内のoperation-local keyなので、`INTENT_VERSION` とgeneric record schemaは変更していない（共通contractへ昇格させていないため人間判断を要する一般規則の変更も発生しなかった）。BL-023がPhase entryにoperation-localで入れた比較器 `_same_design` は、同じ内容の共有 `same_request` へ置き換えた（Phase entryの挙動は変えない）。Phase relationのendpointをspec keyで書くかそのkeyが予約されたPhase IDで書くかは別requestとして扱う: identityは最初のID予約より前にdurableでなければならず、その時点でPhase IDは存在しないため一方を他方へ解決できない（理由は `_phase_relation_records` のdocstringへ記録）。`skills/create` と `skills/roadmap` へ反映済み。
 
 ### BL-020 Correction of mis-recorded historical facts
 

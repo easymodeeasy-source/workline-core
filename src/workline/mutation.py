@@ -363,6 +363,72 @@ class Mutation:
         self._save()
 
 
+def same_request(recorded: object, request: dict[str, Any]) -> bool:
+    """Whether a record was opened for this very request, compared as it is written.
+
+    Compared on the canonical encoding rather than as Python objects, because
+    Python reads ``True`` and ``1`` as the same value while the record - and any
+    payload built from it - keeps them apart. A recorded request that cannot be
+    encoded at all is not one this run can claim to match.
+    """
+    try:
+        return json.dumps(recorded, sort_keys=True) == json.dumps(request, sort_keys=True)
+    except (TypeError, ValueError):
+        return False
+
+
+def pending_for_slot(store: ProjectStore, owner: str, slot: dict[str, Any]) -> list[dict[str, Any]]:
+    """This owner's unfinished mutations whose invocation matches ``slot``.
+
+    ``slot`` is the part of an invocation that says *which* thing is being
+    worked on - a name, a key, an entity - without saying what was decided about
+    it. Discovery is deliberately by slot alone, so a request that differs in
+    content still finds the record it would otherwise have resumed, and can be
+    refused instead of quietly taking it over.
+    """
+    return [
+        record
+        for record in MutationController(store).list_pending()
+        if record["owner"] == owner and all(record["invocation"].get(key) == value for key, value in slot.items())
+    ]
+
+
+def require_same_request(pending: list[dict[str, Any]], request: dict[str, Any], described: str) -> None:
+    """STOP unless an unfinished mutation in this slot is this very request.
+
+    An operation that decides what its caller asked for must be resumable only
+    by the same request. Resuming one request's record for another would report
+    success while the Project keeps what the first one decided - or, where the
+    first had not finished deciding, mix the two. Where that cannot be ruled out
+    the record is left exactly as it is, for a human to reconcile: nothing is
+    abandoned, removed, replaced or rolled back, and no new mutation is started.
+    """
+    if not pending:
+        return
+    legacy = [record for record in pending if "request" not in record["invocation"]]
+    if legacy:
+        raise ReconcileRequired(
+            "unfinished " + described + " "
+            + ", ".join(sorted(record["mutation_id"] for record in legacy))
+            + ": the record is still pending but was written before this operation recorded what it "
+            "had decided, so there is no way to show that this request continues that same one; it "
+            "is left untouched: reconcile required"
+        )
+    if len(pending) > 1:
+        raise ReconcileRequired(
+            f"{len(pending)} unfinished {described} "
+            + ", ".join(sorted(record["mutation_id"] for record in pending))
+            + ": reconcile required"
+        )
+    record = pending[0]
+    if not same_request(record["invocation"].get("request"), request):
+        raise ReconcileRequired(
+            "the unfinished " + described + f" {record['mutation_id']} was opened for a different "
+            "request than the one now given; an interrupted operation is never continued with "
+            "another request, and it is left untouched: reconcile required"
+        )
+
+
 @contextmanager
 def abandon_on_stop(mutation: Mutation):
     """Abandon ``mutation`` when a STOP happens before any effect was recorded."""

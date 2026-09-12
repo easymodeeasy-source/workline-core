@@ -21,7 +21,15 @@ from typing import Any, Sequence
 from . import gitops
 from .errors import SpecViolation, ValidationError
 from .ids import is_valid_id
-from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import (
+    Effect,
+    Mutation,
+    MutationController,
+    WriteScope,
+    abandon_on_stop,
+    pending_for_slot,
+    require_same_request,
+)
 from .oplock import project_operation
 from .state import COMPLETE, EXCLUDED_STATES, ProjectView
 from .store import (
@@ -305,6 +313,40 @@ class CreateResult:
     resumed: bool
 
 
+DIRECT_REQUEST_VERSION = 1
+
+
+def direct_request_identity(spec: WorkSpec) -> dict[str, Any]:
+    """What a direct CREATE decided, in the form its mutation records.
+
+    A name does not say what the Work is, so a mutation identified by its name
+    alone can be resumed by a request that decided something else - and then
+    reports success while the Project keeps what the first request decided. The
+    decided content therefore travels in the invocation, which
+    ``MutationController.begin`` makes durable before a single ID is reserved.
+
+    It holds the decided content itself rather than a digest of it, so a record
+    can be read and understood by a human reconciling it. Only what a direct
+    standalone CREATE can legally vary is recorded: ``phase_id`` / ``roadmap_id``
+    / ``work_kind`` are refused at the entry, and a ``confirmation_target``
+    belongs to a ``human_confirmation`` Work, so registration validation refuses
+    every spec that carries one before any effect is decided.
+
+    Normalised to what is written: the desired state and the derivation detail
+    are stripped because rendering strips them (``store.render_body``,
+    :func:`register_works`), while the name is kept verbatim because rendering
+    writes it as given. A derivation detail that is absent is not the same
+    request as one that is present, so its absence stays distinguishable.
+    """
+    return {
+        "version": DIRECT_REQUEST_VERSION,
+        "name": spec.name,
+        "desired_state": spec.desired_state.strip(),
+        "related": [{"type": r.type, "to": r.to, "condition": r.condition} for r in spec.related],
+        "derivation_detail": None if spec.derivation_detail is None else spec.derivation_detail.strip(),
+    }
+
+
 def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_key: str | None = None) -> CreateResult:
     """CREATE entrypoint for direct standalone invocation (Direct Work Operation context)."""
     if not spec.standalone or spec.roadmap_id is not None:
@@ -317,14 +359,19 @@ def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_ke
 
 def _create_standalone_locked(store: ProjectStore, spec: WorkSpec, invocation_key: str | None) -> CreateResult:
     controller = MutationController(store)
-    invocation = {"operation": DIRECT_OWNER, "name": spec.name, "key": invocation_key or spec.name}
+    request = direct_request_identity(spec)
+    slot = {"operation": DIRECT_OWNER, "name": spec.name, "key": invocation_key or spec.name}
+    invocation = {**slot, "request": request}
     scope = WriteScope(files=(
         f"{WORKLINE_DIR}/relations/roadmap.yaml",
         f"{WORKLINE_DIR}/relations/related.yaml",
         f"{WORKLINE_DIR}/events/events.jsonl",
     ))
-    # Entry check before the mutation exists: an unpinned or drifted push
-    # destination STOPs here, with no intent record and no domain write.
+    # Entry checks before the mutation exists, with no intent record and no
+    # domain write: a request that decided something other than the unfinished
+    # one in this slot is refused rather than quietly taking its record over,
+    # and an unpinned or drifted push destination STOPs here.
+    require_same_request(pending_for_slot(store, DIRECT_OWNER, slot), request, f"direct CREATE of {spec.name!r}")
     destination = gitops.ensure_push_destination(store)
     mutation = controller.open(DIRECT_OWNER, invocation, scope)
     with abandon_on_stop(mutation):

@@ -26,7 +26,16 @@ from .create import (
     validate_related_specs,
 )
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
-from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import (
+    Effect,
+    Mutation,
+    MutationController,
+    WriteScope,
+    abandon_on_stop,
+    pending_for_slot,
+    require_same_request,
+    same_request,
+)
 from .oplock import project_operation
 from .ops import (
     Replan,
@@ -181,6 +190,136 @@ def _require_active_roadmap(view: ProjectView, roadmap_id: str) -> None:
         raise StopError(f"Roadmap {roadmap_id} is held; resume it first", code="roadmap_held")
 
 
+# --------------------------------------------------------------------------- decided request
+
+ROADMAP_REQUEST_VERSION = 1
+
+
+def _related_records(specs: tuple[RelatedSpec, ...]) -> list[dict[str, Any]]:
+    return [{"type": r.type, "to": r.to, "condition": r.condition} for r in specs]
+
+
+def _phase_records(phases: dict[str, PhaseSpec]) -> list[dict[str, Any]]:
+    """The Phases as decided, in declared order: that order sets their display numbers.
+
+    The desired state is stripped because rendering strips it
+    (``store.render_body``); the name is kept verbatim because rendering writes
+    it as given.
+    """
+    return [
+        {"key": key, "name": spec.name, "desired_state": spec.desired_state.strip()}
+        for key, spec in phases.items()
+    ]
+
+
+def _phase_relation_records(relations: tuple[PhaseRelationSpec, ...]) -> list[dict[str, str]]:
+    """Declared order is kept: it decides which reservation each relation gets.
+
+    Endpoints are recorded as the caller wrote them. An endpoint naming a spec
+    key and one naming the Phase ID that key was reserved as resolve to the same
+    relation, yet they are two requests here, because this identity is fixed
+    before any ID is reserved and so cannot resolve one into the other. Treating
+    them as one would mean trusting a caller that read this run's reservations
+    out of the recovery record and rewrote its request around them.
+    """
+    return [{"type": r.type, "from": r.from_ref, "to": r.to_ref} for r in relations]
+
+
+def _optional_section(text: str | None) -> str | None:
+    """An optional section as the writer sees it: present and stripped, or absent.
+
+    ``None`` and ``""`` leave the section out of the body entirely while a
+    blank string puts an empty one in, so presence is recorded separately from
+    content instead of being collapsed by stripping.
+    """
+    return text.strip() if text else None
+
+
+def roadmap_request_identity(plan: RoadmapPlan) -> dict[str, Any]:
+    """What a Roadmap creation decided, in the form its mutation records.
+
+    A Roadmap's name does not say what the Roadmap is, and its creation writes
+    the Roadmap *and* its Phases; resuming one plan's half-written creation with
+    another leaves a Roadmap that is partly one plan and partly another. The
+    plan therefore travels in the invocation, durable before any ID is reserved.
+    """
+    return {
+        "version": ROADMAP_REQUEST_VERSION,
+        "name": plan.name,
+        "background": plan.background.strip(),
+        "desired_state": plan.desired_state.strip(),
+        "scope": _optional_section(plan.scope),
+        "out_of_scope": _optional_section(plan.out_of_scope),
+        "phases": _phase_records(plan.phases),
+        "relations": _phase_relation_records(plan.relations),
+    }
+
+
+def phase_addition_request_identity(
+    phases: dict[str, PhaseSpec], relations: tuple[PhaseRelationSpec, ...]
+) -> dict[str, Any]:
+    """What a Phase addition decided.
+
+    ``future_plan_change`` is deliberately not part of it: it decides whether a
+    held Roadmap accepts the addition at all and never reaches an effect, so two
+    requests differing only there register exactly the same Phases. It is
+    checked before the mutation is opened instead, so a request refused for it
+    leaves no record behind either.
+    """
+    return {
+        "version": ROADMAP_REQUEST_VERSION,
+        "phases": _phase_records(phases),
+        "relations": _phase_relation_records(relations),
+    }
+
+
+def related_request_identity(add: tuple[RelatedSpec, ...], remove_relation_ids: tuple[str, ...]) -> dict[str, Any]:
+    """What a related maintenance request decided.
+
+    Structural rather than the printable key of :func:`_related_request_key`:
+    that key joins caller text with separators it does not escape, so two
+    different requests can spell the same key. Order is kept because it decides
+    which reservation each addition gets.
+    """
+    return {
+        "version": ROADMAP_REQUEST_VERSION,
+        "add": _related_records(add),
+        "remove": list(remove_relation_ids),
+    }
+
+
+def _collapse_related_request(
+    work_id: str, add: tuple[RelatedSpec, ...], remove_relation_ids: tuple[str, ...]
+) -> tuple[tuple[RelatedSpec, ...], tuple[str, ...]]:
+    """The request with its own repeats folded away, keeping the first of each.
+
+    :func:`_resolve_related_changes` already treats a repeated edge or a
+    repeated removal ID as one, so ``(E, E)`` and ``(E,)`` decide the same
+    thing. They are folded here, before the identity is built *and* before the
+    request is resolved, so the two spellings are one request that also reserves
+    the same relation IDs - the reservation key is the position in the request,
+    and a retry must keep the IDs its first attempt issued.
+
+    Only the request's own repeats are folded. What the Project already holds is
+    left to resolution, so the identity says what was asked for, independently
+    of the state it meets.
+    """
+    seen_edges: set[tuple] = set()
+    adds: list[RelatedSpec] = []
+    for spec in add:
+        key = related_edge_key(spec.type, work_id, spec.to, spec.condition)
+        if key not in seen_edges:
+            seen_edges.add(key)
+            adds.append(spec)
+    seen_ids: set[str] = set()
+    removals: list[str] = []
+    for relation_id in remove_relation_ids:
+        if relation_id not in seen_ids:
+            seen_ids.add(relation_id)
+            removals.append(relation_id)
+    return tuple(adds), tuple(removals)
+
+
 # --------------------------------------------------------------------------- new Roadmap
 
 def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
@@ -190,7 +329,13 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
         raise ValidationError("a new Roadmap registers all of its Phases; none were decided")
     with project_operation(store, "roadmap-create", {"name": plan.name}):
         _stop_on_structure(store, "precheck")
-        mutation, destination = _open(store, "roadmap-create", {"name": plan.name})
+        request = roadmap_request_identity(plan)
+        require_same_request(
+            pending_for_slot(store, OWNER, {"operation": "roadmap-create", "name": plan.name}),
+            request,
+            f"Roadmap creation of {plan.name!r}",
+        )
+        mutation, destination = _open(store, "roadmap-create", {"name": plan.name, "request": request})
         with abandon_on_stop(mutation):
             return _create_roadmap(store, mutation, destination, plan)
 
@@ -270,7 +415,22 @@ def _add_phases_locked(
         "roadmap_id": roadmap_id,
         "key": invocation_key or " | ".join(spec.name for spec in phases.values()),
     }
-    mutation, destination = _open(store, "roadmap-add-phases", identity, [roadmap_id])
+    request = phase_addition_request_identity(phases, relations)
+    # First, so that an unfinished addition this request cannot continue is
+    # reported as what it is. The held-Roadmap rule below would otherwise hide
+    # it behind a lifecycle fact that says nothing about the stranded record.
+    require_same_request(
+        pending_for_slot(store, OWNER, {"operation": "roadmap-add-phases", **identity}),
+        request,
+        f"Phase addition to {roadmap_id}",
+    )
+    if lifecycle == HELD and not future_plan_change:
+        # Still decided before the mutation exists, so two requests differing
+        # only in this flag are one request as far as resume is concerned, and a
+        # request refused for it leaves no record behind. Phase CREATE keeps the
+        # same precheck as part of its own contract.
+        raise SpecViolation(f"Roadmap {roadmap_id} is held; Phase addition needs a decided future-plan change")
+    mutation, destination = _open(store, "roadmap-add-phases", {**identity, "request": request}, [roadmap_id])
     with abandon_on_stop(mutation):
         registered = register_phases(
             mutation, "phases", roadmap_id, phases, list(relations), future_plan_change=future_plan_change
@@ -398,20 +558,6 @@ def _pending_phase_entry(store: ProjectStore, phase_id: str) -> list[dict[str, A
     ]
 
 
-def _same_design(recorded: object, identity: dict[str, Any]) -> bool:
-    """Whether a record is expanding this very design, compared as it is written.
-
-    Compared on the canonical encoding rather than as Python objects, because
-    Python reads ``True`` and ``1`` as the same value while the record - and a
-    Related condition built from it - keeps them apart. A recorded design that
-    cannot be encoded at all is not a design this run can claim to match.
-    """
-    try:
-        return json.dumps(recorded, sort_keys=True) == json.dumps(identity, sort_keys=True)
-    except (TypeError, ValueError):
-        return False
-
-
 def _require_resumable(pending: list[dict[str, Any]], phase_id: str, identity: dict[str, Any]) -> None:
     """STOP unless this interrupted expansion is provably the one now being asked for.
 
@@ -437,7 +583,7 @@ def _require_resumable(pending: list[dict[str, Any]], phase_id: str, identity: d
             f"({', '.join(sorted(record['mutation_id'] for record in pending))}): reconcile required"
         )
     record = pending[0]
-    if not _same_design(record["invocation"].get("design"), identity):
+    if not same_request(record["invocation"].get("design"), identity):
         raise ReconcileRequired(
             f"the unfinished Phase entry {record['mutation_id']} of Phase {phase_id} is expanding a "
             "different design from the one now given; an interrupted expansion is never continued "
@@ -922,12 +1068,33 @@ def _maintain_work_related_locked(
     work = _unstarted_roadmap_work(view, work_id)
     validate_related_specs(add, f"related maintenance {work_id}")
 
-    # Request identity comes from the request alone, so it is known before any
-    # current-state resolution. That ordering is what makes resume correct: a
-    # mutation whose effects are already durably recorded must continue from
-    # those records, not be re-derived from a state those very effects changed.
-    identity = {"work_id": work_id, "key": invocation_key or _related_request_key(add, remove_relation_ids)}
+    # What the request asks for, folded to the form the operation acts on, and
+    # then its identity - both derived from the request alone, so they are known
+    # before any current-state resolution. That ordering is what makes resume
+    # correct: a mutation whose effects are already durably recorded must
+    # continue from those records, not be re-derived from a state those very
+    # effects changed.
+    unfolded_key = invocation_key or _related_request_key(add, remove_relation_ids)
+    add, remove_relation_ids = _collapse_related_request(work_id, add, remove_relation_ids)
     operation = "work-related-maintenance"
+    slot = {"work_id": work_id, "key": invocation_key or _related_request_key(add, remove_relation_ids)}
+    request = related_request_identity(add, remove_relation_ids)
+    # Before the no-op decision below, which can return without ever opening a
+    # mutation: a retry that decided something else must be refused, not
+    # reported as nothing to do while the first request stays unfinished.
+    #
+    # A default label is derived from the request, so folding this request's
+    # repeats changes it. A record written before this operation folded - and so
+    # before it recorded what it had decided - sits under the unfolded label, and
+    # is looked for there as well; otherwise the one retry that would have found
+    # it reports a no-op and leaves it pending unnoticed. The two lookups ask for
+    # different labels, so no record is caught twice, and nothing this operation
+    # writes can sit under the unfolded one.
+    pending = pending_for_slot(store, OWNER, {"operation": operation, **slot})
+    if unfolded_key != slot["key"]:
+        pending += pending_for_slot(store, OWNER, {"operation": operation, "work_id": work_id, "key": unfolded_key})
+    require_same_request(pending, request, f"related maintenance of {work_id}")
+    identity = {**slot, "request": request}
     before = _related_snapshot(view, work_id)
     no_change = RelatedMaintenanceResult(work_id, (), (), None, gitcmd.head_commit(store.root), changed=False)
 

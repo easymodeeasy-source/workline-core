@@ -264,7 +264,7 @@ started（in_progress / held）Workのrelated変更経路は設けない。代�
 
 同一edge（type / from / to / condition が同一）が既に存在する場合は重複追加しない。有効変更が0件ならno-opとして正常終了し、commitもpushもrelation IDの発行も行わない。
 
-request identityはrequest内容だけから決まり、current related stateに依存しない。matching pending mutationが既にeffectsをdurable記録している場合は、current stateから対象を再解決せず記録済みeffectsを正としてresumeする。
+request identityはrequest内容だけから決まり、current related stateに依存しない。identityはadd / removeの構造そのもので持ち、区切り文字で連結したlabel文字列では持たない（別内容のrequestが同じlabel文字列になり得る）。request自身の中の重複（同一edgeの重複指定・同一relation IDの重複削除）は、operationがもともと1件として扱うので、identityを作るより前・request解決より前に畳む。畳んだ後の位置からrelation IDを予約するので、同じ意味の綴り違いが同じIDをresumeする。畳むとdefault labelも変わるため、畳む前のlabelの下にあるpending recordも探す（そこに残り得るのはrequestを記録していない旧implementationのrecordだけで、見落とすとno-opとして取り残される）。matching pending mutationが既にeffectsをdurable記録している場合は、current stateから対象を再解決せず記録済みeffectsを正としてresumeする。
 
 ```text
 remove effect適用後にcommit前失敗
@@ -372,6 +372,24 @@ Phase展開後、STARTへ渡す前にRoadmap-owned structural changesをcommit�
 pushする場合の宛先は `rules/git` のpush destinationに従う。各Roadmap operationはmutationを開くより前・networkより前に承認先一致を検査し、承認先なし / 不一致はSTOPする。Roadmap操作で承認先を変更しない。
 
 途中失敗は同じmutationをresume。期待値不一致ならreconcile required。
+
+callerが内容を決めるRoadmap operation（Roadmap作成 / Phase追加 / Related maintenance）は、最初のID予約より前に、決定内容の正規identityをそのmutationのinvocationへ記録する。operationと対象・labelだけのinvocationは、別内容の再実行を同じrequestと見なして記録済みstageを飛ばし、Projectには最初のrequestが決めた内容が残ったまま成功を返し得る。postcheckはentityが解決でき成立状態section等を持つことを見るが、今回のrequestが決めた本文内容と正本を突き合わせないため、これを検出しない。Phase relationのように決定payloadとの一致を検査する部分はあるが、それは `postcheck_failed` として遅れて止まるだけで、requestの取り違え自体を防がない。
+
+記録内容（いずれもこの記録形式のversionを含む）:
+
+- Roadmap作成: Roadmap name / 背景 / 達成したい状態 / 対象範囲 / 対象外、全Phaseのkey・name・成立状態を宣言順で、Phase間relationを宣言順で
+- Phase追加: 追加Phaseのkey・name・成立状態を宣言順で、Phase間relationを宣言順で
+- Related maintenance: 追加edge（type / to / condition）と削除relation IDを指定順で
+
+nameはrenderingがそのまま書くのでverbatim、section本文はrenderingがstripするのでstrip後で比較する。任意sectionは有無と内容を別に記録する。宣言順はdisplay番号やID予約の対応を決めるため意味を持ち、並べ替えを同一requestとして扱わない。
+
+同じslot（operation・対象・label）に未完了mutationがある場合、記録済みrequestが今回のrequestと一致する時だけresumeする。一致しない再実行は、mutationを開くより前・記録済みeffectをreplayするより前・no-op判定より前に `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationの開始は行わない。
+
+requestを記録していない旧実装のpending recordは自動resumeしない。どの中断位置でも `reconcile_required` とし、同じく何も変更しない。診断にはmutation id、対象operation、requestを記録する前に書かれたrecordであることを含める。
+
+`invocation_key` はcallerのlabelであって識別子ではない。label文字列の一致だけでresumeを決めない。
+
+held Roadmapへの正式なfuture-plan変更が決定済みかどうかは、request一致検査の後・mutationを開くより前に検査する。この判定はeffectに到達せず登録内容を変えないためrequest identityへ含めない。request一致検査より後に置くのは、継続できないpending recordの存在をlifecycle factで隠さないため。mutationを開くより前に置くのは、拒否された再実行が既存のpending mutationをabandonしないため。
 
 Roadmap operationは `rules/git` のProject contextに従い、対象Projectのcontextから実行する。invocation Project contextが対象Projectと一致しなければ、lockを取得する前に `foreign_project_mutation` でSTOPし、何も書かない。
 

@@ -225,6 +225,10 @@ Roadmap / STARTから呼ばれるregistration coreは、呼び出し元operation
 
 途中失敗後は同じmutation ID / Work ID / relation IDをresumeする。新IDで重複CREATEしない。
 
+direct standalone invocationは、最初のID予約より前に、決定内容の正規identity（この記録形式のversion、Work name、成立状態、Related（type / to / condition）、derivation detail）をmutationのinvocationへ記録する。nameとlabelだけのinvocationは、別内容の再実行を同じrequestと見なして記録済みstageを飛ばし、Projectには最初のrequestが決めた内容が残ったまま成功を返し得る。postcheckはWorkが解決でき成立状態sectionを持つことを見るが、今回のrequestが決めた本文内容と正本を突き合わせないため、これを検出しない。nameはrenderingがそのまま書くのでverbatim、成立状態とderivation detailはrenderingがstripするのでstrip後で比較し、derivation detailは無しと空を区別する。
+
+記録済みrequestが今回のrequestと一致する時だけresumeする。一致しない再実行は、mutationを開くより前に `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationの開始は行わない。requestを記録していない旧実装のpending recordも自動resumeせず、同じく `reconcile_required` とする。
+
 中央正本の物理writeはMutation Controller経由。
 
 ## Postcheck
