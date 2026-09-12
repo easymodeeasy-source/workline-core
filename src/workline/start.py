@@ -560,7 +560,11 @@ class _Session:
         if owned:
             preexisting = gitops.record_preexisting_dirty(self.mutation, self.store.root)
             gitops.ensure_separable(preexisting, owned)
-            self._commit(f"{work.id}:results", outcome.message or f"feat(workline): {work.display} {work.name}", owned, include_canonical=False)
+            # Without an executor-supplied message the default stays neutral:
+            # whether a result is a feature, a fix or documentation is the
+            # executor's product judgement, and Workline never infers it from
+            # the Work name or kind.
+            self._commit(f"{work.id}:results", outcome.message or f"chore(workline): {work.display} {work.name}", owned, include_canonical=False)
         self._lifecycle(work, ["work_target_removed", "work_completed"])
         self._commit(f"{work.id}:finalize", f"chore(workline): complete {work.display}", [])
         after = ProjectView.load(self.store)

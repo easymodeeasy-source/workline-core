@@ -345,6 +345,20 @@ remoteあり通常Projectでは最終Work結果をremoteへ反映する。remote
 
 pushする場合の宛先は `rules/git` のpush destinationに従う。START開始前、mutationを開くより前、networkへ触れるより前に承認先一致を検査し、承認先なし / 不一致 / 解決不能はdomain writeの前にSTOPする。承認先をSTART側で変更しない。
 
+### 成果commit message
+
+executorが成果completionでmessageを明示した場合は、その文字列をそのまま使う。STARTはprefixを足さず、typeを変換せず、形式を検査しない。
+
+明示messageが無い場合のdefaultは、neutralな固定messageとする。
+
+```text
+chore(workline): <display> <name>
+```
+
+成果がfeat / fix / docs / refactorのどれに当たるかはproduct判断であり、STARTはWork名・成立状態・work_kind・成果fileの内容から推測しない。判断できるのは成果の意味を決めたexecutorだけなので、typeを持たせたい場合はexecutorが明示messageで渡す。
+
+create / modify / deleteの成果は同一のowned setとして1 commitにまとめるため、deletionだけの成果も同じdefaultを使う。owned result fileが無いWorkは成果commit自体を作らない。
+
 ### Terminal finalization
 
 Work成果の必要commit / push後、terminal lifecycleを同じfinalization mutationで処理する。

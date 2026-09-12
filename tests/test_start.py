@@ -33,7 +33,7 @@ class StartLifecycleTests(WorklineTestCase):
         self.assertEqual(log, [w1])
         self.assertEqual(events_of(store, w1), ["work_started", "work_target_added", "work_target_removed", "work_completed"])
         messages = git(store.root, "log", "--format=%s").splitlines()
-        self.assertEqual(messages[:2], ["chore(workline): complete W-01", "feat(workline): W-01 W1"])
+        self.assertEqual(messages[:2], ["chore(workline): complete W-01", "chore(workline): W-01 W1"])
         result_commit = set(git(store.root, "show", "--name-only", "--format=", "HEAD~1").split())
         self.assertEqual(result_commit, {"result_W-01.txt"})
         final_commit = set(git(store.root, "show", "--name-only", "--format=", "HEAD").split())

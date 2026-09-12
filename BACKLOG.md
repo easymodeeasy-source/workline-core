@@ -48,7 +48,7 @@
 | BL-013 | Self-hosting readiness | DEFERRED |
 | BL-014 | Deterministic tie-break among startable candidates | VERIFIED |
 | BL-015 | Silent no-op on Phase re-entry | RESOLVED |
-| BL-016 | Default result commit message type | VERIFIED |
+| BL-016 | Default result commit message type | RESOLVED |
 | BL-017 | Declared write scope broader than actual writes | RESOLVED |
 | BL-018 | Unused assignment in Phase expansion | VERIFIED |
 | BL-019 | Runtime recovery record retention and ignore policy | RESOLVED |
@@ -301,7 +301,7 @@
 
 - ID: BL-016
 - Title: Default result commit message type
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: implementation
 - Problem: STARTがWork成果をcommitする際、messageの指定がなければ既定で `feat(workline): ...` になり、Workの性質（docs / fix / chore等）に関わらず `feat` typeが付く。
 - Why it matters: Conventional Commits等を運用するrepositoryでは履歴の分類が不正確になり、message指定が実質必須になる。
@@ -311,6 +311,7 @@
 - Human confirmation likely: no
 - Self-hosting prerequisite: no
 - Evidence class: smoke test, code inspection
+- Resolution: 成果commitの既定messageから固定の `feat` を廃止し、neutralな `chore(workline): <display> <name>` にした。成果がfeat / fix / docs / refactorのどれに当たるかはproduct判断であり、Work名・成立状態・work_kind・成果fileの内容から推測しない。推測経路は追加していない（名前の語からのtype判定、work_kindからのtype導出、成果diffの解釈を含む）。再現のとおり、変更前はfeature・bugfix・document-only・deletion-onlyのいずれのWorkでも `feat(workline): ...` が付き、同じWorkのfinalize commitが `chore(workline): complete ...` であるため、1 Workが矛盾するtypeの2 commitを残していた。既定messageは他のWorkline生成commit（create / expand phase / complete / hold / cancel等、およびProject開始の固定message `chore(workline): initialize project`）と同じ側へ揃えた。executorが `Completed(message=...)` で明示したmessageの扱いは変更していない。そのままverbatimで使い、prefixを足さず、typeを変換せず、形式も検査しない（Conventional Commits validatorは追加していない）。messageは必須化していない。create / modify / deleteの成果は従来どおり同一owned setとして1 commitにまとめるため、deletionだけの成果も同じ既定messageになる。owned result fileが無いWorkが成果commitを作らない挙動も変えていない。commit typeを読むconsumerはrepository内に無く（CI・changelog・release自動化・commit message parser・hookのいずれも存在しない）、過去commitは書き換えていない。schema・event・relation type・project.yamlは変更しておらず、backfillは不要。canonical authorityはConventional Commitsを要求しておらず、allowed type一覧も持たないため、この既定はneutral defaultであってtype体系の採用ではない。`skills/start` へ反映済み。BL-014のstartable候補のtie-breakは変更していない。
 
 ### BL-017 Declared write scope broader than actual writes
 
