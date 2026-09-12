@@ -229,6 +229,8 @@ direct standalone invocationは、最初のID予約より前に、決定内容�
 
 記録済みrequestが今回のrequestと一致する時だけresumeする。一致しない再実行は、mutationを開くより前に `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationの開始は行わない。requestを記録していない旧実装のpending recordも自動resumeせず、同じく `reconcile_required` とする。
 
+direct standalone invocationの予定write scopeは、`relations/related.yaml` と登録するWork自身とする。relation payloadを渡さずlifecycle eventも記録しないため、`relations/roadmap.yaml` と `events/events.jsonl` はこの経路では書き得ない。registration coreがRoadmap / STARTのmutationへ参加する場合のscopeは、その呼び出し元operationが宣言する。
+
 中央正本の物理writeはMutation Controller経由。
 
 ## Postcheck

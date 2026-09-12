@@ -389,6 +389,18 @@ requestを記録していない旧実装のpending recordは自動resumeしな�
 
 `invocation_key` はcallerのlabelであって識別子ではない。label文字列の一致だけでresumeを決めない。
 
+各Roadmap operationが宣言する予定write scopeは、そのoperationが最後まで進んだ場合に書き得るcanonical fileの集合とする。今回の呼び出しで実際に書いたfileではない: どの経路を通るか決まる前に宣言するので、条件付きでしか書かないfileも含める。共有ledger（`relations/roadmap.yaml` / `relations/related.yaml` / `events/events.jsonl`）はfile単位で書き直すため、同じledgerを書き得る2 operationは独立ではなく、両方がそれを宣言する。
+
+- Roadmap作成 / Phase追加: `relations/roadmap.yaml`
+- Phase entry: `relations/roadmap.yaml` と `relations/related.yaml`（lifecycle eventではないのでevent logは書かない）
+- Roadmap / Phaseのhold / resume / cancel、achievement記録: `events/events.jsonl`
+- plan exclusion（Phase / Work）: replanがWork登録とrelation変更を行い得るため3つとも
+- 既存未開始WorkのRelated maintenance: `relations/related.yaml`
+
+宣言が実際より広いと、同じfileを一切書かないoperation同士が「安全に独立していると証明できない」として `reconcile_required` になる。狭すぎると競合を見逃す。どちらも避けるため、scopeはoperation種別から予測できる静的な集合とし、caller inputやcurrent stateで動的に変えない。scopeを決めていないoperationは全ledgerを宣言する（過大宣言の側へ倒す）。entity scopeは従来どおり、そのoperationが変更する対象と、operation中に発行したIDを含める。
+
+既に書かれたpending recordのwrite scopeは後から書き換えない。広いscopeを記録した旧実装のrecordは、そのscopeのまま従来どおり停止させる。
+
 held Roadmapへの正式なfuture-plan変更が決定済みかどうかは、request一致検査の後・mutationを開くより前に検査する。この判定はeffectに到達せず登録内容を変えないためrequest identityへ含めない。request一致検査より後に置くのは、継続できないpending recordの存在をlifecycle factで隠さないため。mutationを開くより前に置くのは、拒否された再実行が既存のpending mutationをabandonしないため。
 
 Roadmap operationは `rules/git` のProject contextに従い、対象Projectのcontextから実行する。invocation Project contextが対象Projectと一致しなければ、lockを取得する前に `foreign_project_mutation` でSTOPし、何も書かない。

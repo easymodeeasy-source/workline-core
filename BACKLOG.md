@@ -49,7 +49,7 @@
 | BL-014 | Deterministic tie-break among startable candidates | VERIFIED |
 | BL-015 | Silent no-op on Phase re-entry | RESOLVED |
 | BL-016 | Default result commit message type | VERIFIED |
-| BL-017 | Declared write scope broader than actual writes | VERIFIED |
+| BL-017 | Declared write scope broader than actual writes | RESOLVED |
 | BL-018 | Unused assignment in Phase expansion | VERIFIED |
 | BL-019 | Runtime recovery record retention and ignore policy | RESOLVED |
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
@@ -316,7 +316,7 @@
 
 - ID: BL-017
 - Title: Declared write scope broader than actual writes
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: implementation
 - Problem: Roadmap operationは種類に関わらず、予定write scopeのfilesとして共通ledger（roadmap relations / related / events）の3ファイルを固定で宣言する（例: Phase entryはeventを書かず、Phase hold / resumeはrelationを書かない）。STARTも同じ3ファイルを固定で宣言する。
 - Why it matters: pending mutationとのoverlap判定は宣言されたwrite scopeで行われるため、実際には独立なoperation同士も重なりありとして `reconcile required` になる。現時点で実害は確認されていないが、中断や並行作業の際に不要な停止の原因になり得る。
@@ -326,6 +326,7 @@
 - Human confirmation likely: no
 - Self-hosting prerequisite: no
 - Evidence class: smoke test, code inspection
+- Resolution: 各Roadmap operationが共通ledger 3ファイルを一律に宣言するのをやめ、そのoperationが最後まで進んだ場合に書き得るcanonical fileだけを予定write scopeとして宣言するようにした。実測での再現: pendingの `phase-hold`（実際にはevent logしか書かない）が `work-related-maintenance`（related.yamlだけ）と `add_phases`（roadmap.yamlだけ）をいずれも `reconcile_required` で停止させ、pendingの `work-related-maintenance` と pendingの `roadmap-create` も同様に、1ファイルも共有しない `phase-hold` を停止させた。計4組を再現し、recordのdeclared filesと実effectのfilesを並べて、原因がdeclared scopeの重なりだけであることを確認した。宣言内容はoperation種別から静的に決まる: Roadmap作成 / Phase追加 = `relations/roadmap.yaml`、Phase entry = `relations/roadmap.yaml` + `relations/related.yaml`（lifecycle eventではないのでevent logを書かない）、Roadmap / Phaseの hold / resume / cancel と achievement記録 = `events/events.jsonl`、plan exclusion（Phase / Work）= replanがWork登録とrelation変更を行い得るため3つとも、既存未開始WorkのRelated maintenance = `relations/related.yaml`。direct standalone CREATEも `relations/related.yaml` だけに狭めた（relation payloadを渡さずlifecycle eventも記録しないため、他の2つはこの経路では書き得ない）。STARTは変更していない: question wait / completion / hold / derive の各経路を実測し、宣言している3ファイルがそのまま書き得る集合であることを確認した（start-plan-excludeもreplan経由で3つとも書き得る）。`project-start` / `push-destination-pin` / `bootstrap-backfill` は元から自分のpath listを宣言しており実測でも一致していたため変更していない。「実際に書いたfile」ではなく「書き得るfile」を宣言する: scopeはどの経路を通るか決まる前に宣言するので、条件付きでしか書かないfile（Phase relationを伴うRoadmap作成、Relatedを伴うPhase entry、Workを登録するreplan）も含める。共有ledgerはfile単位で書き直すため、同じledgerを書き得る2 operationは独立ではなく、両方が宣言する。検証: 13のRoadmap operation・START・direct CREATEを一通り実行し、記録された全effectのledger集合が宣言集合の部分集合であること（under-declarationが無いこと）を確認した。scopeを決めていないoperation名は全ledgerを宣言するfail-closedとし、過大宣言の側へ倒す。既存pending recordのwrite scopeは書き換えない: 旧実装が記録した広いscopeはそのまま尊重され、resume時の比較は新旧scopeの和集合で行われる。backfillもrewriteもしない。entity scopeは元から精密だったため変更していない（`add_phases` がRoadmap entityを宣言する点だけは実書き込みより広いが、同一Roadmapの計画変更同士を競合させる意図として妥当なので残した）。BL-021のProject execution lockとは責務が別で、lockは同時実行の直列化、write scopeは中断して残ったpending mutationからの独立性判定であり、lock側は変更していない。write scopeはeffectに対する許可ではなく衝突宣言であり（`MutationController.open` 以外に読む場所がない）、狭めてもoperationが書けるものは変わらない。挙動上の帰結として、Phaseの展開が中断して残っているRoadmapでも hold / resume ができるようになった（展開recordは無変更のまま残り、Roadmapをresumeすれば同じmutationで完了することを実測）。`skills/roadmap` と `skills/create` へ反映済み。
 
 ### BL-018 Unused assignment in Phase expansion
 

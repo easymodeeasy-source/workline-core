@@ -362,11 +362,13 @@ def _create_standalone_locked(store: ProjectStore, spec: WorkSpec, invocation_ke
     request = direct_request_identity(spec)
     slot = {"operation": DIRECT_OWNER, "name": spec.name, "key": invocation_key or spec.name}
     invocation = {**slot, "request": request}
-    scope = WriteScope(files=(
-        f"{WORKLINE_DIR}/relations/roadmap.yaml",
-        f"{WORKLINE_DIR}/relations/related.yaml",
-        f"{WORKLINE_DIR}/events/events.jsonl",
-    ))
+    # Registration writes the Work, its Related edges and - only when the caller
+    # decided relations - ``roadmap.yaml``. A direct standalone CREATE passes no
+    # relations and records no lifecycle event, so neither of those two ledgers
+    # can be written here, and declaring them would make this operation look
+    # like a conflict for every unfinished lifecycle or Roadmap-relation change.
+    # The Work's own entity is added to the scope by the registration core.
+    scope = WriteScope(files=(f"{WORKLINE_DIR}/relations/related.yaml",))
     # Entry checks before the mutation exists, with no intent record and no
     # domain write: a request that decided something other than the unfinished
     # one in this slot is refused rather than quietly taking its record over,

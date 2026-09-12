@@ -64,11 +64,62 @@ from .store import (
 from .validate import validate_structure
 
 OWNER = "roadmap"
-LEDGER_FILES = (
-    f"{WORKLINE_DIR}/relations/roadmap.yaml",
-    f"{WORKLINE_DIR}/relations/related.yaml",
-    f"{WORKLINE_DIR}/events/events.jsonl",
-)
+
+ROADMAP_RELATIONS = f"{WORKLINE_DIR}/relations/roadmap.yaml"
+RELATED_RELATIONS = f"{WORKLINE_DIR}/relations/related.yaml"
+EVENT_LOG = f"{WORKLINE_DIR}/events/events.jsonl"
+#: Every canonical ledger a Roadmap operation can write; the fallback for one
+#: whose own set is not written down.
+LEDGER_FILES = (ROADMAP_RELATIONS, RELATED_RELATIONS, EVENT_LOG)
+
+#: Which of those each operation can write, on any path it has.
+#:
+#: A declared write scope is what says whether an interrupted operation and a
+#: new one are independent (``rules/git``: a pending mutation not provably
+#: independent of the planned scope is ``reconcile required``). Declaring every
+#: ledger for every operation therefore made two operations that never touch the
+#: same file look like a conflict - a Phase put on hold writes only the event
+#: log, yet an unfinished one stopped a Related correction that writes only
+#: ``related.yaml``.
+#:
+#: These are the files each operation *can* write, not the ones a particular
+#: call did: a conditional write still belongs here, because scope is declared
+#: before the operation knows which path it takes. A shared ledger is rewritten
+#: whole, so two operations that can both write one are never independent, and
+#: both keep it here.
+OPERATION_LEDGERS: dict[str, tuple[str, ...]] = {
+    # Roadmap and Phase registration write Roadmap-decided Phase relations.
+    # They record no event and no Related.
+    "roadmap-create": (ROADMAP_RELATIONS,),
+    "roadmap-add-phases": (ROADMAP_RELATIONS,),
+    # Phase expansion registers Works with their relations and Related data.
+    # Expansion is not a lifecycle event, so it never writes the event log.
+    "phase-entry": (ROADMAP_RELATIONS, RELATED_RELATIONS),
+    # A lifecycle decision is one appended event and nothing else.
+    "phase-hold": (EVENT_LOG,),
+    "phase-resume": (EVENT_LOG,),
+    "phase-cancel": (EVENT_LOG,),
+    "roadmap-hold": (EVENT_LOG,),
+    "roadmap-resume": (EVENT_LOG,),
+    "roadmap-cancel": (EVENT_LOG,),
+    "roadmap-achievement": (EVENT_LOG,),
+    # Plan exclusion records its event and then applies the replan, which can
+    # register Works (Related) and add or remove Roadmap relations.
+    "phase-plan-exclude": LEDGER_FILES,
+    "work-plan-exclude": LEDGER_FILES,
+    # Related maintenance is a plan correction, never a lifecycle event.
+    "work-related-maintenance": (RELATED_RELATIONS,),
+}
+
+
+def _ledgers(operation: str) -> tuple[str, ...]:
+    """The canonical ledgers ``operation`` can write.
+
+    An operation whose set is not written down declares all of them, so a new
+    one added without a decision here is over-declared - stopping more than it
+    must - rather than wrongly declared independent of everything it touches.
+    """
+    return OPERATION_LEDGERS.get(operation, LEDGER_FILES)
 
 
 # --------------------------------------------------------------------------- payloads
@@ -163,7 +214,7 @@ def _open(
     destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
     invocation = {"operation": operation, **identity}
-    mutation = controller.open(OWNER, invocation, WriteScope(entities=tuple(entities), files=LEDGER_FILES))
+    mutation = controller.open(OWNER, invocation, WriteScope(entities=tuple(entities), files=_ledgers(operation)))
     gitops.ensure_git_ready(store.root)
     gitops.record_preexisting_dirty(mutation, store.root)
     mutation.apply()
