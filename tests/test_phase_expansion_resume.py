@@ -32,9 +32,10 @@ from workline.validate import validate_project
 D1 = rm.PhaseEntryDesign(
     {"a": rm.WorkDesign("Work A", "A が成立する"), "b": rm.WorkDesign("Work B", "B が成立する")},
     rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
+    entry="a",
 )
 D1_CONFIRMED = rm.PhaseEntryDesign(
-    dict(D1.works), D1.integration, rm.WorkDesign("Confirm", "人間が確認した"))
+    dict(D1.works), D1.integration, rm.WorkDesign("Confirm", "人間が確認した"), entry="a")
 D2 = rm.PhaseEntryDesign(
     {"x": rm.WorkDesign("Work X", "X が成立する")},
     rm.WorkDesign("Other integration", "別の統合確認"),
@@ -131,7 +132,7 @@ class DesignIdentityTests(ResumeCase):
         self.assertEqual(identity["works"][0]["desired_state"], "A が成立する")
         self.assertEqual(identity["integration"]["name"], "Integration")
         self.assertIsNone(identity["confirmation"])
-        self.assertEqual(identity["entry"], None)
+        self.assertEqual(identity["entry"], "a")
 
     def test_the_declared_order_of_the_works_is_kept(self) -> None:
         """It decides their display numbers, so a reordering is a different plan."""
@@ -160,7 +161,7 @@ class DesignIdentityTests(ResumeCase):
             "confirmation added": D1_CONFIRMED,
             "planned_next": rm.PhaseEntryDesign(dict(D1.works), D1.integration, planned_next=(("a", "b"),)),
             "requires_completion": rm.PhaseEntryDesign(dict(D1.works), D1.integration, requires_completion=(("a", "b"),)),
-            "entry": rm.PhaseEntryDesign(dict(D1.works), D1.integration, entry="a"),
+            "entry": rm.PhaseEntryDesign(dict(D1.works), D1.integration, entry="b"),
         }.items():
             with self.subTest(part=label):
                 self.assertNotEqual(rm.design_identity(design), base)
@@ -170,6 +171,7 @@ class DesignIdentityTests(ResumeCase):
         spaced = rm.PhaseEntryDesign(
             {"a": rm.WorkDesign("Work A", "  A が成立する\n"), "b": D1.works["b"]},
             D1.integration,
+            entry="a",
         )
 
         self.assertEqual(rm.design_identity(spaced), rm.design_identity(D1))
@@ -179,6 +181,7 @@ class DesignIdentityTests(ResumeCase):
         spaced = rm.PhaseEntryDesign(
             {"a": rm.WorkDesign("Work A", "A が成立する  "), "b": D1.works["b"]},
             D1.integration,
+            entry="a",
         )
 
         result = rm.enter_phase(self.store, self.phase, spaced)
@@ -190,6 +193,7 @@ class DesignIdentityTests(ResumeCase):
         same = rm.PhaseEntryDesign(
             {"a": rm.WorkDesign("Work A", "A が成立する"), "b": rm.WorkDesign("Work B", "B が成立する")},
             rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
+            entry="a",
         )
 
         self.assertEqual(rm.design_identity(same), rm.design_identity(D1))
@@ -376,6 +380,7 @@ class DifferentDesignTests(ResumeCase):
                     (RelatedSpec("conditional_must_read", "docs/x.md",
                                  {"kind": "path_glob", "pattern": "src/**", "mode": mode}),),
                 ),
+                entry="a",
             )
 
         with self.at_stage("integration"):

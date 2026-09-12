@@ -387,7 +387,13 @@ completed event記録後にcommit / push失敗したら、通常STARTを再実�
 
 1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。
 
-startable Workがあれば同一Phase内で継続。
+startable Workが1件に決まれば同一Phase内で継続。
+
+どれを次にするかは `planned_next` で決める。既に完了したWorkが次に推奨しているWorkを優先し、そのうちまだ終わっていないWorkから前に置かれていないものを採る。cancelled / plan_excludedのpredecessorは候補を後ろへ押さえない。
+
+正式条件を適用しても2件以上残る場合は、どれも自動で選ばずstopとしてRoadmapへreturnする。候補listの先頭・ID順 / ULID順・relation fileの記録順・宣言順・表示番号・dict / listの挿入順でtieを破らない。stop理由に候補のIDを含め、人間が次に実行するWorkを明示できるようにする。
+
+このstopで新たなcanonical stateを作らない。直前に完了したWorkのfinalizationは通常どおり閉じ、次のWorkのlifecycle event・derived Work・commitは行わない。
 
 Phase completeまたはstopならRoadmapへreturn。
 

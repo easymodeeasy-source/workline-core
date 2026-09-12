@@ -191,7 +191,17 @@ class WorklineTestCase(unittest.TestCase):
         return rm.create_roadmap(store, plan)
 
     def simple_entry(self, store: ProjectStore, phase_id: str, works: dict[str, str] | None = None, *, confirmation: bool = False, **kwargs) -> rm.PhaseEntryResult:
+        """A Phase expansion for tests that are not about which Work starts.
+
+        A design whose Works are all equally startable no longer picks one of
+        them by itself (BL-014), so when the caller declares several and says
+        nothing about order, this names the first as the entry. A test that is
+        about the choice passes ``entry`` (including ``entry=None`` for the
+        ambiguous case) or ``planned_next`` and keeps it.
+        """
         works = works or {"w1": "W1 done"}
+        if len(works) > 1 and "entry" not in kwargs and "planned_next" not in kwargs:
+            kwargs["entry"] = next(iter(works))
         design = rm.PhaseEntryDesign(
             {key: rm.WorkDesign(key.upper(), desired) for key, desired in works.items()},
             rm.WorkDesign("Integration", "全Workの統合確認が取れている"),

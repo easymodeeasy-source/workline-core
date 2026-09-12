@@ -37,7 +37,16 @@ from .ops import (
     validate_projection,
 )
 from .registry import validate_registry
-from .state import ACTIVE, COMPLETED, HELD, IN_PROGRESS, UNSTARTED, ProjectView, WorkState
+from .state import (
+    ACTIVE,
+    AMBIGUOUS_CANDIDATES,
+    COMPLETED,
+    HELD,
+    IN_PROGRESS,
+    UNSTARTED,
+    ProjectView,
+    WorkState,
+)
 from .store import WORKLINE_DIR, Entity, ProjectStore, Relation
 from .validate import condition_applies, validate_structure
 
@@ -682,14 +691,28 @@ class _Session:
             if r.type == "return_to" and r.from_id in view.works and not view.work_state(r.from_id).terminal
         }
         startable = [w for w in startable if w.id not in pending_returns] or startable
-        if not startable:
-            return None
-        if just_completed:
-            planned = {r.to for r in view.relations_from(just_completed, "planned_next")}
-            for work in startable:
-                if work.id in planned:
-                    return work
-        return startable[0]
+        # The plan decides which Work comes next. When it leaves several equally
+        # planned, the continuation STOPs instead of separating them by the order
+        # they were read in.
+        return view.choose_startable(startable, "Work")
+
+
+def _next_or_ambiguous(
+    session: "_Session", view: ProjectView, phase_id: str | None, entry: Entity, just_completed: str | None
+) -> tuple[Entity | None, str | None]:
+    """The next Work, or the reason the continuation cannot choose one.
+
+    An ambiguous continuation is a STOP, but the Work that just finished was
+    committed legitimately and its finalization mutation still has to close. So
+    the ambiguity comes back as a stop reason to return, not as an exception
+    that would leave the mutation pending behind a decision nobody made.
+    """
+    try:
+        return session.next_work(view, phase_id, entry, just_completed), None
+    except StopError as exc:
+        if exc.code != AMBIGUOUS_CANDIDATES:
+            raise
+        return None, exc.message
 
 
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
@@ -729,8 +752,12 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         result: StartResult
         just_completed: str | None = None
         if mutation.resumed:
-            current = session.next_work(ProjectView.load(store), phase_id, work, None) if mode == "outer" else work
-            if current is None:
+            ambiguous: str | None = None
+            if mode == "outer":
+                current, ambiguous = _next_or_ambiguous(session, ProjectView.load(store), phase_id, work, None)
+            if ambiguous is not None:
+                result = StartResult("stopped", work_id, mutation.id, phase_id=phase_id, detail=ambiguous)
+            elif current is None:
                 result = StartResult("completed", work_id, mutation.id, phase_id=phase_id)
             else:
                 result = session.run_work(current.id)
@@ -745,7 +772,10 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
             if completion.complete:
                 result = StartResult("phase_complete", work_id, mutation.id, tuple(session.completed), phase_id, head=gitcmd.head_commit(store.root))
                 break
-        nxt = session.next_work(view, phase_id, work, just_completed)
+        nxt, ambiguous = _next_or_ambiguous(session, view, phase_id, work, just_completed)
+        if ambiguous is not None:
+            result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, ambiguous, gitcmd.head_commit(store.root))
+            break
         if nxt is None:
             detail = "; ".join(view.phase_completion(phase_id).reasons) if phase_id else "no startable Work in standalone scope"
             result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, detail, gitcmd.head_commit(store.root))

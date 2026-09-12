@@ -2,14 +2,16 @@
 
 No state is stored in canonical files. Work / Phase / Roadmap state, targets,
 effective current-plan Work sets, unfinished integrations, startable Works and
-Phases, and Phase completion are all generated here from events, affiliation
-(``phase_id`` / ``roadmap_id``) and relations.
+Phases, Phase completion, and which startable candidate the plan points to are
+all generated here from events, affiliation (``phase_id`` / ``roadmap_id``) and
+relations.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .errors import StopError
 from .store import Entity, Event, ProjectStore, Relation
 
 UNSTARTED = "unstarted"
@@ -23,6 +25,13 @@ ACHIEVED = "achieved"
 COMPLETE = "complete"
 
 EXCLUDED_STATES = (CANCELLED, PLAN_EXCLUDED)
+
+# An entity the plan can still be waiting for. Everything else has reached an
+# end: completed / complete satisfied it, cancelled / plan_excluded never will.
+FINISHED_STATES = (COMPLETED, COMPLETE)
+TERMINAL_STATES = (COMPLETED, COMPLETE, CANCELLED, PLAN_EXCLUDED)
+
+AMBIGUOUS_CANDIDATES = "ambiguous_startable_candidates"
 
 # Work events that prove a Work actually entered its execution lifecycle.
 # ``work_cancelled`` / ``plan_excluded`` are terminal plan decisions and are
@@ -271,6 +280,57 @@ class ProjectView:
 
     def active_phases(self, roadmap_id: str) -> list[Entity]:
         return [phase for phase in self.roadmap_phases(roadmap_id) if self.phase_lifecycle(phase.id) not in EXCLUDED_STATES]
+
+    # selection among startable candidates -----------------------------------
+    def planned_next_preference(self, candidates: list[Entity]) -> list[Entity]:
+        """Narrow startable candidates by ``planned_next``, breaking no tie.
+
+        ``planned_next`` is the recommended order, so it is read twice, in this
+        order, each narrowing kept only when it leaves something:
+
+        1. what an already finished entity recommends next;
+        2. among those, the ones nothing still outstanding is planned before -
+           a candidate the plan places after work that has not happened yet is
+           not the recommended next step. A predecessor that is cancelled or
+           plan_excluded will never happen, so it holds nothing back.
+
+        Whatever survives is equally recommended. This returns all of it: the
+        order of the returned list carries no meaning and must never be used to
+        pick one - see :meth:`choose_startable`.
+        """
+        if len(candidates) <= 1:
+            return list(candidates)
+        ids = {candidate.id for candidate in candidates}
+        edges = [r for r in self.roadmap_relations if r.type == "planned_next" and r.to in ids]
+        recommended = {r.to for r in edges if self.entity_state_label(r.from_id) in FINISHED_STATES}
+        pool = [candidate for candidate in candidates if candidate.id in recommended] or list(candidates)
+        outstanding = {
+            r.to for r in edges if self.entity_state_label(r.from_id) not in TERMINAL_STATES + ("unresolvable",)
+        }
+        heads = [candidate for candidate in pool if candidate.id not in outstanding]
+        return heads or pool
+
+    def choose_startable(self, candidates: list[Entity], kind: str) -> Entity | None:
+        """The one candidate the plan points to, or a STOP saying it does not.
+
+        ``None`` only when there is nothing to choose from. When the plan leaves
+        several candidates equally recommended, no candidate is returned: the
+        order they happen to arrive in comes from identifiers, relation records
+        and declaration, none of which is an execution order, so choosing from
+        it would be guessing. The caller is told which candidates tied so a
+        human can name one.
+        """
+        if not candidates:
+            return None
+        preferred = self.planned_next_preference(candidates)
+        if len(preferred) == 1:
+            return preferred[0]
+        raise StopError(
+            f"{len(preferred)} startable {kind}s are equally planned: "
+            + ", ".join(sorted(candidate.id for candidate in preferred))
+            + f"; the plan does not say which comes first, so name the {kind} to start",
+            code=AMBIGUOUS_CANDIDATES,
+        )
 
     def startable_phases(self, roadmap_id: str) -> list[Entity]:
         if self.roadmap_lifecycle(roadmap_id) != ACTIVE:

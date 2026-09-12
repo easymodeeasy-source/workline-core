@@ -46,7 +46,7 @@
 | BL-011 | Reusable migration procedure | OPEN |
 | BL-012 | Unsupported self-hosting guard | RESOLVED |
 | BL-013 | Self-hosting readiness | DEFERRED |
-| BL-014 | Deterministic tie-break among startable candidates | VERIFIED |
+| BL-014 | Deterministic tie-break among startable candidates | RESOLVED |
 | BL-015 | Silent no-op on Phase re-entry | RESOLVED |
 | BL-016 | Default result commit message type | RESOLVED |
 | BL-017 | Declared write scope broader than actual writes | RESOLVED |
@@ -271,7 +271,7 @@
 
 - ID: BL-014
 - Title: Deterministic tie-break among startable candidates
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: spec, implementation
 - Problem: startable Work（またはPhase）が複数ある場合、仕様は人間の明示意図・planned_next・dependency・priority・parallel safety等から選ぶと定めるが、最後のtie-breakが実装上の候補listの先頭になっている。START outer continuationの次Work選択、Roadmapのhandoff / Phase entryでのentry Work選択、startable Phaseの選択が該当する。
 - Why it matters: 選択結果が実装の内部順序に依存し、仕様から予測・再現できない。候補の並び順を変える実装変更で、挙動が黙って変わる。
@@ -281,6 +281,7 @@
 - Human confirmation likely: yes（選択規則の意味を変える場合。現行順序の明文化だけなら不要）
 - Self-hosting prerequisite: no
 - Evidence class: smoke test, code inspection
+- Resolution: 候補の先頭を取る4経路（startable Phase選択、Phase entryのentry=None、Roadmap handoffのentry_work_id=None、STARTのouter continuation）を、`ProjectView.planned_next_preference` / `choose_startable` という1つの規則へ統一した。規則は既存のstartable Phase選択が持っていた2段構成をそのまま一般化したもの: (1) 既にcompleted / completeなentityが `planned_next` で次に推奨している候補、(2) そのうち、まだ終わっていないentityから `planned_next` で前に置かれていない候補。各段は結果が残る場合だけ適用する。cancelled / plan_excludedのpredecessorは二度と完了しないので候補を後ろへ押さえない（`skills/roadmap` / `skills/start` のterminal/inactive planned_nextの扱いに合わせた）。1件に決まればそれを選び、2件以上残れば `ambiguous_startable_candidates` でSTOPし、診断に候補IDを含める。既存のstartable Phase選択は `planned_next` の走査を候補起点のedgeに限っていたため、計画が順序を与えている場合でも先頭選択へ落ちていた。その制限を外したことが一般化の実体であり、`planned_next` の意味は拡張していない。調査で再現した欠陥をすべて直した: Phase entry（entry=None）とhandoffは `planned_next` を全く見ていなかった（宣言順の先頭を選んでいた）。STARTは直前に完了したWork由来の `planned_next` しか見ていなかった。startable Phase選択は同格の `planned_next` が複数あるとrelation recordの記録順で勝者が変わった（同一graphの記録順を入れ替えるだけで結果が反転することを確認済み）。最終的な先頭選択はULID順（作成ミリ秒＋80bitの乱数）であり、ID予約間のdisk書込みが偶然ミリ秒境界を跨ぐことだけが宣言順を保っていた（同一ミリ秒に収まると一様乱数になることを実測）。実行順として、候補listの先頭・ID / ULID順・relation fileの記録順・宣言順・表示番号・dict / listの挿入順のいずれも使わない。regression testは、ULIDを逆順に発行する場合・同一ミリ秒に発行する場合・同一graphのrelation記録順を入れ替えた場合のそれぞれで、一意なら同じ候補、曖昧なら同じくSTOPになることを確認する。人間の明示意図は従来どおり優先し、`select_phase(explicit=...)`・`design.entry`・`handoff(entry_work_id=...)` はいずれも自動選択より先に効く。priority / external constraint / target / parallel safetyは、schemaにもrelationにもimplementationにも存在しないため今回は実装せず、`skills/roadmap` 上で「現在適用する正式条件」から外して「将来の設計候補（現在は未実装）」として明確に分離した。存在しない条件を適用したつもりで候補を絞らない。STOPはcanonical stateを変更する前に行う: Phase entryは新規展開のdesignがentry Workを一意に定めない場合、ID予約・mutation開始・entity書込み・commit / pushのいずれよりも前に、既存の明示entry検査と同じ位置でSTOPする（実測: HEAD不変・Work 0件・event 0件・pending mutation 0件）。handoffはSTARTを呼ぶ前にSTOPし、executorを動かさない。中断した展開のresumeはこの検査の対象外とし、BL-023のとおり同じmutationで最後まで進める。その場合にentry Workが一意に決まらなければ、finalize済みの展開を失敗させずに `entry_work_id` を `None` として返し、実行はhandoffが明示を求める。STARTのouter continuationは、直前に完了したWorkのfinalizationを通常どおり閉じたうえでstatus `stopped` として返し、stop理由に候補IDを含める。pending mutationは残さない（実測）。schema・event・relation type・project.yamlは変更しておらず、backfillは不要。既存Projectで影響するのは今後の選択だけで、記録済みの履歴は変わらない。`skills/roadmap` / `skills/start` へ反映済み。「表示番号を実行順として使わない」は維持した。
 
 ### BL-015 Silent no-op on Phase re-entry
 

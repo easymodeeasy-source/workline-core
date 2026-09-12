@@ -35,7 +35,17 @@ from workline.mutation import Mutation, MutationController
 from workline.state import ProjectView
 from workline.validate import Problem
 
+#: Two Works and a named entry. Nothing here is about which Work starts, so the
+#: design says so itself rather than leaving two equally startable Works for
+#: Workline to choose between - which is a STOP since BL-014.
 D1 = rm.PhaseEntryDesign(
+    {"a": rm.WorkDesign("Work A", "A が成立する"), "b": rm.WorkDesign("Work B", "B が成立する")},
+    rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
+    entry="a",
+)
+
+#: The same two Works with nothing to separate them: the ambiguous case itself.
+D_TIED = rm.PhaseEntryDesign(
     {"a": rm.WorkDesign("Work A", "A が成立する"), "b": rm.WorkDesign("Work B", "B が成立する")},
     rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
 )
@@ -118,18 +128,37 @@ class FirstEntryTests(PhaseEntryCase):
 
         self.assertEqual(result.entry_work_id, result.work_ids["b"])
 
-    def test_i_without_an_explicit_entry_the_current_selection_is_unchanged(self) -> None:
-        """BL-014 owns the tie-break among several startable Works; it is untouched.
+    def test_i_without_an_explicit_entry_an_undecided_design_is_refused(self) -> None:
+        """Two equally startable Works and nothing to separate them is a STOP (BL-014).
 
-        The expectation is pinned to the first declared Work rather than read back
-        from ``startable_works``, so a change to that ordering - which is exactly
-        what BL-014 is about - would fail here instead of moving both sides of the
-        comparison together.
+        The design is refused before it writes, so the Phase is left exactly as
+        it was: no Work, no event, no commit and no pending mutation to clean up.
         """
-        result = rm.enter_phase(self.store, self.phase, D1)
+        head = git(self.store.root, "rev-parse", "HEAD").strip()
 
-        self.assertEqual(result.entry_work_id, result.work_ids["a"])
-        self.assertEqual(len(ProjectView.load(self.store).startable_works(self.phase)), 2)
+        with self.assertRaises(StopError) as refused:
+            rm.enter_phase(self.store, self.phase, D_TIED)
+
+        self.assertEqual(refused.exception.code, "ambiguous_startable_candidates")
+        self.assertIn("a", refused.exception.message)
+        self.assertIn("b", refused.exception.message)
+        view = ProjectView.load(self.store)
+        self.assertEqual(view.phase_works(self.phase), [])
+        self.assertEqual(view.events, [])
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+        self.assertEqual(git(self.store.root, "rev-parse", "HEAD").strip(), head)
+
+    def test_i_a_design_whose_planned_next_has_one_head_starts_there(self) -> None:
+        """The design's own recommended order decides, not the order it declared."""
+        design = rm.PhaseEntryDesign(
+            {key: rm.WorkDesign(key.upper(), f"{key} が成立する") for key in ("a", "b", "c")},
+            rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
+            planned_next=(("c", "a"), ("a", "b")),
+        )
+
+        result = rm.enter_phase(self.store, self.phase, design)
+
+        self.assertEqual(result.entry_work_id, result.work_ids["c"])
 
     def test_an_entry_whose_predecessor_is_already_completed_is_accepted(self) -> None:
         """The dependency is satisfied, so this entry really can start."""

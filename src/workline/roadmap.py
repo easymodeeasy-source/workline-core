@@ -48,7 +48,20 @@ from .ops import (
     validate_projection,
 )
 from .phase_create import PhaseRelationSpec, PhaseSpec, register_phases
-from .state import ACHIEVED, ACTIVE, CANCELLED, COMPLETE, COMPLETED, HELD, PLAN_EXCLUDED, UNSTARTED, ProjectView
+from .state import (
+    ACHIEVED,
+    ACTIVE,
+    AMBIGUOUS_CANDIDATES,
+    CANCELLED,
+    COMPLETE,
+    COMPLETED,
+    FINISHED_STATES,
+    HELD,
+    PLAN_EXCLUDED,
+    TERMINAL_STATES,
+    UNSTARTED,
+    ProjectView,
+)
 from .store import (
     ROADMAP_BACKGROUND_HEADING,
     ROADMAP_DESIRED_HEADING,
@@ -516,18 +529,9 @@ def select_phase(store: ProjectStore, roadmap_id: str, explicit: str | None = No
             if phase.id == explicit:
                 return phase
         raise SpecViolation(f"{explicit} is not a startable Phase")
-    if not candidates:
-        return None
-    if len(candidates) == 1:
-        return candidates[0]
-    candidate_ids = {phase.id for phase in candidates}
-    # planned_next from a completed Phase wins; then a candidate no other candidate plans before it.
-    for relation in view.roadmap_relations:
-        if relation.type == "planned_next" and relation.to in candidate_ids and view.phase_state(relation.from_id) == COMPLETE:
-            return view.phases[relation.to]
-    planned_after = {r.to for r in view.roadmap_relations if r.type == "planned_next" and r.from_id in candidate_ids}
-    heads = [phase for phase in candidates if phase.id not in planned_after]
-    return (heads or candidates)[0]
+    # The plan decides, or nothing does: several equally planned Phases STOP
+    # here rather than being separated by the order they were read in.
+    return view.choose_startable(candidates, "Phase")
 
 
 def diagnose_no_candidate(store: ProjectStore, roadmap_id: str) -> str:
@@ -721,6 +725,12 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
         if key in ("integration", "confirmation"):
             raise ValidationError(f"reserved Work key: {key}")
     _require_startable_entry(view, design)
+    if not interrupted:
+        # Only a new expansion is refused for being undecided. One already under
+        # way is carried to its end (BL-023): the entry Work is a return value,
+        # not part of what the expansion registers, so leaving it unchosen is
+        # reported afterwards rather than stranding a half-finished expansion.
+        _require_unique_entry(view, design)
 
     mutation, destination = _open(store, "phase-entry", {"phase_id": phase_id, "design": identity}, [phase_id])
     if mutation.resumed:
@@ -767,6 +777,86 @@ def _require_startable_entry(view: ProjectView, design: PhaseEntryDesign) -> Non
             + ", ".join(blocking)
             + " to complete first"
         )
+
+
+def _design_startable_keys(view: ProjectView, design: PhaseEntryDesign) -> list[str]:
+    """The design's Works this expansion would leave startable, by design key.
+
+    Every Work this expansion creates is unstarted and in the effective set, so
+    startability comes down to the incoming ``requires_completion`` the design
+    asks for - the same reading :func:`_require_startable_entry` applies to one
+    named entry, applied to all of them.
+    """
+    startable: list[str] = []
+    for key in design.works:
+        blocked = False
+        for predecessor, successor in design.requires_completion:
+            if successor != key:
+                continue
+            if predecessor in design.works:
+                blocked = True
+                break
+            label = view.entity_state_label(predecessor)
+            if label == "unresolvable":
+                continue  # an unresolvable endpoint is refused by the registration core
+            if label not in FINISHED_STATES:
+                blocked = True
+                break
+        if not blocked:
+            startable.append(key)
+    return startable
+
+
+def _require_unique_entry(view: ProjectView, design: PhaseEntryDesign) -> None:
+    """Refuse a design whose entry Work the plan does not single out, before it writes.
+
+    With no explicit entry the Work to start is read from the design's own
+    ``planned_next``, by the rule :meth:`ProjectView.planned_next_preference`
+    applies to Works that already exist. The design fixes that answer on its
+    own, so an expansion that would leave several equally planned Works STOPs
+    here - before the intent, the reserved IDs, the entities and the commit -
+    instead of being separated afterwards by the order its Works were read in.
+    """
+    if design.entry is not None:
+        return
+    startable = _design_startable_keys(view, design)
+    if len(startable) <= 1:
+        return
+    edges = [(a, b) for a, b in design.planned_next if b in startable]
+    # A Work this expansion creates is new, so it has finished nothing and is
+    # still outstanding; only an existing endpoint can be in either state.
+    recommended = {
+        b for a, b in edges if a not in design.works and view.entity_state_label(a) in FINISHED_STATES
+    }
+    pool = [key for key in startable if key in recommended] or startable
+    outstanding = {
+        b
+        for a, b in edges
+        if a in design.works or view.entity_state_label(a) not in TERMINAL_STATES + ("unresolvable",)
+    }
+    heads = [key for key in pool if key not in outstanding] or pool
+    if len(heads) > 1:
+        raise StopError(
+            f"{len(heads)} Works of this design would be equally planned to start: "
+            + ", ".join(sorted(heads))
+            + "; the design does not say which comes first, so name the entry Work",
+            code=AMBIGUOUS_CANDIDATES,
+        )
+
+
+def _entry_the_plan_points_to(view: ProjectView, startable: list[Entity]) -> str | None:
+    """The Work this expansion leaves to start, or ``None`` when the plan is silent.
+
+    A new expansion has already been refused if its design did not single one
+    out (:func:`_require_unique_entry`), so this only reports. A resumed one may
+    still be undecided, and saying so costs nothing - failing here would fail an
+    expansion that is already finalized, which is what an entry decided before
+    the first write exists to avoid.
+    """
+    if not startable:
+        return None
+    preferred = view.planned_next_preference(startable)
+    return preferred[0].id if len(preferred) == 1 else None
 
 
 def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, phase: Entity, phase_id: str, roadmap_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
@@ -837,7 +927,7 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
                 code="postcheck_failed",
             )
     else:
-        entry = startable[0].id if startable else None
+        entry = _entry_the_plan_points_to(after, startable)
     return PhaseEntryResult(phase_id, normal.work_ids, integration_id, confirmation_id, entry, True, mutation.id, head)
 
 
@@ -1302,7 +1392,8 @@ def handoff(store: ProjectStore, phase_id: str, executor, entry_work_id: str | N
         startable = view.startable_works(phase_id)
         if not startable:
             raise StopError(f"Phase {phase_id} has no startable Work", code="no_startable_work")
-        entry_work_id = startable[0].id
+        # Decided before START is called, so an ambiguous Phase hands nothing over.
+        entry_work_id = view.choose_startable(startable, "Work").id
     return start(store, entry_work_id, "outer", executor)
 
 

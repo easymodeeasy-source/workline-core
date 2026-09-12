@@ -57,10 +57,17 @@ class HistoricalRelatedCase(WorklineTestCase):
         git(store.root, "commit", "-m", "seed tracked files")
 
     def phase_with(self, store: ProjectStore, works: dict[str, tuple]) -> rm.PhaseEntryResult:
+        """A Phase whose Works are about read targets, not about which one starts.
+
+        Works declared here are all equally startable, which is a STOP since
+        BL-014, so the design names the first as its entry; every test below
+        starts the Work it names anyway.
+        """
         roadmap = self.simple_roadmap(store)
         design = rm.PhaseEntryDesign(
             {key: rm.WorkDesign(key.upper(), f"{key} が成立する", related) for key, related in works.items()},
             rm.WorkDesign("Integration", "全Workの統合確認が取れている"),
+            entry=next(iter(works)),
         )
         return rm.enter_phase(store, roadmap.phase_ids["a"], design)
 

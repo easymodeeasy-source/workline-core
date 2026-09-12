@@ -136,13 +136,40 @@ cancelled / plan_excluded前提はrequires_completionを満たさない。depend
 
 複数候補:
 
-- 人間の明示意図
-- planned_next
-- dependency
-- 既存priority / external constraint / target
-- parallel safety
+現在適用する正式条件は、この順に次の3つだけである。
 
-から選ぶ。成果意味が大きく変わる選択なら `rules/human-confirmation`。
+1. 人間の明示意図（明示されたPhaseが候補にあればそれを選ぶ）
+2. `planned_next`（下記「候補選択の決着」）
+3. dependency（候補条件で既に適用済み。未充足のPhaseは候補に入らない）
+
+成果意味が大きく変わる選択なら `rules/human-confirmation`。
+
+将来の設計候補（**現在は未実装**。schemaにもrelationにも存在せず、選択条件として適用されない）:
+
+```text
+既存priority
+external constraint / target
+parallel safety
+```
+
+これらを「現在適用される条件」として扱わない。実装が無いものを適用したつもりで候補を絞らない。
+
+## 候補選択の決着
+
+startable Phaseの選択と、Phase entry / handoffのentry Work選択と、STARTの同一Phase内継続は、同じ規則で決着させる。
+
+`planned_next` は推奨順である。候補が2件以上あるとき、次の順に絞る。各段階は結果が残る場合だけ適用する。
+
+1. 既にcompleted / completeなentityが `planned_next` で次に推奨している候補
+2. そのうち、まだ終わっていないentityから `planned_next` で前に置かれていない候補
+
+cancelled / plan_excludedのpredecessorは二度と終わらないので、候補を後ろへ押さえない。
+
+絞った結果が1件ならそれを選ぶ。
+
+**2件以上残る場合は選ばずSTOPする。** 候補listの先頭・ID順 / ULID順・relation fileの記録順・宣言順・表示番号・dict / listの挿入順など、内部順序に由来するものでtieを破らない。これらはいずれも実行順ではない。診断には候補のIDを含め、人間が明示選択できるようにする。
+
+STOPはcanonical stateを変更する前に行う。ID予約・mutation開始・entity書込み・commit / pushのいずれも行わない。
 
 ## Phase entry
 
@@ -209,6 +236,8 @@ integration実行時に実結果を見て必要性を再評価する。初期判
 ## START handoff
 
 Phase実行要求がある場合、entry Workを選び `START mode=outer` を呼ぶ。
+
+明示のentry Workが無い場合は「候補選択の決着」で選ぶ。2件以上残るならSTARTを呼ばずSTOPし、entry Workの明示を求める。
 
 STARTは同一Phase完了またはstopでRoadmapへ戻る。次Phaseへ自動越境しない。
 
