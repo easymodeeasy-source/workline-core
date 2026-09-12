@@ -51,7 +51,7 @@
 | BL-016 | Default result commit message type | VERIFIED |
 | BL-017 | Declared write scope broader than actual writes | VERIFIED |
 | BL-018 | Unused assignment in Phase expansion | VERIFIED |
-| BL-019 | Runtime recovery record retention and ignore policy | INVESTIGATE |
+| BL-019 | Runtime recovery record retention and ignore policy | RESOLVED |
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
 | BL-021 | Concurrent operation exclusion | RESOLVED |
 | BL-022 | ProjectSTART abandoned pre-effect recovery | RESOLVED |
@@ -343,7 +343,7 @@
 
 - ID: BL-019
 - Title: Runtime recovery record retention and ignore policy
-- Status: INVESTIGATE
+- Status: RESOLVED
 - Kind: design, implementation, hygiene
 - Problem: `.workline/runtime/` のmutation recovery recordは完了後も残り続け、各operationの開始時には完了済みを含む全recordが読み込まれ、形式versionが検査される。放置されたpending record（stale mutation）の扱いは設計段階で保留したままで、完了済みrecordの保持期間やcleanup経路もない。また、Project開始はruntime領域をGitのignore対象にしないため、Projectによってはruntime recordがuntrackedとして表示され続ける。
 - Why it matters: recordの蓄積は起動時のコスト（BL-007）を増やし、形式を変更した時に過去record全体が互換性の問題になる（BL-013 の intent format compatibility policy）。untrackedのruntime recordはdirty noiseになり、Workline以外のtoolから誤ってcommitされる余地がある。一方で、cleanupを誤るとrecoveryに必要な情報を失う。
@@ -353,6 +353,7 @@
 - Human confirmation likely: yes（cleanup規則は共通ルールの変更。Projectのignore設定を変える場合も）
 - Self-hosting prerequisite: partial（BL-013 の intent format compatibility policy と関係する）
 - Evidence class: design deferral, smoke test, real-project migration, code inspection
+- Resolution: closeしたrecovery recordはresumeの対象ではないため、completedとしてcloseしたmutationが、自分が今回作成したrecord自身を削除することにした。削除は次をすべて機械的に示せる場合に限る: 今回の実行が作成し既存recordをresumeしていない / top-level fieldがcloseしたrecordのfield setと完全一致しversionがint型そのものである / 通常のregular fileであり間接参照でない / Gitのindexにも HEADにも存在しない（判定できないgit呼び出しは「存在する」として扱う）/ 内容がそのmutationが最後に書いたものと完全一致する。1つでも示せなければrecordを残す。resumeしたmutationのrecordを削除しないのは、operationが待っている間に第三者が加えた変更がloadで許容されsaveで書き戻されるため、最終的な内容が作成者の証明にならないからである。indexとHEADを別に問うのは、`git rm --cached` でindexから外れてもHEADが保持しているrecordを削除するとcommit済みの変更を消すことになるからである。削除はoperation自身の後始末でありresultではないため、全effect・Git stage・構造postcheckの後に行い、失敗してもoperationは成功のままとし、そのためにdomain effectを再実行しない。cleanupが中断して残ったcompleted recordは次回も通常どおり読める。pending record、abandoned record、resumeしたmutationのrecord、他のmutationが残したrecordは削除しない。abandoned recordを残すのは、Project開始がそのfolderをやり直してよいと判断できる唯一の証拠だからである（BL-022）。既存Projectに既に蓄積したrecordは今回の対象とせず、保持期間・件数上限・一括cleanup・maintenance commandは設けない。Git ignore設定（Project rootの `.gitignore`、`.git/info/exclude`、runtime配下のignore file等）はWorkline側で作成・変更せず、Projectの既存ignore設定はProject側の所有物として扱う。schema、intent version、project.yaml、event、relation typeは変更しておらず、backfillは不要。残る論点の分離: 狭いwrite scopeを持つ `bootstrap-backfill` / `push-destination-pin` のpending recordは通常作業を止めないため気付かれずに残り得る（その可視化はBL-006のpending mutation報告の範囲）、残存recordのintent format互換方針はBL-013、cold-start性能全体はBL-007、workline-core自身の生成物hygieneはBL-010。`rules/git` とproject-start Skillへ反映済み。
 
 ### BL-020 Correction of mis-recorded historical facts
 

@@ -20,6 +20,7 @@ here claims that POSIX was exercised.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import inspect
 import ntpath
@@ -28,6 +29,7 @@ from pathlib import Path
 import posixpath
 import re
 import textwrap
+from typing import Iterator
 import unittest
 from unittest import mock
 
@@ -128,6 +130,25 @@ class RecoveryTestCase(WorklineTestCase):
         with cwd(WORKLINE_ROOT):
             return ps.project_start(root, WORKLINE_ROOT, **kwargs)
 
+    @contextmanager
+    def recorded_notes(self) -> Iterator[dict[str, dict]]:
+        """The notes each mutation records, collected as it records them.
+
+        A Project開始 that completes takes its own recovery record away again
+        (``rules/git``: Mutation Controller), so what a successful one recorded
+        is read here rather than from a file it no longer leaves behind. A
+        resumed mutation still leaves its record, and those tests read it there.
+        """
+        notes: dict[str, dict] = {}
+        set_note = Mutation.set_note
+
+        def capture(mutation: Mutation, key: str, value: object) -> None:
+            set_note(mutation, key, value)
+            notes.setdefault(mutation.id, {})[key] = value
+
+        with mock.patch.object(Mutation, "set_note", capture):
+            yield notes
+
     def assertStops(self, code: str, root: Path, **kwargs) -> StopError:
         with self.assertRaises(StopError) as ctx:
             self.start(root, **kwargs)
@@ -156,7 +177,13 @@ class RecoveryTestCase(WorklineTestCase):
         self.assertEqual(git(root, "log", "-1", "--format=%s").strip(), ps.INITIAL_COMMIT_MESSAGE)
         self.assertEqual(committed(root), {*CANONICAL, BOOTSTRAP_REL_PATH})
         self.assertEqual(MutationController(store).list_pending(), [])
-        self.assertEqual(records(root)[result.mutation_id]["status"], "completed")
+        # A mutation that completes takes its own recovery record away again
+        # (``rules/git``: Mutation Controller); one that had to be resumed keeps
+        # it, because a record that lay on disk cannot be shown to be untouched.
+        if result.resumed:
+            self.assertEqual(records(root)[result.mutation_id]["status"], "completed")
+        else:
+            self.assertNotIn(result.mutation_id, records(root))
 
     def abandoned_start(self, root: Path, *, preexisting: list[str] | None = None) -> Path:
         """A Project開始 intent for ``root`` closed as abandoned before its first effect.
@@ -223,7 +250,8 @@ class NewStartPreventionTests(RecoveryTestCase):
         self.assertInitialized(root, result)
         self.assertFalse(result.resumed)
         self.assertEqual(git(root, "log", "--format=%s").splitlines(), [ps.INITIAL_COMMIT_MESSAGE])
-        self.assertEqual(list(records(root)), [result.mutation_id])
+        # The STOP left no record behind, and the start that succeeded took its own away.
+        self.assertEqual(list(records(root)), [])
 
     def test_every_pre_effect_stop_of_a_new_start_leaves_no_workline(self) -> None:
         def toplevel_elsewhere(root: Path):
@@ -359,7 +387,6 @@ class NewStartPreventionTests(RecoveryTestCase):
             ("effects", "create"),
         ])
         self.assertInitialized(root, result)
-        self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": ["mine.txt"]})
         self.assertIn("?? mine.txt", status(root))
         self.assertIn("?? late.txt", status(root))
 
@@ -370,10 +397,11 @@ class NewStartPreventionTests(RecoveryTestCase):
         bootstrap.parent.mkdir(parents=True)
         bootstrap.write_text(render_bootstrap(), encoding="utf-8", newline="\n")
 
-        result = self.start(root)
+        with self.recorded_notes() as notes:
+            result = self.start(root)
 
         self.assertInitialized(root, result)
-        self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": []})
+        self.assertEqual(notes[result.mutation_id], {"preexisting_dirty": []})
         self.assertEqual(bootstrap.read_bytes(), render_bootstrap().encode("utf-8"))
 
 
@@ -486,7 +514,8 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         self.assertNotEqual(result.mutation_id, path.stem)
         self.assertEqual(path.read_bytes(), old)
         statuses = {mutation_id: record["status"] for mutation_id, record in records(root).items()}
-        self.assertEqual(statuses, {path.stem: "abandoned", result.mutation_id: "completed"})
+        # The abandoned record stays; the start that completed took its own away.
+        self.assertEqual(statuses, {path.stem: "abandoned"})
 
     def test_several_abandoned_starts_are_started_again_and_left_byte_for_byte(self) -> None:
         root = self.new_dir()
@@ -504,7 +533,7 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         self.assertNotIn(result.mutation_id, [path.stem for path in paths])
         now = record_bytes(root)
         self.assertEqual({name: data for name, data in now.items() if name in old}, old)
-        self.assertEqual(len(now), 4)
+        self.assertEqual(len(now), 3)  # all three abandoned records, and nothing new
 
     def test_the_abandoned_snapshot_is_never_carried_over(self) -> None:
         root = self.new_dir()
@@ -513,10 +542,11 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         path = self.abandoned_start(root, preexisting=[BOOTSTRAP_REL_PATH, "gone.txt"])
         (root / "mine.txt").write_text("mine\n", encoding="utf-8")
 
-        result = self.start(root)
+        with self.recorded_notes() as notes:
+            result = self.start(root)
 
         self.assertInitialized(root, result)
-        self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": ["mine.txt"]})
+        self.assertEqual(notes[result.mutation_id], {"preexisting_dirty": ["mine.txt"]})
         self.assertEqual(records(root)[path.stem]["notes"], {"preexisting_dirty": [BOOTSTRAP_REL_PATH, "gone.txt"]})
 
     def test_a_colon_name_is_retried_only_where_it_is_a_filename(self) -> None:
@@ -549,11 +579,12 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         path = self.abandoned_start(root, preexisting=snapshot)
         old = path.read_bytes()
 
-        result = self.start(root)
+        with self.recorded_notes() as notes:
+            result = self.start(root)
 
         self.assertInitialized(root, result)
         self.assertEqual(path.read_bytes(), old)
-        self.assertEqual(records(root)[result.mutation_id]["notes"], {"preexisting_dirty": snapshot})
+        self.assertEqual(notes[result.mutation_id], {"preexisting_dirty": snapshot})
 
     def test_an_abandoned_start_next_to_the_repository_it_initialized(self) -> None:
         root = self.new_dir()
@@ -574,11 +605,12 @@ class AbandonedResidueRetryTests(RecoveryTestCase):
         (root / "staged.txt").write_text("staged\n", encoding="utf-8")
         git(root, "add", "staged.txt")
 
-        result = self.start(root)
+        with self.recorded_notes() as notes:
+            result = self.start(root)
 
         self.assertInitialized(root, result)
         self.assertEqual(
-            records(root)[result.mutation_id]["notes"],
+            notes[result.mutation_id],
             {"preexisting_dirty": ["staged.txt", "tracked.txt", "untracked.txt"]},
         )
         self.assertEqual(git(root, "log", "--format=%s").splitlines(), [ps.INITIAL_COMMIT_MESSAGE, "user commit"])

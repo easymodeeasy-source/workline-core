@@ -218,7 +218,7 @@ Project repositoryがあれば、.workline/ 配下をindexにもHEADにも持た
 
 canonical file / directory（空directoryを含む）、effectやreserved IDを持つrecord、他owner・他invocation・他write scopeのrecord、completed / pendingのrecord、record 0件、非空tmp、locks等の未知の内容、trackedな `.workline`、移動したfolderに残ったrecordは、いずれも証明にならない。
 
-4.の場合もbootstrap conflictは優先してSTOPし、push destinationの事前確認も迂回しない。abandoned recordのcleanup・保持期間はここでは定めない。
+4.の場合もbootstrap conflictは優先してSTOPし、push destinationの事前確認も迂回しない。abandoned recordは保持する。completedとしてcloseしたmutationが削除するのは自分が今回作成したrecord自身だけであり（`rules/git` のMutation Controller）、abandoned record・pending record・他のmutationのrecordは削除しない。Project開始の成功後も、このfolderに残っていたabandoned recordはそのまま残る。
 
 ## Create Project structure
 

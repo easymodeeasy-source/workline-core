@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git
 from workline import start as st
 from workline.create import RelatedSpec, RelationSpec, WorkSpec, create_standalone_work, register_works
 from workline.errors import SpecViolation, StopError, ValidationError
-from workline.mutation import MutationController, WriteScope
+from workline.mutation import Mutation, MutationController, WriteScope
 from workline.oplock import project_operation
 from workline.state import ProjectView
 from workline.validate import validate_project
@@ -84,7 +85,17 @@ class CreateRegistrationCoreTests(WorklineTestCase):
             (store.root / "r.txt").write_text("x", encoding="utf-8")
             return st.Completed(("r.txt",))
 
-        result = st.start(store, w1, "single-work", executor)
+        # A mutation that completes takes its own recovery record away, so what
+        # it recorded is collected while it runs rather than read back after.
+        recorded: list[tuple[str, str, str]] = []
+        record_effects = Mutation.add_effects
+
+        def capture(mutation: Mutation, stage: str, effects: list) -> None:
+            recorded.extend((mutation.id, e.kind, e.payload.get("path", "")) for e in effects)
+            record_effects(mutation, stage, effects)
+
+        with mock.patch.object(Mutation, "add_effects", capture):
+            result = st.start(store, w1, "single-work", executor)
         self.assertEqual(result.status, "completed")
         view = ProjectView.load(store)
         fix = next(w for w in view.works.values() if w.name == "Fix")
@@ -92,9 +103,13 @@ class CreateRegistrationCoreTests(WorklineTestCase):
         derived = [r for r in view.roadmap_relations if r.type == "derived"]
         self.assertEqual([(r.from_id, r.to) for r in derived], [(w1, fix.id)])
         self.assertTrue(any(p.name.startswith("der_") for p in store.derivations.iterdir()))
-        mutation = MutationController(store).load(result.mutation_id)
-        self.assertTrue(any(e["kind"] == "write_file" and fix.id in e["payload"]["path"] for e in mutation.effects))
-        self.assertEqual(mutation.status, "completed")
+        # the derived Work was written by the START mutation itself, and every
+        # effect of the whole operation belonged to that one mutation
+        self.assertIn((result.mutation_id, "write_file", fix.path), recorded)
+        self.assertEqual({mutation_id for mutation_id, _, _ in recorded}, {result.mutation_id})
+        self.assertEqual(set(seen_mutations), {result.mutation_id})
+        self.assertEqual(MutationController(store).list_pending(), [])
+        self.assertEqual(sorted(store.mutations.glob("*.yaml")), [])
         self.assertIn(fix.path, git(store.root, "ls-files"))
 
 

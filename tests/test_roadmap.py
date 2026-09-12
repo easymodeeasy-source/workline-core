@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from typing import Iterator
 import unittest
+from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git, scripted_executor
 from workline import roadmap as rm
 from workline import start as st
 from workline.errors import SpecViolation, StopError, ValidationError
-from workline.mutation import MutationController, WriteScope
+from workline.mutation import Mutation, MutationController, WriteScope
 from workline.oplock import project_operation
 from workline.ops import Replan
 from workline.phase_create import PhaseRelationSpec, PhaseSpec, register_phases
@@ -277,7 +280,38 @@ class PhaseSelectionTests(WorklineTestCase):
 class PhaseAdditionTests(WorklineTestCase):
     """``add_phases``: the Roadmap-owned operation that adds Phases to an existing Roadmap."""
 
+    @contextmanager
+    def _recorded_effects(self) -> Iterator[list[tuple[str, str, str, str]]]:
+        """Every effect a mutation records, and which mutation recorded it.
+
+        A mutation that completes takes its own recovery record away again
+        (``rules/git``: Mutation Controller), so what an operation planned - and
+        that one mutation planned all of it - is read while it runs rather than
+        from a leftover file.
+        """
+        recorded: list[tuple[str, str, str, str]] = []
+        record_effects = Mutation.add_effects
+
+        def capture(mutation: Mutation, stage: str, effects: list) -> None:
+            recorded.extend(
+                (mutation.id, mutation.owner, str(mutation.invocation.get("operation")), effect.kind)
+                for effect in effects
+            )
+            record_effects(mutation, stage, effects)
+
+        with mock.patch.object(Mutation, "add_effects", capture):
+            yield recorded
+
+    def _assertOneAdditionMutation(self, recorded: list, added) -> list[str]:
+        """Every recorded effect belongs to this add-phases mutation; return the kinds."""
+        self.assertEqual(
+            {(mutation_id, owner, operation) for mutation_id, owner, operation, _ in recorded},
+            {(added.mutation_id, "roadmap", "roadmap-add-phases")},
+        )
+        return [kind for *_, kind in recorded]
+
     def _addition_intents(self, store) -> list[dict]:
+        """Recovery records an add-phases mutation left behind: none, once it completed."""
         controller = MutationController(store)
         records = [controller._load_intent(path) for path in sorted(store.mutations.glob("*.yaml"))]
         return [r for r in records if r["owner"] == "roadmap" and r["invocation"].get("operation") == "roadmap-add-phases"]
@@ -294,7 +328,8 @@ class PhaseAdditionTests(WorklineTestCase):
         dirty = store.root / "user_notes.txt"
         dirty.write_text("人間の未commit変更\n", encoding="utf-8")
 
-        added = rm.add_phases(store, result.roadmap_id, {"c": PhaseSpec("C", "c state")})
+        with self._recorded_effects() as recorded:
+            added = rm.add_phases(store, result.roadmap_id, {"c": PhaseSpec("C", "c state")})
 
         view = ProjectView.load(store)
         new_id = added.phase_ids["c"]
@@ -314,13 +349,13 @@ class PhaseAdditionTests(WorklineTestCase):
         self.assertEqual(view.works, {})
         self.assertEqual(validate_project(store), [])
 
-        # one Roadmap-owned mutation, completed, commit but no push without a remote
-        intents = self._addition_intents(store)
-        self.assertEqual([r["mutation_id"] for r in intents], [added.mutation_id])
-        self.assertEqual(intents[0]["status"], "completed")
-        kinds = [e["kind"] for e in intents[0]["effects"]]
+        # one Roadmap-owned mutation, commit but no push without a remote
+        kinds = self._assertOneAdditionMutation(recorded, added)
         self.assertIn("git_commit", kinds)
         self.assertNotIn("git_push", kinds)
+        # It completed, so it cleaned up after itself: no record of it is left,
+        # and nothing of it is still open.
+        self.assertEqual(self._addition_intents(store), [])
         self.assertEqual(MutationController(store).list_pending(), [])
         self.assertEqual(git(store.root, "log", "-1", "--format=%s").strip(), "chore(workline): add phases to roadmap R-01")
         self.assertEqual(set(git(store.root, "show", "--name-only", "--format=", "HEAD").split()), {view.phases[new_id].path})
@@ -333,16 +368,17 @@ class PhaseAdditionTests(WorklineTestCase):
         store = self.new_project(remote=True)
         result = self.simple_roadmap(store, {"a": ("A", "a")})
         a = result.phase_ids["a"]
-        added = rm.add_phases(
-            store,
-            result.roadmap_id,
-            {"c": PhaseSpec("C", "c state"), "d": PhaseSpec("D", "d state")},
-            (
-                PhaseRelationSpec("requires_completion", "c", "d"),
-                PhaseRelationSpec("planned_next", "c", "d"),
-                PhaseRelationSpec("planned_next", a, "c"),
-            ),
-        )
+        with self._recorded_effects() as recorded:
+            added = rm.add_phases(
+                store,
+                result.roadmap_id,
+                {"c": PhaseSpec("C", "c state"), "d": PhaseSpec("D", "d state")},
+                (
+                    PhaseRelationSpec("requires_completion", "c", "d"),
+                    PhaseRelationSpec("planned_next", "c", "d"),
+                    PhaseRelationSpec("planned_next", a, "c"),
+                ),
+            )
         c, d = added.phase_ids["c"], added.phase_ids["d"]
         view = ProjectView.load(store)
         self.assertEqual({p.display for p in view.phases.values()}, {"P-01", "P-02", "P-03"})
@@ -354,8 +390,8 @@ class PhaseAdditionTests(WorklineTestCase):
         self.assertEqual(len(added.relation_ids), 3)
         self.assertEqual([p.id for p in rm.startable_phases(store, result.roadmap_id)], sorted([a, c]))
         self.assertEqual(validate_project(store), [])
-        kinds = [e["kind"] for e in self._addition_intents(store)[0]["effects"]]
-        self.assertIn("git_push", kinds)
+        self.assertIn("git_push", self._assertOneAdditionMutation(recorded, added))
+        self.assertEqual(self._addition_intents(store), [])
         self.assertEqual(git(store.root, "rev-parse", "HEAD").strip(), git(self.remote_path(), "rev-parse", "main").strip())
         self.assertEqual(MutationController(store).list_pending(), [])
 

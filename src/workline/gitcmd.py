@@ -86,6 +86,20 @@ def tracked_under(repo: Path, relpath: str) -> list[str] | None:
     return sorted(p.replace("\\", "/") for p in result.stdout.split("\0") if p)
 
 
+def head_paths(repo: Path, relpath: str) -> list[str] | None:
+    """Paths under ``relpath`` that HEAD holds; None when undeterminable.
+
+    The index and HEAD answer different questions. A file taken out of the index
+    with ``git rm --cached`` is no longer tracked there while HEAD still holds
+    it, so whoever has to know that removing a file would lose something
+    committed asks both, and treats an unanswerable call as "held".
+    """
+    result = run_git(repo, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", relpath, check=False)
+    if not result.ok:
+        return None
+    return sorted(p.replace("\\", "/") for p in result.stdout.split("\0") if p)
+
+
 def tracked_file(repo: Path, relpath: str) -> bool:
     """Whether ``relpath`` is tracked as exactly this file.
 

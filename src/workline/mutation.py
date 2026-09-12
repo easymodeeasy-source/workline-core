@@ -27,7 +27,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
+import stat
 from typing import Any
 
 from . import gitcmd, oplock, pushurl, yamlish
@@ -39,6 +41,7 @@ from .ids import is_valid_id, kind_of, new_id
 from .store import (
     ENTITY_DIRS,
     INFRA_WRITE_PATHS,
+    MUTATIONS_DIR,
     PRE_PROJECT_OWNERS,
     PHASE_EVENTS,
     PHASE_TERMINAL_EVENTS,
@@ -61,6 +64,15 @@ from .store import (
 
 INTENT_MARKER = "workline-mutation-intent"
 INTENT_VERSION = 1
+
+# Every top-level field of a recovery record this controller opened
+# (:meth:`MutationController.begin`) and then closed (:meth:`Mutation.complete`
+# or :meth:`Mutation.abandon`). A record holding any other set of fields is not
+# one this run can show it wrote by itself, so it is never removed.
+CLOSED_RECORD_FIELDS = frozenset({
+    "workline", "version", "mutation_id", "owner", "status", "created_at", "updated_at",
+    "invocation", "write_scope", "reserved_ids", "notes", "effects", "completed_at",
+})
 
 UNAPPLIED = "unapplied"
 MATCHING = "applied_matching"
@@ -282,6 +294,64 @@ class Mutation:
         self.record["status"] = "completed"
         self.record["completed_at"] = utc_now()
         self._save()
+        self._drop_own_record()
+
+    def _drop_own_record(self) -> None:
+        """Take away this mutation's own recovery record, now that nothing can need it.
+
+        A closed record has no reader: a resume looks only at pending records,
+        and the Project開始 residue proof accepts only abandoned ones. Keeping
+        every one of them for the life of the Project is what makes each
+        operation's startup read the whole history back, and what lets a later
+        change of record format stop a Project over a record nothing needs.
+
+        Removing it is the cleanup ``rules/git`` allows - an artifact this same
+        mutation created, uncommitted, unreferenced and exactly as written - so
+        every part of that has to be shown, not assumed
+        (:meth:`_own_record_removable`), and whatever cannot be shown keeps the
+        record. The record is this operation's own leftover and never its
+        result: failing to remove it is not a failure of the operation, and
+        nothing is retried because of it.
+        """
+        try:
+            if self._own_record_removable():
+                self.path.unlink()
+        except (OSError, GitError):
+            return
+
+    def _own_record_removable(self) -> bool:
+        """Whether this mutation can show that removing its own record loses nothing.
+
+        All of it is required, and an answer that cannot be reached counts as a
+        reason to keep the record:
+
+        * this run wrote the record from the beginning and never resumed one it
+          found on disk. A record that lay on disk while its operation waited
+          can carry someone else's edit - :meth:`MutationController._load_intent`
+          accepts unknown fields and :meth:`_save` writes them back - so the
+          bytes such a record ends up holding say nothing about who wrote them;
+        * its top-level fields are exactly a closed record's;
+        * the file is a plain regular file, not a link or other indirection;
+        * neither the Git index nor HEAD holds it, so taking it away cannot
+          delete anything someone committed. They are separate questions, and a
+          git call that cannot answer either one counts as holding it;
+        * its bytes are exactly what this mutation last wrote.
+        """
+        if self.resumed:
+            return False
+        if set(self.record) != CLOSED_RECORD_FIELDS or type(self.record["version"]) is not int:
+            return False
+        info = os.lstat(self.path)
+        if getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            return False
+        if not stat.S_ISREG(info.st_mode):
+            return False
+        relative = f"{MUTATIONS_DIR}/{self.path.name}"
+        if gitcmd.tracked_under(self.store.root, relative) != []:
+            return False
+        if gitcmd.head_paths(self.store.root, relative) != []:
+            return False
+        return self.path.read_bytes() == yamlish.dump(self.record).encode("utf-8")
 
     def abandon(self) -> None:
         """Close an intent that never recorded an effect (nothing to resume)."""

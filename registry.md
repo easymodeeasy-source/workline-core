@@ -44,6 +44,8 @@ remoteなしは正常。localがremoteに対して単純behindなら安全確認
 
 `.workline/runtime/` はWorkline-owned non-domain runtime補助領域とする。Worklineが作成・管理するrecovery metadataを同一mutationの期待値に従って作成・更新する場合は前項の既存untracked保護の対象外だが、Workline ownershipを確認できないrecordや期待値不一致のrecordは自動上書きせず `reconcile required` として停止する。`.workline/runtime/locks/` に置くProject execution lock（lock fileと診断用holder情報）も同じruntime補助領域であり、commitせず、domain正本やevidenceとして扱わない。
 
+runtime補助領域をGitのignore対象にするための設定（Project rootの `.gitignore`、`.git/info/exclude`、runtime配下のignore file等）は、Workline側で作成・変更しない。Projectの既存ignore設定はProject側の所有物として扱う。
+
 ### Operation Owner
 
 Project側へ書き込むstate-changing操作には operation owner を1つ置く。
@@ -324,6 +326,18 @@ mut_<ULID>
 ```
 
 recovery metadataは `.workline/runtime/mutations/<mutation_id>.yaml` 等、`.workline/runtime/` 配下のruntime補助領域に置く。runtime metadataはdomain正本ではなく通常commit対象にしない。
+
+closeしたrecovery recordはresumeの対象ではない。completedとしてcloseしたmutationは、自分が今回作成したそのrecord自身を削除する。削除してよいのは次をすべて示せる場合に限る:
+
+```text
+そのrecordを今回の実行が作成し、既存recordをresumeしていない
+top-level fieldが、closeしたrecordのfield setと完全一致し、versionがint型そのものである
+通常のregular fileであり、link等の間接参照ではない
+Gitのindexにも HEADにも存在しない（判定できないgit呼び出しは「存在する」として扱う）
+内容が、そのmutationが最後に書いたものと完全一致する
+```
+
+1つでも示せない場合はrecordを残す。削除はそのoperation自身の後始末でありresultではないため、削除の失敗をoperationの失敗として扱わず、そのためにdomain effectを再実行しない。pending recordとabandoned recordは削除しない。他のmutationが残したrecordも削除しない。保持期間・件数上限・古いrecordの一括cleanupは設けない。
 
 mutation開始時に必要なentity / relation IDを先行発行し保持する。途中失敗後は新しいIDでやり直さず、同じmutationをresumeする。
 
