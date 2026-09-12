@@ -13,6 +13,10 @@ the expansion has been committed.
 
 An interrupted expansion is not a caller re-entry: its pending mutation is
 recovery state and is left exactly as found. Resuming it is BL-023's subject.
+
+The structure an expansion produced is checked before it is committed, not
+after: the commit and the push happen inside the finalization, so a check that
+ran only afterwards would refuse a Phase that had already landed.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from workline.create import RelatedSpec, WorkSpec, create_standalone_work
 from workline.errors import SpecViolation, StopError, ValidationError
 from workline.mutation import Mutation, MutationController
 from workline.state import ProjectView
+from workline.validate import Problem
 
 D1 = rm.PhaseEntryDesign(
     {"a": rm.WorkDesign("Work A", "A が成立する"), "b": rm.WorkDesign("Work B", "B が成立する")},
@@ -488,6 +493,37 @@ class InterruptedExpansionTests(PhaseEntryCase):
         self.assertEqual(raised.exception.code, "phase_already_expanded")
         self.assertEqual([p["mutation_id"] for p in MutationController(self.store).list_pending()],
                          [pending["mutation_id"]])
+
+
+# --------------------------------------------------------------------------- structure check
+class ExpansionStructureCheckTests(PhaseEntryCase):
+    def test_a_broken_expansion_is_refused_before_anything_is_committed(self) -> None:
+        """The expansion's own structure check is what STOPs it before Git.
+
+        The check is called for its refusal, not for its value, so nothing later
+        reads what it returns and no other test would notice if the call itself
+        were dropped along with that unused result. Losing it would not go
+        unnoticed at runtime: the finalization commits and pushes before its own
+        postcheck, so the refusal would arrive only once the broken expansion
+        had already landed.
+        """
+        before = gitcmd.head_commit(self.store.root)
+        real = rm.validate_structure
+        calls = {"n": 0}
+
+        def failing(view):
+            calls["n"] += 1
+            # 1 is the precheck; 2 is the expansion's own structure check
+            return [Problem("work_invalid", "injected")] if calls["n"] == 2 else real(view)
+
+        with mock.patch.object(rm, "validate_structure", failing):
+            with self.assertRaises(ValidationError) as raised:
+                rm.enter_phase(self.store, self.phase, D1)
+
+        # Nothing reached Git: the refusal came before the commit and the push.
+        self.assertEqual(gitcmd.head_commit(self.store.root), before)
+        self.assertEqual(raised.exception.code, "structure_invalid")
+        self.assertIn("phase structure check", str(raised.exception))
 
 
 if __name__ == "__main__":

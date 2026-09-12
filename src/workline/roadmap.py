@@ -818,7 +818,10 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
         confirmation_id = confirmation.work_ids["confirmation"]
         paths += list(confirmation.paths)
 
-    after = _stop_on_structure(store, "phase structure check")
+    # Called for its refusal, not for its value: this is the last chance to
+    # STOP before :func:`_finalize` commits and pushes, so the structure this
+    # expansion produced is checked here rather than after it has landed.
+    _stop_on_structure(store, "phase structure check")
     head = _finalize(mutation, destination, f"chore(workline): expand phase {phase.display}", paths)
 
     after = ProjectView.load(store)

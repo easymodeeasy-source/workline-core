@@ -50,7 +50,7 @@
 | BL-015 | Silent no-op on Phase re-entry | RESOLVED |
 | BL-016 | Default result commit message type | RESOLVED |
 | BL-017 | Declared write scope broader than actual writes | RESOLVED |
-| BL-018 | Unused assignment in Phase expansion | VERIFIED |
+| BL-018 | Unused assignment in Phase expansion | RESOLVED |
 | BL-019 | Runtime recovery record retention and ignore policy | RESOLVED |
 | BL-020 | Correction of mis-recorded historical facts | DEFERRED |
 | BL-021 | Concurrent operation exclusion | RESOLVED |
@@ -334,7 +334,7 @@
 
 - ID: BL-018
 - Title: Unused assignment in Phase expansion
-- Status: VERIFIED
+- Status: RESOLVED
 - Kind: hygiene
 - Problem: Phase展開の実装で、構造検査の戻り値を代入した変数が使われないまま、直後に状態の再読込結果で上書きされている。動作には影響しない。
 - Why it matters: 構造検査の結果を後続で使っているように読め、保守時の誤読を招く。
@@ -344,6 +344,7 @@
 - Human confirmation likely: no
 - Self-hosting prerequisite: no
 - Evidence class: smoke test, code inspection
+- Resolution: Phase展開の構造検査について、未使用の代入 `after = ` だけを削除し、`_stop_on_structure(store, "phase structure check")` の呼出しは保持した。この呼出しはcommit / pushより前に置かれた唯一の構造ゲートであり、`_finalize` は `gitops.finalize`（git_commit / git_push effect）を適用してから自身の postcheck を走らせるため、呼出しごと消すと構造不正な展開がcommit・pushされた後にしかSTOPできなくなる。canonical Skill `skills/roadmap` の順序（Phase構造検査 → commit / push）もこの呼出しを要求している。意図が読み取れるよう、値のためではなく失敗時のSTOPのために呼んでいることをcommentで明記した。挙動・schema・canonical semanticsは不変で、canonical wordingの変更もbackfillも不要。代入された値が読まれないことはAST上で確認済み（`after` の出現はStore / Store / Loadの3つのみ、唯一のLoadは上書き後、間の文は `after` を読まず、分岐・try・closureなし）。この代入は初出commit `2ba599f` から存在し、linter未設定のため検出されていなかった。既存testは呼出しの有無を一切固定していなかった（呼出しごと削除したmutantでもfocused 67件が全passする実測）ため、`ExpansionStructureCheckTests` を1件追加した: 展開自身の構造検査を失敗させ、`structure_invalid` / `phase structure check` でSTOPし、かつHEADが動いていない（commit・pushに到達していない）ことを固定する。このtestは修正前・修正後いずれもPASSし、呼出しを削除したmutantではHEADが進んで失敗する。実測: focused 68 passed / 36 subtests、full suite 532 passed / 2 skipped / 397 subtests、validate-registry PASS。
 
 ### BL-019 Runtime recovery record retention and ignore policy
 
