@@ -233,6 +233,18 @@ direct standalone invocationの予定write scopeは、`relations/related.yaml` �
 
 中央正本の物理writeはMutation Controller経由。
 
+## 登録前の構造検査
+
+registration coreは、Postcheckの構造validationを、登録するeffectを記録する前に、同じ規則で登録後のProjectの投影へ適用する。独自の構造規則は持たない。
+
+投影は、記録しようとするWork file・derivation detail・relation・Relatedを、storeが読み戻すのと同じ規則で現在stateへ重ねたものとする。resumeしたmutationが記録済みで未適用のeffectを持つ場合は、それも適用順に重ねる。Project execution lockにより他のwriterは入らないので、投影はpostcheckが見るstateと一致する。
+
+構造が不正になる登録（cancelled / plan_excludedのWorkを `requires_completion` のpredecessorにする、cycle、同一edgeの重複等）は、effectを記録・適用する前に、postcheckと同じ `postcheck_failed`・同じmessageでSTOPする。canonical file・relation・commit・pushは変更せず、今回開いたmutationはeffectを持たないままabandonされる。構造precheckを持たないdirect standalone invocationでも、構造が既に不正なProjectでは同じ理由で登録前に拒否し、Work fileもpending recordも残さない（既存の不正は修復しない）。記録済み・未適用のeffectをresumeする場合も適用する前に同じ検査を行い、中断の間に不正になっていれば、effectを適用せずpending recordをそのまま残してSTOPする。構造が不正にならない登録は従来どおり記録・適用する。
+
+複数のstageで登録するcaller（RoadmapのPhase entry）は、最初のstageを記録する前に、未記録の全stageのWork payload（name・成立状態・Related）をregistration coreと同じpayload規則で検査する（`skills/roadmap` 参照）。
+
+cancel / plan exclusionのreplanに伴うWork登録は、ownerがreplan全体（terminal event・relation削除・relation追加・新Work）を記録前に投影検査したうえでの適用手順の一部なので、この登録前の構造検査を行わず、登録の適用後にpostcheckで検査する。
+
 ## Postcheck
 
 - stable ID unique / resolvable

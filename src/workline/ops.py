@@ -136,11 +136,17 @@ def apply_replan(
     """Record and apply replan effects. Returns touched canonical paths."""
     touched: list[str] = []
     if replan.new_works:
+        # The owner projected the whole replan - its event, removals, additions
+        # and new Works - before recording any of it. Registration here is one
+        # step of applying that, taken before the removals, so the core's own
+        # projection of this step is not what decides the replan; the
+        # registration keeps its apply-then-postcheck order on this path.
         result = register_works(
             mutation,
             f"{prefix}:works",
             replan.new_works,
             list(replan.add_relations),
+            refuse_before_apply=False,
         )
         touched.extend(result.paths)
         if result.work_ids != work_ids:

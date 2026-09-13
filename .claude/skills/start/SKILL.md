@@ -187,6 +187,8 @@ Mutation Controller = physical writer
 START = Git operation owner
 ```
 
+CREATEが登録前の構造検査で拒否した派生Work / fix Work（`skills/create` 参照）は、Work file・relation・Relatedのいずれも書かれない。拒否までにSTARTがそのWorkへ記録したlifecycle event（`work_started` / `work_target_added` 等）は、executor実行中の他のSTOPと同じくSTART mutationに残り、同じWork・同じmodeのSTARTでresumeする。
+
 ## Integration ownership
 
 実行中の追加Work / 再integrationの意味ownerはSTART。

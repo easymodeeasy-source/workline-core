@@ -416,6 +416,12 @@ pushする場合の宛先は `rules/git` のpush destinationに従う。各Roadm
 
 途中失敗は同じmutationをresume。期待値不一致ならreconcile required。
 
+Roadmap作成・Phase追加・Phase entryの登録は、Phase CREATE / CREATEの登録前の構造検査に従い、構造が不正になる登録をeffectの記録・適用より前に、postcheckと同じ `postcheck_failed` で拒否する（`skills/phase-create`、`skills/create` 参照）。拒否されたrequestはcanonical file・relation・commit・pushを変更せず、今回開いたmutationをabandonするので、同じrequestの再実行も、修正したrequestも、他のoperationも、pending recordやdirty fileに止められない。
+
+- Roadmap作成: Roadmap fileを記録する前に、そのRoadmap fileを加えた投影に対して全Phaseを決定し、Phase CREATEのprecheck・relation payload検査・登録前の構造検査を行う。Phase CREATEが拒否する作成はRoadmap fileも書かない。Phase ID / relation IDはこの時点で予約するので、Roadmap fileを記録する前後に中断したrecordもそれらを持ち、resumeは同じIDを使う。
+- Phase entry: 通常Work・integration・human_confirmationを別々のstageで登録するので、最初のstageを記録する前に、未記録の全stageのWork payload（name・成立状態・Related）をCREATEのpayload規則で宣言順に検査する。各stageの構造はCREATE registration coreがそのstageを記録する前に検査する。後続stageのrelationとconfirmation対象はPhase entry自身が登録済みWorkから組み立て、未開始Workの追加はpayload規則が読むPhase stateを変えないので、payloadを通った後続stageが先行stageの適用後に拒否されることはない。
+- resume: Roadmap作成・Phase追加・Phase entryは、resumeしたmutationの記録済みeffectをreplayする前に、未適用のeffectを現在stateへ重ねた投影を同じ検査にかける。中断の間に独立なoperation（例: 記録済み・未適用のrelationが前提とするPhaseのcancel）がstateを変えて不正になっていれば、何も適用せず、pending recordを変更しないまま `postcheck_failed` でSTOPする。そのrecordはwrite scopeが重なるoperationを従来どおり止めるので、人による照合が要る。Roadmap fileを記録した後・Phaseを記録する前に中断した作成は、Roadmap fileをreplayし、Phaseを記録する前にこの検査で止まる。
+
 callerが内容を決めるRoadmap operation（Roadmap作成 / Phase追加 / Related maintenance）は、最初のID予約より前に、決定内容の正規identityをそのmutationのinvocationへ記録する。operationと対象・labelだけのinvocationは、別内容の再実行を同じrequestと見なして記録済みstageを飛ばし、Projectには最初のrequestが決めた内容が残ったまま成功を返し得る。postcheckはentityが解決でき成立状態section等を持つことを見るが、今回のrequestが決めた本文内容と正本を突き合わせないため、これを検出しない。Phase relationのように決定payloadとの一致を検査する部分はあるが、それは `postcheck_failed` として遅れて止まるだけで、requestの取り違え自体を防がない。
 
 記録内容（いずれもこの記録形式のversionを含む）:

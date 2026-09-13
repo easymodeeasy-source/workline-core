@@ -124,6 +124,16 @@ Phase CREATEは独立Git operation ownerではない。Roadmapのparent mutation
 
 write直前に必要なら `.workline/phases/` / `.workline/relations/` を作る。空directoryの存在を前提にしない。`.gitkeep` は不要。
 
+## 登録前の構造検査
+
+Postcheckの構造validationは、登録するeffectを記録する前に、同じ規則で登録後のProjectの投影へ適用する。独自の構造規則は持たない。
+
+投影は、記録しようとするPhase file・relationを、storeが読み戻すのと同じ規則で現在stateへ重ねたものとする。resumeしたmutationが記録済みで未適用のeffectを持つ場合は、それも適用順に重ねる。Project execution lockにより他のwriterは入らないので、投影はpostcheckが見るstateと一致する。
+
+構造が不正になる登録（cancelled / plan_excludedのPhaseを `requires_completion` のpredecessorにする、cancelled / plan_excludedのPhaseを `return_to` 先にする、`requires_completion` のcycle、同一edgeの重複等）は、Phase file・relationを記録・適用する前に、postcheckと同じ `postcheck_failed`・同じmessageでSTOPする。canonical file・relation・commit・pushは変更せず、そのoperationが今回開いたmutationはeffectを持たないままabandonされる。構造が不正にならない登録は従来どおり記録・適用する。
+
+Roadmap作成ではRoadmap fileがPhaseより先に登録されるため、RoadmapはRoadmap fileを記録する前に、そのRoadmap fileを加えた投影に対して、このSkillのprecheck・relation payload検査・登録前の構造検査を行う（`skills/roadmap` 参照）。
+
 ## Postcheck
 
 - Phase ID unique / resolvable

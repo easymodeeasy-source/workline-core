@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 from typing import Any
 
@@ -298,6 +298,50 @@ def render_project_yaml(workline_root: Path, pin: PushPin | None = None) -> str:
     )
 
 
+# --------------------------------------------------------------------------- reading
+#
+# What a canonical file says is decided here once, for a file on disk and for
+# content that is only about to be written alike, so that a projection of
+# decided writes reads exactly what the store will read back after them.
+
+def as_read_back(content: str) -> str:
+    """``content`` as the store reads it back once it is written.
+
+    Writes keep line endings as given, and reading translates every ``\\r\\n``
+    and lone ``\\r`` to ``\\n``, as ``Path.read_text`` does.
+    """
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def entity_kind_at(relative: str) -> str | None:
+    """The entity kind whose listing reads the canonical file at ``relative``, or ``None``."""
+    parts = relative.split("/")
+    if len(parts) != 3 or parts[0] != WORKLINE_DIR or not parts[2].endswith(".md"):
+        return None
+    for kind, directory in ENTITY_DIRS.items():
+        if parts[1] == directory:
+            return kind
+    return None
+
+
+def entity_fields(kind: str, text: str, file_name: str, expected_id: str | None = None) -> tuple[str, dict[str, Any], str]:
+    """The ID, frontmatter and body an entity file named ``file_name`` holding ``text`` declares, or a STOP."""
+    try:
+        meta, body = yamlish.load_frontmatter(text)
+    except yamlish.YamlishError as exc:
+        raise ValidationError(f"{kind} file unreadable: {file_name}: {exc}", code="entity_invalid") from exc
+    entity_id = meta.get("id")
+    if not isinstance(entity_id, str) or not is_valid_id(entity_id, kind):
+        raise ValidationError(f"{kind} file has invalid id: {file_name}", code="entity_invalid")
+    if expected_id is not None and entity_id != expected_id:
+        raise ValidationError(f"{kind} id mismatch: file {file_name} declares {entity_id}", code="entity_invalid")
+    if PurePosixPath(file_name).stem != entity_id:
+        raise ValidationError(f"{kind} file name does not match id: {file_name}", code="entity_invalid")
+    if meta.get("type") != kind:
+        raise ValidationError(f"{kind} file has type {meta.get('type')!r}: {file_name}", code="entity_invalid")
+    return entity_id, meta, body
+
+
 # --------------------------------------------------------------------------- store
 
 class ProjectStore:
@@ -376,18 +420,10 @@ class ProjectStore:
     # entities ---------------------------------------------------------------
     def _parse_entity(self, kind: str, path: Path, expected_id: str | None) -> Entity:
         try:
-            meta, body = yamlish.load_frontmatter(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, yamlish.YamlishError) as exc:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
             raise ValidationError(f"{kind} file unreadable: {path.name}: {exc}", code="entity_invalid") from exc
-        entity_id = meta.get("id")
-        if not isinstance(entity_id, str) or not is_valid_id(entity_id, kind):
-            raise ValidationError(f"{kind} file has invalid id: {path.name}", code="entity_invalid")
-        if expected_id is not None and entity_id != expected_id:
-            raise ValidationError(f"{kind} id mismatch: file {path.name} declares {entity_id}", code="entity_invalid")
-        if path.stem != entity_id:
-            raise ValidationError(f"{kind} file name does not match id: {path.name}", code="entity_invalid")
-        if meta.get("type") != kind:
-            raise ValidationError(f"{kind} file has type {meta.get('type')!r}: {path.name}", code="entity_invalid")
+        entity_id, meta, body = entity_fields(kind, text, path.name, expected_id)
         return Entity(entity_id, kind, meta, body, self.rel(path))
 
     def read_entity(self, kind: str, entity_id: str) -> Entity:

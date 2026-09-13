@@ -9,10 +9,12 @@ relations.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import PurePosixPath
+from typing import Any, Iterable
 
 from .errors import StopError
-from .store import Entity, Event, ProjectStore, Relation
+from .store import Entity, Event, ProjectStore, Relation, as_read_back, entity_fields, entity_kind_at
 
 UNSTARTED = "unstarted"
 IN_PROGRESS = "in_progress"
@@ -143,6 +145,49 @@ class ProjectView:
         view.related = store.read_related()
         view.events = store.read_events()
         return view
+
+    def with_effects(self, effects: Iterable[Any]) -> "ProjectView":
+        """This snapshot as the Project will read once ``effects`` are applied, with nothing written.
+
+        ``effects`` are decided effects, as :class:`workline.mutation.Effect`
+        objects or as the records a mutation keeps of them, in the order they
+        are applied. Each is read the way the store reads back what applying it
+        writes: an entity file through the store's own entity rules, a relation
+        appended to or removed from its file, an event appended to the log.
+        Whatever this snapshot does not hold - derivation detail, Project
+        infrastructure, Git - leaves it as it is.
+        """
+        projected = replace(
+            self,
+            works=dict(self.works),
+            phases=dict(self.phases),
+            roadmaps=dict(self.roadmaps),
+            roadmap_relations=list(self.roadmap_relations),
+            related=list(self.related),
+            events=list(self.events),
+        )
+        entities = {"work": projected.works, "phase": projected.phases, "roadmap": projected.roadmaps}
+        for effect in effects:
+            kind, payload = (effect["kind"], effect["payload"]) if isinstance(effect, dict) else (effect.kind, effect.payload)
+            if kind == "write_file":
+                entity_kind = entity_kind_at(payload["path"])
+                if entity_kind is not None:
+                    name = PurePosixPath(payload["path"]).name
+                    entity_id, meta, body = entity_fields(entity_kind, as_read_back(payload["content"]), name)
+                    entities[entity_kind][entity_id] = Entity(entity_id, entity_kind, meta, body, payload["path"])
+            elif kind in ("add_relation", "remove_relation"):
+                relations = projected.roadmap_relations if payload["file"] == "roadmap" else projected.related
+                if kind == "add_relation":
+                    relations.append(Relation.from_record(payload["record"]))
+                else:
+                    relations[:] = [r for r in relations if r.id != payload["record"]["id"]]
+            elif kind == "append_event":
+                projected.events.append(Event.from_record(payload["record"]))
+        # The store lists entities in ID order.
+        projected.works = dict(sorted(projected.works.items()))
+        projected.phases = dict(sorted(projected.phases.items()))
+        projected.roadmaps = dict(sorted(projected.roadmaps.items()))
+        return projected
 
     # events ---------------------------------------------------------------
     def events_for(self, entity_id: str) -> list[Event]:

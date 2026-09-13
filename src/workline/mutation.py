@@ -79,6 +79,8 @@ MATCHING = "applied_matching"
 MISMATCH = "applied_mismatch"
 
 EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_event", "git_commit", "git_push")
+#: The effects that write a Project's files rather than Git.
+FILE_EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_event")
 
 
 def utc_now() -> str:
@@ -361,6 +363,27 @@ class Mutation:
         self.record["status"] = "abandoned"
         self.record["completed_at"] = utc_now()
         self._save()
+
+
+def unapplied_effects(mutation: Mutation) -> list[dict[str, Any]]:
+    """The recorded file effects :meth:`Mutation.apply` has still to write, in the order it writes them.
+
+    Each is classified the way :meth:`Mutation.apply` classifies it, and the
+    list ends where that would stop: at the first effect applied with an
+    unexpected result, which it refuses before writing anything after it. Git
+    effects write none of the Project's files, and classifying a push contacts
+    its destination, so they are passed over. Nothing is written or saved.
+    """
+    unapplied: list[dict[str, Any]] = []
+    for record in mutation.effects:
+        if record["kind"] not in FILE_EFFECT_KINDS:
+            continue
+        classification = mutation.controller.classify(record)
+        if classification == MISMATCH:
+            break
+        if classification == UNAPPLIED:
+            unapplied.append(record)
+    return unapplied
 
 
 def same_request(recorded: object, request: dict[str, Any]) -> bool:

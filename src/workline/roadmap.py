@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 import json
-from typing import Any
+from typing import Any, Callable
 
 from . import gitcmd, gitops
 from .create import (
@@ -21,9 +21,11 @@ from .create import (
     RelatedSpec,
     RelationSpec,
     WorkSpec,
+    refuse_invalid_work_writes,
     register_works,
     related_edge_key,
     validate_related_specs,
+    validate_work_specs,
 )
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .mutation import (
@@ -50,7 +52,13 @@ from .ops import (
     projected_view,
     validate_projection,
 )
-from .phase_create import PhaseRelationSpec, PhaseSpec, register_phases
+from .phase_create import (
+    PhaseRelationSpec,
+    PhaseSpec,
+    decide_phases,
+    refuse_invalid_phase_writes,
+    register_phases,
+)
 from .state import (
     ACHIEVED,
     ACTIVE,
@@ -219,13 +227,26 @@ def _stop_on_structure(store: ProjectStore, context: str) -> ProjectView:
 
 
 def _open(
-    store: ProjectStore, operation: str, identity: dict[str, Any], entities: list[str] = ()
+    store: ProjectStore,
+    operation: str,
+    identity: dict[str, Any],
+    entities: list[str] = (),
+    *,
+    refuse_recorded: Callable[[Mutation], None] | None = None,
 ) -> tuple[Mutation, gitops.PushDestination | None]:
     """Open (or resume) the operation's mutation with a verified push destination.
 
     The destination is checked before the mutation exists, so an unpinned or
     drifted remote STOPs with no intent record, no domain write and no network
     contact.
+
+    A resumed mutation replays what it recorded before anything else runs.
+    ``refuse_recorded`` is the registration check an operation that registers
+    Phases or Works applies to that replay (:func:`refuse_invalid_phase_writes`,
+    :func:`refuse_invalid_work_writes`): the Project can have changed while the
+    mutation waited, so what it recorded is projected onto the Project as it is
+    now, and a replay the registration postcheck would refuse is refused before
+    any of it is written, with the record left exactly as it is.
     """
     destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
@@ -233,6 +254,8 @@ def _open(
     mutation = controller.open(OWNER, invocation, WriteScope(entities=tuple(entities), files=_ledgers(operation)))
     gitops.ensure_git_ready(store.root)
     gitops.record_preexisting_dirty(mutation, store.root)
+    if refuse_recorded is not None and mutation.resumed:
+        refuse_recorded(mutation)
     mutation.apply()
     return mutation, destination
 
@@ -435,7 +458,9 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
             request,
             f"Roadmap creation of {plan.name!r}",
         )
-        mutation, destination = _open(store, "roadmap-create", {"name": plan.name, "request": request})
+        mutation, destination = _open(
+            store, "roadmap-create", {"name": plan.name, "request": request}, refuse_recorded=refuse_invalid_phase_writes
+        )
         with abandon_on_stop(mutation):
             return _create_roadmap(store, mutation, destination, plan)
 
@@ -454,7 +479,18 @@ def _create_roadmap(
             sections.append((ROADMAP_OUT_OF_SCOPE_HEADING, plan.out_of_scope))
         meta = {"id": roadmap_id, "display": f"R-{store.count_entities('roadmap') + 1:02d}", "type": "roadmap"}
         content = render_entity(meta, render_body(plan.name, sections))
-        mutation.add_effects("roadmap", [Effect.write_file(ProjectStore.entity_rel_path("roadmap", roadmap_id), content)])
+        written = [Effect.write_file(ProjectStore.entity_rel_path("roadmap", roadmap_id), content)]
+        # The Roadmap is written before its Phases are registered, and once it is
+        # recorded this mutation can no longer be abandoned. So the Phases are
+        # decided and checked first - Phase CREATE's own precheck, relation
+        # payload rules and registration check, on the Project as this Roadmap
+        # file will leave it - and a creation Phase CREATE would refuse is
+        # refused before the Roadmap is recorded. The Phase and relation IDs this
+        # reserves are the ones the registration below then uses.
+        projected = ProjectView.load(store).with_effects(written)
+        decided = decide_phases(mutation, "phases", roadmap_id, plan.phases, list(plan.relations), view=projected)
+        refuse_invalid_phase_writes(mutation, decided.effects, projected)
+        mutation.add_effects("roadmap", written)
     mutation.apply()
 
     phases = register_phases(mutation, "phases", roadmap_id, plan.phases, list(plan.relations))
@@ -530,7 +566,10 @@ def _add_phases_locked(
         # request refused for it leaves no record behind. Phase CREATE keeps the
         # same precheck as part of its own contract.
         raise SpecViolation(f"Roadmap {roadmap_id} is held; Phase addition needs a decided future-plan change")
-    mutation, destination = _open(store, "roadmap-add-phases", {**identity, "request": request}, [roadmap_id])
+    mutation, destination = _open(
+        store, "roadmap-add-phases", {**identity, "request": request}, [roadmap_id],
+        refuse_recorded=refuse_invalid_phase_writes,
+    )
     with abandon_on_stop(mutation):
         registered = register_phases(
             mutation, "phases", roadmap_id, phases, list(relations), future_plan_change=future_plan_change
@@ -773,7 +812,10 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
         # reported afterwards rather than stranding a half-finished expansion.
         _require_unique_entry(view, design)
 
-    mutation, destination = _open(store, "phase-entry", {"phase_id": phase_id, "design": identity}, [phase_id])
+    mutation, destination = _open(
+        store, "phase-entry", {"phase_id": phase_id, "design": identity}, [phase_id],
+        refuse_recorded=refuse_invalid_work_writes,
+    )
     if mutation.resumed:
         # An expansion that already exists is carried forward, never given up:
         # abandoning it would strand the IDs it reserved and the effects it
@@ -907,13 +949,6 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
     }
     normal_relations = [RelationSpec("planned_next", a, b) for a, b in design.planned_next]
     normal_relations += [RelationSpec("requires_completion", a, b) for a, b in design.requires_completion]
-    def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
-        if mutation.has_stage(stage):
-            return _recorded_registration(mutation, stage, list(specs))
-        return register_works(mutation, stage, specs, relations)
-
-    normal = registered("works", normal_specs, normal_relations)
-
     integration_spec = WorkSpec(
         design.integration.name,
         design.integration.desired_state,
@@ -922,6 +957,41 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
         work_kind="phase_integration_check",
         related=tuple(design.integration.related),
     )
+    # The confirmation's target is the integration registered below.
+    confirmation_spec = None if design.human_confirmation is None else WorkSpec(
+        design.human_confirmation.name,
+        design.human_confirmation.desired_state,
+        phase_id=phase_id,
+        roadmap_id=roadmap_id,
+        work_kind="human_confirmation",
+        related=tuple(design.human_confirmation.related),
+    )
+
+    # The expansion registers in stages, and the registration core refuses each
+    # stage before that stage writes - but by then an earlier stage may already
+    # be applied, in a mutation that can no longer be abandoned. So the payload
+    # the design decides for every stage not recorded yet - each Work's name,
+    # desired state and Related - is refused here by the core's own payload
+    # rules, before the first of those stages writes. Nothing else in a later
+    # stage can be refused once its payload passes: its relations and the
+    # confirmation's target are built by this expansion from the Works it has
+    # just registered, and adding unstarted Works to this Phase changes nothing
+    # those rules read.
+    view = ProjectView.load(store)
+    stages = [("works", normal_specs), ("integration", {"integration": integration_spec})]
+    if confirmation_spec is not None:
+        stages.append(("confirmation", {"confirmation": confirmation_spec}))
+    for stage, specs in stages:
+        if not mutation.has_stage(stage):
+            validate_work_specs(specs, view)
+
+    def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
+        if mutation.has_stage(stage):
+            return _recorded_registration(mutation, stage, list(specs))
+        return register_works(mutation, stage, specs, relations)
+
+    normal = registered("works", normal_specs, normal_relations)
+
     integration = registered(
         "integration",
         {"integration": integration_spec},
@@ -931,19 +1001,10 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
 
     confirmation_id: str | None = None
     paths = list(normal.paths) + list(integration.paths)
-    if design.human_confirmation is not None:
-        confirmation_spec = WorkSpec(
-            design.human_confirmation.name,
-            design.human_confirmation.desired_state,
-            phase_id=phase_id,
-            roadmap_id=roadmap_id,
-            work_kind="human_confirmation",
-            confirmation_target=integration_id,
-            related=tuple(design.human_confirmation.related),
-        )
+    if confirmation_spec is not None:
         confirmation = registered(
             "confirmation",
-            {"confirmation": confirmation_spec},
+            {"confirmation": replace(confirmation_spec, confirmation_target=integration_id)},
             [RelationSpec("requires_completion", integration_id, "confirmation")],
         )
         confirmation_id = confirmation.work_ids["confirmation"]

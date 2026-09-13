@@ -4,9 +4,11 @@ The registration core registers Works whose meaning has already been decided
 by the caller (Roadmap / START / a human for standalone Works). It assigns
 stable identity, writes the Work body, registers ``origin`` / ``phase_id``,
 caller-decided relations, Related data and derivation detail, and runs the
-postcheck. It never decides whether a Work is needed, never creates
-integration / human_confirmation Works on its own, never records lifecycle
-events, and is not a Git finalizer.
+postcheck. The postcheck's structure rule is first applied to the Project as
+the registration would leave it, so a registration it refuses is refused before
+anything of it is written. It never decides whether a Work is needed, never
+creates integration / human_confirmation Works on its own, never records
+lifecycle events, and is not a Git finalizer.
 
 Only the direct standalone invocation (``create_standalone_work``) creates a
 Direct Work Operation context that owns postcheck / commit / push.
@@ -29,6 +31,7 @@ from .mutation import (
     abandon_on_stop,
     pending_for_slot,
     require_same_request,
+    unapplied_effects,
 )
 from .oplock import project_operation
 from .state import COMPLETE, EXCLUDED_STATES, ProjectView
@@ -135,6 +138,39 @@ def _stop_on_problems(problems: list[Problem], context: str) -> None:
         raise ValidationError(context + ": " + "; ".join(f"{p.code}: {p.message}" for p in problems), code="postcheck_failed")
 
 
+def refuse_invalid_work_writes(mutation: Mutation, effects: Sequence[Effect] = (), view: ProjectView | None = None) -> None:
+    """Refuse, before anything is written, what the registration postcheck would refuse after it.
+
+    The Project is projected as it will read once ``mutation`` has applied what
+    it still has to - its recorded effects not applied yet (a resumed
+    registration can hold some) and then ``effects``, a stage about to be
+    recorded - and checked by the postcheck's own structure rule, reported the
+    way the postcheck reports it. The Project execution lock keeps every other
+    writer out, so that projection is the state the postcheck would see.
+
+    With nothing left to write the Project is exactly what the postcheck will
+    check, and it is left to the postcheck.
+    """
+    writes = unapplied_effects(mutation) + list(effects)
+    if not writes:
+        return
+    if view is None:
+        view = ProjectView.load(mutation.store)
+    _stop_on_problems(validate_structure(view.with_effects(writes)), "postcheck")
+
+
+def validate_work_specs(specs: dict[str, WorkSpec], view: ProjectView) -> None:
+    """Refuse a Work payload the registration core would refuse, as it refuses it.
+
+    The payload rules of every Work the core registers, applied before it
+    reserves an ID. A caller registering in several stages applies them to
+    every stage before the first one writes, so that no stage can be refused
+    after an earlier one was applied.
+    """
+    for key, spec in specs.items():
+        _validate_spec(spec, key, view)
+
+
 def _validate_spec(spec: WorkSpec, key: str, view: ProjectView) -> None:
     if not spec.name.strip():
         raise ValidationError(f"work {key}: name is required")
@@ -168,14 +204,25 @@ def register_works(
     stage: str,
     specs: dict[str, WorkSpec],
     relations: list[RelationSpec] = (),
+    *,
+    refuse_before_apply: bool = True,
 ) -> RegistrationResult:
-    """Registration core. Participates in the caller's mutation; no Git."""
+    """Registration core. Participates in the caller's mutation; no Git.
+
+    What the postcheck would refuse is refused before the stage is recorded, or,
+    when a resumed mutation recorded it already, before it is applied
+    (:func:`refuse_invalid_work_writes`). ``refuse_before_apply=False`` keeps
+    the order this core had before that check - apply, then postcheck - for a
+    caller whose registration is one step of a change it has already projected
+    as a whole: a replan applies its relation removals only after this
+    registration, so its own final projection, not this intermediate state, is
+    what decides it.
+    """
     store = mutation.store
     if not specs:
         raise ValidationError("registration core needs at least one Work")
     view = ProjectView.load(store)
-    for key, spec in specs.items():
-        _validate_spec(spec, key, view)
+    validate_work_specs(specs, view)
 
     # stable IDs (reserved once per mutation; resumed unchanged) --------------
     work_ids = {key: mutation.reserve_id(f"{stage}:work:{key}", "work") for key in specs}
@@ -207,8 +254,9 @@ def register_works(
     _check_projection(view, specs, work_ids, resolved_relations)
 
     # effects -------------------------------------------------------------
-    if not mutation.has_stage(stage):
-        effects: list[Effect] = []
+    recorded = mutation.has_stage(stage)
+    effects: list[Effect] = []
+    if not recorded:
         base_number = store.count_entities("work")
         for offset, (key, spec) in enumerate(specs.items()):
             work_id = work_ids[key]
@@ -237,6 +285,9 @@ def register_works(
             for index, related in enumerate(spec.related):
                 extra = {"condition": related.condition} if related.condition is not None else {}
                 effects.append(Effect.add_relation("related", Relation(related_ids[(key, index)], related.type, work_ids[key], related.to, extra)))
+    if refuse_before_apply:
+        refuse_invalid_work_writes(mutation, effects, view)
+    if not recorded:
         mutation.add_effects(stage, effects)
     mutation.apply()
 
