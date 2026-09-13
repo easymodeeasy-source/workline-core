@@ -385,11 +385,19 @@ remoteありなら承認先へ最終push
 
 completed event記録後にcommit / push失敗したら、通常STARTを再実行しない。同じpending finalization mutationをresumeし、domain実作業やeventを重複させずGit段階だけ継続する。
 
+completed eventを記録した後、そのeventを含む最終commitを記録する前に中断・STOPした場合も同じ。同じWork・同じmodeのSTART再実行は、現在stateからWorkを選び直す前に、そのpending mutationが記録したterminal lifecycle eventのfinalizationが終わっているかをrecordで確かめる。completionのeventを記録（または適用）したのに最終commitが未記録なら、executorを再実行せず、eventを追加せず、他のWorkを選ばず、同じmutationで最終commit / pushを行ってからcompletedとして扱う。outerではその後に同一Phase内の次startable Workを再計算する。前のWorkのterminal eventを次のWorkのcommitへ混ぜない。
+
+このGit段階からの継続は、recordがそれをこのSTART自身のcompletionと示す場合だけ行う: そのlifecycle stageがcompletionの記録するevent（`work_target_removed` / `work_completed`）を予約済みIDでちょうど持ち、最後に記録されたstageであり、single-workでは指定Workのものであり、HEADのevent logがまだそのeventを持たないこと。示せない場合（複数Workのfinalizationが未完了、STARTが記録しない形のrecord、このmutationが記録していないcommitによってHEADのevent logが既にそのeventを持つ）は、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする。
+
+cancel eventを記録したのにcancelのfinalization commitを記録していないmutationは、cancelで決めたreplanがrecordに無いため、ここからは継続しない。outerの再実行はその未完了cancelを越えて次のWorkへ進まず、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする（それより前のSTART precheckが止める場合は、その停止のまま）。single-workの再実行は、cancel eventでterminalになったWorkの開始として従来どおり拒否し、mutationはpendingのまま残る。
+
+どの場合も、未commit / 未pushのterminal eventを残したままcompleted / stopped / phase_completeを返してSTART mutationを閉じない。
+
 期待値不一致・divergence・ownership競合はreconcile required。
 
 ## outer continuation
 
-1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。
+1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。START再実行（resume）では、そのmutationが記録した直前のWorkのterminal finalization（Terminal finalization参照）を終えるまで次のWorkを再計算しない。
 
 startable Workが1件に決まれば同一Phase内で継続。
 

@@ -22,7 +22,7 @@ from typing import Callable
 
 from . import gitcmd, gitops
 from .create import RelatedSpec, RelationSpec, WorkSpec, register_works
-from .errors import SpecViolation, StopError, ValidationError
+from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .mutation import Mutation, MutationController, WriteScope, abandon_on_stop
 from .oplock import project_operation
 from .ops import (
@@ -47,7 +47,7 @@ from .state import (
     ProjectView,
     WorkState,
 )
-from .store import WORKLINE_DIR, Entity, ProjectStore, Relation
+from .store import WORK_TERMINAL_EVENTS, WORKLINE_DIR, Entity, ProjectStore, Relation
 from .validate import condition_applies, validate_structure
 
 OWNER = "start"
@@ -405,6 +405,9 @@ class _Session:
             raise ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable")
         state = view.work_state(work_id)
         if state.state == COMPLETED:
+            # Only a resumed START gets here, once replaying its recorded finalization has
+            # committed and pushed the completion; one whose finalization was never
+            # recorded is finished before any Work is run (:func:`_completion_to_finish`).
             return StartResult("completed", work_id, self.mutation.id, phase_id=work.phase_id)
         if state.terminal:
             raise SpecViolation(f"Work {work_id} is {state.state}; terminal Works are not started")
@@ -604,12 +607,30 @@ class _Session:
             # message with anything in it is committed exactly as given.
             self._commit(f"{work.id}:results", _result_message(outcome.message, work), owned, include_canonical=False)
         self._lifecycle(work, ["work_target_removed", "work_completed"])
+        return self._finalize_completion(work)
+
+    def _finalize_completion(self, work: Entity) -> StartResult:
+        """The Git stage of a completion: the commit carrying its events, the push, the postcheck."""
         self._commit(f"{work.id}:finalize", f"chore(workline): complete {work.display}", [])
         after = ProjectView.load(self.store)
         if after.work_state(work.id).state != COMPLETED:
             raise StopError(f"{work.id} is not completed after finalization", code="postcheck_failed")
         self.completed.append(work.id)
         return StartResult("completed", work.id, self.mutation.id, tuple(self.completed), work.phase_id, head=gitcmd.head_commit(self.store.root))
+
+    def finish_completion(self, work_id: str) -> StartResult:
+        """Finalize a completion this mutation recorded and applied, doing none of it again.
+
+        The Work's result is committed and its ``work_target_removed`` /
+        ``work_completed`` events are in the event log, but the commit that
+        carries them was never recorded. What is left is exactly the Git stage
+        (``skills/start``: Terminal finalization): the executor is not asked
+        again, no event is added, and nothing else is chosen or run first.
+        """
+        work = ProjectView.load(self.store).works.get(work_id)
+        if work is None:
+            raise ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable")
+        return self._finalize_completion(work)
 
     # cancel ----------------------------------------------------------------
     def _cancel(self, view: ProjectView, work: Entity, outcome: Cancel) -> StartResult:
@@ -744,6 +765,123 @@ def _next_or_ambiguous(
         return None, exc.message
 
 
+_EVENT_LOG = f"{WORKLINE_DIR}/events/events.jsonl"
+_COMPLETION_EVENTS = ("work_target_removed", "work_completed")
+
+
+def _completion_to_finish(mutation: Mutation, work_id: str, mode: str) -> str | None:
+    """The Work whose recorded completion a resumed START finalizes before anything else, or ``None``.
+
+    A terminal lifecycle stage this START records is finalized by the Git stage
+    recorded after it: ``<Work>:finalize:<n>`` for a completion, ``commit:<n>``
+    for a cancel. While that stage is missing, the terminal events are in the
+    event log, or about to be replayed into it, with nothing committed or
+    pushed. Current state already shows the Work completed or cancelled, so a
+    retry that read only the state would report success, choose the next Work
+    or fold those events into another Work's commit - and close the mutation
+    that was the only way left to finalize them.
+
+    So the record is read first, before anything is replayed:
+
+    * no terminal stage without its Git stage - ``None``, and START goes on as
+      it always did (a recorded Git stage is replayed like any other effect);
+    * an unfinished completion that is provably this START's own - its stage
+      holds exactly the two events a completion records for that Work, under
+      the IDs reserved for them, it is the last stage recorded, in single-work
+      mode it is the invoked Work, and HEAD's event log does not hold those
+      events yet - that Work: only its Git stage is left, and it is done
+      before anything else;
+    * an unfinished cancel of the invoked Work in single-work mode - ``None``:
+      running a Work its own cancel made terminal is refused as it always was,
+      which neither reports success nor closes the mutation;
+    * anything else unfinished - a cancel met by an outer START, whose decided
+      replan the record does not hold, more than one unfinished terminal Work,
+      a completion recorded in a form this START does not write, or completion
+      events HEAD's event log already holds through a commit this mutation did
+      not record, which leaves its own finalization commit and push unshown -
+      STOP, with the record left exactly as it is.
+    """
+    stages: list[str] = []
+    for effect in mutation.effects:
+        if effect.get("stage") not in stages:
+            stages.append(effect.get("stage"))
+    unfinished: list[tuple[int, str, dict]] = []
+    for position, stage in enumerate(stages):
+        terminal = [
+            event for event in _stage_events(mutation, stage)
+            if event.get("type") in WORK_TERMINAL_EVENTS and isinstance(event.get("entity"), str)
+        ]
+        if not terminal:
+            continue
+        subject, event_type = terminal[0]["entity"], terminal[0]["type"]
+        closing = f"{subject}:finalize:" if event_type == "work_completed" else "commit:"
+        if not any(str(later).startswith(closing) for later in stages[position + 1:]):
+            unfinished.append((position, stage, terminal[0]))
+    if not unfinished:
+        return None
+    if len(unfinished) > 1:
+        raise ReconcileRequired(
+            f"START mutation {mutation.id} recorded terminal lifecycle events for "
+            + ", ".join(sorted({event["entity"] for _, _, event in unfinished}))
+            + " that no commit finalizes; START finalizes one Work before it runs another, so this is not a "
+            "record it can continue, and it is left pending, exactly as it is: reconcile required"
+        )
+    position, stage, event = unfinished[0]
+    subject, event_type = event["entity"], event["type"]
+    if event_type == "work_completed":
+        if not (position == len(stages) - 1 and (mode == "outer" or subject == work_id) and _recorded_completion(mutation, stage, subject)):
+            raise ReconcileRequired(
+                f"START mutation {mutation.id} recorded work_completed for {subject} without the commit that finalizes "
+                "it, but not as this START records a completion of that Work, so it cannot show that finalizing it "
+                "is its own to do; it is left pending, exactly as it is: reconcile required"
+            )
+        if _in_head_event_log(mutation.store, [recorded.get("id") for recorded in _stage_events(mutation, stage)]):
+            raise ReconcileRequired(
+                f"START mutation {mutation.id} recorded the completion of {subject}, but a commit it did not record "
+                "already holds those events, so its own finalization commit and push cannot be shown; it is left "
+                "pending, exactly as it is: reconcile required"
+            )
+        return subject
+    if mode == "single-work" and subject == work_id:
+        return None
+    raise ReconcileRequired(
+        f"START mutation {mutation.id} recorded {event_type} for {subject} without the commit that finalizes it. "
+        "What that decision replanned is not in the record, so this START can neither finish it nor go on past it "
+        "to report another outcome; it is left pending, exactly as it is: reconcile required"
+    )
+
+
+def _stage_events(mutation: Mutation, stage: str) -> list[dict]:
+    """The event records of ``stage``'s ``append_event`` effects, in recorded order."""
+    events: list[dict] = []
+    for effect in mutation.stage_effects(stage):
+        payload = effect.get("payload")
+        record = payload.get("record") if effect.get("kind") == "append_event" and isinstance(payload, dict) else None
+        if isinstance(record, dict):
+            events.append(record)
+    return events
+
+
+def _recorded_completion(mutation: Mutation, stage: str, work_id: str) -> bool:
+    """Whether ``stage`` is exactly the lifecycle stage a completion of ``work_id`` records."""
+    effects = mutation.stage_effects(stage)
+    events = _stage_events(mutation, stage)
+    return (
+        isinstance(stage, str)
+        and stage.rsplit(":", 1)[0] == f"{work_id}:lifecycle"
+        and [effect.get("kind") for effect in effects] == ["append_event"] * len(_COMPLETION_EVENTS)
+        and [(event.get("type"), event.get("entity")) for event in events] == [(t, work_id) for t in _COMPLETION_EVENTS]
+        and all(mutation.reserved(f"{stage}:event:{index}") == event.get("id") for index, event in enumerate(events))
+    )
+
+
+def _in_head_event_log(store: ProjectStore, event_ids: list[str]) -> bool:
+    """Whether the event log committed in HEAD holds any of ``event_ids``; a question Git cannot answer counts as yes."""
+    patterns = [arg for event_id in event_ids for arg in ("-e", str(event_id))]
+    found = gitcmd.run_git(store.root, "grep", "-q", "-F", *patterns, "HEAD", "--", _EVENT_LOG, check=False)
+    return found.returncode != 1
+
+
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
@@ -769,6 +907,9 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
     invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
     mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     with abandon_on_stop(mutation):
+        # A terminal lifecycle this mutation recorded without its finalization is
+        # answered from the record before anything is replayed or chosen.
+        finishing = _completion_to_finish(mutation, work_id, mode) if mutation.resumed else None
         gitops.record_preexisting_dirty(mutation, store.root)
         mutation.apply()  # resume: replay every recorded effect before continuing
         state = view.work_state(work_id)
@@ -780,7 +921,9 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         current: Entity | None = work
         result: StartResult
         just_completed: str | None = None
-        if mutation.resumed:
+        if finishing is not None:
+            result = session.finish_completion(finishing)
+        elif mutation.resumed:
             ambiguous: str | None = None
             if mode == "outer":
                 current, ambiguous = _next_or_ambiguous(session, ProjectView.load(store), phase_id, work, None)
