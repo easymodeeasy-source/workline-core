@@ -35,6 +35,7 @@ from .mutation import (
     pending_for_slot,
     require_same_request,
     same_request,
+    unsettled_lifecycle,
 )
 from .oplock import project_operation
 from .ops import (
@@ -242,6 +243,39 @@ def _finalize(
     _stop_on_structure(mutation.store, "postcheck")
     mutation.complete()
     return gitcmd.head_commit(mutation.store.root)
+
+
+def _require_settled_lifecycle(store: ProjectStore, entities: tuple[str, ...], described: str) -> None:
+    """STOP while a lifecycle fact this operation relies on is decided but not yet visible.
+
+    Declared write scope answers a different question. It says which files two
+    mutations would both write, and it is symmetric: if it carried this
+    dependency, every operation that merely *reads* a Roadmap's lifecycle would
+    also block every operation that *writes* it - an interrupted Phase expansion
+    would again stop the Roadmap from being held, which is exactly the needless
+    stop the narrowed scope removed. A read dependency only runs one way, so it
+    is checked here, on the reader, over the entities this operation actually
+    reads.
+
+    Only a decision the Project cannot see yet is a problem. One already applied
+    is in the log, so the ordinary precondition reports it precisely ("Roadmap is
+    cancelled"), and this guard stays quiet and lets it. Nothing is written, no
+    mutation is opened, and the unfinished record is left exactly as it is.
+    """
+    decided = unsettled_lifecycle(store, entities)
+    if not decided:
+        return
+    raise ReconcileRequired(
+        described + " reads the lifecycle of " + ", ".join(sorted(wanted for wanted in set(entities) if wanted))
+        + ", and "
+        + ", ".join(
+            f"{item['type']} of {item['entity']} is already decided by unfinished mutation "
+            f"{item['mutation_id']} (owner {item['owner']}) but not yet applied"
+            for item in decided
+        )
+        + "; current state does not show it yet, so this operation would act on a fact that has been "
+        "decided away. Finish or reconcile that mutation first; nothing here was changed: reconcile required"
+    )
 
 
 def _require_active_roadmap(view: ProjectView, roadmap_id: str) -> None:
@@ -692,6 +726,11 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
         raise SpecViolation(f"Phase {phase_id} is already complete")
     if state in (HELD, CANCELLED, PLAN_EXCLUDED):
         raise SpecViolation(f"Phase {phase_id} is {state}")
+    # Expansion is decided by this Roadmap's and this Phase's lifecycle, neither
+    # of which this operation writes, so neither is covered by its write scope.
+    # Checked after what current state already shows, so an applied fact keeps
+    # its own reason and only a decision still invisible is reported here.
+    _require_settled_lifecycle(store, (roadmap_id, phase_id), f"Phase entry of {phase_id}")
     unsatisfied = view.unsatisfied_dependencies(phase_id)
     if unsatisfied:
         raise StopError(
@@ -1210,6 +1249,13 @@ def _maintain_work_related_locked(
     # under the Project execution lock.
     view = _stop_on_structure(store, "precheck")
     work = _unstarted_roadmap_work(view, work_id)
+    # Maintenance is decided by the Roadmap's lifecycle and the Work's own state.
+    # The Work is in the write scope; the Roadmap is not, and is not written here.
+    # Checked after what current state already shows, as in Phase entry.
+    _require_settled_lifecycle(
+        store, (str((work.meta.get("origin") or {}).get("roadmap_id") or ""), work_id),
+        f"related maintenance of {work_id}",
+    )
     validate_related_specs(add, f"related maintenance {work_id}")
 
     # What the request asks for, folded to the form the operation acts on, and

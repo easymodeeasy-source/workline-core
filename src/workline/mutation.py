@@ -30,7 +30,7 @@ import json
 import os
 from pathlib import Path
 import stat
-from typing import Any
+from typing import Any, Iterable
 
 from . import gitcmd, oplock, pushurl, yamlish
 from .context import pre_project_authorized, same_directory
@@ -427,6 +427,44 @@ def require_same_request(pending: list[dict[str, Any]], request: dict[str, Any],
             "request than the one now given; an interrupted operation is never continued with "
             "another request, and it is left untouched: reconcile required"
         )
+
+
+def unsettled_lifecycle(store: ProjectStore, entities: "Iterable[str]") -> list[dict[str, str]]:
+    """Lifecycle events an unfinished mutation decided and the Project cannot see yet.
+
+    A lifecycle fact - held, resumed, cancelled, achieved, started, completed,
+    plan_excluded - is derived from the event log, so an operation that reads one
+    as a precondition reads the log. Between the moment another mutation records
+    its event and the moment that event is applied, the log does not hold it: the
+    decision is durable but invisible. An operation that only looked at current
+    state would act on a fact that has already been decided away.
+
+    The effect is compared against the log by event ID rather than by its own
+    ``applied`` flag, so a crash between applying an event and saving that flag
+    reports the event as settled - which it is, because the log holds it and the
+    reader can see it.
+
+    Owner-agnostic: a Work's lifecycle decision is as invisible when START made
+    it as when Roadmap did.
+    """
+    wanted = {entity for entity in entities if entity}
+    if not wanted:
+        return []
+    logged = {event.id for event in store.read_events()} if store.events_jsonl.is_file() else set()
+    decided: list[dict[str, str]] = []
+    for record in MutationController(store).list_pending():
+        for effect in record["effects"]:
+            if effect["kind"] != "append_event":
+                continue
+            event = effect["payload"]["record"]
+            if event["entity"] in wanted and event["id"] not in logged:
+                decided.append({
+                    "mutation_id": record["mutation_id"],
+                    "owner": record["owner"],
+                    "entity": event["entity"],
+                    "type": event["type"],
+                })
+    return decided
 
 
 @contextmanager

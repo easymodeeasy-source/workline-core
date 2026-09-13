@@ -19,6 +19,14 @@ by the entity and ledger sets recorded here.
 
 Recovery records written before this are left exactly as they are, broad scope
 and all, and go on stopping what they used to stop.
+
+Write scope says nothing about what an operation *reads*. Phase entry and
+Related maintenance decide whether they may run from a Roadmap's lifecycle, a
+fact that lives in the event log neither of them writes, so between another
+mutation recording a lifecycle event and applying it they would act on a
+decision already made the other way. They check for exactly that, on the reader
+and one way only, which is why these tests interrupt mutations in two windows:
+with every effect applied, and with effects recorded but none applied.
 """
 
 from __future__ import annotations
@@ -26,7 +34,7 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from helpers import WorklineTestCase, completing_executor, scripted_executor
+from helpers import WorklineTestCase, completing_executor, git, scripted_executor
 from workline import roadmap as rm
 from workline import start as st
 from workline import yamlish
@@ -69,6 +77,20 @@ def ledgers_written(record: dict) -> set[str]:
 
 
 class ScopeCase(WorklineTestCase):
+    #: The window :meth:`interrupt` leaves a mutation in unless told otherwise.
+    WINDOW = "applied"
+
+    #: The stage whose recording the ``recorded`` window stops after.
+    STAGES = {
+        "hold_phase": "event", "resume_phase": "event", "cancel_phase": "event",
+        "hold_roadmap": "event", "resume_roadmap": "event", "cancel_roadmap": "event",
+        "evaluate_achievement": "event",
+        "maintain_work_related": "related",
+        "create_roadmap": "roadmap",
+        "add_phases": "phases",
+        "enter_phase": "works",
+    }
+
     # observation -----------------------------------------------------------
     def captured(self) -> list[dict]:
         """Every mutation completed while :meth:`capture` was active."""
@@ -84,17 +106,43 @@ class ScopeCase(WorklineTestCase):
 
         return mock.patch.object(Mutation, "complete", watch)
 
-    def interrupt(self, fn, *args, **kwargs) -> dict:
-        """Leave one pending mutation behind, stopped just before it finalizes."""
+    def interrupt(self, fn, *args, window: str | None = None, stage: str | None = None, **kwargs) -> dict:
+        """Leave one pending mutation behind, stopped in one of its two windows.
 
-        def fire(*a, **k):
-            raise Interrupted("before finalize")
+        ``applied`` stops where ``_finalize`` would run: every recorded effect is
+        applied and nothing is committed. ``recorded`` stops one step earlier -
+        ``stage``'s effects are durably recorded and not one of them is applied.
+        The two windows are not interchangeable: in the second the Project cannot
+        see what the mutation has already decided, which is how an operation can
+        read a lifecycle fact that has been decided away.
+        """
+        window = window or self.WINDOW
+        stage = stage or self.STAGES[fn.__name__]
+        if window == "applied":
+            patch = mock.patch.object(rm, "_finalize", lambda *a, **k: (_ for _ in ()).throw(Interrupted(window)))
+        else:
+            real = Mutation.add_effects
 
-        with mock.patch.object(rm, "_finalize", fire):
+            def record_then_stop(mutation: Mutation, name: str, effects) -> None:
+                real(mutation, name, effects)
+                if name == stage:
+                    raise Interrupted(f"{window}:{stage}")
+
+            patch = mock.patch.object(Mutation, "add_effects", record_then_stop)
+        with patch:
             with self.assertRaises(Interrupted):
                 fn(*args, **kwargs)
         (record,) = MutationController(self.store).list_pending()
+        if window == "recorded":
+            assert record["effects"] and not any(e.get("applied") for e in record["effects"]),                 "the recorded window must leave decided effects unapplied"
         return record
+
+    def decided_events(self, record: dict) -> list[tuple[str, str]]:
+        """The lifecycle events this record has decided, applied or not."""
+        return [
+            (effect["payload"]["record"]["type"], effect["payload"]["record"]["entity"])
+            for effect in record["effects"] if effect["kind"] == "append_event"
+        ]
 
     def declared(self, record: dict) -> set[str]:
         return set(record["write_scope"]["files"])
@@ -373,6 +421,23 @@ class ConflictTests(ScopeCase):
         self.assertTrue(pending_scope.overlaps(WriteScope(files=rm._ledgers("roadmap-create"))))
 
 
+class IndependenceWhileDecidedTests(IndependenceTests):
+    """The same independence, with the unfinished mutation stopped before applying anything.
+
+    Nothing an unrelated operation reads is decided by these mutations, so the
+    window in which a decision is recorded but invisible must not turn an
+    independent pair into a conflict.
+    """
+
+    WINDOW = "recorded"
+
+
+class ConflictWhileDecidedTests(ConflictTests):
+    """The same conflicts, with the unfinished mutation stopped before applying anything."""
+
+    WINDOW = "recorded"
+
+
 # --------------------------------------------------------------------------- records written before
 class LegacyRecordTests(ScopeCase):
     def setUp(self) -> None:
@@ -497,6 +562,243 @@ class NeighbourRegressionTests(ScopeCase):
         self.assertEqual(raised.exception.code, "reconcile_required")
         self.assertIn(pending["mutation_id"], str(raised.exception))
         self.assertEqual(self.record_bytes(), before)
+
+
+# ------------------------------------------------------- the facts an operation reads
+class LifecycleReadDependencyTests(ScopeCase):
+    """A narrowed write scope must not make a read dependency invisible.
+
+    Declared scope answers "would these two write the same file". Some operations
+    also *read* a lifecycle fact to decide whether they may run at all, and that
+    fact lives in the event log they never write. Between another mutation
+    recording its lifecycle event and applying it, the log does not hold the
+    decision: current state says the Roadmap is active while its cancellation is
+    already durable. Phase entry and Related maintenance read exactly that, so
+    they check for it directly - on the reader, one way only, so that an
+    interrupted expansion still does not stop the Roadmap from being held.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.new_project()
+        self.roadmap = self.simple_roadmap(self.store, {"a": ("Phase A", "A"), "b": ("Phase B", "B")})
+        self.rid = self.roadmap.roadmap_id
+        self.pa, self.pb = self.roadmap.phase_ids["a"], self.roadmap.phase_ids["b"]
+        self.entry = self.simple_entry(self.store, self.pa, {"w1": "W1"})
+        self.w1 = self.entry.work_ids["w1"]
+        (self.store.root / "a.md").write_text("a" + chr(10), encoding="utf-8")
+
+    def design(self) -> rm.PhaseEntryDesign:
+        return rm.PhaseEntryDesign({"x": rm.WorkDesign("X", "x")}, rm.WorkDesign("I", "i"))
+
+    def enter_phase_b(self):
+        return rm.enter_phase(self.store, self.pb, self.design())
+
+    def maintain(self):
+        return rm.maintain_work_related(self.store, self.w1, add=(RelatedSpec("must_read", "a.md"),))
+
+    def shape(self) -> dict:
+        view = ProjectView.load(self.store)
+        return {
+            "works in B": sorted(w.name for w in view.effective_works(self.pb)),
+            "related": sorted((r.type, r.to) for r in view.related),
+            "roadmap": view.roadmap_lifecycle(self.rid),
+            "head": git(self.store.root, "rev-parse", "HEAD").strip(),
+        }
+
+    def assertRefusedUnchanged(self, pending: dict, call) -> str:
+        before_records, before_shape = self.record_bytes(), self.shape()
+
+        with self.assertRaises(ReconcileRequired) as raised:
+            call()
+
+        message = str(raised.exception)
+        self.assertIn(pending["mutation_id"], message)
+        self.assertEqual(self.record_bytes(), before_records)  # the decision is left as it was
+        self.assertEqual(self.shape(), before_shape)  # no entity, relation, event or commit
+        return message
+
+    # ------------------------------------------------------------------ must stop
+    def test_a_decided_cancellation_stops_a_phase_entry(self) -> None:
+        pending = self.interrupt(rm.cancel_roadmap, self.store, self.rid, window="recorded")
+        self.assertEqual(self.decided_events(pending), [("roadmap_cancelled", self.rid)])
+        self.assertEqual(ProjectView.load(self.store).roadmap_lifecycle(self.rid), "active")  # invisible
+
+        message = self.assertRefusedUnchanged(pending, self.enter_phase_b)
+
+        self.assertIn("roadmap_cancelled", message)
+        self.assertIn(self.rid, message)
+        self.assertIn("not yet applied", message)
+
+    def test_a_decided_cancellation_stops_related_maintenance(self) -> None:
+        pending = self.interrupt(rm.cancel_roadmap, self.store, self.rid, window="recorded")
+
+        self.assertRefusedUnchanged(pending, self.maintain)
+
+    def test_a_decided_hold_stops_both_readers(self) -> None:
+        for label, call in (("phase entry", "enter_phase_b"), ("related maintenance", "maintain")):
+            with self.subTest(reader=label):
+                case = type(self)(self._testMethodName)
+                case.setUp()
+                try:
+                    pending = case.interrupt(rm.hold_roadmap, case.store, case.rid, window="recorded")
+                    case.assertRefusedUnchanged(pending, getattr(case, call))
+                finally:
+                    case.doCleanups()
+
+    def test_a_decided_achievement_stops_a_reader(self) -> None:
+        """``roadmap_achieved`` is a Roadmap lifecycle fact like any other.
+
+        Achievement needs every active Phase complete, so the reader that can
+        still run is maintenance of an unstarted Work left in a cancelled Phase.
+        """
+        leftover = rm.enter_phase(self.store, self.pb, self.design()).work_ids["x"]
+        rm.cancel_phase(self.store, self.pb)
+        st.start(self.store, self.w1, "single-work", completing_executor(self.store))
+        st.start(self.store, self.entry.integration_id, "single-work", completing_executor(self.store))
+        pending = self.interrupt(rm.evaluate_achievement, self.store, self.rid, "achieved", window="recorded")
+        self.assertEqual(self.decided_events(pending), [("roadmap_achieved", self.rid)])
+
+        with self.assertRaises(ReconcileRequired) as raised:
+            rm.maintain_work_related(self.store, leftover, add=(RelatedSpec("must_read", "a.md"),))
+
+        self.assertIn("roadmap_achieved", str(raised.exception))
+        self.assertIn(pending["mutation_id"], str(raised.exception))
+
+    def test_a_decided_phase_cancellation_stops_that_phases_entry(self) -> None:
+        pending = self.interrupt(rm.cancel_phase, self.store, self.pb, window="recorded")
+
+        message = self.assertRefusedUnchanged(pending, self.enter_phase_b)
+
+        self.assertIn("phase_cancelled", message)
+
+    # -------------------------------------------- an applied decision needs no guard
+    def test_an_applied_decision_is_reported_by_the_ordinary_precondition(self) -> None:
+        """Once the log holds it, current state says it plainly; the guard stays quiet."""
+        self.interrupt(rm.cancel_roadmap, self.store, self.rid, window="applied")
+        self.assertEqual(ProjectView.load(self.store).roadmap_lifecycle(self.rid), "cancelled")
+
+        with self.assertRaises(StopError) as raised:
+            self.enter_phase_b()
+
+        self.assertEqual(raised.exception.code, "spec_violation")
+        self.assertIn("cancelled", str(raised.exception))
+
+    def test_an_applied_hold_is_reported_as_held(self) -> None:
+        self.interrupt(rm.hold_roadmap, self.store, self.rid, window="applied")
+
+        with self.assertRaises(StopError) as raised:
+            self.enter_phase_b()
+
+        self.assertEqual(raised.exception.code, "roadmap_held")
+
+    def test_an_applied_fact_keeps_its_reason_even_with_a_contrary_decision_pending(self) -> None:
+        """Held, with its resume already decided: both readers still say "held".
+
+        The guard runs after what current state shows, so it never replaces a
+        precise refusal with a generic one; resuming the Roadmap is what unblocks.
+        """
+        rm.hold_roadmap(self.store, self.rid)
+        self.interrupt(rm.resume_roadmap, self.store, self.rid, window="recorded")
+        for label, call in (("phase entry", self.enter_phase_b), ("related maintenance", self.maintain)):
+            with self.subTest(reader=label):
+                with self.assertRaises(StopError) as raised:
+                    call()
+                self.assertEqual(raised.exception.code, "roadmap_held")
+
+        rm.resume_roadmap(self.store, self.rid)  # finishes the decided resume
+
+        self.assertTrue(self.enter_phase_b().expanded)
+        self.assertTrue(self.maintain().changed)
+        self.assertEqual(validate_project(self.store), [])
+
+    # ------------------------------------------------------------- must NOT stop
+    def test_another_roadmaps_decision_does_not_stop_this_one(self) -> None:
+        other = rm.create_roadmap(self.store, rm.RoadmapPlan(
+            "Other", "背景", "達成したい状態", {"a": PhaseSpec("P", "p")}))
+        pending = self.interrupt(rm.cancel_roadmap, self.store, other.roadmap_id, window="recorded")
+        self.assertEqual(self.decided_events(pending), [("roadmap_cancelled", other.roadmap_id)])
+
+        result = self.enter_phase_b()
+
+        self.assertTrue(result.expanded)
+        self.assertEqual(validate_project(self.store), [])
+
+    def test_a_decision_about_another_phase_does_not_stop_this_entry(self) -> None:
+        """Phase entry reads its own Phase and its Roadmap, not every Phase."""
+        third = rm.add_phases(self.store, self.rid, {"c": PhaseSpec("Phase C", "c")}).phase_ids["c"]
+        pending = self.interrupt(rm.hold_phase, self.store, third, window="recorded")
+        self.assertEqual(self.decided_events(pending), [("phase_held", third)])
+
+        result = self.enter_phase_b()
+
+        self.assertTrue(result.expanded)
+        self.assertEqual(validate_project(self.store), [])
+
+    def test_a_decision_about_another_phase_does_not_stop_related_maintenance(self) -> None:
+        self.interrupt(rm.hold_phase, self.store, self.pb, window="recorded")
+
+        result = self.maintain()
+
+        self.assertTrue(result.changed)
+        self.assertEqual(validate_project(self.store), [])
+
+    def test_a_half_expanded_phase_still_lets_the_roadmap_be_held_and_resumed(self) -> None:
+        """The BL-017 behaviour: the guard runs on the reader, so it is one-way."""
+        pending = self.interrupt(rm.enter_phase, self.store, self.pb, self.design())
+        self.assertEqual(self.decided_events(pending), [])  # an expansion decides no lifecycle fact
+
+        self.assertEqual(rm.hold_roadmap(self.store, self.rid).status, "roadmap_held")
+        self.assertEqual(rm.resume_roadmap(self.store, self.rid).status, "roadmap_resumed")
+
+        result = rm.enter_phase(self.store, self.pb, self.design())
+        self.assertEqual(result.mutation_id, pending["mutation_id"])
+        self.assertEqual(validate_project(self.store), [])
+
+    def test_an_unfinished_related_correction_still_lets_a_phase_be_held(self) -> None:
+        pending = self.interrupt(rm.maintain_work_related, self.store, self.w1,
+                                 add=(RelatedSpec("must_read", "a.md"),), window="recorded", stage="related")
+        self.assertEqual(self.decided_events(pending), [])
+
+        self.assertEqual(rm.hold_phase(self.store, self.pb).status, "phase_held")
+
+    # ------------------------------------------------------- never blocks its own resume
+    def test_the_guard_never_blocks_the_record_it_would_resume(self) -> None:
+        """Neither reader records a lifecycle event, so neither can be its own blocker."""
+        for label, window, stage in (("phase entry", "applied", "event"),
+                                     ("phase entry", "recorded", "works"),
+                                     ("related maintenance", "recorded", "related")):
+            with self.subTest(reader=label, window=window):
+                case = type(self)(self._testMethodName)
+                case.setUp()
+                try:
+                    if label == "phase entry":
+                        pending = case.interrupt(rm.enter_phase, case.store, case.pb, case.design(),
+                                                 window=window, stage=stage)
+                        case.assertEqual(case.decided_events(pending), [])
+                        result = case.enter_phase_b()
+                        case.assertEqual(result.mutation_id, pending["mutation_id"])
+                    else:
+                        add = (RelatedSpec("must_read", "a.md"),)
+                        pending = case.interrupt(rm.maintain_work_related, case.store, case.w1, add=add,
+                                                 window=window, stage=stage)
+                        case.assertEqual(case.decided_events(pending), [])
+                        result = case.maintain()
+                        case.assertEqual(result.mutation_id, pending["mutation_id"])
+                    case.assertEqual(validate_project(case.store), [])
+                finally:
+                    case.doCleanups()
+
+    def test_a_lifecycle_operation_still_resumes_its_own_decision(self) -> None:
+        """The guard is not on lifecycle operations, so it cannot block their recovery."""
+        pending = self.interrupt(rm.hold_roadmap, self.store, self.rid, window="recorded")
+
+        result = rm.hold_roadmap(self.store, self.rid)
+
+        self.assertEqual(result.status, "roadmap_held")
+        self.assertEqual(result.mutation_id, pending["mutation_id"])
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+        self.assertEqual(validate_project(self.store), [])
 
 
 if __name__ == "__main__":
