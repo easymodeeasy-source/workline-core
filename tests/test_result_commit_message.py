@@ -20,6 +20,7 @@ from helpers import WorklineTestCase, git
 from workline import gitcmd
 from workline import start as st
 from workline.create import WorkSpec, create_standalone_work
+from workline.errors import ValidationError
 from workline.mutation import MutationController
 
 
@@ -167,13 +168,8 @@ class BlankMessageTests(WorklineTestCase):
     def test_a_tab_and_newline_message_uses_the_default(self) -> None:
         self.assertFellBackToDefault("\t\r\n")
 
-    def test_a_message_that_is_not_a_string_uses_the_default(self) -> None:
-        """Nothing that finished before may fail now.
-
-        A falsy non-string already fell back to the default. The blank test must
-        not be stricter than the truthiness test it replaced, or a Work that used
-        to complete would stop - or crash - over a value it never had to change.
-        """
+    def test_a_falsy_value_that_is_not_a_string_still_uses_the_default(self) -> None:
+        """Falsy values fell back to the default before, and still do."""
         for index, value in enumerate((0, False, [])):
             with self.subTest(value=value):
                 work_id = create_standalone_work(self.store, WorkSpec(f"Odd {index}", "成立する")).work_id
@@ -185,8 +181,64 @@ class BlankMessageTests(WorklineTestCase):
                 result = st.start(self.store, work_id, "single-work", execute)
 
                 self.assertEqual(result.status, "completed")
-                self.assertTrue(git(self.store.root, "log", "-2", "--format=%s").splitlines()[1].startswith("chore(workline): "))
+                self.assertEqual(
+                    git(self.store.root, "log", "-2", "--format=%s").splitlines()[1],
+                    f"chore(workline): W-{index + 1:02d} Odd {index}",
+                )
                 self.assertEqual(MutationController(self.store).list_pending(), [])
+
+    def test_a_truthy_value_that_is_not_a_string_is_still_refused(self) -> None:
+        """Not promoted to a valid message: the commit effect refuses it, as it always did.
+
+        Only blank strings were added to what falls back to the default. A truthy
+        non-string is handed on unchanged and meets the same refusal it met
+        before; there is no new check of its own and no quiet default.
+        """
+        for index, value in enumerate((5, [1])):
+            with self.subTest(value=value):
+                store = self.new_project(f"truthy{index}")
+                work_id = create_standalone_work(store, WorkSpec("Truthy", "成立する")).work_id
+
+                def execute(ctx, value=value, store=store):
+                    (store.root / "result.txt").write_text("x\n", encoding="utf-8")
+                    return st.Completed(("result.txt",), value)
+
+                with self.assertRaises(ValidationError) as refused:
+                    st.start(store, work_id, "single-work", execute)
+
+                self.assertEqual(refused.exception.code, "validation_failed")
+                self.assertEqual(refused.exception.message, "git_commit needs a message")
+                # nothing was committed under the default in its place
+                self.assertNotIn("chore(workline): W-01 Truthy", git(store.root, "log", "--format=%s").splitlines())
+
+    def test_only_blank_strings_changed_from_the_truthiness_test(self) -> None:
+        """The whole boundary, against the rule it replaced: ``message or default``.
+
+        Every input gives exactly what that rule gave, with one exception - a
+        string of only whitespace, which now falls back to the default instead of
+        reaching a validation that refuses it. The object handed on is the same
+        object, so a refusal further down is the same refusal.
+        """
+
+        class Work:
+            display = "W-07"
+            name = "Boundary"
+
+        default = "chore(workline): W-07 Boundary"
+        blank_strings = ("   ", "\t\r\n", " ", "\n")
+        unchanged = (None, "", 0, False, [], 0.0, 5, [1], "docs(project): exact", " x ", "\n real \n", "まとめた")
+        marker = object()
+
+        for value in unchanged + (marker,):
+            with self.subTest(value=value):
+                got = st._result_message(value, Work)
+                if value:
+                    self.assertIs(got, value)  # the very object: not copied, stripped or replaced
+                else:
+                    self.assertEqual(got, default)
+        for value in blank_strings:
+            with self.subTest(value=value):
+                self.assertEqual(st._result_message(value, Work), default)
 
     def test_a_blank_message_leaves_the_project_usable(self) -> None:
         """The Work finishes, so the next operation is not blocked behind it."""

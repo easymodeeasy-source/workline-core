@@ -247,12 +247,16 @@ def _result_message(message: str | None, work: Entity) -> str:
     The emptiness test is the only thing that strips; it never reaches the
     message that gets committed.
 
-    Anything that is not a string has nothing to commit either, so it takes the
-    default too rather than failing here: a falsy value already did, and making
-    this test stricter than the one it replaces would stop a Work that used to
-    finish.
+    Blank strings are the only thing this adds to the truthiness test it
+    replaces, and nothing else changes meaning. A falsy value still falls back
+    to the default as it always did. A truthy value that is not a string is
+    still handed on unchanged, so the commit effect's own validation refuses it
+    exactly as before - it is neither promoted to a valid message here nor
+    refused by a new check of its own.
     """
-    if not isinstance(message, str) or not message.strip():
+    if not message:
+        return f"chore(workline): {work.display} {work.name}"
+    if isinstance(message, str) and not message.strip():
         return f"chore(workline): {work.display} {work.name}"
     return message
 
