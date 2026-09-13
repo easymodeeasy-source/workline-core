@@ -138,15 +138,19 @@ def apply_replan(
     if replan.new_works:
         # The owner projected the whole replan - its event, removals, additions
         # and new Works - before recording any of it. Registration here is one
-        # step of applying that, taken before the removals, so the core's own
-        # projection of this step is not what decides the replan; the
-        # registration keeps its apply-then-postcheck order on this path.
+        # step of applying that, so the registration keeps its apply-then-
+        # postcheck order on this path. It is taken before the removals, which
+        # are already decided and are recorded and applied only after it: its
+        # structure checks leave them out, so they judge the structure this
+        # replan leaves instead of refusing the moment in between, while a
+        # registration refused for anything else never leaves a removal applied.
         result = register_works(
             mutation,
             f"{prefix}:works",
             replan.new_works,
             list(replan.add_relations),
             refuse_before_apply=False,
+            removed_after=tuple(r.id for r in removals),
         )
         touched.extend(result.paths)
         if result.work_ids != work_ids:

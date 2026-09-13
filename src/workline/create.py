@@ -16,7 +16,7 @@ Direct Work Operation context that owns postcheck / commit / push.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from typing import Any, Sequence
 
@@ -206,6 +206,7 @@ def register_works(
     relations: list[RelationSpec] = (),
     *,
     refuse_before_apply: bool = True,
+    removed_after: tuple[str, ...] = (),
 ) -> RegistrationResult:
     """Registration core. Participates in the caller's mutation; no Git.
 
@@ -214,15 +215,27 @@ def register_works(
     (:func:`refuse_invalid_work_writes`). ``refuse_before_apply=False`` keeps
     the order this core had before that check - apply, then postcheck - for a
     caller whose registration is one step of a change it has already projected
-    as a whole: a replan applies its relation removals only after this
-    registration, so its own final projection, not this intermediate state, is
-    what decides it.
+    as a whole: a replan, whose owner checks the whole replan before recording
+    any of it.
+
+    ``removed_after`` names the Roadmap relations that same caller has already
+    decided to remove right after this registration, in the same mutation - a
+    replan's removals. Every structure check this registration makes - the
+    ``requires_completion`` cycle, the check before writing, the structural
+    postcheck - then judges the Project without those relations, as the
+    caller's change leaves it, rather than the moment between the two stages:
+    there a relation the replan removes still points at the Work or Phase it has
+    just excluded. The relations themselves are still removed by the caller,
+    after this registration. Payload, endpoint, integration and confirmation
+    rules read the Project exactly as it is. Without ``removed_after`` nothing
+    changes.
     """
     store = mutation.store
     if not specs:
         raise ValidationError("registration core needs at least one Work")
     view = ProjectView.load(store)
     validate_work_specs(specs, view)
+    structure = _without_roadmap_relations(view, removed_after)
 
     # stable IDs (reserved once per mutation; resumed unchanged) --------------
     work_ids = {key: mutation.reserve_id(f"{stage}:work:{key}", "work") for key in specs}
@@ -251,7 +264,9 @@ def register_works(
         resolved_relations.append(Relation(relation_ids[index], rel.type, from_id, to_id))
 
     # projected structure check (integration invariant, recursion, refs) ------
-    _check_projection(view, specs, work_ids, resolved_relations)
+    # Only the requires_completion cycle reads relations here; the integration
+    # and confirmation rules read Works and events, which ``structure`` shares.
+    _check_projection(structure, specs, work_ids, resolved_relations)
 
     # effects -------------------------------------------------------------
     recorded = mutation.has_stage(stage)
@@ -286,7 +301,7 @@ def register_works(
                 extra = {"condition": related.condition} if related.condition is not None else {}
                 effects.append(Effect.add_relation("related", Relation(related_ids[(key, index)], related.type, work_ids[key], related.to, extra)))
     if refuse_before_apply:
-        refuse_invalid_work_writes(mutation, effects, view)
+        refuse_invalid_work_writes(mutation, effects, structure)
     if not recorded:
         mutation.add_effects(stage, effects)
     mutation.apply()
@@ -303,7 +318,7 @@ def register_works(
     for relation in resolved_relations:
         if relation.id not in registered:
             raise ValidationError(f"postcheck: relation {relation.id} missing", code="postcheck_failed")
-    _stop_on_problems(validate_structure(after), "postcheck")
+    _stop_on_problems(validate_structure(_without_roadmap_relations(after, removed_after)), "postcheck")
     paths = tuple(e["payload"]["path"] for e in mutation.stage_effects(stage) if e["kind"] == "write_file")
     touched = list(paths)
     if resolved_relations:
@@ -311,6 +326,14 @@ def register_works(
     if any(spec.related for spec in specs.values()):
         touched.append(f"{WORKLINE_DIR}/relations/related.yaml")
     return RegistrationResult(work_ids, relation_ids, tuple(touched))
+
+
+def _without_roadmap_relations(view: ProjectView, relation_ids: tuple[str, ...]) -> ProjectView:
+    """``view`` without the named Roadmap relations, or ``view`` itself when none are named."""
+    if not relation_ids:
+        return view
+    removed = set(relation_ids)
+    return replace(view, roadmap_relations=[r for r in view.roadmap_relations if r.id not in removed])
 
 
 def _check_projection(
