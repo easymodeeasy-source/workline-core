@@ -428,6 +428,16 @@ requestを記録していない旧実装のpending recordは自動resumeしな�
 
 `invocation_key` はcallerのlabelであって識別子ではない。label文字列の一致だけでresumeを決めない。
 
+Roadmap / Phaseのhold / resume / cancelとachievement記録も、途中失敗は同じoperation・同じ対象の再実行で同じmutationをresumeする。これらが決める内容は対象とevent種別だけで、どちらもinvocation（operationと対象）で決まるため、requestを別に記録しない。
+
+自分の未完了mutationが既に適用したlifecycle eventは、そのrequestが出会う現在stateではなくrecovery stateである。前提条件（holdなら対象がactive、resumeならheld 等）をそのeventを含むstateだけで判定すると、eventを適用した後に中断したholdの再実行が「既にheld」として自分自身を拒否し、commit / push / mutation完了へ進む経路が無くなる。前提条件はまず従来どおり現在stateで判定し、拒否された時だけ、次をすべて示せるeventを除いたstateで判定し直す。
+
+- 未完了mutationが同じoperation・同じ対象のものである（Mutation Controllerがresumeするinvocationと一致する）
+- そのmutationが記録したeventが、このoperationが記録するevent（種別と対象）そのものである
+- event logがそのeventを記録どおりに保持している（適用済み・期待値一致）
+
+これを示せなければ、次の例外を除き判定も結果も従来と同じである。eventをまだ記録していない、記録したeventがevent logに無い、または記録したeventがこのoperationのeventでない未完了mutationは、自分のeventを証明しない。読めないrecovery recordも何も証明せず、従来どおりmutationを開く時に報告される。stateだけを見て完了済みと扱わない: 未完了mutationの無いheld Phaseや、別のmutationが書いたeventによるstateは、従来どおり前提条件で拒否する。別operation・別対象のrequestはこのmutationを継続せず、従来どおりwrite scopeで独立性を判定する。例外として、前提条件が拒否された時に、同じoperation・対象の未完了mutationが複数ある場合と、event logが同じIDで記録と異なる内容を保持している場合は `reconcile_required` とし、pending recordを変更しない。
+
 各Roadmap operationが宣言する予定write scopeは、そのoperationが最後まで進んだ場合に書き得るcanonical fileの集合とする。今回の呼び出しで実際に書いたfileではない: どの経路を通るか決まる前に宣言するので、条件付きでしか書かないfileも含める。共有ledger（`relations/roadmap.yaml` / `relations/related.yaml` / `events/events.jsonl`）はfile単位で書き直すため、同じledgerを書き得る2 operationは独立ではなく、両方がそれを宣言する。
 
 - Roadmap作成 / Phase追加: `relations/roadmap.yaml`

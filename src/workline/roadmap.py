@@ -11,7 +11,7 @@ Roadmap never executes Works and never lets START cross into the next Phase.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from typing import Any
 
@@ -27,6 +27,8 @@ from .create import (
 )
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .mutation import (
+    MATCHING,
+    MISMATCH,
     Effect,
     Mutation,
     MutationController,
@@ -979,14 +981,110 @@ def _lifecycle(store: ProjectStore, operation: str, entity_id: str, event_type: 
 
 def _record_lifecycle(store: ProjectStore, operation: str, entity_id: str, event_type: str, precheck) -> OperationResult:
     """Record one lifecycle event; the caller holds the Project execution lock."""
-    view = _stop_on_structure(store, "precheck")
-    precheck(view)
+    _decide_lifecycle(store, operation, entity_id, event_type, precheck)
     mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, [event_type]))
     mutation.apply()
     head = _finalize(mutation, destination, f"chore(workline): {event_type} {entity_id}")
     return OperationResult(event_type, entity_id, mutation.id, head)
+
+
+def _decide_lifecycle(
+    store: ProjectStore, operation: str, entity_id: str, event_type: str, precheck
+) -> tuple[ProjectView, str | None]:
+    """Decide a lifecycle precondition; return the state it held on and the own event left out of it.
+
+    A lifecycle precondition - a Phase to hold must be active, a Roadmap to resume
+    must be held - asks about the state a request meets. An event its own
+    interrupted mutation already appended is not part of that state but recovery
+    state. Read as current state it makes the one retry that would commit and
+    push it refuse itself ("Phase ... is held"), and nothing can finish the
+    mutation: its commit or push is never made, and everything else that writes
+    the event log stays stopped behind it.
+
+    So a refusal is not reported until it is known not to be of that kind. The
+    precondition is decided on the state as it is, exactly as before; only when
+    it refuses, and only when this operation's own unfinished mutation has
+    provably applied an event (:func:`_own_applied_event`), is it decided again
+    without that one event. Everything that passes the precondition goes the way
+    it always went, and so does every refusal no own applied event explains -
+    except a refusal meeting a record that could only be taken on trust, which
+    :func:`_own_applied_event` leaves for reconciliation instead.
+    """
+    view = _stop_on_structure(store, "precheck")
+    try:
+        precheck(view)
+        return view, None
+    except StopError as refused:
+        refusal = refused
+    applied = _own_applied_event(store, operation, entity_id, event_type)
+    if applied is None:
+        raise refusal
+    view = _without_event(view, applied)
+    precheck(view)
+    return view, applied
+
+
+def _own_applied_event(store: ProjectStore, operation: str, entity_id: str, event_type: str) -> str | None:
+    """The event this operation's own unfinished mutation has provably applied, or ``None``.
+
+    It is this request's own write - not a state that merely looks like one - only
+    when the record proves it:
+
+    * the unfinished mutation is this operation on this entity, the invocation
+      :meth:`MutationController.open` resumes;
+    * the event it recorded is exactly the one event this operation records;
+    * the event log holds that event exactly as recorded.
+
+    Nothing short of that proof is taken as one. A mutation that has recorded no
+    event, or whose event is not in the log yet, has written nothing; a record
+    whose event is not the one this operation records proves nothing about it;
+    and a recovery area that cannot be read proves nothing either, and is left to
+    be reported where it always was. Only what would otherwise have to be taken on
+    trust is left for a human to reconcile, exactly as it is: several unfinished
+    mutations of this operation on this entity, or an event log holding another
+    record under the recorded ID.
+    """
+    try:
+        pending = _pending_for(store, operation, {"entity": entity_id})
+    except ReconcileRequired:
+        return None
+    if not pending:
+        return None
+    if len(pending) > 1:
+        raise ReconcileRequired(
+            f"{len(pending)} unfinished {operation} mutations of {entity_id} "
+            f"({', '.join(sorted(record['mutation_id'] for record in pending))}): reconcile required"
+        )
+    record = pending[0]
+    recorded = [effect for effect in record.get("effects") or [] if effect.get("stage") == "event"]
+    if len(recorded) != 1 or recorded[0].get("kind") != "append_event":
+        return None
+    payload = recorded[0].get("payload")
+    event = payload.get("record") if isinstance(payload, dict) else None
+    if (
+        not isinstance(event, dict)
+        or not isinstance(event.get("id"), str)
+        or event.get("type") != event_type
+        or event.get("entity") != entity_id
+    ):
+        return None
+    classification = MutationController(store).classify(recorded[0])
+    if classification == MISMATCH:
+        raise ReconcileRequired(
+            f"the unfinished {operation} mutation {record['mutation_id']} of {entity_id} recorded event "
+            f"{event['id']}, but the event log holds a different record under that id; it is left untouched: "
+            "reconcile required"
+        )
+    return event["id"] if classification == MATCHING else None
+
+
+def _without_event(view: ProjectView, event_id: str | None) -> ProjectView:
+    """``view`` without one event, or ``view`` itself when there is none to leave out."""
+    if event_id is None:
+        return view
+    return replace(view, events=[event for event in view.events if event.id != event_id])
 
 
 def hold_phase(store: ProjectStore, phase_id: str) -> OperationResult:
@@ -1413,9 +1511,14 @@ def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, d
         return AchievementResult("desired_state_change_required", roadmap_id, detail=detail)
 
     with project_operation(store, "roadmap-achievement", {"entity": roadmap_id}):
-        view = _stop_on_structure(store, "precheck")
-        _require_active_roadmap(view, roadmap_id)
-        if not view.all_active_phases_complete(roadmap_id):
+        view, applied = _decide_lifecycle(
+            store, "roadmap-achievement", roadmap_id, "roadmap_achieved",
+            lambda current: _require_active_roadmap(current, roadmap_id),
+        )
+        # Only an achievement nothing has been applied for yet is reported back as
+        # not ready. One whose event this operation already applied is carried to
+        # its end below, or STOPs there; it is never left standing behind a report.
+        if applied is None and not view.all_active_phases_complete(roadmap_id):
             return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
 
         def still_achievable(current: ProjectView) -> None:
