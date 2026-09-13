@@ -14,10 +14,13 @@ validates no format.
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 from helpers import WorklineTestCase, git
+from workline import gitcmd
 from workline import start as st
 from workline.create import WorkSpec, create_standalone_work
+from workline.mutation import MutationController
 
 
 class ResultCommitMessageTests(WorklineTestCase):
@@ -118,6 +121,170 @@ class ResultCommitMessageTests(WorklineTestCase):
 
         written = git(self.store.root, "log", "--format=%s").splitlines()
         self.assertEqual([m for m in written if m.startswith("feat(")], [])
+
+
+class BlankMessageTests(WorklineTestCase):
+    """A message that says nothing means the same however it is spelled.
+
+    None, empty and whitespace-only all fall back to the neutral default. A
+    blank one is never refused: whitespace alone is not a message a commit could
+    carry, and stopping the Work over it would strand a result that is already
+    finished - the commit effect is recorded after the executor has run, so the
+    refusal used to leave a pending mutation that blocked the next operation.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.new_project()
+
+    def _run_with(self, message: str | None, name: str = "Blank case"):
+        work_id = create_standalone_work(self.store, WorkSpec(name, "成立する")).work_id
+
+        def execute(ctx):
+            (self.store.root / "result.txt").write_text("x\n", encoding="utf-8")
+            return st.Completed(("result.txt",), message)
+
+        result = st.start(self.store, work_id, "single-work", execute)
+        self.assertEqual(result.status, "completed")
+        return git(self.store.root, "log", "--format=%s").splitlines()
+
+    def assertFellBackToDefault(self, message: str | None) -> None:
+        messages = self._run_with(message)
+
+        self.assertEqual(messages[1], "chore(workline): W-01 Blank case")
+        self.assertEqual(messages[0], "chore(workline): complete W-01")
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+
+    def test_no_message_uses_the_default(self) -> None:
+        self.assertFellBackToDefault(None)
+
+    def test_an_empty_message_uses_the_default(self) -> None:
+        self.assertFellBackToDefault("")
+
+    def test_a_spaces_only_message_uses_the_default_instead_of_stopping(self) -> None:
+        self.assertFellBackToDefault("   ")
+
+    def test_a_tab_and_newline_message_uses_the_default(self) -> None:
+        self.assertFellBackToDefault("\t\r\n")
+
+    def test_a_message_that_is_not_a_string_uses_the_default(self) -> None:
+        """Nothing that finished before may fail now.
+
+        A falsy non-string already fell back to the default. The blank test must
+        not be stricter than the truthiness test it replaced, or a Work that used
+        to complete would stop - or crash - over a value it never had to change.
+        """
+        for index, value in enumerate((0, False, [])):
+            with self.subTest(value=value):
+                work_id = create_standalone_work(self.store, WorkSpec(f"Odd {index}", "成立する")).work_id
+
+                def execute(ctx, value=value, index=index):
+                    (self.store.root / f"odd{index}.txt").write_text("x\n", encoding="utf-8")
+                    return st.Completed((f"odd{index}.txt",), value)
+
+                result = st.start(self.store, work_id, "single-work", execute)
+
+                self.assertEqual(result.status, "completed")
+                self.assertTrue(git(self.store.root, "log", "-2", "--format=%s").splitlines()[1].startswith("chore(workline): "))
+                self.assertEqual(MutationController(self.store).list_pending(), [])
+
+    def test_a_blank_message_leaves_the_project_usable(self) -> None:
+        """The Work finishes, so the next operation is not blocked behind it."""
+        self._run_with("   ", "First")
+
+        later = create_standalone_work(self.store, WorkSpec("Later", "成立する"))
+
+        self.assertIsNotNone(later.work_id)
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+
+
+class VerbatimMessageTests(WorklineTestCase):
+    """What an executor actually says is committed exactly as given."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.new_project()
+
+    def committed_message(self, message: str) -> str:
+        """The message START hands to Git, before Git does anything of its own."""
+        seen: list[str] = []
+        real = gitcmd.commit_only
+
+        def watch(repo, msg, paths):
+            seen.append(msg)
+            return real(repo, msg, paths)
+
+        work_id = create_standalone_work(self.store, WorkSpec("Verbatim", "成立する")).work_id
+
+        def execute(ctx):
+            (self.store.root / "result.txt").write_text("x\n", encoding="utf-8")
+            return st.Completed(("result.txt",), message)
+
+        with mock.patch.object(gitcmd, "commit_only", watch):
+            st.start(self.store, work_id, "single-work", execute)
+        return seen[0]
+
+    def test_a_conventional_message_is_passed_through_unchanged(self) -> None:
+        self.assertEqual(self.committed_message("docs(project): rewrite the guide"), "docs(project): rewrite the guide")
+
+    def test_a_free_form_message_is_passed_through_unchanged(self) -> None:
+        self.assertEqual(self.committed_message("まとめて書き直した"), "まとめて書き直した")
+
+    def test_surrounding_whitespace_is_not_stripped_by_workline(self) -> None:
+        """The blank test strips; the message that gets committed never does.
+
+        Git trims trailing whitespace when it stores a commit subject, so the
+        check is what Workline hands over, not what Git kept afterwards.
+        """
+        given = " docs(project): exact text "
+
+        self.assertEqual(self.committed_message(given), given)
+
+    def test_a_message_that_only_looks_blank_at_the_edges_is_kept(self) -> None:
+        self.assertEqual(self.committed_message("\n  real content  \n"), "\n  real content  \n")
+
+
+class ResultCommitShapeTests(WorklineTestCase):
+    """How many result commits a completion makes, and in what order."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.new_project()
+
+    def test_several_result_paths_stay_one_result_commit(self) -> None:
+        work_id = create_standalone_work(self.store, WorkSpec("Many", "成立する")).work_id
+
+        def execute(ctx):
+            for name in ("one.txt", "two.txt", "three.txt"):
+                (self.store.root / name).write_text("x\n", encoding="utf-8")
+            return st.Completed(("one.txt", "two.txt", "three.txt"))
+
+        st.start(self.store, work_id, "single-work", execute)
+
+        messages = git(self.store.root, "log", "--format=%s").splitlines()
+        self.assertEqual(messages[:2], ["chore(workline): complete W-01", "chore(workline): W-01 Many"])
+        self.assertEqual(
+            set(git(self.store.root, "show", "--name-only", "--format=", "HEAD~1").split()),
+            {"one.txt", "two.txt", "three.txt"},
+        )
+
+    def test_a_blank_message_does_not_change_the_commit_shape(self) -> None:
+        """Same two commits, same order, as a completion with no message at all."""
+        work_id = create_standalone_work(self.store, WorkSpec("Shape", "成立する")).work_id
+
+        def execute(ctx):
+            (self.store.root / "a.txt").write_text("x\n", encoding="utf-8")
+            (self.store.root / "b.txt").write_text("x\n", encoding="utf-8")
+            return st.Completed(("a.txt", "b.txt"), "   ")
+
+        st.start(self.store, work_id, "single-work", execute)
+
+        messages = git(self.store.root, "log", "--format=%s").splitlines()
+        self.assertEqual(messages[:2], ["chore(workline): complete W-01", "chore(workline): W-01 Shape"])
+        self.assertEqual(
+            set(git(self.store.root, "show", "--name-only", "--format=", "HEAD~1").split()),
+            {"a.txt", "b.txt"},
+        )
 
 
 if __name__ == "__main__":

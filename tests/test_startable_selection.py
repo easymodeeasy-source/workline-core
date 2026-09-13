@@ -143,6 +143,42 @@ class PhaseEntryChoiceTests(WorkSelectionCase):
 
         self.assertEqual(refused.exception.code, AMBIGUOUS)
 
+    def test_h_an_undecided_expansion_already_under_way_still_resumes(self) -> None:
+        """The ambiguity guard refuses to start an expansion, never to finish one.
+
+        An undecided design can no longer begin, but an expansion that began
+        before the guard existed can still be pending. It is carried to its end
+        like any other (BL-023), and the entry it could not single out comes back
+        as ``None`` - the Phase is not stranded, and running it asks for a choice.
+        """
+        undecided = self.design(("a", "b"))
+        real_register = rm.register_works
+
+        def interrupted(mutation, stage, *args, **kwargs):
+            registered = real_register(mutation, stage, *args, **kwargs)
+            if stage == "integration":
+                raise RuntimeError("interrupted after the integration was registered")
+            return registered
+
+        # The expansion is begun as an earlier implementation would have: unguarded.
+        with mock.patch.object(rm, "_require_unique_entry", lambda view, design: None), \
+                mock.patch.object(rm, "register_works", interrupted), \
+                self.assertRaises(RuntimeError):
+            rm.enter_phase(self.store, self.phase, undecided)
+        pending = MutationController(self.store).list_pending()
+        self.assertEqual(len(pending), 1)
+
+        result = rm.enter_phase(self.store, self.phase, undecided)
+
+        self.assertTrue(result.expanded)
+        self.assertEqual(result.mutation_id, pending[0]["mutation_id"])
+        self.assertIsNone(result.entry_work_id)
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+        self.assertEqual(len(ProjectView.load(self.store).phase_works(self.phase)), 3)
+        with self.assertRaises(StopError) as asked:
+            rm.handoff(self.store, self.phase, completing_executor(self.store))
+        self.assertEqual(asked.exception.code, AMBIGUOUS)
+
 
 # --------------------------------------------------------------------------- site 3: handoff
 

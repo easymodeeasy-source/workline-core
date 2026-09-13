@@ -347,13 +347,15 @@ pushする場合の宛先は `rules/git` のpush destinationに従う。START開
 
 ### 成果commit message
 
-executorが成果completionでmessageを明示した場合は、その文字列をそのまま使う。STARTはprefixを足さず、typeを変換せず、形式を検査しない。
+executorが成果completionで中身のあるmessageを渡した場合は、その文字列をそのまま使う。STARTはprefixを足さず、typeを変換せず、前後の空白も含めて内容を書き換えず、形式も検査しない。
 
-明示messageが無い場合のdefaultは、neutralな固定messageとする。
+messageが無い場合、およびmessageが空・空白だけの場合のdefaultは、neutralな固定messageとする。
 
 ```text
 chore(workline): <display> <name>
 ```
+
+空白だけのmessageは「messageを渡さなかった」と同じに扱う。どちらも読み手に何も伝えないため区別しない。これを拒否してWorkを止めない。空かどうかの判定にだけ空白を無視し、実際にcommitするmessageはexecutorが渡した文字列そのものとする（判定のためのstrip結果をcommitしない）。
 
 成果がfeat / fix / docs / refactorのどれに当たるかはproduct判断であり、STARTはWork名・成立状態・work_kind・成果fileの内容から推測しない。判断できるのは成果の意味を決めたexecutorだけなので、typeを持たせたい場合はexecutorが明示messageで渡す。
 

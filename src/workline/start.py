@@ -236,6 +236,27 @@ def _registry_ids(root) -> set[str]:
         return set()
 
 
+def _result_message(message: str | None, work: Entity) -> str:
+    """The message a Work's result commit carries.
+
+    An executor that has something to say says it, and that string is committed
+    exactly as given - not stripped, prefixed, retyped or checked against any
+    commit convention. Saying nothing is the same however it is spelled: no
+    message, an empty one, or only whitespace all fall back to the neutral
+    default, because none of them tells a reader anything the default does not.
+    The emptiness test is the only thing that strips; it never reaches the
+    message that gets committed.
+
+    Anything that is not a string has nothing to commit either, so it takes the
+    default too rather than failing here: a falsy value already did, and making
+    this test stricter than the one it replaces would stop a Work that used to
+    finish.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return f"chore(workline): {work.display} {work.name}"
+    return message
+
+
 def completion_precheck(
     store: ProjectStore,
     view: ProjectView,
@@ -572,8 +593,12 @@ class _Session:
             # Without an executor-supplied message the default stays neutral:
             # whether a result is a feature, a fix or documentation is the
             # executor's product judgement, and Workline never infers it from
-            # the Work name or kind.
-            self._commit(f"{work.id}:results", outcome.message or f"chore(workline): {work.display} {work.name}", owned, include_canonical=False)
+            # the Work name or kind. A blank message says nothing, so it means
+            # the same as supplying none - whitespace alone is not a message a
+            # commit could carry, and refusing it would strand the finished Work
+            # rather than describe it. Only that emptiness test strips: a
+            # message with anything in it is committed exactly as given.
+            self._commit(f"{work.id}:results", _result_message(outcome.message, work), owned, include_canonical=False)
         self._lifecycle(work, ["work_target_removed", "work_completed"])
         self._commit(f"{work.id}:finalize", f"chore(workline): complete {work.display}", [])
         after = ProjectView.load(self.store)

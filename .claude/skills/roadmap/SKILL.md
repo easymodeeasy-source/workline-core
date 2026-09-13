@@ -169,7 +169,17 @@ cancelled / plan_excludedのpredecessorは二度と終わらないので、候�
 
 **2件以上残る場合は選ばずSTOPする。** 候補listの先頭・ID順 / ULID順・relation fileの記録順・宣言順・表示番号・dict / listの挿入順など、内部順序に由来するものでtieを破らない。これらはいずれも実行順ではない。診断には候補のIDを含め、人間が明示選択できるようにする。
 
-STOPはcanonical stateを変更する前に行う。ID予約・mutation開始・entity書込み・commit / pushのいずれも行わない。
+STOPの位置は経路によって違う。共通なのは「選べなかった候補のためにcanonical stateを進めない」ことであり、「STOPすれば何も起きていない」ではない。
+
+startable Phase選択・新規Phase entry・handoff:
+
+> ambiguityは新しいcanonical writeより前に判定する。ID予約・mutation開始・entity書込み・commit / pushのいずれも行わず、Projectは操作前のままである。handoffはSTARTもexecutorも起動しない。
+
+STARTの同一Phase内継続:
+
+> 直前のWorkは既に正当に完了しており、そのlifecycle eventとcommitはcanonical stateに残る。これは曖昧さとは無関係に成立した事実なので巻き戻さない。ambiguityが分かった後は、次の候補のためのlifecycle event・derived Work・mutation・commit / pushを作らずstopとして返す。直前Workのfinalizationは通常どおり閉じ、pending mutationを残さない。
+
+中断した展開のresumeはこの判定の対象にしない。`skills/roadmap` のPhase entryが定めるとおり最後まで進め、entry Workが一意に決まらない場合はentryなしとして返す。実行時のentry指定はhandoffが求める。
 
 ## Phase entry
 
