@@ -1104,11 +1104,28 @@ def resume_phase(store: ProjectStore, phase_id: str) -> OperationResult:
 
 
 def cancel_phase(store: ProjectStore, phase_id: str) -> OperationResult:
+    """Cancel a Phase, refusing before anything is written when the plan still needs it.
+
+    A cancelled Phase never completes, so a Phase still waiting for it through
+    ``requires_completion``, or planning to return to it through ``return_to``,
+    is left unreplanned. Structural validation only finds that once the event is
+    in the log, and :func:`_finalize` runs it after the commit and the push - so
+    the cancellation used to be published first and refused afterwards, with its
+    mutation left pending. The event is therefore projected onto the state this
+    request meets and checked by the same validation, the way plan exclusion and
+    a Work cancel check theirs, before the mutation is opened.
+
+    It is part of the precondition, so an interrupted cancellation whose own
+    event is already applied is decided on the state without that event
+    (:func:`_decide_lifecycle`): the retry projects its event exactly once and is
+    never refused by itself.
+    """
     def precheck(view: ProjectView) -> None:
         if phase_id not in view.phases:
             raise ValidationError(f"Phase unresolvable: {phase_id}")
         if view.phase_lifecycle(phase_id) in (CANCELLED, PLAN_EXCLUDED):
             raise SpecViolation(f"Phase {phase_id} already terminal")
+        validate_projection(projected_view(view, add_events=[(phase_id, "phase_cancelled")]), "phase cancel")
     return _lifecycle(store, "phase-cancel", phase_id, "phase_cancelled", precheck)
 
 
