@@ -383,6 +383,17 @@ lock: 成立済みProjectのexecution lockを取得して行う（他processが�
 
 backfillは通常のmaintenanceなので、Project開始の「初期commit必須・push不要」例外を適用しない。remoteがあればcommit後pushまで行う（clone先で利用可能である必要があるため）。
 
+中断したbackfillは、同じbackfillの再実行で継続する。bootstrapは固定textなので、存在・一致・trackedであることは誰が置いたかを示さない。そのため再実行は、bootstrapの現在状態を見る前に、このProjectの未完了のbackfill record（owner単位で探す）を確認する。
+
+```text
+未完了recordなし: 従来どおり（一致するtracked bootstrap → already_present）
+同じ起動のrecordが1件: 同じmutationとして継続し、残っているcommit / push / 完了だけを行う
+  （backfill commitは記録したbase以降の履歴で確認する。commit / pushの継続は rules/git のCommit / pushに従う）
+何も決定していないrecord + bootstrapがHEADと一致してcommit済み: commit / pushせずrecordを閉じ、already_present
+commitを作ったと記録していないのにHEADが既にbootstrapを持つ: 自分のcommitか他者の同一内容のcommitかを区別できない → 自分のcommitとして継続・pushせず reconcile required
+複数record / 別の起動のrecord（Projectの移動等）/ backfillが書く形でないrecord / このimplementationと違うbootstrapを決定したrecord / branchを持たない未作成commitのrecord: 継続せず、recordを変えずに reconcile required
+```
+
 ## 既存Projectへのpush destination pin
 
 push destination承認先を持たない既存Projectも、ProjectSTARTの再実行では対応しない。bootstrap backfillと同じくinfrastructure maintenance経路で行う。新しいdomain Skillを増やさず、Project routerのSkill inventoryへも追加しない。
