@@ -345,7 +345,7 @@ commit前にregistry / routingを再確認する。
 
 初期commit後はpushしない。承認先を書いた場合もpushしない。
 
-commit失敗時は同じmutationをresumeし、既に一致するdomain filesを作り直さない。その間に人のcommitでHEADが進んでいた場合にcommitを作るかどうかは、`rules/git` のCommit / pushに従う。HEADが記録時のままでも、記録時と違うbranchへ切り替えた、またはdetached HEADにした場合（detached HEADで記録したcommitなら、branchへ切り替えた場合）は、初期commitを作らず停止する（同じ規定）。
+commit失敗時は同じmutationをresumeし、既に一致するdomain filesを作り直さない。その間に人のcommitでHEADが進んでいた場合にcommitを作るかどうかは、`rules/git` のCommit / pushに従う。HEADが記録時のままでも、記録時と違うbranchへ切り替えた、またはdetached HEADにした場合（detached HEADで記録したcommitなら、branchへ切り替えた場合）は、初期commitを作らず停止する（同じ規定）。初期commitと同じmessageのcommitが既にあっても、それだけでは初期commitを作ったことにならない（同じ規定）。
 
 ## Postcheck
 

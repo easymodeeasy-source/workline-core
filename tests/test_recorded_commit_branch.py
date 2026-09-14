@@ -352,24 +352,25 @@ class StartFinalizationTests(BranchCase):
                 self.assertNothingLeftOver()
 
 
-# --------------------------------------------------------------------------- unchanged
-class KnownResidualTests(BranchCase):
-    def test_a_commit_carrying_the_recorded_message_on_another_branch_is_still_taken_for_it(self) -> None:
-        """BL-033, unchanged: the recorded message is looked for before the branch is considered."""
+# --------------------------------------------------------------------------- the recorded message (BL-033)
+class SameMessageTests(BranchCase):
+    def test_a_commit_carrying_the_recorded_message_on_another_branch_is_not_taken_for_it(self) -> None:
+        """BL-033: the recorded message does not stand in for the branch - another branch still stops."""
         self.build()
         call, pattern = self.operation("phase hold")
         pending = self.interrupt(call, pattern, "commit recorded")
+        recorded = self.recorded_commit(pending)
         base = self.head()
         git(self.root, "checkout", "-q", "-b", "side")
-        self.human_commit({"notes.md": "notes\nsame message\n"}, self.recorded_commit(pending)["message"])
-        executed: list[str] = []
+        self.human_commit({"notes.md": "notes\nsame message\n"}, recorded["message"])
 
-        result = self.counting(call, executed)
+        self.assertStopsUntouched(call)
 
-        self.assertEqual((result.status, result.mutation_id), ("phase_held", pending["mutation_id"]))
-        self.assertEqual(executed, [])  # the recorded commit is never made, and main:main is already up to date
-        self.assertEqual(self.dirty(), [" M .workline/events/events.jsonl"])
         self.assertEqual((git(self.root, "rev-parse", "main").strip(), self.remote_head()), (base, base))
+        # back on the branch it was decided on, the same retry makes the commit there
+        git(self.root, "checkout", "-q", "main")
+        self.assertEqual(call().mutation_id, pending["mutation_id"])
+        self.assertMadeOnBranch(recorded["message"], base, MAIN)
 
 
 if __name__ == "__main__":

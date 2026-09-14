@@ -665,21 +665,24 @@ class RecordedBranchTests(WorklineTestCase):
                 controller.validate_effect(commit(branch=branch), [], rm.OWNER)
 
 
-# --------------------------------------------------------------------------- unchanged
-class KnownResidualTests(CommitWindowCase):
-    def test_a_commit_carrying_the_recorded_message_is_still_taken_for_it(self) -> None:
-        """BL-033, unchanged: the recorded message is looked for before HEAD's movement is considered."""
+# --------------------------------------------------------------------------- the recorded message (BL-033)
+class SameMessageTests(CommitWindowCase):
+    def test_a_commit_carrying_the_recorded_message_is_not_taken_for_it(self) -> None:
+        """BL-033: a commit that only shares the recorded message moves HEAD on like any independent commit."""
         self.build()
         call, pattern = self.operation("phase hold")
         pending = self.interrupt(call, pattern, "commit recorded")
-        self.human_commit({"notes.md": "notes\nsame message\n"}, self.recorded_commit(pending)["message"])
+        recorded = self.recorded_commit(pending)
+        moved_to = self.human_commit({"notes.md": "notes\nsame message\n"}, recorded["message"])
         executed: list[str] = []
 
         result = self.counting(call, executed)
 
         self.assertEqual((result.status, result.mutation_id), ("phase_held", pending["mutation_id"]))
-        self.assertEqual(executed, ["git_push"])  # the recorded commit is never made
-        self.assertEqual(self.dirty(), [f" M {EVENT_LOG}"])
+        self.assertEqual(executed, ["git_commit", "git_push"])
+        self.assertEqual(self.parent(self.made_with(recorded["message"], moved_to)), moved_to)
+        self.assertEqual(self.head(), self.remote_head())
+        self.assertNothingLeftOver()
 
 
 if __name__ == "__main__":

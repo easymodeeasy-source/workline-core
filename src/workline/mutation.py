@@ -306,6 +306,7 @@ class Mutation:
             if classification == UNAPPLIED:
                 self.controller.apply_effect(record)
             if not record.get("applied"):
+                # also what lets a later classification recognize a commit as this mutation's own
                 record["applied"] = True
                 self._save()
             outcomes.append((int(record["seq"]), classification))
@@ -936,15 +937,16 @@ class MutationController:
                     return MATCHING if event.to_record() == rec else MISMATCH
             return UNAPPLIED
         if kind == "git_commit":
-            return self._classify_commit(payload)
+            return self._classify_commit(payload, record.get("applied") is True)
         if kind == "git_push":
             return self._classify_push(payload)
         raise ValidationError(f"unknown effect kind: {kind}")
 
-    def _classify_commit(self, payload: dict[str, Any]) -> str:
+    def _classify_commit(self, payload: dict[str, Any], applied: bool) -> str:
         """Classify a recorded commit, in this order:
 
-        * a commit since ``base_head`` carries the recorded message - applied, matching;
+        * the record already holds the commit as ``applied``, and a commit since
+          ``base_head`` still carries the recorded message - applied, matching;
         * nothing is left to commit at the recorded paths - applied, matching;
         * HEAD is still ``base_head``, on the branch the commit was decided on
           (:func:`_on_recorded_branch`) - unapplied;
@@ -952,11 +954,25 @@ class MutationController:
           (:func:`_head_advanced_independently`) - unapplied, and the commit is
           made on top of them;
         * anything else - applied with an unexpected result.
+
+        A message does not identify a commit: anyone can write the same one, for
+        any content and on any branch. Finding it says something only about a
+        commit this mutation already knows it made. ``applied`` is saved right
+        after the commit succeeded, or after an earlier classification found its
+        paths committed, and every later apply classifies the commit again -
+        often after a later stage of the same mutation changed those paths once
+        more, when the message is all that is left to recognize it by.
+
+        A commit the record does not hold as applied - recorded and never made,
+        refused by a hook, or made just before an interruption kept its flag from
+        being saved - is never taken for made because some commit carries its
+        message. Only its paths holding nothing left to commit show that; short of
+        it, the base, branch and history checks decide as for any other commit.
         """
         repo = self.store.root
         head = gitcmd.head_commit(repo)
         base = payload.get("base_head")
-        if head is not None:
+        if head is not None and applied:
             rev_range = f"{base}..HEAD" if base else "HEAD"
             log = gitcmd.run_git(repo, "log", "--format=%H%x00%B%x01", rev_range, check=False)
             if log.ok:
