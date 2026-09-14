@@ -44,6 +44,8 @@ from .mutation import (
 from .oplock import project_operation
 from .ops import (
     Replan,
+    _plan_exclusion_request,
+    _resume_plan_exclusion,
     apply_replan,
     event_effects,
     owned_canonical_paths,
@@ -1217,24 +1219,36 @@ def _plan_exclude(store: ProjectStore, operation: str, entity_id: str, replan: R
 
 
 def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, replan: Replan, precheck) -> OperationResult:
-    view = _stop_on_structure(store, "precheck")
-    precheck(view)
-    mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
-    with abandon_on_stop(mutation):
-        work_ids, removals, additions = plan_replan(mutation, "replan", view, replan)
-        projection = projected_view(
-            view,
-            add_events=[(entity_id, "plan_excluded")],
-            remove_relation_ids=tuple(r.id for r in removals),
-            add_relations=additions,
-            add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
-        )
-        validate_projection(projection, "plan exclusion replan")
+    message = f"chore(workline): plan_excluded {entity_id}"
+    # The replan is part of the invocation, durable before the first ID is reserved. An unfinished plan exclusion
+    # of this target is continued only by this same request and only as provably its own - decided on the Project
+    # without what it already applied, and checked before anything it recorded is replayed.
+    request = _plan_exclusion_request(entity_id, replan)
+    identity = {"entity": entity_id, "request": request}
+    slot = {"operation": operation, "entity": entity_id}
+    resumed = _resume_plan_exclusion(store, OWNER, slot, entity_id, replan, request, precheck, lambda view: message)
+    if resumed is not None:
+        mutation, destination = _open(store, operation, identity, [entity_id])
+        work_ids, removals, additions = resumed.work_ids, resumed.removals, resumed.additions
+    else:
+        view = _stop_on_structure(store, "precheck")
+        precheck(view)
+        mutation, destination = _open(store, operation, identity, [entity_id])
+        with abandon_on_stop(mutation):
+            work_ids, removals, additions = plan_replan(mutation, "replan", view, replan)
+            projection = projected_view(
+                view,
+                add_events=[(entity_id, "plan_excluded")],
+                remove_relation_ids=tuple(r.id for r in removals),
+                add_relations=additions,
+                add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
+            )
+            validate_projection(projection, "plan exclusion replan")
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, ["plan_excluded"]))
     mutation.apply()
     apply_replan(mutation, "replan", replan, removals, additions, work_ids)
-    head = _finalize(mutation, destination, f"chore(workline): plan_excluded {entity_id}")
+    head = _finalize(mutation, destination, message)
     return OperationResult("plan_excluded", entity_id, mutation.id, head)
 
 

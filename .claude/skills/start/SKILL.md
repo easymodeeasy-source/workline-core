@@ -176,6 +176,8 @@ cancelled Workを前提としていた `requires_completion` は満たされた�
 
 未開始Phase Workをfuture planから外す `plan_excluded` はRoadmapのfuture-plan operationが担当する。未開始Standalone WorkはSTARTがstandalone scope operationとして `plan_excluded` を所有する。
 
+Standalone Workのplan exclusionの途中失敗も、Roadmapのplan exclusionと同じ規則で同じmutationをresumeする（`skills/roadmap` のMutation / Git）: replanを含む決定内容を最初のID予約より前にrequestとしてinvocationへ記録し、記録済みrequestが一致して、recordがそのrequest自身のものと示せる時だけ、そのmutationが適用したeffectを除いたstateで判定し、残りをreplayの前に検査して最後まで進める。requestを記録していない旧実装のrecord、別request、書き換えたrecordは `reconcile_required` でSTOPし、recordを変更しない。branchとcommitの扱いは `rules/git` のCommit / pushに従う。このmutationのinvocationはoperation `start-plan-exclude` と対象Workで、START実行（Work・mode）のinvocationを共有しないので、Terminal finalizationのresumeがplan exclusionのrecordを読むことも、plan exclusionがSTARTのrecordを自分のrecordとして読むこともない。
+
 ## Derived / fix Work
 
 実行中に新Workが必要と判断した場合、STARTがWork意味とrelationを決め、CREATEへ登録依頼する。

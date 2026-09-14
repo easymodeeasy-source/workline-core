@@ -437,7 +437,7 @@ class StartTests(CommitWindowCase):
                 self.assertNothingLeftOver()
 
     def test_an_outer_cancel_is_committed_after_an_independent_commit(self) -> None:
-        """The commit of a replan START recorded is carried the same way (a plan exclusion stops before it, BL-029)."""
+        """The commit of a replan START recorded is carried the same way (a plan exclusion's: ``test_plan_exclusion_resume``, BL-029)."""
         self.build()
         s1, s2, helper = (create_standalone_work(self.store, WorkSpec(n, n.lower())).work_id for n in ("S1", "S2", "Helper"))
         st.plan_exclude_standalone_work(self.store, helper, Replan(add_relations=(RelationSpec("planned_next", s1, s2),)))

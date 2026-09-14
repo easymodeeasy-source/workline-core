@@ -738,7 +738,10 @@ class RelatedMaintenanceBindingTests(BindingCase):
 
 # --------------------------------------------------------------------------- what stays as it was
 class UnchangedOperationTests(BindingCase):
-    """Operations whose mutation carries no caller-decided payload keep their behaviour."""
+    """Operations whose mutation carries no caller-decided payload keep their behaviour.
+
+    The plan exclusions were among them until they came to carry their replan (BL-029).
+    """
 
     def measure(self, name: str, exclude, setup, *, window: str) -> dict[str, object]:
         """Interrupt one plan exclusion, retry it with a different replan, and look."""
@@ -753,8 +756,10 @@ class UnchangedOperationTests(BindingCase):
             with self.assertRaises(Interrupted):
                 exclude(self.store, target, replan_for(0))
         pending = self.pending()
+        before = self.record_bytes()
 
-        exclude(self.store, target, replan_for(1))
+        with self.assertRaises(ReconcileRequired) as refused:
+            exclude(self.store, target, replan_for(1))
 
         view = ProjectView.load(self.store)
         observed = {work.name for work in view.works.values()} | {
@@ -762,16 +767,19 @@ class UnchangedOperationTests(BindingCase):
         }
         return {
             "status": MutationController(self.store).load(pending["mutation_id"]).status,
-            "kept the retry's own content": marks[1] in observed,
-            "kept nothing of the first": marks[0] not in observed,
-            "problems": validate_project(self.store),
+            "refusal names the record": pending["mutation_id"] in str(refused.exception),
+            "record untouched": self.record_bytes() == before,
+            "wrote nothing of the retry": marks[1] not in observed,
         }
 
-    def test_the_plan_excludes_keep_their_measured_behaviour(self) -> None:
-        """A retry takes the record over, but the store ends up holding the retry's own content.
+    def test_the_plan_excludes_bind_their_replan_too(self) -> None:
+        """A retry with another replan no longer takes the record over (BL-029).
 
-        Nothing the first request decided survives, so this is not the defect
-        BL-024 names, and these three operations are left exactly as they were.
+        Before BL-029 these three operations were left unbound: in the windows
+        before their event was applied a different replan continued the record,
+        and the store held the retry's content. The replan is now recorded before
+        the first ID is reserved, so such a retry is refused and the record is
+        left exactly as it is.
         """
         def replacement_work(store, target):
             def replan_for(index: int) -> Replan:
@@ -816,10 +824,10 @@ class UnchangedOperationTests(BindingCase):
                     case.setUp()
                     try:
                         seen = case.measure(f"{index}-{window[0]}", exclude, setup, window=window)
-                        case.assertEqual(seen["status"], "completed")
-                        case.assertTrue(seen["kept the retry's own content"])
-                        case.assertTrue(seen["kept nothing of the first"])
-                        case.assertEqual(seen["problems"], [])
+                        case.assertEqual(seen["status"], "pending")
+                        case.assertTrue(seen["refusal names the record"])
+                        case.assertTrue(seen["record untouched"])
+                        case.assertTrue(seen["wrote nothing of the retry"])
                     finally:
                         case.doCleanups()
 

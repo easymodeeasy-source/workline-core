@@ -243,7 +243,7 @@ registration coreは、Postcheckの構造validationを、登録するeffectを�
 
 複数のstageで登録するcaller（RoadmapのPhase entry）は、最初のstageを記録する前に、未記録の全stageのWork payload（name・成立状態・Related）をregistration coreと同じpayload規則で検査する（`skills/roadmap` 参照）。
 
-cancel / plan exclusionのreplanに伴うWork登録は、ownerがreplan全体（terminal event・relation削除・relation追加・新Work）を記録前に投影検査したうえでの適用手順の一部なので、この登録前の構造検査を行わず、登録の適用後にpostcheckで検査する。
+cancel / plan exclusionのreplanに伴うWork登録は、ownerがreplan全体（terminal event・relation削除・relation追加・新Work）を記録前に投影検査したうえでの適用手順の一部なので、この登録前の構造検査を行わず、登録の適用後にpostcheckで検査する。中断したplan exclusionを同じrequestでresumeする場合、記録済みの登録stageはregistration coreで登録し直さず、そのstageと予約IDから読み戻す。まだ記録していない登録は、ownerが記録済みeffectをreplayする前に、登録が会う状態に対して、registration coreが記録前に行うのと同じ検査（payload・endpoint・integration invariant・human_confirmation・`requires_completion` cycle）を同じ報告で行う（`skills/roadmap` のMutation / Git）。
 
 replanはterminal event → 新Work（追加relationを含む）→ relation削除 → commit / pushの順に適用し、この順序は変えない。登録はrelation削除より前に行われるので、この登録が行う構造検査（記録前の `requires_completion` cycle検査と、適用後のpostcheckの構造validation）は、同じreplanが登録の直後に削除すると決定済みのRoadmap relationを除いた構造で判定する。除外したWork / Phaseを前提とする削除予定のrelationがまだ残っている一時的な状態で、owner projectionが妥当と判定したreplanを拒否しない。除くのは名指しされたrelationだけで、それ以外の構造問題とpayload・endpoint・integration invariant・human_confirmationの規則は従来どおり判定し、削除そのものは登録の後に適用する。登録前の構造検査を行う登録に同じ削除が渡される場合も、同じ構造で判定する。
 

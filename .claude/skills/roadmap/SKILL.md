@@ -424,15 +424,16 @@ Roadmap作成・Phase追加・Phase entryの登録は、Phase CREATE / CREATEの
 - Phase entry: 通常Work・integration・human_confirmationを別々のstageで登録するので、最初のstageを記録する前に、未記録の全stageのWork payload（name・成立状態・Related）をCREATEのpayload規則で宣言順に検査する。各stageの構造はCREATE registration coreがそのstageを記録する前に検査する。後続stageのrelationとconfirmation対象はPhase entry自身が登録済みWorkから組み立て、未開始Workの追加はpayload規則が読むPhase stateを変えないので、payloadを通った後続stageが先行stageの適用後に拒否されることはない。
 - resume: Roadmap作成・Phase追加・Phase entryは、resumeしたmutationの記録済みeffectをreplayする前に、未適用のeffectを現在stateへ重ねた投影を同じ検査にかける。中断の間に独立なoperation（例: 記録済み・未適用のrelationが前提とするPhaseのcancel）がstateを変えて不正になっていれば、何も適用せず、pending recordを変更しないまま `postcheck_failed` でSTOPする。そのrecordはwrite scopeが重なるoperationを従来どおり止めるので、人による照合が要る。Roadmap fileを記録した後・Phaseを記録する前に中断した作成は、Roadmap fileをreplayし、Phaseを記録する前にこの検査で止まる。
 
-callerが内容を決めるRoadmap operation（Roadmap作成 / Phase追加 / Related maintenance）は、最初のID予約より前に、決定内容の正規identityをそのmutationのinvocationへ記録する。operationと対象・labelだけのinvocationは、別内容の再実行を同じrequestと見なして記録済みstageを飛ばし、Projectには最初のrequestが決めた内容が残ったまま成功を返し得る。postcheckはentityが解決でき成立状態section等を持つことを見るが、今回のrequestが決めた本文内容と正本を突き合わせないため、これを検出しない。Phase relationのように決定payloadとの一致を検査する部分はあるが、それは `postcheck_failed` として遅れて止まるだけで、requestの取り違え自体を防がない。
+callerが内容を決めるRoadmap operation（Roadmap作成 / Phase追加 / Related maintenance / Phase・Workのplan exclusion）は、最初のID予約より前に、決定内容の正規identityをそのmutationのinvocationへ記録する。operationと対象・labelだけのinvocationは、別内容の再実行を同じrequestと見なして記録済みstageを飛ばし、Projectには最初のrequestが決めた内容が残ったまま成功を返し得る。postcheckはentityが解決でき成立状態section等を持つことを見るが、今回のrequestが決めた本文内容と正本を突き合わせないため、これを検出しない。Phase relationのように決定payloadとの一致を検査する部分はあるが、それは `postcheck_failed` として遅れて止まるだけで、requestの取り違え自体を防がない。
 
 記録内容（いずれもこの記録形式のversionを含む）:
 
 - Roadmap作成: Roadmap name / 背景 / 達成したい状態 / 対象範囲 / 対象外、全Phaseのkey・name・成立状態を宣言順で、Phase間relationを宣言順で
 - Phase追加: 追加Phaseのkey・name・成立状態を宣言順で、Phase間relationを宣言順で
 - Related maintenance: 追加edge（type / to / condition）と削除relation IDを指定順で
+- plan exclusion（Phase / Work）: 対象、replanの新Work（key・name・成立状態・phase_id・roadmap_id・work_kind・confirmation_target・Related（type / to / condition）・derivation detail）を宣言順で、追加relation（type / from / to）を宣言順で、削除relation IDを指定順で
 
-nameはrenderingがそのまま書くのでverbatim、section本文はrenderingがstripするのでstrip後で比較する。任意sectionは有無と内容を別に記録する。宣言順はdisplay番号やID予約の対応を決めるため意味を持ち、並べ替えを同一requestとして扱わない。
+nameはrenderingがそのまま書くのでverbatim、section本文（成立状態・derivation detail等）はrenderingがstripするのでstrip後で比較する。任意sectionとderivation detailは有無と内容を別に記録する。relationのendpointは書かれたとおりに記録し、request内のkeyと、そのkeyに予約されたIDは別requestとする（identityはID予約より前に固定するため）。宣言順はdisplay番号やID予約の対応を決めるため意味を持ち、並べ替えを同一requestとして扱わない。どのbranchで決定・確定したかはrequestに含めない（`rules/git` のCommit / pushに従い、決定したeffectと一緒に記録される）。
 
 同じslot（operation・対象・label）に未完了mutationがある場合、記録済みrequestが今回のrequestと一致する時だけresumeする。一致しない再実行は、mutationを開くより前・記録済みeffectをreplayするより前・no-op判定より前に `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationの開始は行わない。
 
@@ -449,6 +450,14 @@ Roadmap / Phaseのhold / resume / cancelとachievement記録も、途中失敗�
 - event logがそのeventを記録どおりに保持している（適用済み・期待値一致）
 
 これを示せなければ、次の例外を除き判定も結果も従来と同じである。eventをまだ記録していない、記録したeventがevent logに無い、または記録したeventがこのoperationのeventでない未完了mutationは、自分のeventを証明しない。読めないrecovery recordも何も証明せず、従来どおりmutationを開く時に報告される。stateだけを見て完了済みと扱わない: 未完了mutationの無いheld Phaseや、別のmutationが書いたeventによるstateは、従来どおり前提条件で拒否する。別operation・別対象のrequestはこのmutationを継続せず、従来どおりwrite scopeで独立性を判定する。例外として、前提条件が拒否された時に、同じoperation・対象の未完了mutationが複数ある場合と、event logが同じIDで記録と異なる内容を保持している場合は `reconcile_required` とし、pending recordを変更しない。
+
+plan exclusion（Phase / Work）は `plan_excluded` eventを記録・適用してから、replan（新Workの登録と追加relation、relationの削除）を記録・適用し、commit / pushする。自分の未完了mutationが既に適用したevent・新Work・追加relation・削除も、同じrequestが出会う現在stateではなくrecovery stateである。それを含む現在stateで構造precheck・前提条件（unstarted）・replanを判定すると、eventを適用した後に中断した再実行が自分自身を拒否し（削除前の構造、既にplan_excluded、削除済みrelationの解決不能、記録済みintegrationの二重計上）、mutationを完了する経路が無くなる。そこでplan exclusionは、同じslot（operationと対象）の未完了mutationについて、mutationを開く前・何もreplayする前に、記録済みrequestが今回のrequestと一致することを確かめ（上記。requestを記録していない旧実装のrecord、別request、複数recordは `reconcile_required`）、stageを記録済みなら次をすべて示せる時だけ同じmutationを最後まで進める。
+
+- 予約IDが、このrequestが予約するkeyだけに、そのkeyの種類の互いに異なるIDとして記録されている
+- 記録済みstageが、このrequestが記録する順（`event` → 新Workの登録 または 新Workの無い追加relation → 削除 → `finalize`）の先頭部分であり、各stageがこのrequestと予約IDから決まる内容そのものである: 予約IDの対象の `plan_excluded` 1件、登録coreが作るWork file・derivation detail・追加relation・Related、追加relation、指定順の削除、記録済みeffectのpathsとこのoperationのmessageによるcommit
+- 適用済みのeffectが記録順の先頭部分で、未適用のeffectは最後に記録したstageにだけあり、commitを記録した後には無い
+
+示せた場合、構造precheck・前提条件・commit messageの照合・replanの投影は、そのmutationが適用したeffectを除いたstate（適用済みのeventと追加relationを除き、書いたentity fileを除き、削除したrelationは記録したsnapshotから戻す）で判定する。記録済みの削除はそのstageから、記録済みの新Work登録はそのstageと予約IDから読み戻し、現在stateから解決し直したり登録し直したりしない。記録済み・未適用のeffectと未記録のstageは、replayする前に、登録coreが記録前に行う検査、effectの記録時の検査、残りをすべて適用した後の構造、commitが未記録なら開始前からの変更との分離で検査し、拒否される場合は、記録・適用した場合と同じ拒否（`spec_violation` / `validation_failed` / `dirty_overlap` 等）で、何もreplay・記録・commit・pushせずpending recordを変更しないままSTOPする。示せないrecord（書き換えたstage・予約ID・進行）はどの中断位置でも `reconcile_required` とし、何も変更しない。stageを記録していないrecordは何も適用していないので、予約IDがこのrequestのものだと示せれば、従来どおり現在stateで判定する。どのbranchの上でreplay・記録・commitしてよいか、記録済みのcommitが作られたかどうかはこの判定に含めず、`rules/git` のCommit / pushに従う（決定を記録したbranchの上でだけ進み、commitはそのbranchを引き継ぎ、独立なcommitで伸びただけのbranchでは記録どおりのcommitを作り、同じmessageのcommitだけでは作成済みとしない）。requestを記録していても、決定のbranchやcommitのbranchを持たないrecordは推測で進めない。完了したplan exclusionの同じrequestは従来どおり前提条件で拒否する。
 
 各Roadmap operationが宣言する予定write scopeは、そのoperationが最後まで進んだ場合に書き得るcanonical fileの集合とする。今回の呼び出しで実際に書いたfileではない: どの経路を通るか決まる前に宣言するので、条件付きでしか書かないfileも含める。共有ledger（`relations/roadmap.yaml` / `relations/related.yaml` / `events/events.jsonl`）はfile単位で書き直すため、同じledgerを書き得る2 operationは独立ではなく、両方がそれを宣言する。
 

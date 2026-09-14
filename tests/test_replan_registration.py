@@ -484,10 +484,11 @@ class InterruptedReplanTests(ReplanCase):
 
 
 class KnownResidualTests(ReplanCase):
-    """Not part of BL-028, and kept as they were: a retry after the terminal event is applied is refused, untouched.
+    """Not part of BL-028, and kept as it was: a START cancel retried after its event is refused, untouched (BL-030).
 
-    Plan exclusion's own event makes its unstarted precondition refuse the retry
-    (BL-025 residual (1)), and START refuses a Work its own cancel made terminal.
+    A plan exclusion retried after its own event used to be refused the same way
+    (BL-025 residual (1)); it now carries its mutation to the end (BL-029,
+    ``test_plan_exclusion_resume``).
     """
 
     def assertRetryRefusedUntouched(self, retry, code: str) -> None:
@@ -497,11 +498,11 @@ class KnownResidualTests(ReplanCase):
         self.assertEqual(refused.exception.code, code)
         self.assertEqual(self.record_bytes(), records)
 
-    def test_plan_exclusion_after_its_event(self) -> None:
-        for window, stop, code in (
-            ("event applied", lambda: after_applying(r"^event$"), "structure_invalid"),
-            ("works applied", lambda: after_applying(r"^replan:works$"), "structure_invalid"),
-            ("removals applied", lambda: after_applying(r"^replan:remove$"), "spec_violation"),
+    def test_plan_exclusion_after_its_event_now_finishes(self) -> None:
+        for window, stop in (
+            ("event applied", lambda: after_applying(r"^event$")),
+            ("works applied", lambda: after_applying(r"^replan:works$")),
+            ("removals applied", lambda: after_applying(r"^replan:remove$")),
         ):
             with self.subTest(window=window):
                 case = type(self)(self._testMethodName)
@@ -511,7 +512,11 @@ class KnownResidualTests(ReplanCase):
                     w2 = entry.work_ids["w2"]
                     with stop(), case.assertRaises(Interrupted):
                         rm.plan_exclude_work(case.store, w2, replan)
-                    case.assertRetryRefusedUntouched(lambda: rm.plan_exclude_work(case.store, w2, replan), code)
+                    (pending,) = MutationController(case.store).list_pending()
+                    result = rm.plan_exclude_work(case.store, w2, replan)
+                    case.assertEqual(result.mutation_id, pending["mutation_id"])
+                    case.assertEqual(len(case.named("W3")), 1)
+                    case.assertFinished(f"chore(workline): plan_excluded {w2}")
                 finally:
                     case.doCleanups()
 

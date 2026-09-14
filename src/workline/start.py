@@ -27,6 +27,8 @@ from .mutation import Mutation, MutationController, WriteScope, abandon_on_stop
 from .oplock import project_operation
 from .ops import (
     Replan,
+    _plan_exclusion_request,
+    _resume_plan_exclusion,
     apply_replan,
     event_effects,
     owned_canonical_paths,
@@ -971,30 +973,48 @@ def plan_exclude_standalone_work(store: ProjectStore, work_id: str, replan: Repl
 
 
 def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: Replan):
-    view = _structure_or_stop(store, "precheck")
-    work = view.works.get(work_id)
-    if work is None:
-        raise ValidationError(f"Work unresolvable: {work_id}")
-    if work.phase_id is not None:
-        raise SpecViolation("Phase Work plan exclusion is owned by Roadmap")
-    if view.work_state(work_id).state != UNSTARTED:
-        raise SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}")
+    def precheck(view: ProjectView) -> None:
+        work = view.works.get(work_id)
+        if work is None:
+            raise ValidationError(f"Work unresolvable: {work_id}")
+        if work.phase_id is not None:
+            raise SpecViolation("Phase Work plan exclusion is owned by Roadmap")
+        if view.work_state(work_id).state != UNSTARTED:
+            raise SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}")
+
+    def message(view: ProjectView) -> str:
+        return f"chore(workline): plan_excluded {view.works[work_id].display}"
+
+    # Resumed exactly as Roadmap's plan exclusion is (``roadmap._plan_exclude_locked``). The slot names this
+    # operation, not START's own invocation: a START record of the same Work is never taken for one of these, and
+    # START's own resume (:func:`_completion_to_finish`) reads only the mutation ``_start_locked`` opens.
+    slot = {"operation": "start-plan-exclude", "work_id": work_id}
+    request = _plan_exclusion_request(work_id, replan)
+    resumed = _resume_plan_exclusion(store, OWNER, slot, work_id, replan, request, precheck, message)
+    if resumed is not None:
+        view = resumed.view
+    else:
+        view = _structure_or_stop(store, "precheck")
+        precheck(view)
     destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
-    mutation = controller.open(OWNER, {"operation": "start-plan-exclude", "work_id": work_id}, WriteScope(entities=(work_id,), files=LEDGER_FILES))
+    mutation = controller.open(OWNER, {**slot, "request": request}, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     gitops.ensure_git_ready(store.root)
     gitops.record_preexisting_dirty(mutation, store.root)
     mutation.apply()
-    with abandon_on_stop(mutation):
-        work_ids, removals, additions = plan_replan(mutation, "replan", view, replan)
-        projection = projected_view(
-            view,
-            add_events=[(work_id, "plan_excluded")],
-            remove_relation_ids=tuple(r.id for r in removals),
-            add_relations=additions,
-            add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
-        )
-        validate_projection(projection, "plan exclusion replan")
+    if resumed is not None:
+        work_ids, removals, additions = resumed.work_ids, resumed.removals, resumed.additions
+    else:
+        with abandon_on_stop(mutation):
+            work_ids, removals, additions = plan_replan(mutation, "replan", view, replan)
+            projection = projected_view(
+                view,
+                add_events=[(work_id, "plan_excluded")],
+                remove_relation_ids=tuple(r.id for r in removals),
+                add_relations=additions,
+                add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
+            )
+            validate_projection(projection, "plan exclusion replan")
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", work_id, ["plan_excluded"]))
     mutation.apply()
@@ -1002,7 +1022,7 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
     gitops.finalize(
         mutation,
         "finalize",
-        f"chore(workline): plan_excluded {work.display}",
+        message(view),
         owned_canonical_paths(mutation),
         destination=destination,
     )

@@ -250,18 +250,7 @@ def register_works(
     mutation.extend_scope(entities=list(work_ids.values()))
 
     # relation payload validation -----------------------------------------------
-    resolved_relations: list[Relation] = []
-    for index, rel in enumerate(relations):
-        if rel.type not in ROADMAP_RELATION_TYPES:
-            raise ValidationError(f"relation {index}: unknown type {rel.type}")
-        from_id = resolve_ref(rel.from_ref, work_ids)
-        to_id = resolve_ref(rel.to_ref, work_ids)
-        for endpoint in (from_id, to_id):
-            if not is_valid_id(endpoint, "work") or (endpoint not in view.works and endpoint not in work_ids.values()):
-                raise ValidationError(f"relation {index}: endpoint unresolvable: {endpoint}")
-        if from_id == to_id:
-            raise ValidationError(f"relation {index}: self relation")
-        resolved_relations.append(Relation(relation_ids[index], rel.type, from_id, to_id))
+    resolved_relations = _resolve_roadmap_relations(view, relations, work_ids, relation_ids)
 
     # projected structure check (integration invariant, recursion, refs) ------
     # Only the requires_completion cycle reads relations here; the integration
@@ -272,34 +261,9 @@ def register_works(
     recorded = mutation.has_stage(stage)
     effects: list[Effect] = []
     if not recorded:
-        base_number = store.count_entities("work")
-        for offset, (key, spec) in enumerate(specs.items()):
-            work_id = work_ids[key]
-            meta: dict[str, Any] = {"id": work_id, "display": _display("W", base_number + offset + 1), "type": "work"}
-            if spec.phase_id is not None:
-                meta["phase_id"] = spec.phase_id
-                meta["origin"] = {"type": "roadmap", "roadmap_id": spec.roadmap_id, "phase_id": spec.phase_id}
-            else:
-                meta["origin"] = {"type": "standalone"}
-            if spec.work_kind is not None:
-                meta["work_kind"] = spec.work_kind
-            if spec.confirmation_target is not None:
-                target = spec.confirmation_target
-                if isinstance(target, list):
-                    meta["confirmation_target"] = [resolve_ref(t, work_ids) for t in target]
-                else:
-                    meta["confirmation_target"] = resolve_ref(target, work_ids)
-            body = render_body(spec.name, [(WORK_DESIRED_HEADING, spec.desired_state)])
-            effects.append(Effect.write_file(ProjectStore.entity_rel_path("work", work_id), render_entity(meta, body)))
-            if key in derivation_ids:
-                detail = f"# Derivation detail\n\n{spec.derivation_detail.strip()}\n"
-                effects.append(Effect.write_file(f"{WORKLINE_DIR}/derivations/{derivation_ids[key]}.md", detail))
-        for relation in resolved_relations:
-            effects.append(Effect.add_relation("roadmap", relation))
-        for key, spec in specs.items():
-            for index, related in enumerate(spec.related):
-                extra = {"condition": related.condition} if related.condition is not None else {}
-                effects.append(Effect.add_relation("related", Relation(related_ids[(key, index)], related.type, work_ids[key], related.to, extra)))
+        effects = _registration_effects(
+            specs, work_ids, resolved_relations, related_ids, derivation_ids, store.count_entities("work")
+        )
     if refuse_before_apply:
         refuse_invalid_work_writes(mutation, effects, structure)
     if not recorded:
@@ -326,6 +290,93 @@ def register_works(
     if any(spec.related for spec in specs.values()):
         touched.append(f"{WORKLINE_DIR}/relations/related.yaml")
     return RegistrationResult(work_ids, relation_ids, tuple(touched))
+
+
+def _resolve_roadmap_relations(
+    view: ProjectView, relations: "Sequence[RelationSpec]", work_ids: dict[str, str], relation_ids: dict[int, str]
+) -> list[Relation]:
+    """The caller-decided Roadmap relations under the IDs reserved for them, or the payload refusal."""
+    resolved: list[Relation] = []
+    for index, rel in enumerate(relations):
+        if rel.type not in ROADMAP_RELATION_TYPES:
+            raise ValidationError(f"relation {index}: unknown type {rel.type}")
+        from_id = resolve_ref(rel.from_ref, work_ids)
+        to_id = resolve_ref(rel.to_ref, work_ids)
+        for endpoint in (from_id, to_id):
+            if not is_valid_id(endpoint, "work") or (endpoint not in view.works and endpoint not in work_ids.values()):
+                raise ValidationError(f"relation {index}: endpoint unresolvable: {endpoint}")
+        if from_id == to_id:
+            raise ValidationError(f"relation {index}: self relation")
+        resolved.append(Relation(relation_ids[index], rel.type, from_id, to_id))
+    return resolved
+
+
+def _registration_effects(
+    specs: dict[str, WorkSpec],
+    work_ids: dict[str, str],
+    relations: list[Relation],
+    related_ids: dict[tuple[str, int], str],
+    derivation_ids: dict[str, str],
+    base_number: int,
+) -> list[Effect]:
+    """The effects a registration stage records, in the order it records them.
+
+    ``base_number`` is how many Works the Project held before the stage; the new
+    Works are numbered after them in declared order. A resumed replan rebuilds a
+    recorded stage from the same inputs to show the stage is the one its request
+    decides.
+    """
+    effects: list[Effect] = []
+    for offset, (key, spec) in enumerate(specs.items()):
+        work_id = work_ids[key]
+        meta: dict[str, Any] = {"id": work_id, "display": _display("W", base_number + offset + 1), "type": "work"}
+        if spec.phase_id is not None:
+            meta["phase_id"] = spec.phase_id
+            meta["origin"] = {"type": "roadmap", "roadmap_id": spec.roadmap_id, "phase_id": spec.phase_id}
+        else:
+            meta["origin"] = {"type": "standalone"}
+        if spec.work_kind is not None:
+            meta["work_kind"] = spec.work_kind
+        if spec.confirmation_target is not None:
+            target = spec.confirmation_target
+            if isinstance(target, list):
+                meta["confirmation_target"] = [resolve_ref(t, work_ids) for t in target]
+            else:
+                meta["confirmation_target"] = resolve_ref(target, work_ids)
+        body = render_body(spec.name, [(WORK_DESIRED_HEADING, spec.desired_state)])
+        effects.append(Effect.write_file(ProjectStore.entity_rel_path("work", work_id), render_entity(meta, body)))
+        if key in derivation_ids:
+            detail = f"# Derivation detail\n\n{spec.derivation_detail.strip()}\n"
+            effects.append(Effect.write_file(f"{WORKLINE_DIR}/derivations/{derivation_ids[key]}.md", detail))
+    for relation in relations:
+        effects.append(Effect.add_relation("roadmap", relation))
+    for key, spec in specs.items():
+        for index, related in enumerate(spec.related):
+            extra = {"condition": related.condition} if related.condition is not None else {}
+            effects.append(Effect.add_relation("related", Relation(related_ids[(key, index)], related.type, work_ids[key], related.to, extra)))
+    return effects
+
+
+def _check_registration(
+    view: ProjectView,
+    specs: dict[str, WorkSpec],
+    relations: "Sequence[RelationSpec]",
+    work_ids: dict[str, str],
+    relation_ids: dict[int, str],
+    removed_after: tuple[str, ...] = (),
+) -> list[Relation]:
+    """What :func:`register_works` refuses before it records its stage, decided on ``view`` with nothing reserved or written.
+
+    The same checks in the same order, with the same reports: the Work payload
+    rules, the relation payload rules, and the integration / confirmation /
+    ``requires_completion`` cycle rules (the cycle judged without
+    ``removed_after``). ``view`` is the Project as the registration would meet
+    it, and the IDs are the ones it would use. Returns the resolved relations.
+    """
+    validate_work_specs(specs, view)
+    resolved = _resolve_roadmap_relations(view, relations, work_ids, relation_ids)
+    _check_projection(_without_roadmap_relations(view, removed_after), specs, work_ids, resolved)
+    return resolved
 
 
 def _without_roadmap_relations(view: ProjectView, relation_ids: tuple[str, ...]) -> ProjectView:
