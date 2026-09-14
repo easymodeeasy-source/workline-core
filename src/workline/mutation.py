@@ -11,6 +11,10 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
 * on resume every recorded effect is classified against reality as
   unapplied / applied-matching / applied-mismatch, and a mismatch stops the
   operation as ``reconcile required``;
+* an effect that decides Project content is recorded with the branch it was
+  decided on, and until the commit that finalizes it is recorded - which then
+  names that same branch - nothing of the mutation is replayed or recorded on
+  any other (:func:`_open_decision`);
 * a mutation of an established Project is opened, resumed and written only
   while its operation holds the Project execution lock
   (:mod:`workline.oplock`), which an operation receives only after passing the
@@ -88,6 +92,13 @@ FILE_EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_ev
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _BRANCH_REF = re.compile(r"refs/heads/\S+")
 
+#: The key of a recorded effect that holds where the stage deciding it was decided (:func:`_open_decision`).
+_DECIDED_ON = "decided_on"
+
+#: Work lifecycle events that open a Work's execution rather than decide what it produced. START records
+#: them before its executor runs, and a stage made only of them fixes no branch (``skills/start``).
+_OPENING_EVENTS = frozenset({"work_started", "work_resumed", "work_target_added"})
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -142,6 +153,10 @@ class Effect:
         (:func:`_head_advanced_independently`) - from a history that went
         elsewhere. A record without a branch - as every record written before the
         branch was recorded is - does not show one.
+
+        A commit that finalizes a decision the mutation recorded earlier is
+        recorded only while HEAD is still where that decision was made, so its
+        ``branch`` is the decision's branch (:func:`_bind_decision`).
         """
         payload: dict[str, Any] = {"message": message, "paths": list(paths), "base_head": base_head}
         if branch is not None:
@@ -241,6 +256,7 @@ class Mutation:
             if kind_of(existing) != kind:
                 raise ReconcileRequired(f"reserved id {key} has kind {kind_of(existing)} not {kind}")
             return existing
+        _require_decided_branch(self, f"reserving {key}")
         identifier = new_id(kind)
         reserved[key] = identifier
         self._save()
@@ -256,11 +272,13 @@ class Mutation:
 
     def set_note(self, key: str, value: Any) -> None:
         self._writable()
+        _require_decided_branch(self, f"noting {key}")
         self.record.setdefault("notes", {})[key] = value
         self._save()
 
     def extend_scope(self, entities: list[str] = (), files: list[str] = ()) -> None:
         self._writable()
+        _require_decided_branch(self, "extending its write scope")
         scope = self.scope
         merged = WriteScope(tuple(scope.entities) + tuple(entities), tuple(scope.files) + tuple(files))
         self.record["write_scope"] = merged.to_record()
@@ -274,7 +292,12 @@ class Mutation:
         return [effect for effect in self.effects if effect.get("stage") == stage]
 
     def add_effects(self, stage: str, effects: list[Effect]) -> None:
-        """Validate ``effects`` and append them durably to the intent (before any run)."""
+        """Validate ``effects`` and append them durably to the intent (before any run).
+
+        A stage that decides Project content carries the branch it is decided on
+        in the same durable write, and nothing is recorded off the branch an
+        unfinalized decision was made on (:func:`_bind_decision`).
+        """
         self._writable()
         if self.status != "pending":
             raise StopError(f"mutation {self.id} is {self.status}", code="mutation_not_pending")
@@ -288,14 +311,20 @@ class Mutation:
             record = {"seq": seq, "stage": stage, "kind": effect.kind, "payload": effect.payload, "applied": False}
             self.controller.validate_effect(record, recorded + pending_records, self.owner)
             pending_records.append(record)
+        _bind_decision(self, stage, pending_records)
         self.record["effects"] = recorded + pending_records
         self._save()
 
     def apply(self) -> list[tuple[int, str]]:
-        """Classify every recorded effect in order and apply the unapplied ones."""
+        """Classify every recorded effect in order and apply the unapplied ones.
+
+        Before anything is classified or applied, a decision no recorded commit
+        finalizes yet must still be where it was made (:func:`_require_decided_branch`).
+        """
         self._writable()
         if self.status != "pending":
             raise StopError(f"mutation {self.id} is {self.status}", code="mutation_not_pending")
+        _require_decided_branch(self, "replaying what it recorded")
         outcomes: list[tuple[int, str]] = []
         for record in self.record.get("effects") or []:
             classification = self.controller.classify(record)
@@ -520,6 +549,176 @@ def abandon_on_stop(mutation: Mutation):
         if mutation.status == "pending" and not mutation.effects:
             mutation.abandon()
         raise
+
+
+# --------------------------------------------------------------------------- the branch a decision is made on
+
+_UNBOUND = object()
+
+
+def _opens_execution(effect: dict[str, Any]) -> bool:
+    payload = effect.get("payload")
+    event = payload.get("record") if effect.get("kind") == "append_event" and isinstance(payload, dict) else None
+    return isinstance(event, dict) and event.get("type") in _OPENING_EVENTS
+
+
+def _decides(effects: list[dict[str, Any]]) -> bool:
+    """Whether a stage's effects decide Project content that its commit must finalize where they were decided.
+
+    Only an effect that writes the Project's files decides anything; a Git stage
+    finalizes what was decided. A stage made only of the lifecycle events that
+    open a Work's execution decides nothing either: START records it before its
+    executor runs, and what the Work produces - and so the branch that is
+    finalized on - is decided only once the executor has returned. An effect
+    that cannot be read as such an event counts as deciding.
+    """
+    return any(not _opens_execution(effect) for effect in effects if effect.get("kind") in FILE_EFFECT_KINDS)
+
+
+def _open_decision(mutation: Mutation) -> tuple[list[str], dict[str, Any] | None]:
+    """The stages whose decision no recorded commit finalizes yet, and the binding they carry.
+
+    A stage that decides Project content (:func:`_decides`) is recorded with a
+    binding under :data:`_DECIDED_ON`: the full name of the branch HEAD was on
+    when it was decided (``None`` on a detached HEAD) and the commit HEAD was
+    at (``None`` while the branch had none). The Git stage recorded after it
+    finalizes it; from then on the recorded commit names its branch itself
+    (:func:`_on_recorded_branch`), and the binding has nothing left to say.
+    Until then it is the only thing that says where the decision was made.
+
+    ``([], None)`` when nothing decided waits for its commit. Whatever cannot
+    be shown STOPs, and nothing stands in for it:
+
+    * a decision recorded without a binding - as every decision recorded before
+      decisions carried their branch was - shows no branch, and the branch HEAD
+      is on now is not taken for it, even when it is the same;
+    * a binding in another form than this module records, or decisions waiting
+      for the same commit that carry different bindings, show no single place.
+    """
+    effects = mutation.effects
+    last_commit = max((index for index, effect in enumerate(effects) if effect.get("kind") == "git_commit"), default=-1)
+    stages: dict[str, list[dict[str, Any]]] = {}
+    for effect in effects[last_commit + 1:]:
+        stages.setdefault(str(effect.get("stage")), []).append(effect)
+    decided = [stage for stage, stage_effects in stages.items() if _decides(stage_effects)]
+    if not decided:
+        return [], None
+    bindings = [
+        effect.get(_DECIDED_ON, _UNBOUND)
+        for stage in decided
+        for effect in stages[stage]
+        if effect.get("kind") in FILE_EFFECT_KINDS
+    ]
+    named = ", ".join(decided)
+    if any(binding is _UNBOUND for binding in bindings):
+        raise ReconcileRequired(
+            f"mutation {mutation.id} recorded {named}, which decide Project content no recorded commit finalizes "
+            "yet, without the branch they were decided on, as a record written before decisions carried their "
+            "branch is; nothing in the record shows that branch and the branch HEAD is on now is not taken for it, "
+            "so nothing is replayed or recorded: reconcile required"
+        )
+    if not all(_binding_readable(binding) for binding in bindings) or any(binding != bindings[0] for binding in bindings):
+        raise ReconcileRequired(
+            f"mutation {mutation.id}: the decisions no recorded commit finalizes yet ({named}) do not carry one "
+            "branch binding in the form Workline records, so where they were decided cannot be shown: reconcile required"
+        )
+    return decided, dict(bindings[0])
+
+
+def _binding_readable(binding: object) -> bool:
+    return (
+        isinstance(binding, dict)
+        and set(binding) == {"branch", "head"}
+        and (binding["branch"] is None or isinstance(binding["branch"], str) and _BRANCH_REF.fullmatch(binding["branch"]) is not None)
+        and (binding["head"] is None or isinstance(binding["head"], str) and _COMMIT_ID.fullmatch(binding["head"]) is not None)
+    )
+
+
+def _where_head_is(repo: Path) -> dict[str, Any] | None:
+    """The binding a decision made now carries; ``None`` when Git cannot say which branch, if any, HEAD is on."""
+    branch = gitcmd.current_branch_ref(repo)
+    if branch is None and gitcmd.head_detached(repo) is not True:
+        return None
+    return {"branch": branch, "head": gitcmd.head_commit(repo)}
+
+
+def _still_where_decided(repo: Path, binding: dict[str, Any]) -> bool:
+    """Whether HEAD is on the branch a decision was made on, over a history that still holds the commit it was made at.
+
+    The branch is compared by its full name, and a detached HEAD matches only a
+    decision made on one. A branch that only grew past that commit - an
+    independent commit, a fast-forward - still holds it; an amended, reset or
+    rebased one does not. Every question is put to Git, and one it cannot
+    answer shows nothing.
+    """
+    here = _where_head_is(repo)
+    if here is None or here["branch"] != binding["branch"]:
+        return False
+    if binding["head"] is None or here["head"] == binding["head"]:
+        return True
+    return here["head"] is not None and gitcmd.descends_from(repo, here["head"], binding["head"]) is True
+
+
+def _off_decided_branch(mutation: Mutation, decided: list[str], binding: dict[str, Any], doing: str) -> ReconcileRequired:
+    def place(where: dict[str, Any] | None) -> str:
+        if where is None:
+            return "a branch Git cannot name"
+        return (where["branch"] or "a detached HEAD") + (f" at {where['head']}" if where["head"] else "")
+
+    return ReconcileRequired(
+        f"mutation {mutation.id} decided {', '.join(decided)} on {place(binding)}, and no recorded commit finalizes "
+        f"that yet; HEAD is now on {place(_where_head_is(mutation.store.root))}, which is not that branch or no longer "
+        "holds that commit. Finalizing the decision here would commit it where it was not decided, so nothing is "
+        f"replayed, recorded, committed or pushed ({doing}); check out the branch it was decided on to continue: "
+        "reconcile required"
+    )
+
+
+def _require_decided_branch(mutation: Mutation, doing: str) -> None:
+    """STOP unless every decision no recorded commit finalizes yet is still where it was made (:func:`_open_decision`)."""
+    decided, binding = _open_decision(mutation)
+    if binding is not None and not _still_where_decided(mutation.store.root, binding):
+        raise _off_decided_branch(mutation, decided, binding, doing)
+
+
+def _bind_decision(mutation: Mutation, stage: str, records: list[dict[str, Any]]) -> None:
+    """Give the effects of a stage about to be recorded the binding they must carry, or STOP before it is recorded.
+
+    * While a decision waits for its commit, nothing is recorded unless HEAD is
+      still where that decision was made, and a commit recorded then must name
+      that same branch: this is where the decision's binding passes to the
+      commit's ``branch`` (:func:`_on_recorded_branch`), which guards it from
+      then on.
+    * A stage that decides Project content carries the binding of the decision
+      it joins, or - when none waits - the place HEAD is now, written in the
+      same durable save as the stage itself. When Git cannot say which branch
+      HEAD is on, nothing is recorded.
+    * Anything else carries no binding.
+    """
+    decided, binding = _open_decision(mutation)
+    repo = mutation.store.root
+    if binding is not None:
+        if not _still_where_decided(repo, binding):
+            raise _off_decided_branch(mutation, decided, binding, f"recording stage {stage!r}")
+        for record in records:
+            if record["kind"] == "git_commit" and record["payload"].get("branch") != binding["branch"]:
+                raise ReconcileRequired(
+                    f"mutation {mutation.id} decided {', '.join(decided)} on {binding['branch'] or 'a detached HEAD'}, "
+                    f"but the commit recorded to finalize it in stage {stage!r} names "
+                    f"{record['payload'].get('branch') or 'no branch'}; it is not recorded: reconcile required"
+                )
+    if not _decides(records):
+        return
+    if binding is None:
+        binding = _where_head_is(repo)
+        if binding is None:
+            raise GitError(
+                f"Git cannot say which branch HEAD is on, so the branch stage {stage!r} of mutation {mutation.id} "
+                "would be decided on is unknown; nothing is recorded"
+            )
+    for record in records:
+        if record["kind"] in FILE_EFFECT_KINDS:
+            record[_DECIDED_ON] = dict(binding)
 
 
 def _on_recorded_branch(repo: Path, payload: dict[str, Any]) -> bool:
