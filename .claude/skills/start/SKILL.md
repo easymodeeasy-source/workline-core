@@ -343,6 +343,8 @@ CREATEによる派生Work / relation変更も同じSTART operationへ属する�
 
 commit直前にdiffを再確認し、START-owned changeだけをstageする。同一fileにunrelated changeがある場合、安全にhunk分離できる時だけ分離する。不能ならSTOP。
 
+STARTが記録したcommit（成果commit、finalization commit等）を作る前に中断・失敗した場合、その間に人のcommit等でHEADが進んでも、`rules/git` のCommit / pushに従い、記録したbaseがHEADの祖先であり、base以降のどのcommitも記録したpathsを変更しておらず、記録したbranchの上にいることを示せる時だけ、そのHEADの上に記録どおりのcommitを作ってGit段階から継続する。pathsの一部だけ・別の内容でのcommit、変更して戻した履歴、履歴の書換え、branchの変更、branchを記録していない旧implementationのrecordは、従来どおりreconcile required。
+
 remoteあり通常Projectでは最終Work結果をremoteへ反映する。remoteなしはlocal commitでよい。
 
 pushする場合の宛先は `rules/git` のpush destinationに従う。START開始前、mutationを開くより前、networkへ触れるより前に承認先一致を検査し、承認先なし / 不一致 / 解決不能はdomain writeの前にSTOPする。承認先をSTART側で変更しない。

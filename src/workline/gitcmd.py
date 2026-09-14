@@ -120,6 +120,20 @@ def current_branch(repo: Path) -> str | None:
     return result.stdout.strip() or None
 
 
+def current_branch_ref(repo: Path) -> str | None:
+    """The full name (``refs/heads/<name>``) of the branch HEAD is on; None when detached or undeterminable.
+
+    The full name identifies the branch exactly. The short name
+    :func:`current_branch` reports is shortened only as far as it stays
+    unambiguous, so it can change with the other refs around the branch.
+    """
+    result = run_git(repo, "symbolic-ref", "--quiet", "HEAD", check=False)
+    ref = result.stdout.strip()
+    if not result.ok or not ref.startswith("refs/heads/"):
+        return None
+    return ref
+
+
 def head_commit(repo: Path) -> str | None:
     result = run_git(repo, "rev-parse", "--verify", "--quiet", "HEAD", check=False)
     if not result.ok:
@@ -266,3 +280,33 @@ def commit_touches(repo: Path, rev: str, paths: list[str]) -> set[str]:
         return set()
     result = run_git(repo, "show", "--name-only", "--format=", "-z", rev, "--", *paths)
     return {p.replace("\\", "/") for p in result.stdout.split("\0") if p}
+
+
+def descends_from(repo: Path, commit: str, ancestor: str) -> bool | None:
+    """Whether local commit ``commit`` is ``ancestor`` itself or descends from it; None when undeterminable.
+
+    Both are commits of this repository, named by object ID. It says nothing
+    about what a remote holds: push evidence comes only from the push path
+    (:func:`push_dry_run`).
+    """
+    result = run_git(repo, "merge-base", "--is-ancestor", ancestor, commit, check=False)
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    return None
+
+
+def commits_touching(repo: Path, since: str, until: str, paths: list[str]) -> list[str] | None:
+    """Commits in ``since..until`` that change any of ``paths``; None when undeterminable.
+
+    A commit counts when it differs at those paths from any one of its parents,
+    and every parent of a merge is followed (``--full-history``): a path a
+    merged branch changed and changed back is still reported, although neither
+    the merge nor the end result shows it. There is no rename detection, so a
+    rename into or out of a path is a change of that path.
+    """
+    result = run_git(repo, "rev-list", "--full-history", f"{since}..{until}", "--", *paths, check=False)
+    if not result.ok:
+        return None
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]

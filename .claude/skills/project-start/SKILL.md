@@ -345,7 +345,7 @@ commit前にregistry / routingを再確認する。
 
 初期commit後はpushしない。承認先を書いた場合もpushしない。
 
-commit失敗時は同じmutationをresumeし、既に一致するdomain filesを作り直さない。
+commit失敗時は同じmutationをresumeし、既に一致するdomain filesを作り直さない。その間に人のcommitでHEADが進んでいた場合にcommitを作るかどうかは、`rules/git` のCommit / pushに従う。
 
 ## Postcheck
 

@@ -96,7 +96,9 @@ def finalize_effects(
     Project, or Project開始, whose initial commit deliberately needs no push).
     """
     repo = store.root
-    effects = [Effect.git_commit(message, sorted(set(paths)), gitcmd.head_commit(repo))]
+    effects = [
+        Effect.git_commit(message, sorted(set(paths)), gitcmd.head_commit(repo), gitcmd.current_branch_ref(repo))
+    ]
     if destination is not None:
         effects.append(Effect.git_push(destination.remote, ensure_git_ready(repo), destination.locator))
     return effects

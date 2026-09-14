@@ -416,6 +416,8 @@ pushする場合の宛先は `rules/git` のpush destinationに従う。各Roadm
 
 途中失敗は同じmutationをresume。期待値不一致ならreconcile required。
 
+commitを記録した後・作る前に中断したoperation（commit自体の失敗を含む）の再実行は、その間に独立なoperationや人のcommitでHEADが進んだことだけでは止まらない。`rules/git` のCommit / pushに従い、記録したbaseがHEADの祖先であり、base以降のどのcommitも記録したpathsを変更しておらず、記録したbranchの上にいることを示せる時だけ、そのHEADの上に記録どおりのcommitを作ってpushする。pathsの一部だけ・別の内容でのcommit、変更して戻した履歴、履歴の書換え、branchの変更、branchを記録していない旧implementationのrecordは、従来どおりreconcile required。
+
 Roadmap作成・Phase追加・Phase entryの登録は、Phase CREATE / CREATEの登録前の構造検査に従い、構造が不正になる登録をeffectの記録・適用より前に、postcheckと同じ `postcheck_failed` で拒否する（`skills/phase-create`、`skills/create` 参照）。拒否されたrequestはcanonical file・relation・commit・pushを変更せず、今回開いたmutationをabandonするので、同じrequestの再実行も、修正したrequestも、他のoperationも、pending recordやdirty fileに止められない。
 
 - Roadmap作成: Roadmap fileを記録する前に、そのRoadmap fileを加えた投影に対して全Phaseを決定し、Phase CREATEのprecheck・relation payload検査・登録前の構造検査を行う。Phase CREATEが拒否する作成はRoadmap fileも書かない。Phase ID / relation IDはこの時点で予約するので、Roadmap fileを記録する前後に中断したrecordもそれらを持ち、resumeは同じIDを使う。

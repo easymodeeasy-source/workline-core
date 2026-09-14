@@ -377,6 +377,19 @@ Project開始は例外で、初期commit必須・push不要。
 
 commit失敗 / push失敗時はdomain writeを再実行せず、同じpending mutationのGit段階からresumeする。
 
+commitは、commit message・commitするpaths・記録時のHEAD（base）と、記録時にHEADが指していたbranchの完全なref名（`refs/heads/<name>`）をeffectとして記録してから作る。detached HEADで記録したcommitはbranchを持たない。
+
+commitを記録した後・作る前に中断したmutation（commit自体の失敗を含む）のresumeでは、その間に独立なoperationや人のcommitでHEADがbaseから進んだことだけを期待値不一致としない。記録したcommitが作られておらず（base以降にそのcommitが無く、pathsにcommitする変更が残っている）、次をすべて示せる場合だけ未適用として扱い、現在のHEADの上に記録どおりのcommitを作る。
+
+```text
+recordのbaseが完全なcommit IDで、現在のHEADの祖先である
+base..HEADのどのcommitも記録したpathsを変更していない
+  （mergeは全parentを辿る。rename検出はしない。途中で変更して元の内容へ戻した履歴も変更とみなす）
+現在HEADが指すbranchが、recordのbranchと一致する
+```
+
+1つでも示せない場合は従来どおり期待値不一致として `reconcile required` で停止し、commitを作らない。pathsの一部だけ、または別の内容でのcommit、変更して戻した・revertした履歴、amend / reset / rebase等でbaseがHEADの祖先でない履歴、branchの変更、baseやbranchをrecordから示せない場合、Gitが判定できない場合がこれに当たる。branchを記録していない旧implementationのrecordは、同じstageのpush先branch等から推測せず、HEADが進んでいれば停止する。remoteだけが先に進んだ場合（push previewの `!` で `reconcile required`）の扱いは変えない。
+
 START terminal処理は `work_target_removed` / `work_completed` を含む最終commitと、remoteありならその最終pushまでをfinalization mutationとする。local completed / remote未反映時は通常STARTを再実行せず finalization resumeする。
 
 ### Push destination

@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import stat
 from typing import Any, Iterable
 
@@ -82,6 +83,11 @@ EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_event",
 #: The effects that write a Project's files rather than Git.
 FILE_EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_event")
 
+# A recorded commit names its base by the full object ID and its branch by the full ref name, never by an
+# expression Git would resolve.
+_COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_BRANCH_REF = re.compile(r"refs/heads/\S+")
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -125,8 +131,21 @@ class Effect:
         return Effect("append_event", {"record": event.to_record()})
 
     @staticmethod
-    def git_commit(message: str, paths: list[str], base_head: str | None) -> "Effect":
-        return Effect("git_commit", {"message": message, "paths": list(paths), "base_head": base_head})
+    def git_commit(message: str, paths: list[str], base_head: str | None, branch: str | None = None) -> "Effect":
+        """Commit exactly ``paths`` with ``message``.
+
+        ``base_head`` is the commit HEAD was when the commit was decided (``None``:
+        there was none yet), and ``branch`` the full name of the branch HEAD was on
+        then, left out when HEAD was on no branch. Together they let a resume tell
+        a commit not made yet, on a branch that has only grown past it, from a
+        history that went elsewhere (:func:`_head_advanced_independently`). A
+        record without a branch - as every record written before the branch was
+        recorded is - does not show one.
+        """
+        payload: dict[str, Any] = {"message": message, "paths": list(paths), "base_head": base_head}
+        if branch is not None:
+            payload["branch"] = branch
+        return Effect("git_commit", payload)
 
     @staticmethod
     def git_push(remote: str, branch: str, locator: str) -> "Effect":
@@ -501,6 +520,47 @@ def abandon_on_stop(mutation: Mutation):
         raise
 
 
+def _head_advanced_independently(repo: Path, payload: dict[str, Any], head: str) -> bool:
+    """Whether a recorded commit that was never made can still be made now that HEAD has moved on.
+
+    A commit is recorded, with the HEAD it was decided on, before it is made.
+    Between the two - an interruption, or the commit itself failing - an
+    operation independent of this one, or a person, can commit, and HEAD is no
+    longer ``base_head``. That alone does not make the recorded commit wrong: if
+    the branch only grew by commits that leave this commit's paths alone, it is
+    still exactly the commit that was decided, made on top of them as it would
+    have been had it been decided after them.
+
+    Only what can be shown counts, and all of it is required:
+
+    * the record names its base by a full commit ID, and that commit is an
+      ancestor of HEAD. An amended, reset or rebased history did not grow;
+    * no commit since the base changes a recorded path, with every parent of a
+      merge followed. That is stricter than the paths still holding what the
+      base held: a path someone changed and changed back - or committed with
+      this commit's own content and then reverted - was still changed by
+      someone else while this commit waited, and making it now would go over
+      that. A path committed on its own, or with other content, was changed
+      too;
+    * HEAD is on the branch the record names. A record that names none - as
+      every record written before the branch was recorded does - shows none,
+      and nothing stands in for it: a push of the same stage names only where
+      it pushes, not where the commit was decided;
+    * Git answers every question asked; one it cannot answer shows nothing.
+
+    Short of that, the commit stays applied with an unexpected result.
+    """
+    base, branch = payload.get("base_head"), payload.get("branch")
+    if not isinstance(base, str) or not _COMMIT_ID.fullmatch(base):
+        return False
+    if not isinstance(branch, str) or gitcmd.current_branch_ref(repo) != branch:
+        return False
+    return (
+        gitcmd.descends_from(repo, head, base) is True
+        and gitcmd.commits_touching(repo, base, head, list(payload["paths"])) == []
+    )
+
+
 class MutationController:
     """Physical writer for a Project's canonical files."""
 
@@ -786,6 +846,8 @@ class MutationController:
                 raise ValidationError("git_commit needs relative paths")
             if any(p.startswith(RUNTIME_DIR + "/") for p in paths):
                 raise ValidationError("runtime metadata is never committed")
+            if "branch" in payload and not (isinstance(payload["branch"], str) and _BRANCH_REF.fullmatch(payload["branch"])):
+                raise ValidationError("git_commit branch must be the full name of a branch")
             return
         if kind == "git_push":
             remote, branch, locator = payload.get("remote"), payload.get("branch"), payload.get("locator")
@@ -852,6 +914,16 @@ class MutationController:
         raise ValidationError(f"unknown effect kind: {kind}")
 
     def _classify_commit(self, payload: dict[str, Any]) -> str:
+        """Classify a recorded commit, in this order:
+
+        * a commit since ``base_head`` carries the recorded message - applied, matching;
+        * nothing is left to commit at the recorded paths - applied, matching;
+        * HEAD is still ``base_head`` - unapplied;
+        * HEAD has only moved on past commits independent of this one
+          (:func:`_head_advanced_independently`) - unapplied, and the commit is
+          made on top of them;
+        * anything else - applied with an unexpected result.
+        """
         repo = self.store.root
         head = gitcmd.head_commit(repo)
         base = payload.get("base_head")
@@ -869,6 +941,8 @@ class MutationController:
         if head is not None and not changed:
             return MATCHING  # nothing left to commit for these paths
         if head == base:
+            return UNAPPLIED
+        if head is not None and _head_advanced_independently(repo, payload, head):
             return UNAPPLIED
         return MISMATCH
 
