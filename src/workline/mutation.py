@@ -137,10 +137,11 @@ class Effect:
         ``base_head`` is the commit HEAD was when the commit was decided (``None``:
         there was none yet), and ``branch`` the full name of the branch HEAD was on
         then, left out when HEAD was on no branch. Together they let a resume tell
-        a commit not made yet, on a branch that has only grown past it, from a
-        history that went elsewhere (:func:`_head_advanced_independently`). A
-        record without a branch - as every record written before the branch was
-        recorded is - does not show one.
+        a commit not made yet - on the branch it was decided on
+        (:func:`_on_recorded_branch`), which may have only grown past it
+        (:func:`_head_advanced_independently`) - from a history that went
+        elsewhere. A record without a branch - as every record written before the
+        branch was recorded is - does not show one.
         """
         payload: dict[str, Any] = {"message": message, "paths": list(paths), "base_head": base_head}
         if branch is not None:
@@ -518,6 +519,33 @@ def abandon_on_stop(mutation: Mutation):
         if mutation.status == "pending" and not mutation.effects:
             mutation.abandon()
         raise
+
+
+def _on_recorded_branch(repo: Path, payload: dict[str, Any]) -> bool:
+    """Whether HEAD is where a recorded commit that was never made was decided to go.
+
+    HEAD still being the recorded ``base_head`` says only that no commit has been
+    made on top of it. Another branch can point at the same commit: a person who
+    checks one out, or renames the branch, leaves HEAD where it was, and making
+    the commit then puts it on that other branch while the branch it was decided
+    on - and every push the record names for it - never receives it.
+
+    So the branch has to be shown as well:
+
+    * a record that names a branch shows it only when HEAD is on exactly that
+      branch, compared by its full name;
+    * a record without a branch was written on a detached HEAD - or before the
+      branch was recorded at all - and names none; nothing stands in for it,
+      least of all the branch HEAD happens to be on now. It goes on only while
+      HEAD is on no branch either, which is where a commit decided on a detached
+      HEAD is made (and where an operation that refuses a detached HEAD at its
+      entry never gets to). On a branch it stops;
+    * Git answers every question asked; one it cannot answer shows nothing.
+    """
+    if "branch" not in payload:
+        return gitcmd.head_detached(repo) is True
+    branch = payload["branch"]
+    return isinstance(branch, str) and gitcmd.current_branch_ref(repo) == branch
 
 
 def _head_advanced_independently(repo: Path, payload: dict[str, Any], head: str) -> bool:
@@ -918,7 +946,8 @@ class MutationController:
 
         * a commit since ``base_head`` carries the recorded message - applied, matching;
         * nothing is left to commit at the recorded paths - applied, matching;
-        * HEAD is still ``base_head`` - unapplied;
+        * HEAD is still ``base_head``, on the branch the commit was decided on
+          (:func:`_on_recorded_branch`) - unapplied;
         * HEAD has only moved on past commits independent of this one
           (:func:`_head_advanced_independently`) - unapplied, and the commit is
           made on top of them;
@@ -940,7 +969,7 @@ class MutationController:
         changed = gitcmd.changed_against_head(repo, list(payload["paths"]))
         if head is not None and not changed:
             return MATCHING  # nothing left to commit for these paths
-        if head == base:
+        if head == base and _on_recorded_branch(repo, payload):
             return UNAPPLIED
         if head is not None and _head_advanced_independently(repo, payload, head):
             return UNAPPLIED

@@ -343,7 +343,7 @@ CREATEによる派生Work / relation変更も同じSTART operationへ属する�
 
 commit直前にdiffを再確認し、START-owned changeだけをstageする。同一fileにunrelated changeがある場合、安全にhunk分離できる時だけ分離する。不能ならSTOP。
 
-STARTが記録したcommit（成果commit、finalization commit等）を作る前に中断・失敗した場合、その間に人のcommit等でHEADが進んでも、`rules/git` のCommit / pushに従い、記録したbaseがHEADの祖先であり、base以降のどのcommitも記録したpathsを変更しておらず、記録したbranchの上にいることを示せる時だけ、そのHEADの上に記録どおりのcommitを作ってGit段階から継続する。pathsの一部だけ・別の内容でのcommit、変更して戻した履歴、履歴の書換え、branchの変更、branchを記録していない旧implementationのrecordは、従来どおりreconcile required。
+STARTが記録したcommit（成果commit、finalization commit等）を作る前に中断・失敗した場合、その間に人のcommit等でHEADが進んでも、`rules/git` のCommit / pushに従い、記録したbaseがHEADの祖先であり、base以降のどのcommitも記録したpathsを変更しておらず、記録したbranchの上にいることを示せる時だけ、そのHEADの上に記録どおりのcommitを作ってGit段階から継続する。pathsの一部だけ・別の内容でのcommit、変更して戻した履歴、履歴の書換え、branchの変更、branchを記録していない旧implementationのrecordは、従来どおりreconcile required。HEADが記録時のbaseのままでも、記録したbranchの上にいることを示せなければ（同じcommitを指す別branchのcheckout、branch名の変更等）、成果commitやterminal eventを含むfinalization commitを別branchへ作らず、reconcile requiredで停止する。記録したbranchへ戻れば、同じSTARTの再実行がGit段階から継続する（`rules/git` のCommit / push）。
 
 remoteあり通常Projectでは最終Work結果をremoteへ反映する。remoteなしはlocal commitでよい。
 

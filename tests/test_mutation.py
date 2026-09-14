@@ -203,7 +203,9 @@ class MutationControllerTests(WorklineTestCase):
         mutation.apply()
         from workline import gitcmd
 
-        mutation.add_effects("git", [Effect.git_commit("chore(workline): test commit", [WORK_PATH], gitcmd.head_commit(self.store.root))])
+        root = self.store.root
+        # recorded as gitops.finalize_effects records it: a commit without its branch goes on only off a branch (BL-035)
+        mutation.add_effects("git", [Effect.git_commit("chore(workline): test commit", [WORK_PATH], gitcmd.head_commit(root), gitcmd.current_branch_ref(root))])
         mutation.apply()
         head = gitcmd.head_commit(self.store.root)
         outcomes = self.controller.load(mutation.id).apply()

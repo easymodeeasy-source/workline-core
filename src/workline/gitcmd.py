@@ -134,6 +134,21 @@ def current_branch_ref(repo: Path) -> str | None:
     return ref
 
 
+def head_detached(repo: Path) -> bool | None:
+    """Whether HEAD is detached - it names a commit, not a branch; None when undeterminable.
+
+    Git answers that HEAD is no symbolic ref at all only when it is detached; a
+    branch that has no commit yet is still a branch. Any other failure answers
+    neither way.
+    """
+    result = run_git(repo, "symbolic-ref", "--quiet", "HEAD", check=False)
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    return None
+
+
 def head_commit(repo: Path) -> str | None:
     result = run_git(repo, "rev-parse", "--verify", "--quiet", "HEAD", check=False)
     if not result.ok:

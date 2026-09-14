@@ -379,6 +379,15 @@ commit失敗 / push失敗時はdomain writeを再実行せず、同じpending mu
 
 commitは、commit message・commitするpaths・記録時のHEAD（base）と、記録時にHEADが指していたbranchの完全なref名（`refs/heads/<name>`）をeffectとして記録してから作る。detached HEADで記録したcommitはbranchを持たない。
 
+記録したcommitを未適用として扱うには、HEADとbaseの関係だけでなく、recordのbranchと現在HEADが指すbranchの整合も示す必要がある。commitを記録した後・作る前に中断したmutation（commit自体の失敗を含む）のresumeで、HEADがまだbaseであることだけでは未適用としない。次を示せる時だけ未適用として、記録どおりのcommitを作る。
+
+```text
+recordがbranchを持つ:     現在HEADが指すbranchの完全なref名が、recordのbranchと一致する
+recordがbranchを持たない: HEADがdetachedであることをGitが示す
+```
+
+HEADがbaseのままでも、同じcommitを指す別branchへのcheckout、branch名の変更、branchを持つrecordでのdetached HEAD（branchを必要とするoperationは従来どおり入口の `detached_head` で先に停止する）、branchを持たないrecordでのbranchの上での再実行、recordのbranchが完全なbranch名でない場合、Gitが判定できない場合は、期待値不一致として `reconcile required` で停止し、commitを作らない。別branchに作ったcommitは記録したbranchにもremoteにも届かないのに、recordのpush（記録時のbranch同士のrefspec）はdry-runで `=` を返して反映済みとなり、operationが成功扱いになるためである。記録したbranchへ戻れば、同じ再実行がGit段階から進む。branchを持たないrecordにはbranchを記録する前のimplementationのrecordも含まれるが、どのbranchで記録したかを推測しない。
+
 commitを記録した後・作る前に中断したmutation（commit自体の失敗を含む）のresumeでは、その間に独立なoperationや人のcommitでHEADがbaseから進んだことだけを期待値不一致としない。記録したcommitが作られておらず（base以降にそのcommitが無く、pathsにcommitする変更が残っている）、次をすべて示せる場合だけ未適用として扱い、現在のHEADの上に記録どおりのcommitを作る。
 
 ```text
