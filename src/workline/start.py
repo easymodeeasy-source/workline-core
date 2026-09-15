@@ -988,7 +988,7 @@ def _cancel_decision(work_id: str, prefix: str, outcome: Cancel, removals: list[
     replan the uninterrupted cancel carries on with. The decision is therefore
     recorded only when the record reads every part of it back as the same value
     of the same kind. A part it cannot keep - a float, a tuple, an object, a
-    nested list, text holding a line separator the record's lines break on -
+    nested list, text holding a lone surrogate UTF-8 cannot write -
     refuses the cancel here, before anything of it is recorded, rather than
     leaving a cancel that could be finished only if nothing interrupted it. So
     does a decision a resume would not read as one (:func:`_decision_problem`),

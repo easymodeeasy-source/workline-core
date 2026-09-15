@@ -5,6 +5,11 @@ subset is sufficient: block mappings, block sequences, empty flow ``[]`` /
 ``{}``, and scalars (``str`` / ``int`` / ``bool`` / ``null``). Strings that
 could be misread are emitted double-quoted with JSON escapes, which is valid
 YAML. Anything outside the subset raises ``YamlishError`` (fail closed).
+
+A string may hold any text, U+0085 / U+2028 / U+2029 included. Those three
+end a line for ``str.splitlines`` but not for JSON, so the writer escapes them
+and the reader never ends a line at one inside a double-quoted scalar
+(:data:`LINE_SEPARATORS`).
 """
 
 from __future__ import annotations
@@ -23,8 +28,28 @@ _RESERVED = {
 }
 
 
+#: The line boundaries ``str.splitlines`` knows that JSON leaves as they are when it keeps non-ASCII text:
+#: NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR. Inside a string they are text, never where a line ends.
+LINE_SEPARATORS = ("\x85", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}")
+
+
 class YamlishError(ValueError):
     """Raised when text is outside the supported YAML subset."""
+
+
+def escape_line_separators(json_text: str) -> str:
+    """``json_text`` with every U+0085 / U+2028 / U+2029 written as its JSON escape.
+
+    ``json.dumps(..., ensure_ascii=False)`` keeps them raw, which is valid JSON,
+    but a reader that takes lines as ``str.splitlines`` does ends a line inside
+    the string there. Escaped, a string stays on the one physical line it is
+    written on and reads back as the same text. JSON allows them nowhere
+    outside a string, so replacing them anywhere in JSON text changes strings
+    only; every other character is written exactly as before.
+    """
+    for separator in LINE_SEPARATORS:
+        json_text = json_text.replace(separator, "\\u%04x" % ord(separator))
+    return json_text
 
 
 # --------------------------------------------------------------------------- dump
@@ -53,7 +78,7 @@ def _scalar(value: Any) -> str:
         and not value.endswith(":")
     ):
         return value
-    return json.dumps(value, ensure_ascii=False)
+    return escape_line_separators(json.dumps(value, ensure_ascii=False))
 
 
 def _dump_lines(value: Any, depth: int, out: list[str]) -> None:
@@ -151,24 +176,30 @@ def _parse_scalar(text: str) -> Any:
     return text
 
 
+def _quoted_end(text: str) -> int | None:
+    """Where the double-quoted string ``text`` starts with ends (just past its closing quote); None while open."""
+    end = 1
+    while end < len(text):
+        if text[end] == "\\":
+            end += 2
+            continue
+        if text[end] == '"':
+            return end + 1
+        end += 1
+    return None
+
+
 def _split_key(text: str) -> tuple[str, str] | None:
     """Split ``key: value`` / ``key:``; return None when not a mapping entry."""
     if text.startswith('"'):
-        end = 1
-        while end < len(text):
-            if text[end] == "\\":
-                end += 2
-                continue
-            if text[end] == '"':
-                break
-            end += 1
-        else:
+        end = _quoted_end(text)
+        if end is None:
             return None
         try:
-            key = json.loads(text[: end + 1])
+            key = json.loads(text[:end])
         except json.JSONDecodeError:
             return None
-        rest = text[end + 1 :]
+        rest = text[end:]
         if rest == ":":
             return key, ""
         if rest.startswith(": "):
@@ -186,6 +217,64 @@ def _split_key(text: str) -> tuple[str, str] | None:
         index += 1
 
 
+def _inside_quoted_scalar(line: str) -> bool:
+    """Whether ``line`` ends inside a double-quoted scalar, in the form the writer puts one.
+
+    That is a string opening a key or a sequence item right after the
+    indentation or the ``- ``, or opening a value right after its key's ``: ``
+    - where :func:`_prepare`, :func:`_split_key` and :func:`_parse_scalar`
+    read a double-quoted scalar whatever follows it on the line. A comment, a
+    plain scalar or key that merely holds a quote, a quote after a string has
+    ended, and a quote only some other whitespace leads to are not one.
+    """
+    text = line.lstrip(" ")
+    if text.lstrip().startswith("#"):
+        return False
+    if text.startswith("- "):
+        text = text[2:]
+    if text.startswith('"'):
+        end = _quoted_end(text)
+        if end is None:
+            return True
+        if not text[end:].startswith(": "):
+            return False
+        text = text[end + 2:]
+    else:
+        entry = _split_key(text)
+        if entry is None:
+            return False
+        text = entry[1]
+    return text.startswith('"') and _quoted_end(text) is None
+
+
+def _lines(text: str) -> list[str]:
+    """The physical lines of ``text``: ``str.splitlines``, except inside a double-quoted scalar.
+
+    A U+0085 / U+2028 / U+2029 inside a string is text. The writer escapes it
+    (:func:`escape_line_separators`); a file written before it did holds it
+    raw, inside the double-quoted scalar it belongs to, and there it does not
+    end the line. Every other line boundary, and one of these three anywhere
+    else, ends the line exactly as ``str.splitlines`` ends it, so text that
+    holds no such string is split as it always was.
+    """
+    if not any(separator in text for separator in LINE_SEPARATORS):
+        return text.splitlines()
+    lines: list[str] = []
+    current = ""
+    for piece in text.splitlines(keepends=True):
+        content = piece.splitlines()[0]
+        current += content
+        ending = piece[len(content):]
+        if ending in LINE_SEPARATORS and _inside_quoted_scalar(current):
+            current += ending
+            continue
+        lines.append(current)
+        current = ""
+    if current:
+        lines.append(current)
+    return lines
+
+
 class _Line:
     __slots__ = ("indent", "text", "number")
 
@@ -197,7 +286,7 @@ class _Line:
 
 def _prepare(text: str) -> list[_Line]:
     lines: list[_Line] = []
-    for number, raw in enumerate(text.splitlines(), start=1):
+    for number, raw in enumerate(_lines(text), start=1):
         leading = raw[: len(raw) - len(raw.lstrip())]
         if "\t" in leading:
             raise YamlishError(f"line {number}: tabs are not allowed for indentation")

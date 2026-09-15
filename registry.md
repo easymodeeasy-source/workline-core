@@ -317,6 +317,8 @@ Roadmap / Phase / Work本体
 
 Domain Skillは意味を決め、Mutation Controllerは決定済みpayloadをvalidationして適用する。Mutation Controllerは意味判断しない。
 
+正本とrecovery recordのstructured text（YAML subsetのfile、`events/events.jsonl`）では、文字列fieldの中のUnicode line separatorを物理的な行・recordの区切りとして扱わない（`events/events.jsonl` の1件はLFで終わる）。U+0085 / U+2028 / U+2029は合法なtextであり、入力として拒否しない。writerはこれらを文字列の中でJSONのUnicode escapeとして書き、1つの値・1件のrecordを1物理行に収める。readerは、それ以前に文字列の中へraw文字のまま書かれた既存のrecordとfileも読む。そのようなfileは通常のoperationで次に保存されるときにescape表現になり、修復のためだけに書き換えない。
+
 ### Multi-write mutation
 
 複数正本を変更するoperationは stable `mutation_id` を持つ。概念:

@@ -265,7 +265,7 @@ def render_relations(relations: list[Relation]) -> str:
 
 
 def render_event_line(event: Event) -> str:
-    return json.dumps(event.to_record(), ensure_ascii=False, separators=(",", ":"))
+    return yamlish.escape_line_separators(json.dumps(event.to_record(), ensure_ascii=False, separators=(",", ":")))
 
 
 def project_yaml_text(data: dict[str, Any], pin: PushPin | None) -> str:
@@ -498,7 +498,9 @@ class ProjectStore:
             text = self.events_jsonl.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise ValidationError(f"events unreadable: {exc}", code="events_invalid") from exc
-        for number, line in enumerate(text.splitlines(), start=1):
+        # A record ends at LF, the one line end the log is written with (``read_text`` has already turned CRLF
+        # and CR into LF). U+0085 / U+2028 / U+2029 inside a JSON string are text, not the end of a record.
+        for number, line in enumerate(text.split("\n"), start=1):
             if not line.strip():
                 continue
             try:

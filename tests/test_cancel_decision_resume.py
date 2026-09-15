@@ -411,6 +411,9 @@ class DecisionValueTests(CancelCase):
             "nothing": None,
             "a list": ["one", "two"],
             "a mapping": {"why": "not needed", "count": 2},
+            "text holding a next line (U+0085)": "not\x85needed",
+            "text holding a line separator (U+2028)": "not\N{LINE SEPARATOR}needed",
+            "text holding a paragraph separator (U+2029)": "not\N{PARAGRAPH SEPARATOR}needed",
         }
         works = [create_standalone_work(self.store, WorkSpec(f"S{index}", f"s{index}")).work_id for index in range(len(reasons))]
         for work, (label, reason) in zip(works, reasons.items()):
@@ -431,7 +434,7 @@ class DecisionValueTests(CancelCase):
             "a fraction": (Replan(), 1.5, "cancel.reason (float)"),
             "a tuple": (Replan(), ("not", "needed"), "cancel.reason (tuple)"),
             "an object": (Replan(), object(), "cancel.reason (object)"),
-            "a line separator": (Replan(), "not needed", "cancel.reason (str)"),
+            "text holding a lone surrogate": (Replan(), "not" + chr(0xD800) + "needed", "cancel.reason (str)"),
             "a list in a list": (Replan(), [["not", "needed"]], "cancel.reason (list)"),
             "a key that reads back as text": (Replan(), [{1: "not needed"}], "cancel.reason[0] (dict)"),
             "a new Work's key that is a tuple": (

@@ -1345,7 +1345,7 @@ class MutationController:
             text = _normalize(self.store.events_text())
             if text and not text.endswith("\n"):
                 text += "\n"
-            text += json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":")) + "\n"
+            text += yamlish.escape_line_separators(json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":"))) + "\n"
             durable_write_text(self.store.events_jsonl, text, tmp_dir=self.store.tmp)
             return
         if kind == "git_commit":
