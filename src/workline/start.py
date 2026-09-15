@@ -16,18 +16,27 @@ the structural rules the live specification assigns to it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 import stat
-from typing import Callable
+from typing import Any, Callable
 
-from . import gitcmd, gitops
-from .create import RelatedSpec, RelationSpec, WorkSpec, register_works
+from . import gitcmd, gitops, yamlish
+from .create import RelatedSpec, RelationSpec, WorkSpec, _registration_effects, register_works, resolve_ref
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
-from .mutation import Mutation, MutationController, WriteScope, abandon_on_stop
+from .ids import is_valid_id
+from .mutation import FILE_EFFECT_KINDS, Effect, Mutation, MutationController, WriteScope, abandon_on_stop
 from .oplock import project_operation
 from .ops import (
     Replan,
+    _as_recorded,
+    _own_effects_free_view,
+    _owned_paths,
     _plan_exclusion_request,
+    _ProvenRecord,
+    _recorded_progress,
+    _recorded_stages,
+    _refuse_before_replay,
     _resume_plan_exclusion,
     apply_replan,
     event_effects,
@@ -649,11 +658,63 @@ class _Session:
             add_works={work_ids[k]: spec for k, spec in outcome.replan.new_works.items()},
         )
         validate_projection(projection, "cancel replan")
-        self._lifecycle(work, [t for _, t in events])
-        apply_replan(self.mutation, prefix, outcome.replan, removals, additions, work_ids)
+        decision = _cancel_decision(work.id, prefix, outcome, removals)
+        self._record_cancel(work, [t for _, t in events], decision)
+        return self._carry_cancel(work, prefix, outcome.replan, removals, additions, work_ids, outcome.reason)
+
+    def _record_cancel(self, work: Entity, types: list[str], decision: dict[str, Any]) -> None:
+        """Record the cancel's lifecycle events together with the decision that made them, then apply them.
+
+        The decision rides on the ``work_cancelled`` effect, so it is durable in
+        exactly the save that records the terminal events - the save in which the
+        Mutation Controller also records the branch they are decided on
+        (``rules/git``: Commit / push). No record holds the events without their
+        decision, and once they exist nothing a resume needs is left with the
+        executor.
+        """
+        stage = stage_name(self.mutation, f"{work.id}:lifecycle")
+        effects = event_effects(self.mutation, stage, work.id, types)
+        effects[-1] = Effect(effects[-1].kind, {**effects[-1].payload, _CANCEL_DECISION: decision})
+        self.mutation.add_effects(stage, effects)
+        self.mutation.apply()
+
+    def _carry_cancel(
+        self,
+        work: Entity,
+        prefix: str,
+        replan: Replan,
+        removals: list[Relation],
+        additions: list[Relation],
+        work_ids: dict[str, str],
+        reason: object,
+    ) -> StartResult:
+        """Everything of a cancel after its lifecycle events: the replan, the structural validation, the commit."""
+        apply_replan(self.mutation, prefix, replan, removals, additions, work_ids)
         _structure_or_stop(self.store, "cancel structural validation")
         self._commit("commit", f"chore(workline): cancel {work.display}", [])
-        return StartResult("cancelled", work.id, self.mutation.id, tuple(self.completed), work.phase_id, outcome.reason, gitcmd.head_commit(self.store.root))
+        return StartResult("cancelled", work.id, self.mutation.id, tuple(self.completed), work.phase_id, reason, gitcmd.head_commit(self.store.root))
+
+    def finish_cancel(self, cancel: "_ProvenCancel") -> StartResult:
+        """Carry a cancel this mutation recorded through what is left of it, deciding none of it again.
+
+        The record was shown to hold the cancel's decision and only effects that
+        decision makes, and replaying it applied every effect already recorded
+        (:func:`_cancel_to_finish`). The executor is not asked; the prefix, the
+        IDs, the removals and a recorded registration come from the record; and
+        the rest is recorded from the decision exactly as the uninterrupted cancel
+        records it. A commit recorded already is done once replayed. The outcome
+        is the cancel's own: ``cancelled``, with the reason it was decided for,
+        and nothing is chosen or run after it.
+        """
+        work = ProjectView.load(self.store).works[cancel.work_id]
+        if cancel.committed:
+            return StartResult(
+                "cancelled", work.id, self.mutation.id, tuple(self.completed), work.phase_id, cancel.reason,
+                gitcmd.head_commit(self.store.root),
+            )
+        return self._carry_cancel(
+            work, cancel.prefix, cancel.replan, cancel.removals, cancel.additions, cancel.work_ids, cancel.reason
+        )
 
     # derived / fix Works -----------------------------------------------------
     def _derive(self, view: ProjectView, work: Entity, outcome: Derive) -> dict[str, str]:
@@ -793,15 +854,16 @@ def _completion_to_finish(mutation: Mutation, work_id: str, mode: str) -> str | 
       mode it is the invoked Work, and HEAD's event log does not hold those
       events yet - that Work: only its Git stage is left, and it is done
       before anything else;
-    * an unfinished cancel of the invoked Work in single-work mode - ``None``:
-      running a Work its own cancel made terminal is refused as it always was,
-      which neither reports success nor closes the mutation;
-    * anything else unfinished - a cancel met by an outer START, whose decided
-      replan the record does not hold, more than one unfinished terminal Work,
-      a completion recorded in a form this START does not write, or completion
+    * anything else unfinished - more than one unfinished terminal Work, a
+      completion recorded in a form this START does not write, or completion
       events HEAD's event log already holds through a commit this mutation did
       not record, which leaves its own finalization commit and push unshown -
       STOP, with the record left exactly as it is.
+
+    A cancel is never finished here. A record holding one is read before the
+    mutation is even opened (:func:`_cancel_to_finish`): the cancel is carried on
+    from its recorded decision, or START stops there. An unfinished cancel that
+    reaches this point was not seen there, and is not taken on trust.
     """
     stages: list[str] = []
     for effect in mutation.effects:
@@ -844,11 +906,9 @@ def _completion_to_finish(mutation: Mutation, work_id: str, mode: str) -> str | 
                 "pending, exactly as it is: reconcile required"
             )
         return subject
-    if mode == "single-work" and subject == work_id:
-        return None
     raise ReconcileRequired(
-        f"START mutation {mutation.id} recorded {event_type} for {subject} without the commit that finalizes it. "
-        "What that decision replanned is not in the record, so this START can neither finish it nor go on past it "
+        f"START mutation {mutation.id} recorded {event_type} for {subject} without the commit that finalizes it, "
+        "and not as a cancel this START has shown from its record, so it can neither finish it nor go on past it "
         "to report another outcome; it is left pending, exactly as it is: reconcile required"
     )
 
@@ -884,6 +944,616 @@ def _in_head_event_log(store: ProjectStore, event_ids: list[str]) -> bool:
     return found.returncode != 1
 
 
+# --------------------------------------------------------------------------- cancel decision
+#
+# A cancel is decided by the executor, not by START's caller: which new Works
+# replace the cancelled one, which relations are added and removed, and why, all
+# come back as its outcome. START records that decision on the ``work_cancelled``
+# effect, in the save that records the cancel's lifecycle events, and a retry of
+# the same START carries the cancel on from the record alone - never by asking
+# the executor again, and never by reading the decision back out of the Project.
+# Where the retry may replay and record is not decided here: the Mutation
+# Controller allows it only on the branch the cancel was decided on, and the
+# recorded commit's own branch rules from its Git stage on (``rules/git``:
+# Commit / push).
+
+#: The key of the ``work_cancelled`` effect's payload under which a cancel's decision is recorded.
+_CANCEL_DECISION = "cancel"
+_CANCEL_DECISION_VERSION = 1
+_DECISION_FIELDS = frozenset({"version", "work_id", "prefix", "reason", "new_works", "add_relations", "remove_relations"})
+_NEW_WORK_FIELDS = frozenset({
+    "key", "name", "desired_state", "phase_id", "roadmap_id", "work_kind", "confirmation_target", "related",
+    "derivation_detail",
+})
+_RELATED_FIELDS = frozenset({"type", "to", "condition"})
+_ADDITION_FIELDS = frozenset({"type", "from", "to"})
+_EVENT_FIELDS = frozenset({"id", "type", "entity", "at"})
+#: The lifecycle events a cancel records, in the order it records them.
+_CANCEL_EVENTS = (["work_cancelled"], ["work_target_removed", "work_cancelled"])
+
+
+def _cancel_decision(work_id: str, prefix: str, outcome: Cancel, removals: list[Relation]) -> dict[str, Any]:
+    """What a START cancel decided, exactly as its recovery record reads it back - or the refusal.
+
+    Everything a resume needs that no effect recorded with the cancel's events
+    holds: the Work, the prefix its replan stages are recorded under, the reason,
+    the new Works and the relations to add exactly as the executor gave them
+    (declared order, endpoints as written - a key and the ID it is reserved as
+    are different decisions), and every relation to remove as the Project held
+    it when the cancel was decided. The lifecycle events are not repeated - the
+    decision rides on them - and neither are the IDs reserved for the replan,
+    which the record keeps under keys this decision determines.
+
+    Nothing is normalised or translated, because a resume rebuilds from it the
+    replan the uninterrupted cancel carries on with. The decision is therefore
+    recorded only when the record reads every part of it back as the same value
+    of the same kind. A part it cannot keep - a float, a tuple, an object, a
+    nested list, text holding a line separator the record's lines break on -
+    refuses the cancel here, before anything of it is recorded, rather than
+    leaving a cancel that could be finished only if nothing interrupted it. So
+    does a decision a resume would not read as one (:func:`_decision_problem`),
+    such as a new Work whose name is not text, which the registration would
+    refuse only after the cancel's events were applied.
+    """
+    replan = outcome.replan
+    try:
+        decision = {
+            "version": _CANCEL_DECISION_VERSION,
+            "work_id": work_id,
+            "prefix": prefix,
+            "reason": outcome.reason,
+            "new_works": [
+                {
+                    "key": key,
+                    "name": spec.name,
+                    "desired_state": spec.desired_state,
+                    "phase_id": spec.phase_id,
+                    "roadmap_id": spec.roadmap_id,
+                    "work_kind": spec.work_kind,
+                    "confirmation_target": spec.confirmation_target,
+                    "related": [{"type": r.type, "to": r.to, "condition": r.condition} for r in spec.related],
+                    "derivation_detail": spec.derivation_detail,
+                }
+                for key, spec in replan.new_works.items()
+            ],
+            "add_relations": [{"type": r.type, "from": r.from_ref, "to": r.to_ref} for r in replan.add_relations],
+            "remove_relations": [relation.to_record() for relation in removals],
+        }
+    except (AttributeError, TypeError) as exc:
+        raise ValidationError(
+            f"cancel decision: the replan is not one a cancel decision can record ({exc}); a cancel is recorded only "
+            "together with everything it decided, so nothing of it is recorded"
+        ) from exc
+    kept = _read_back(decision)
+    if kept is _UNKEPT:
+        where, value = _unkept_part(decision, "cancel")
+        raise ValidationError(
+            f"cancel decision: {where} ({type(value).__name__}) cannot be kept exactly by the recovery record; a "
+            "cancel is recorded only together with everything it decided, so nothing of it is recorded"
+        )
+    # Only a decision a resume can read back as one is recorded: what the registration would refuse anyway is refused
+    # here, before the cancel's events, instead of after them.
+    problem = _decision_problem(kept)
+    if problem is not None:
+        raise ValidationError(
+            f"cancel decision: {problem}; a cancel is recorded only together with everything it decided, so nothing "
+            "of it is recorded"
+        )
+    return kept
+
+
+def _canonical(value: object) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+_UNKEPT = object()
+
+
+def _read_back(value: object) -> object:
+    """``value`` as a recovery record reads it back once written, or :data:`_UNKEPT` when that is not exactly ``value``.
+
+    Written and read the way the record itself is (``yamlish``, UTF-8), and
+    compared with the kind of every part, keys included (:func:`_typed`).
+    """
+    try:
+        text = yamlish.dump({"value": value})
+        text.encode("utf-8")
+        kept = yamlish.load(text)["value"]
+        if _typed(kept) == _typed(value):
+            return kept
+    except (yamlish.YamlishError, TypeError, ValueError, KeyError, RecursionError):
+        pass
+    return _UNKEPT
+
+
+def _typed(value: object) -> object:
+    """``value`` spelled out with the kind of each part, so that ``True`` is not ``1``, nor ``1`` the key ``"1"``."""
+    if value is None or isinstance(value, bool):
+        return [type(value).__name__, value]
+    if isinstance(value, int):
+        return ["int", int(value)]
+    if isinstance(value, str):
+        return ["str", str(value)]
+    if isinstance(value, dict):
+        return ["dict", [[_typed(key), _typed(item)] for key, item in value.items()]]
+    if isinstance(value, list):
+        return ["list", [_typed(item) for item in value]]
+    raise TypeError(f"{type(value).__name__} is not a value a recovery record keeps")
+
+
+def _unkept_part(value: object, where: str) -> tuple[str, object]:
+    """The innermost part of ``value`` a recovery record does not keep exactly, and where it is."""
+    if isinstance(value, dict):
+        parts = [(f"{where}.{key}", item) for key, item in value.items()]
+    elif isinstance(value, list):
+        parts = [(f"{where}[{index}]", item) for index, item in enumerate(value)]
+    else:
+        parts = []
+    for part, item in parts:
+        if _read_back(item) is _UNKEPT:
+            return _unkept_part(item, part)
+    return where, value
+
+
+@dataclass(frozen=True)
+class _ProvenCancel:
+    """An interrupted cancel of exactly this START, shown from its record, and what carrying it on still needs."""
+
+    mutation_id: str
+    work_id: str
+    prefix: str
+    reason: object
+    replan: Replan
+    work_ids: dict[str, str]
+    additions: list[Relation]
+    removals: list[Relation]
+    committed: bool  # the commit carrying the cancel is recorded: replaying the record finishes it
+    view: ProjectView  # the Project without the cancel's own applied effects: what the decision was made on
+
+
+@dataclass(frozen=True)
+class _CancelRecord:
+    """The stages of a START record and its one cancel, read with nothing assumed."""
+
+    effects: list[dict[str, Any]]
+    stages: list[str]
+    by_stage: dict[str, list[dict[str, Any]]]
+    stage: str
+    position: int
+    work_id: str
+    events: list[dict[str, Any]]
+    reserved: dict[str, Any]
+    decision: object
+
+    @property
+    def types(self) -> list[str]:
+        return [event["type"] for event in self.events]
+
+
+def _cancel_to_finish(store: ProjectStore, entry: Entity, mode: str) -> _ProvenCancel | None:
+    """The cancel an interrupted run of exactly this START recorded and a retry carries on, or ``None``.
+
+    Read before anything is judged on the current Project, before the mutation
+    is opened and before any recorded effect is replayed, because a cancel that
+    stopped part-way leaves a Project this START would otherwise refuse or
+    misread: its own ``work_cancelled`` makes the Work terminal, a relation its
+    replan was about to remove can still point at the cancelled Work, and a
+    commit already recorded would be replayed before anything else. Every step
+    reads only, and whatever refuses leaves the record, the Project and Git
+    exactly as they are:
+
+    * no unfinished START of this Work and mode holds a cancel - ``None``, and
+      START goes on as it always did (a recovery area that cannot be read proves
+      nothing here and is reported where it always was, when the mutation is
+      opened);
+    * several unfinished STARTs of this Work and mode - ``reconcile required``;
+    * a cancel recorded without its decision, as every cancel was before START
+      recorded one - ``reconcile required``, whether or not its commit is
+      recorded too: what it decided is never read back out of the Project, the
+      events, the commit or the reservations;
+    * :func:`_prove_cancel` - the decision is in the form START records it, it
+      cancels this START's Work under its own prefix and reservations, every
+      stage recorded after it is exactly what it makes, and what was applied is
+      consistent with the order it was recorded in;
+    * :func:`_decide_cancel` - the decision judged again, as START judged it, on
+      the Project without the cancel's own applied effects;
+    * ``ops._refuse_before_replay`` - what is still to come refused the way
+      recording and applying it would refuse, before any of it runs.
+    """
+    invocation = {"operation": OWNER, "work_id": entry.id, "mode": mode}
+    try:
+        records = [
+            record for record in MutationController(store).list_pending()
+            if record["owner"] == OWNER and record["invocation"] == invocation
+        ]
+    except ReconcileRequired:
+        return None
+    if not any(_cancel_event(effect) is not None for record in records for effect in _effects_of(record)):
+        return None
+    if len(records) > 1:
+        raise ReconcileRequired(
+            f"{len(records)} unfinished START mutations of {entry.id} ({mode}) "
+            + ", ".join(sorted(record["mutation_id"] for record in records))
+            + ", and one of them recorded a cancel; START carries on exactly one, and they are left as they are: "
+            "reconcile required"
+        )
+    (record,) = records
+    refuse = _cancel_refusal(record)
+    read = _read_cancel_record(record, refuse)
+    proven, cancel = _prove_cancel(store, record, read, entry, mode, refuse)
+    view = _decide_cancel(proven, read, cancel, refuse)
+    own = {read.stage, *_replan_stages(cancel.prefix, cancel.replan)}
+    _refuse_before_replay(
+        store, OWNER, record, proven, cancel.replan, cancel.removals,
+        prefix=cancel.prefix,
+        context="cancel replan",
+        committing=[effect for effect in proven.file_effects if effect["stage"] in own],
+    )
+    return _ProvenCancel(
+        record["mutation_id"], read.work_id, cancel.prefix, read.decision["reason"], cancel.replan, cancel.work_ids,
+        cancel.additions, cancel.removals, cancel.committed, view,
+    )
+
+
+def _effects_of(record: dict[str, Any]) -> list[Any]:
+    effects = record.get("effects")
+    return effects if isinstance(effects, list) else []
+
+
+def _cancel_event(effect: object) -> dict[str, Any] | None:
+    """The ``work_cancelled`` event an effect records, or ``None``."""
+    payload = effect.get("payload") if isinstance(effect, dict) and effect.get("kind") == "append_event" else None
+    event = payload.get("record") if isinstance(payload, dict) else None
+    return event if isinstance(event, dict) and event.get("type") == "work_cancelled" else None
+
+
+def _cancel_refusal(record: dict[str, Any]) -> Callable[[str], ReconcileRequired]:
+    def refuse(reason: str) -> ReconcileRequired:
+        return ReconcileRequired(
+            f"START mutation {record['mutation_id']} recorded a cancel, but its record holds {reason}; nothing shows "
+            "that carrying it on does what that cancel decided, and it is left pending, exactly as it is: "
+            "reconcile required"
+        )
+
+    return refuse
+
+
+def _read_cancel_record(record: dict[str, Any], refuse) -> _CancelRecord:
+    """The record's stages and its one cancel stage with the decision on it, when both are in the form START records them."""
+    effects = record.get("effects")
+    if not isinstance(effects, list) or not all(
+        isinstance(effect, dict)
+        and isinstance(effect.get("stage"), str)
+        and isinstance(effect.get("kind"), str)
+        and isinstance(effect.get("payload"), dict)
+        for effect in effects
+    ):
+        raise refuse("effects that cannot be read")
+    stages = _recorded_stages(effects, refuse)
+    cancelled = [effect for effect in effects if _cancel_event(effect) is not None]
+    if len(cancelled) != 1:
+        raise refuse("more than one work_cancelled event; START cancels one Work and then stops")
+    (cancel_effect,) = cancelled
+    stage = cancel_effect["stage"]
+    if _CANCEL_DECISION not in cancel_effect["payload"]:
+        raise ReconcileRequired(
+            f"START mutation {record['mutation_id']} recorded the cancel of {_cancel_event(cancel_effect).get('entity')} "
+            "without the decision that cancel made: it was written before START recorded what a cancel decides, so "
+            "neither its replan nor its outcome can be shown, and nothing stands in for them - not the Project, the "
+            "events, a recorded commit or the IDs it reserved; it is left pending, exactly as it is: reconcile required"
+        )
+    by_stage = {name: [effect for effect in effects if effect["stage"] == name] for name in stages}
+    lifecycle = by_stage[stage]
+    events = [effect["payload"].get("record") for effect in lifecycle]
+    if not all(
+        effect["kind"] == "append_event"
+        and isinstance(event, dict)
+        and set(event) == _EVENT_FIELDS
+        and all(isinstance(event[field], str) and event[field] for field in _EVENT_FIELDS)
+        for effect, event in zip(lifecycle, events)
+    ):
+        raise refuse(f"a cancel stage {stage!r} holding something other than lifecycle events")
+    work_id = events[-1]["entity"]
+    if (
+        [event["type"] for event in events] not in _CANCEL_EVENTS
+        or any(event["entity"] != work_id for event in events)
+        or not is_valid_id(work_id, "work")
+    ):
+        raise refuse(f"a cancel stage {stage!r} holding other events than the cancel of one Work records")
+    position = stages.index(stage)
+    number = len({name for name in stages[:position] if name.startswith(f"{work_id}:lifecycle:")})
+    if stage != f"{work_id}:lifecycle:{number}":
+        raise refuse(f"a cancel stage named {stage!r}, where the cancel of {work_id} records it as its next lifecycle stage")
+    reserved = record.get("reserved_ids")
+    if not isinstance(reserved, dict):
+        raise refuse("reservations that are not a mapping")
+    if any(reserved.get(f"{stage}:event:{index}") != event["id"] for index, event in enumerate(events)):
+        raise refuse("cancel events under IDs the cancel did not reserve for them")
+    if any(set(effect["payload"]) != {"record"} for effect in lifecycle[:-1]) or set(lifecycle[-1]["payload"]) != {
+        "record", _CANCEL_DECISION
+    }:
+        raise refuse("cancel events carrying something other than the decision on the work_cancelled event")
+    return _CancelRecord(
+        effects, stages, by_stage, stage, position, work_id, events, reserved, lifecycle[-1]["payload"][_CANCEL_DECISION]
+    )
+
+
+def _decision_problem(decision: object) -> str | None:
+    """What makes ``decision`` other than a cancel decision START records, or ``None``.
+
+    The form is the one :func:`_cancel_decision` records, and it refuses to
+    record any other: text where registering a Work or a relation needs text,
+    and any value the record keeps where the executor may hand one - a reason,
+    and a new Work's key and the endpoints and confirmation targets that name
+    one.
+    """
+    if not isinstance(decision, dict) or set(decision) != _DECISION_FIELDS:
+        return "fields other than a cancel decision's"
+    if type(decision["version"]) is not int or decision["version"] != _CANCEL_DECISION_VERSION:
+        return f"version {decision['version']!r}, which this START does not read"
+    if not isinstance(decision["work_id"], str) or not isinstance(decision["prefix"], str):
+        return "a Work or a prefix that is not text"
+    new_works, additions, removals = decision["new_works"], decision["add_relations"], decision["remove_relations"]
+    if not isinstance(new_works, list) or not all(_decided_work(work) for work in new_works):
+        return "new Works in another form than a cancel decision records them"
+    keys = [work["key"] for work in new_works]
+    if len(set(keys)) != len(keys) or len({_canonical(key) for key in keys}) != len(keys):
+        return "one new Work key decided twice"
+    if not isinstance(additions, list) or not all(
+        isinstance(addition, dict)
+        and set(addition) == _ADDITION_FIELDS
+        and isinstance(addition["type"], str)
+        and _names_one(addition["from"])
+        and _names_one(addition["to"])
+        for addition in additions
+    ):
+        return "relations to add in another form than a cancel decision records them"
+    if not isinstance(removals, list) or not all(_decided_removal(removal) for removal in removals):
+        return "relations to remove in another form than a cancel decision records them"
+    return None
+
+
+def _names_one(value: object) -> bool:
+    """Whether ``value`` can name a Work - by its ID or by a new Work's key - as a record keeps it."""
+    return value is None or isinstance(value, (str, int))
+
+
+def _decided_work(work: object) -> bool:
+    if not isinstance(work, dict) or set(work) != _NEW_WORK_FIELDS:
+        return False
+    target = work["confirmation_target"]
+    return (
+        _names_one(work["key"])
+        and isinstance(work["name"], str)
+        and isinstance(work["desired_state"], str)
+        and all(work[field] is None or isinstance(work[field], str) for field in ("phase_id", "roadmap_id", "work_kind", "derivation_detail"))
+        and (_names_one(target) or isinstance(target, list) and all(_names_one(item) for item in target))
+        and isinstance(work["related"], list)
+        and all(
+            isinstance(related, dict)
+            and set(related) == _RELATED_FIELDS
+            and isinstance(related["type"], str)
+            and isinstance(related["to"], str)
+            and (related["condition"] is None or isinstance(related["condition"], dict))
+            for related in work["related"]
+        )
+    )
+
+
+def _decided_removal(removal: object) -> bool:
+    return (
+        isinstance(removal, dict)
+        and all(isinstance(removal.get(part), str) and removal[part] for part in ("id", "type", "from", "to"))
+        and is_valid_id(removal["id"], "relation")
+        and removal["type"] != "derived"
+        and Relation.from_record(removal).to_record() == removal
+    )
+
+
+def _decided_replan(decision: dict[str, Any]) -> Replan:
+    """The replan a proven decision records, rebuilt as the executor gave it."""
+    return Replan(
+        remove_relation_ids=tuple(removal["id"] for removal in decision["remove_relations"]),
+        add_relations=tuple(RelationSpec(addition["type"], addition["from"], addition["to"]) for addition in decision["add_relations"]),
+        new_works={
+            work["key"]: WorkSpec(
+                work["name"],
+                work["desired_state"],
+                phase_id=work["phase_id"],
+                roadmap_id=work["roadmap_id"],
+                work_kind=work["work_kind"],
+                confirmation_target=work["confirmation_target"],
+                related=tuple(RelatedSpec(related["type"], related["to"], related["condition"]) for related in work["related"]),
+                derivation_detail=work["derivation_detail"],
+            )
+            for work in decision["new_works"]
+        },
+    )
+
+
+def _replan_stages(prefix: str, replan: Replan) -> list[str]:
+    """The stages a cancel's replan records after its lifecycle stage, in the order it records them (``ops.apply_replan``)."""
+    stages = [f"{prefix}:works"] if replan.new_works else [f"{prefix}:relations"] if replan.add_relations else []
+    if replan.remove_relation_ids:
+        stages.append(f"{prefix}:remove")
+    return stages
+
+
+@dataclass(frozen=True)
+class _DecidedCancel:
+    prefix: str
+    replan: Replan
+    work_ids: dict[str, str]
+    additions: list[Relation]
+    removals: list[Relation]
+    committed: bool
+
+
+def _prove_cancel(
+    store: ProjectStore, record: dict[str, Any], read: _CancelRecord, entry: Entity, mode: str, refuse
+) -> tuple[_ProvenRecord, _DecidedCancel]:
+    """Show the decision, and every effect recorded with and after it, are what that decision makes for this START."""
+    decision = read.decision
+    problem = _decision_problem(decision)
+    if problem is not None:
+        raise refuse(f"a cancel decision with {problem}")
+    work_id, stages, reserved, position = read.work_id, read.stages, read.reserved, read.position
+    if decision["work_id"] != work_id:
+        raise refuse(f"a decision to cancel {decision['work_id']} on the events cancelling {work_id}")
+    current = ProjectView.load(store)
+    work = current.works.get(work_id)
+    if work is None:
+        raise refuse(f"the cancel of {work_id}, which does not resolve")
+    if mode == "single-work" and work_id != entry.id:
+        raise refuse(f"the cancel of {work_id}, where this single-work START runs {entry.id} alone")
+    if work.phase_id != entry.phase_id:
+        raise refuse(f"the cancel of {work_id}, outside the scope this START runs from {entry.id}")
+
+    # stages: the prefix is the one the cancel recorded its replan under, and only what the decision records follows
+    prefix = decision["prefix"]
+    expected_prefix = f"{work_id}:cancel:{len({name for name in stages[:position] if name.startswith(f'{work_id}:cancel:')})}"
+    if prefix != expected_prefix:
+        raise refuse(f"the replan prefix {prefix!r}, where the cancel records its replan under {expected_prefix!r}")
+    replan = _decided_replan(decision)
+    works_stage, relations_stage, remove_stage = f"{prefix}:works", f"{prefix}:relations", f"{prefix}:remove"
+    replanned = _replan_stages(prefix, replan)
+    after = stages[position + 1:]
+    if after[: len(replanned)] != replanned[: len(after)]:
+        raise refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} in that order")
+    committed = len(after) > len(replanned)
+    commit_stage: str | None = None
+    if committed:
+        commit_stage = f"commit:{len({name for name in stages[: position + 1 + len(replanned)] if name.startswith('commit:')})}"
+        if after[len(replanned):] != [commit_stage]:
+            raise refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} and then its commit")
+    for index, name in enumerate(stages[:position]):
+        for effect in read.by_stage[name]:
+            event = effect["payload"].get("record") if effect["kind"] == "append_event" else None
+            if not isinstance(event, dict) or event.get("type") not in WORK_TERMINAL_EVENTS:
+                continue
+            if event.get("type") != "work_completed" or not any(
+                later.startswith(f"{event.get('entity')}:finalize:") for later in stages[index + 1: position]
+            ):
+                raise refuse(f"a terminal lifecycle stage {name!r} no commit finalized before the cancel")
+
+    # reservations: the decision's keys name them, and the IDs are never decided again
+    def reserved_id(key: str, kind: str) -> str:
+        value = reserved.get(key)
+        if not isinstance(value, str) or not is_valid_id(value, kind):
+            raise refuse(f"no {kind} ID reserved under {key!r}")
+        return value
+
+    work_ids = {key: reserved_id(f"{works_stage}:work:{key}", "work") for key in replan.new_works}
+    relation_stage = works_stage if replan.new_works else relations_stage
+    relation_ids = [reserved_id(f"{relation_stage}:rel:{index}", "relation") for index in range(len(replan.add_relations))]
+    used = list(work_ids.values()) + relation_ids + [event["id"] for event in read.events]
+    if len(set(used)) != len(used):
+        raise refuse("one reserved ID used for two things the decision makes")
+    additions = [
+        Relation(relation_ids[index], spec.type, resolve_ref(spec.from_ref, work_ids), resolve_ref(spec.to_ref, work_ids))
+        for index, spec in enumerate(replan.add_relations)
+    ]
+    removals = [Relation.from_record(removal) for removal in decision["remove_relations"]]
+
+    # recorded replan stages: exactly what the decision records, under its reservations
+    if works_stage in read.by_stage:
+        related_ids = {
+            (key, index): reserved_id(f"{works_stage}:related:{key}:{index}", "relation")
+            for key, spec in replan.new_works.items()
+            for index in range(len(spec.related))
+        }
+        derivation_ids = {
+            key: reserved_id(f"{works_stage}:der:{key}", "derivation")
+            for key, spec in replan.new_works.items()
+            if spec.derivation_detail is not None
+        }
+        # The Works the Project held when the stage was recorded: while this mutation is pending, its new Works are the
+        # only ones registered since.
+        base_number = len(current.works) - sum(1 for identifier in work_ids.values() if identifier in current.works)
+        try:
+            expected = _registration_effects(replan.new_works, work_ids, additions, related_ids, derivation_ids, base_number)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise refuse(f"new Works the registration cannot write ({exc})") from exc
+        if _as_recorded(read.by_stage[works_stage]) != _as_recorded(expected):
+            raise refuse(f"a {works_stage} stage other than the registration its decision makes")
+    if relations_stage in read.by_stage:
+        if _as_recorded(read.by_stage[relations_stage]) != _as_recorded(Effect.add_relation("roadmap", r) for r in additions):
+            raise refuse(f"a {relations_stage} stage other than the relations its decision adds")
+    if remove_stage in read.by_stage:
+        if _as_recorded(read.by_stage[remove_stage]) != _as_recorded(Effect.remove_relation("roadmap", r) for r in removals):
+            raise refuse(f"a {remove_stage} stage other than the removals its decision makes")
+    file_effects = [effect for effect in read.effects if effect["kind"] in FILE_EFFECT_KINDS]
+    finalize = read.by_stage[commit_stage] if committed else None
+    if finalize is not None:
+        try:
+            owned = set(_owned_paths(file_effects))
+        except (KeyError, TypeError) as exc:
+            raise refuse(f"file effects that cannot be read ({exc})") from exc
+        commit = finalize[0]["payload"]
+        paths = commit.get("paths")
+        if (
+            [effect["kind"] for effect in finalize] not in (["git_commit"], ["git_commit", "git_push"])
+            or commit.get("message") != f"chore(workline): cancel {work.display}"
+            or not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) for path in paths)
+            or not set(paths) <= owned
+        ):
+            raise refuse(f"a {commit_stage} stage other than the commit carrying the cancel")
+
+    # progress: what was applied is what the record says was done first, and only its last stage can be part-way
+    applied, unapplied = _recorded_progress(store, file_effects, stages[-1], committed, refuse)
+    if not committed and _in_head_event_log(store, [event["id"] for event in read.events]):
+        raise ReconcileRequired(
+            f"START mutation {record['mutation_id']} recorded the cancel of {work_id}, but a commit it did not record "
+            "already holds those events, so its own commit and push cannot be shown; it is left pending, exactly as "
+            "it is: reconcile required"
+        )
+    proven = _ProvenRecord(
+        dict(reserved), read.effects, read.by_stage, current, work_ids, additions,
+        removals if remove_stage in read.by_stage else None, finalize, file_effects, applied, unapplied,
+    )
+    return proven, _DecidedCancel(prefix, replan, work_ids, additions, removals, committed)
+
+
+def _decide_cancel(proven: _ProvenRecord, read: _CancelRecord, cancel: _DecidedCancel, refuse) -> ProjectView:
+    """The decision judged again as START judged it, on the Project without the cancel's own applied effects.
+
+    START's precheck, the Work the cancel found, the relations it removes and
+    the owner projection of the whole replan read that Project - the one the
+    decision was made on - so the cancel's own events, Works, additions and
+    removals are neither held against it nor counted twice. What other stages of
+    the same START applied before the cancel stays: the cancel was decided on it.
+    """
+    own = {read.stage, *_replan_stages(cancel.prefix, cancel.replan)}
+    view = _own_effects_free_view(proven.current, [effect for effect in proven.applied if effect["stage"] in own])
+    work_id, types = read.work_id, read.types
+    state = view.work_state(work_id)
+    if state.state != IN_PROGRESS or state.has_target != ("work_target_removed" in types):
+        raise refuse(
+            f"a cancel of {work_id} as it never stood: without the cancel it is {state.state} "
+            f"{'with' if state.has_target else 'without'} a target"
+        )
+    problems = validate_structure(view)
+    if problems:
+        raise ValidationError(f"start precheck: {problems_text(problems)}", code="structure_invalid")
+    standing = {relation.id: relation for relation in view.roadmap_relations}
+    for removal in cancel.removals:
+        if removal.id not in standing or standing[removal.id].to_record() != removal.to_record():
+            raise refuse(f"relation {removal.id} to remove, which the Project no longer holds as the cancel found it")
+    validate_projection(
+        projected_view(
+            view,
+            add_events=[(work_id, event_type) for event_type in types],
+            remove_relation_ids=tuple(relation.id for relation in cancel.removals),
+            add_relations=cancel.additions,
+            add_works={cancel.work_ids[key]: spec for key, spec in cancel.replan.new_works.items()},
+        ),
+        "cancel replan",
+    )
+    return view
+
+
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
@@ -897,7 +1567,10 @@ def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> S
 
 def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     work = store.read_entity("work", work_id)  # stable resolve; no fallback
-    view = _structure_or_stop(store, "start precheck")
+    # A cancel an interrupted run of this START recorded is answered from its record first: the current Project
+    # shows that cancel part-way, and is judged as it stood when the cancel was decided.
+    cancel = _cancel_to_finish(store, work, mode)
+    view = cancel.view if cancel is not None else _structure_or_stop(store, "start precheck")
     gitops.ensure_git_ready(store.root)
     # Before the mutation exists: an unpinned or drifted push destination STOPs
     # here, with no intent record, no domain write and no network contact.
@@ -909,9 +1582,14 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
     invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
     mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     with abandon_on_stop(mutation):
+        if cancel is not None and mutation.id != cancel.mutation_id:
+            raise ReconcileRequired(
+                f"START resumed mutation {mutation.id}, not {cancel.mutation_id} whose cancel it had shown; both are "
+                "left as they are: reconcile required"
+            )
         # A terminal lifecycle this mutation recorded without its finalization is
         # answered from the record before anything is replayed or chosen.
-        finishing = _completion_to_finish(mutation, work_id, mode) if mutation.resumed else None
+        finishing = _completion_to_finish(mutation, work_id, mode) if mutation.resumed and cancel is None else None
         gitops.record_preexisting_dirty(mutation, store.root)
         mutation.apply()  # resume: replay every recorded effect before continuing
         state = view.work_state(work_id)
@@ -923,7 +1601,10 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         current: Entity | None = work
         result: StartResult
         just_completed: str | None = None
-        if finishing is not None:
+        if cancel is not None:
+            # The cancel ends this START as it would have uninterrupted: no other Work is chosen or run after it.
+            result = session.finish_cancel(cancel)
+        elif finishing is not None:
             result = session.finish_completion(finishing)
         elif mutation.resumed:
             ambiguous: str | None = None

@@ -449,7 +449,8 @@ class StartTests(CommitWindowCase):
 
         result = call()
 
-        self.assertEqual((result.status, result.mutation_id), ("stopped", pending["mutation_id"]))
+        # the cancel ends the outer START, as it would have uninterrupted (BL-030)
+        self.assertEqual((result.status, result.work_id, result.mutation_id), ("cancelled", s2, pending["mutation_id"]))
         self.assertEqual(self.parent(self.made_with(self.recorded_commit(pending, r"^commit:\d+$")["message"], moved_to)), moved_to)
         self.assertEqual(self.head(), self.remote_head())
         self.assertNothingLeftOver()

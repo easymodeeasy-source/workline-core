@@ -765,8 +765,8 @@ class NeighbourTests(PlanExclusionCase):
         self.assertEqual(validate_project(self.store), [])
         self.assertEqual(self.head(), self.remote_head())
 
-    def test_a_start_cancel_after_its_event_is_still_refused(self) -> None:
-        """A START cancel's decision is not in its record, and this change does not resume it (BL-030)."""
+    def test_a_start_cancel_after_its_event_finishes_from_its_own_decision(self) -> None:
+        """A START cancel is carried on from the decision it recorded (BL-030), never as a plan exclusion."""
         entry = self.phase(confirmation=True)
         w1, i1, c1 = entry.work_ids["w1"], entry.integration_id, entry.confirmation_id
         st.start(self.store, w1, "single-work", completing_executor(self.store))
@@ -778,8 +778,24 @@ class NeighbourTests(PlanExclusionCase):
         cancel = lambda: st.start(self.store, i1, "single-work", scripted_executor({i1: [st.Cancel(replan, "scope")]}))  # noqa: E731
         with after_applying(r":cancel:\d+:remove$"), self.assertRaises(Interrupted):
             cancel()
+        (pending,) = MutationController(self.store).list_pending()
+        resumed: list[object] = []
+        real = ops._resume_plan_exclusion
 
-        self.assertRefusedUntouched(cancel, SpecViolation)
+        def watch(*args, **kwargs):
+            resumed.append(args)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(ops, "_resume_plan_exclusion", watch), mock.patch.object(st, "_resume_plan_exclusion", watch):
+            result, stages, executed = self.watching(cancel)
+
+        self.assertEqual((result.status, result.mutation_id), ("cancelled", pending["mutation_id"]))
+        self.assertEqual(resumed, [])  # the plan exclusion's resume never reads it
+        self.assertEqual(stages, ["commit:0"])
+        self.assertEqual(executed, ["git_commit", "git_push"])
+        self.assertEqual(len(self.named("I2")), 1)
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+        self.assertEqual(self.head(), self.remote_head())
 
     def test_another_operation_on_the_target_never_takes_the_record_over(self) -> None:
         roadmap = self.simple_roadmap(self.store, {"a": ("Phase A", "A"), "b": ("Phase B", "B")})

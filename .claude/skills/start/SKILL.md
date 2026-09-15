@@ -393,15 +393,19 @@ completed eventを記録した後、そのeventを含む最終commitを記録す
 
 このGit段階からの継続は、recordがそれをこのSTART自身のcompletionと示す場合だけ行う: そのlifecycle stageがcompletionの記録するevent（`work_target_removed` / `work_completed`）を予約済みIDでちょうど持ち、最後に記録されたstageであり、single-workでは指定Workのものであり、HEADのevent logがまだそのeventを持たないこと。示せない場合（複数Workのfinalizationが未完了、STARTが記録しない形のrecord、このmutationが記録していないcommitによってHEADのevent logが既にそのeventを持つ）は、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする。この継続もcompletionを決定したbranchの上でだけ行い、別branchへcheckoutした後の再実行は、finalization commitを別branchへ作らず、次のWork・integration・Phase完了へも進まず、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする（`rules/git` のCommit / push）。
 
-cancel eventを記録したのにcancelのfinalization commitを記録していないmutationは、cancelで決めたreplanがrecordに無いため、ここからは継続しない。outerの再実行はその未完了cancelを越えて次のWorkへ進まず、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする（それより前のSTART precheckが止める場合は、その停止のまま）。single-workの再実行は、cancel eventでterminalになったWorkの開始として従来どおり拒否し、mutationはpendingのまま残る。single-workの再実行も、cancelを決定したbranch以外では、その拒否より前に何もreplayせず `reconcile_required` で停止する（`rules/git` のCommit / push）。
+cancelでは、STARTはexecutorが返したcancelの決定（対象Work、replanのstageを記録するprefix、理由、replanの新Workと追加relationをexecutorが渡したとおりの値と順序で、削除relationを決定した時にProjectが持っていた内容で）を `work_cancelled` のeffectに載せ、cancelのlifecycle eventを記録するのと同じdurable writeでrecordに記録する。このwriteはcancelを決定したbranchも記録する（`rules/git` のCommit / push）。replanに予約したIDは決定に重ねて書かない。決定のどれかの値を、recordが書いて読み戻した時に同じ種類の同じ値として保てない場合（小数、tuple、object、listの中のlist、空でない文字列以外をkeyに持つmapping、recordの行を分断する改行類を含む文字列など）、およびreplanがその記録の形にならない場合（新Workのnameが文字列でない、Relatedが `RelatedSpec` の形でない等）は、cancel eventを記録する前に `validation_failed` でSTOPし、cancelのeventも決定も記録しない。決定を持たないcancel eventは記録しない。
 
-どの場合も、未commit / 未pushのterminal eventを残したままcompleted / stopped / phase_completeを返してSTART mutationを閉じない。
+cancel eventを記録した後に中断・STOPした場合、同じWork・同じmodeのSTART再実行は、現在stateを判定する前・mutationを開く前・何もreplayする前にrecordを読み、記録済みの決定からcancelを続けられることを示せる場合だけ続ける: 決定がSTARTの記録する形であり、対象Workがsingle-workでは指定Work、outerでは同じPhase範囲のWorkであり、prefixと予約IDがそのcancelのものであり、決定の後に記録されたstage（新Workの登録または追加relation、削除relation、cancelのcommit）がその決定の作るものと順序どおり一致し、適用済みのeffectが記録順の先頭部分であること。そのうえでcancel自身が適用したeffectを除いたstateでSTART precheckとcancelのreplanの投影を行い、残りのeffectを記録・適用すれば出る拒否は何もreplayする前に、その拒否の本来のcode（投影の `spec_violation`、検証の `validation_failed` / `structure_invalid`、`dirty_overlap` 等）で出し、recordを変更しない。続ける場合は、executorを再実行せず、prefix・予約ID・削除relation・記録済みの新Work登録をrecordから取り、残りのreplan・structural validation・commit / pushだけを行って、記録した理由とともに `cancelled` を返す。outerでもcancelの後に次のWorkを選ばず、Phase完了やintegrationへも進まない（中断が無い場合と同じ）。
+
+決定を記録していない旧implementationのrecordは、cancelのcommitを記録済みでも、event・commit・現在stateから決定を推測せず、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする。決定の形・対象・prefix・予約・stageの順序・記録済みeffectが決定と一致しないrecord、削除するrelationをProjectが決定した時の内容で持たない場合、同じSTARTの複数のrecord、このmutationが記録していないcommitによってHEADのevent logが既にcancel eventを持つ場合も同じ。cancelを決定したbranch以外での再実行は、何もreplay・commit・pushせず `reconcile_required` で停止し、決定したbranchへ戻れば同じ再実行が続きから進む（`rules/git` のCommit / push）。cancel eventを記録する前の中断では、従来どおりexecutorから決め直す。
+
+どの場合も、未commit / 未pushのterminal eventを残したままcompleted / cancelled / stopped / phase_completeを返してSTART mutationを閉じない。
 
 期待値不一致・divergence・ownership競合はreconcile required。
 
 ## outer continuation
 
-1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。START再実行（resume）では、そのmutationが記録した直前のWorkのterminal finalization（Terminal finalization参照）を終えるまで次のWorkを再計算しない。
+1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。START再実行（resume）では、そのmutationが記録した直前のWorkのterminal finalization（Terminal finalization参照）を終えるまで次のWorkを再計算しない。記録済みのcancelを続けた再実行は、そのcancelを終えたところでSTARTを終える。
 
 startable Workが1件に決まれば同一Phase内で継続。
 

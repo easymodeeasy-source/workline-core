@@ -18,10 +18,9 @@ commit the event log stopped on it as a pre-existing change.
 A resumed START now reads its record first. A completion it recorded and applied
 is carried through exactly its Git stage - the executor is not asked again, no
 event is added, no other Work runs first - and only then does START report, or
-go on in outer mode. A cancel recorded without that commit cannot be finished
-from the record, which does not hold what the cancel replanned (BL-030): an
-outer START stops there with the record untouched instead of reporting another
-outcome over it, and a single-work START refuses the cancelled Work as before.
+go on in outer mode. A cancel is carried on from the decision it recorded with
+its events (BL-030, ``test_cancel_decision_resume``) and ends the START as it
+would have uninterrupted: ``cancelled``, with nothing chosen or run after it.
 """
 
 from __future__ import annotations
@@ -414,9 +413,16 @@ class OuterContinuationTests(FinalizationCase):
 
 # --------------------------------------------------------------------------- cancel
 class UnfinishedCancelTests(FinalizationCase):
-    """A cancel recorded without its commit is not finished here: its replan is not in the record (BL-030)."""
+    """A cancel recorded without its commit is finished from its recorded decision, and nothing runs after it (BL-030)."""
 
-    def test_an_outer_start_stops_at_a_cancel_it_cannot_finish(self) -> None:
+    def assertCancelled(self, work_id: str) -> None:
+        """The cancel was carried by its own commit, once, and pushed."""
+        subject = f"chore(workline): cancel {self.display(work_id)}"
+        self.assertEqual(self.introduced_by(work_id, "work_cancelled"), [subject])
+        self.assertEqual(self.subjects().count(subject), 1)
+        self.assertEqual(self.head(), self.remote_head())
+
+    def test_an_outer_start_finishes_the_cancel_and_goes_no_further(self) -> None:
         cases = {
             "nothing next": ("S1", "S2"),
             "a next work": ("S1", "S2", "S3"),
@@ -429,21 +435,28 @@ class UnfinishedCancelTests(FinalizationCase):
                 call = lambda: st.start(self.store, s1, "outer", self.executor({s2: st.Cancel(Replan(), "not needed")}))  # noqa: E731,B023
                 pending = self.interrupt(cancel_windows(s2)[window], call)
 
-                refused = self.assertStoppedUntouched(pending, call)
+                result = call()
 
-                self.assertIn(s2, refused.message)
-                self.assertEqual(self.ran, [s1, s2])
-                self.assertEqual(self.introduced_by(s2, "work_cancelled"), [] if window == "cancel recorded" else ["uncommitted"])
+                self.assertEqual((result.status, result.work_id, result.detail, result.mutation_id),
+                                 ("cancelled", s2, "not needed", pending["mutation_id"]))
+                self.assertEqual(self.ran, [s1, s2])  # S2 was not asked again, and no next Work ran
+                self.assertTrue(all(ProjectView.load(self.store).work_state(other).state == "unstarted" for other in ids[2:]))
+                self.assertCancelled(s2)
+                self.assertNothingLeftOver()
 
-    def test_an_outer_start_stops_at_its_own_entry_works_unfinished_cancel(self) -> None:
+    def test_an_outer_start_finishes_its_own_entry_works_cancel(self) -> None:
         (s1,) = self.standalone_chain("S1")
         call = lambda: st.start(self.store, s1, "outer", self.executor({s1: st.Cancel(Replan(), "not needed")}))  # noqa: E731
         pending = self.interrupt(cancel_windows(s1)["cancel applied"], call)
 
-        self.assertStoppedUntouched(pending, call)
+        result = call()
 
-    def test_an_outer_start_stops_even_once_the_cancel_replan_is_applied(self) -> None:
-        """The structure is valid again, and a Work is startable - it still does not run over the cancel."""
+        self.assertEqual((result.status, result.work_id, result.mutation_id), ("cancelled", s1, pending["mutation_id"]))
+        self.assertCancelled(s1)
+        self.assertNothingLeftOver()
+
+    def test_an_outer_start_finishes_the_cancel_before_anything_else_once_its_replan_is_applied(self) -> None:
+        """The structure is valid again, and a Work is startable - it still does not run after the cancel."""
         entry = self.phase({"w1": "one", "w2": "two"}, planned_next=(("w1", "w2"),))
         w1, w2, integration = entry.work_ids["w1"], entry.work_ids["w2"], entry.integration_id
         (dependency,) = [r.id for r in ProjectView.load(self.store).roadmap_relations
@@ -453,10 +466,15 @@ class UnfinishedCancelTests(FinalizationCase):
         pending = self.interrupt(lambda: after_applying(rf"^{w2}:cancel:\d+:remove$"), call)
         self.assertEqual(validate_project(self.store), [])
 
-        self.assertStoppedUntouched(pending, call)
-        self.assertEqual(self.ran, [w1, w2])  # the integration did not run
+        result = call()
 
-    def test_a_single_work_start_still_refuses_the_work_its_cancel_made_terminal(self) -> None:
+        self.assertEqual((result.status, result.work_id, result.mutation_id), ("cancelled", w2, pending["mutation_id"]))
+        self.assertEqual(self.ran, [w1, w2])  # the integration did not run
+        self.assertEqual(ProjectView.load(self.store).work_state(integration).state, "unstarted")
+        self.assertCancelled(w2)
+        self.assertNothingLeftOver()
+
+    def test_a_single_work_start_finishes_the_cancel_of_its_work(self) -> None:
         for index, window in enumerate(("cancel recorded", "cancel applied")):
             with self.subTest(window=window):
                 self.build(f"single-cancel-{index}")
@@ -464,24 +482,26 @@ class UnfinishedCancelTests(FinalizationCase):
                 call = lambda: st.start(self.store, s1, "single-work", self.executor({s1: st.Cancel(Replan(), "not needed")}))  # noqa: E731,B023
                 pending = self.interrupt(cancel_windows(s1)[window], call)
 
-                with self.assertRaises(StopError) as refused:
-                    call()
+                result = call()
 
-                self.assertEqual(refused.exception.code, "spec_violation")
-                self.assertEqual([p["mutation_id"] for p in MutationController(self.store).list_pending()], [pending["mutation_id"]])
-                self.assertEqual(self.introduced_by(s1, "work_cancelled"), ["uncommitted"])
+                self.assertEqual((result.status, result.detail, result.mutation_id), ("cancelled", "not needed", pending["mutation_id"]))
+                self.assertEqual(self.ran, [s1])
+                self.assertCancelled(s1)
+                self.assertNothingLeftOver()
 
-    def test_a_cancel_whose_commit_was_recorded_is_still_carried_by_the_replay(self) -> None:
-        """Not a new STOP: once the commit is recorded, resuming replays it like any other effect."""
+    def test_a_cancel_whose_commit_was_recorded_ends_the_start_once_replayed(self) -> None:
+        """Not a new STOP: once the commit is recorded, resuming replays it like any other effect, and the START ends there."""
         s1, s2 = self.standalone_chain("S1", "S2")
         call = lambda: st.start(self.store, s1, "outer", self.executor({s2: st.Cancel(Replan(), "not needed")}))  # noqa: E731
-        self.interrupt(cancel_windows(s2)["commit recorded"], call)
+        pending = self.interrupt(cancel_windows(s2)["commit recorded"], call)
 
-        result = call()
+        executed: list[str] = []
+        result = self.watching(call, executed)
 
-        self.assertEqual((result.status, result.detail), ("stopped", "no startable Work in standalone scope"))
-        self.assertEqual(self.introduced_by(s2, "work_cancelled"), [f"chore(workline): cancel {self.display(s2)}"])
-        self.assertEqual(self.head(), self.remote_head())
+        self.assertEqual((result.status, result.work_id, result.detail, result.mutation_id),
+                         ("cancelled", s2, "not needed", pending["mutation_id"]))
+        self.assertEqual(executed, ["git_commit", "git_push"])
+        self.assertCancelled(s2)
         self.assertNothingLeftOver()
 
 

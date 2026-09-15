@@ -468,31 +468,30 @@ class ContinuationTests(DecisionCase):
         self.assertEqual((result.status, self.ran), ("phase_complete", [self.w1, self.w2, self.integration]))
         self.assertFinalizedHere(pending)
 
-    def test_a_cancel_keeps_the_stop_it_already_had(self) -> None:
-        """Interrupted with its replan applied and its commit not recorded: no cancel resumes (BL-030's to do)."""
-        with self.subTest(mode="outer"):
-            self.world("outer-cancel", "outer completion")
-            dependency = self.requirement(self.w2)
-            cancel = st.Cancel(Replan(remove_relation_ids=(dependency,)), "not needed")
-            call = lambda: st.start(self.store, self.w1, "outer", self.cancelling({self.w2: cancel}))  # noqa: E731
-            self.stop_in(after_applying(rf"^{self.w2}:cancel:\d+:remove$"), call)
-            git(self.root, "checkout", "-q", "-b", "side")
-            # BL-031 reads the record before anything else, on either branch
-            self.assertStopsUntouched(call, fragment="What that decision replanned is not in the record")
-            git(self.root, "checkout", "-q", "main")
-            self.assertStopsUntouched(call, fragment="What that decision replanned is not in the record")
-        with self.subTest(mode="single-work"):
-            self.world("single-cancel", "start completion")
-            cancel = st.Cancel(Replan(remove_relation_ids=(self.requirement(self.w1),)), "not needed")
-            call = lambda: st.start(self.store, self.w1, "single-work", self.cancelling({self.w1: cancel}))  # noqa: E731
-            pending = self.stop_in(after_applying(rf"^{self.w1}:cancel:\d+:remove$"), call)
-            git(self.root, "checkout", "-q", "-b", "side")
-            self.assertStopsUntouched(call)  # the cancel was decided on main: nothing replayed on side
-            git(self.root, "checkout", "-q", "main")
-            with self.assertRaises(StopError) as refused:
-                call()
-            self.assertEqual(refused.exception.code, "spec_violation")  # as before: the cancelled Work is not run
-            self.assertEqual([p["mutation_id"] for p in MutationController(self.store).list_pending()], [pending["mutation_id"]])
+    def test_a_cancel_is_carried_on_only_on_the_branch_it_was_decided_on(self) -> None:
+        """Interrupted with its replan applied and its commit not recorded, a cancel resumes from its decision (BL-030)."""
+        for mode, cancelled in (("outer", "w2"), ("single-work", "w1")):
+            with self.subTest(mode=mode):
+                self.world(f"{mode}-cancel", "outer completion" if mode == "outer" else "start completion")
+                work = getattr(self, cancelled)
+                cancel = st.Cancel(Replan(remove_relation_ids=(self.requirement(work),)), "not needed")
+                call = lambda: st.start(self.store, self.w1, mode, self.cancelling({work: cancel}))  # noqa: E731,B023
+                pending = self.stop_in(after_applying(rf"^{work}:cancel:\d+:remove$"), call)
+                ran = list(self.ran)
+                git(self.root, "checkout", "-q", "-b", "side")
+
+                self.assertStopsUntouched(call)  # the cancel was decided on main: nothing replayed or committed on side
+
+                git(self.root, "checkout", "-q", "main")
+                executed: list[str] = []
+                result = self.counting(call, executed)
+                self.assertEqual((result.status, result.work_id, result.mutation_id), ("cancelled", work, pending["mutation_id"]))
+                self.assertEqual(executed, ["git_commit", "git_push"])  # only what was left: its commit, on main
+                self.assertEqual(self.ran, ran)  # neither the executor nor the next Work ran
+                (commit,) = [e for e in MutationController(self.store).list_records()
+                             if e["mutation_id"] == pending["mutation_id"]][0]["effects"][-2:-1]
+                self.assertEqual(commit["payload"]["branch"], MAIN)  # the decision's branch, handed to its commit
+                self.assertFinalizedHere(pending)
 
     def requirement(self, work_id: str) -> str:
         from workline.state import ProjectView

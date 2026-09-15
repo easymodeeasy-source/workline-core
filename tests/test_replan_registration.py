@@ -484,11 +484,12 @@ class InterruptedReplanTests(ReplanCase):
 
 
 class KnownResidualTests(ReplanCase):
-    """Not part of BL-028, and kept as it was: a START cancel retried after its event is refused, untouched (BL-030).
+    """Not part of BL-028: a replan retried after its own event used to be refused, untouched.
 
-    A plan exclusion retried after its own event used to be refused the same way
-    (BL-025 residual (1)); it now carries its mutation to the end (BL-029,
-    ``test_plan_exclusion_resume``).
+    A plan exclusion retried after its own event (BL-025 residual (1)) now
+    carries its mutation to the end (BL-029, ``test_plan_exclusion_resume``), and
+    so does a START cancel, from the decision it recorded (BL-030,
+    ``test_cancel_decision_resume``).
     """
 
     def assertRetryRefusedUntouched(self, retry, code: str) -> None:
@@ -520,11 +521,19 @@ class KnownResidualTests(ReplanCase):
                 finally:
                     case.doCleanups()
 
-    def test_start_cancel_after_its_event(self) -> None:
+    def test_start_cancel_after_its_event_now_finishes(self) -> None:
         entry, replan, cancel = self.integration_moved_before_confirmation()
+        i1 = entry.integration_id
         with after_applying(r":cancel:\d+:remove$"), self.assertRaises(Interrupted):
             cancel()
-        self.assertRetryRefusedUntouched(cancel, "spec_violation")
+        (pending,) = MutationController(self.store).list_pending()
+
+        result = cancel()
+
+        self.assertEqual((result.status, result.mutation_id), ("cancelled", pending["mutation_id"]))
+        self.assertEqual(len(self.named("I2")), 1)
+        self.assertEqual(self.events(i1).count("work_cancelled"), 1)
+        self.assertFinished(f"chore(workline): cancel {ProjectView.load(self.store).works[i1].display}")
 
 
 if __name__ == "__main__":

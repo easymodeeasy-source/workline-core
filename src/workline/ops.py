@@ -5,7 +5,8 @@
   structural validation before any physical write;
 * owned canonical path computation from recorded effects;
 * the resume of an interrupted plan exclusion, which Roadmap (Phase / Work) and
-  START (standalone Work) share.
+  START (standalone Work) share, and whose record checks a resumed START cancel
+  reuses.
 """
 
 from __future__ import annotations
@@ -162,12 +163,12 @@ def apply_replan(
     touched: list[str] = []
     works = f"{prefix}:works"
     if replan.new_works and mutation.has_stage(works):
-        # Only a resumed plan exclusion gets here (:func:`_resume_plan_exclusion`),
-        # which showed the recorded stage is its request's registration, and the
-        # resume has replayed it. Registering it again would validate Works that
+        # Only a resumed plan exclusion (:func:`_resume_plan_exclusion`) or START
+        # cancel (``start._cancel_to_finish``) gets here: its resume showed the
+        # recorded stage is the registration its request or its recorded decision
+        # makes, and has replayed it. Registering it again would validate Works that
         # now exist and count a recorded integration twice, so the stage is read
         # back instead: its reservations give the Work IDs, its effects the paths.
-        # A START cancel never gets here - its prefix names a stage not recorded yet.
         if {key: mutation.reserved(f"{works}:work:{key}") for key in replan.new_works} != work_ids:
             raise ValidationError("replan: reserved Work IDs diverged")
         touched.extend(_owned_paths(mutation.stage_effects(works)))
@@ -227,9 +228,9 @@ def problems_text(problems: list[Problem]) -> str:
 # replayed. Where the retry may replay and record is not decided here: the
 # Mutation Controller allows it only where the recorded decision was made, and
 # the recorded commit's own branch rules from its Git stage on (``rules/git``:
-# Commit / push). START's own resume of a Work it finalizes
-# (``start._completion_to_finish``) reads only START's invocation, which a plan
-# exclusion never shares.
+# Commit / push). START's own resume of a Work it finalizes or cancelled
+# (``start._completion_to_finish``, ``start._cancel_to_finish``) reads only
+# START's invocation, which a plan exclusion never shares.
 
 _PLAN_EXCLUSION_REQUEST_VERSION = 1
 
@@ -452,14 +453,7 @@ def _prove_plan_exclusion(
     effects = record.get("effects") or []
     if not isinstance(effects, list) or not all(isinstance(effect, dict) for effect in effects):
         raise refuse("effects that cannot be read")
-    stages: list[str] = []
-    for effect in effects:
-        stage = effect.get("stage")
-        if stages and stages[-1] == stage:
-            continue
-        if stage in stages:
-            raise refuse(f"stage {stage!r} recorded in two places")
-        stages.append(stage)
+    stages = _recorded_stages(effects, refuse)
     order = _plan_exclusion_stages(replan)
     if stages != order[: len(stages)]:
         raise refuse(f"the stages {stages}, where this request records {order} in that order")
@@ -546,6 +540,33 @@ def _prove_plan_exclusion(
         ):
             raise refuse("a finalization other than the commit of the paths this mutation writes")
 
+    applied, unapplied = _recorded_progress(store, file_effects, stages[-1], finalize is not None, refuse)
+    return _ProvenRecord(
+        reserved, effects, by_stage, current, work_ids, additions, recorded_removals, finalize, file_effects, applied,
+        unapplied,
+    )
+
+
+def _recorded_stages(effects: list[dict[str, Any]], refuse) -> list[str]:
+    """The stages ``effects`` record, in the order they were recorded, when each is recorded in one place."""
+    stages: list[str] = []
+    for effect in effects:
+        stage = effect.get("stage")
+        if stages and stages[-1] == stage:
+            continue
+        if stage in stages:
+            raise refuse(f"stage {stage!r} recorded in two places")
+        stages.append(stage)
+    return stages
+
+
+def _recorded_progress(
+    store: ProjectStore, file_effects: list[dict[str, Any]], last_stage: object, committed: bool, refuse
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The recorded file effects the Project holds and the ones still to apply, when they show the order they were recorded in.
+
+    Each is classified as replaying it would classify it, with nothing written.
+    """
     controller = MutationController(store)
     applied: list[dict[str, Any]] = []
     unapplied: list[dict[str, Any]] = []
@@ -564,15 +585,12 @@ def _prove_plan_exclusion(
             applied.append(effect)
     # A stage is recorded only once every stage before it is applied, so what is still to apply can only belong to the
     # last stage recorded - never to a stage another one follows, and never once the commit is recorded.
-    if unapplied and (finalize is not None or {effect.get("stage") for effect in unapplied} != {stages[-1]}):
+    if unapplied and (committed or {effect.get("stage") for effect in unapplied} != {last_stage}):
         raise refuse(
             f"effect {unapplied[0].get('seq')} ({unapplied[0]['kind']}) of stage {unapplied[0].get('stage')!r} not "
             "applied although a later stage is recorded"
         )
-    return _ProvenRecord(
-        reserved, effects, by_stage, current, work_ids, additions, recorded_removals, finalize, file_effects, applied,
-        unapplied,
-    )
+    return applied, unapplied
 
 
 def _decide_plan_exclusion(
@@ -656,6 +674,10 @@ def _refuse_before_replay(
     proven: _ProvenRecord,
     replan: Replan,
     removals: list[Relation],
+    *,
+    prefix: str = _REPLAN,
+    context: str = "plan exclusion replan",
+    committing: list[dict[str, Any]] | None = None,
 ) -> None:
     """Refuse, before any recorded effect is replayed, what the rest of the resume would refuse once it had.
 
@@ -667,8 +689,14 @@ def _refuse_before_replay(
     applies; and, while the commit is not recorded, its separation from changes
     that were there before the operation. Each refusal is the one recording or
     applying would have made, only before anything is written.
+
+    ``prefix`` names the replan's stages, ``context`` the change the structure
+    refusal reports, and ``committing`` the recorded effects whose files the
+    commit carries - by default every file effect of the record, which a plan
+    exclusion's mutation holds alone. A START cancel shares its mutation with
+    what START finalized before it (``start._cancel_to_finish``).
     """
-    works_stage, relations_stage, remove_stage = f"{_REPLAN}:works", f"{_REPLAN}:relations", f"{_REPLAN}:remove"
+    works_stage, relations_stage, remove_stage = f"{prefix}:works", f"{prefix}:relations", f"{prefix}:remove"
     future: list[Effect] = []
     if replan.new_works and works_stage not in proven.by_stage:
         # The registration meets the Project once the recorded effects are applied.
@@ -707,8 +735,9 @@ def _refuse_before_replay(
         controller.validate_effect(candidate, previous, owner)
         previous.append(candidate)
     left = proven.current.with_effects(list(proven.unapplied) + future)
-    validate_projection(left, "plan exclusion replan", ignore_placeholder_events=False)
+    validate_projection(left, context, ignore_placeholder_events=False)
     if proven.finalize is None:
         noted = (record.get("notes") or {}).get("preexisting_dirty")
         preexisting = list(noted) if isinstance(noted, list) else gitops.preexisting_dirty_snapshot(store.root)
-        gitops.ensure_separable(preexisting, _owned_paths(proven.file_effects + future))
+        committed = proven.file_effects if committing is None else committing
+        gitops.ensure_separable(preexisting, _owned_paths(list(committed) + future))
