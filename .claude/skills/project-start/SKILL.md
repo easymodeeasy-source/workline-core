@@ -345,7 +345,7 @@ commit前にregistry / routingを再確認する。
 
 初期commit後はpushしない。承認先を書いた場合もpushしない。
 
-commit失敗時は同じmutationをresumeし、既に一致するdomain filesを作り直さない。その間に人のcommitでHEADが進んでいた場合にcommitを作るかどうかは、`rules/git` のCommit / pushに従う。HEADが記録時のままでも、記録時と違うbranchへ切り替えた、またはdetached HEADにした場合（detached HEADで記録したcommitなら、branchへ切り替えた場合）は、初期commitを作らず停止する（同じ規定）。初期commitと同じmessageのcommitが既にあっても、それだけでは初期commitを作ったことにならない（同じ規定）。Project構造の作成を記録した後・初期commitを記録する前に中断した場合も、再実行は作成を決定した所在（branch、detached HEADならdetached HEAD。まだcommitの無いbranchを含む）でだけ初期commitを作り、別branch、branchとdetached HEADの取り違え、Gitが判定できない場合は、初期commitを作らず停止する（同じ規定）。
+commit失敗時は同じmutationをresumeし、既に一致するdomain filesを作り直さない。その間に人のcommitでHEADが進んでいた場合にcommitを作るかどうかは、`rules/git` のCommit / pushに従う。HEADが記録時のままでも、記録時と違うbranchへ切り替えた、またはdetached HEADにした場合（detached HEADで記録したcommitなら、branchへ切り替えた場合）は、初期commitを作らず停止する（同じ規定）。初期commitと同じmessageのcommitが既にあっても、それだけでは初期commitを作ったことにならない（同じ規定）。Project構造の作成を記録した後・初期commitを記録する前に中断した場合も、再実行は作成を決定した所在（branch、detached HEADならdetached HEAD。まだcommitの無いbranchを含む）でだけ初期commitを作り、別branch、branchとdetached HEADの取り違え、Gitが判定できない場合は、初期commitを作らず停止する（同じ規定）。初期commitやbackfill commitを作った後に、そのcommitを履歴に含まないbranch等へ移って再実行し、そのcommitで確定する適用済みのfileをもう一度書くことになる場合は、そのcommitが記録したbranchの上でだけ書き、別branch・detached HEAD・Gitが判定できない場合は何も書かず停止する。branchを持たないcommit（detached HEADで記録した初期commit等）は従来どおり扱う（同じ規定）。
 
 ## Postcheck
 

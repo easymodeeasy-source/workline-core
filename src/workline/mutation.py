@@ -19,6 +19,10 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   the same durable save that records it applied, and on the branch it was
   recorded on it is recognized by that ID alone, never by its message
   (:func:`_made_commit_held`);
+* an effect the mutation applied and a recorded commit finalizes is written
+  again only on the branch that commit names: a resume that would write it
+  anywhere else stops before anything is replayed or recorded
+  (:func:`_require_finalized_branch`);
 * a mutation of an established Project is opened, resumed and written only
   while its operation holds the Project execution lock
   (:mod:`workline.oplock`), which an operation receives only after passing the
@@ -268,6 +272,7 @@ class Mutation:
                 raise ReconcileRequired(f"reserved id {key} has kind {kind_of(existing)} not {kind}")
             return existing
         _require_decided_branch(self, f"reserving {key}")
+        _require_finalized_branch(self, f"reserving {key}")
         identifier = new_id(kind)
         reserved[key] = identifier
         self._save()
@@ -284,12 +289,14 @@ class Mutation:
     def set_note(self, key: str, value: Any) -> None:
         self._writable()
         _require_decided_branch(self, f"noting {key}")
+        _require_finalized_branch(self, f"noting {key}")
         self.record.setdefault("notes", {})[key] = value
         self._save()
 
     def extend_scope(self, entities: list[str] = (), files: list[str] = ()) -> None:
         self._writable()
         _require_decided_branch(self, "extending its write scope")
+        _require_finalized_branch(self, "extending its write scope")
         scope = self.scope
         merged = WriteScope(tuple(scope.entities) + tuple(entities), tuple(scope.files) + tuple(files))
         self.record["write_scope"] = merged.to_record()
@@ -307,7 +314,9 @@ class Mutation:
 
         A stage that decides Project content carries the branch it is decided on
         in the same durable write, and nothing is recorded off the branch an
-        unfinalized decision was made on (:func:`_bind_decision`).
+        unfinalized decision was made on (:func:`_bind_decision`), nor where an
+        applied effect a recorded commit finalizes would have to be written
+        again off that commit's branch (:func:`_require_finalized_branch`).
         """
         self._writable()
         if self.status != "pending":
@@ -323,6 +332,7 @@ class Mutation:
             self.controller.validate_effect(record, recorded + pending_records, self.owner)
             pending_records.append(record)
         _bind_decision(self, stage, pending_records)
+        _require_finalized_branch(self, f"recording stage {stage!r}")
         self.record["effects"] = recorded + pending_records
         self._save()
 
@@ -330,7 +340,9 @@ class Mutation:
         """Classify every recorded effect in order and apply the unapplied ones.
 
         Before anything is classified or applied, a decision no recorded commit
-        finalizes yet must still be where it was made (:func:`_require_decided_branch`).
+        finalizes yet must still be where it was made (:func:`_require_decided_branch`),
+        and an effect already applied that a recorded commit finalizes is not
+        written again off that commit's branch (:func:`_require_finalized_branch`).
         A commit made here is recorded with its ID in the same save that records
         it applied (:func:`_make_commit`).
         """
@@ -338,6 +350,7 @@ class Mutation:
         if self.status != "pending":
             raise StopError(f"mutation {self.id} is {self.status}", code="mutation_not_pending")
         _require_decided_branch(self, "replaying what it recorded")
+        _require_finalized_branch(self, "replaying what it recorded")
         outcomes: list[tuple[int, str]] = []
         for record in self.record.get("effects") or []:
             classification = self.controller.classify(record)
@@ -599,8 +612,10 @@ def _open_decision(mutation: Mutation) -> tuple[list[str], dict[str, Any] | None
     binding under :data:`_DECIDED_ON`: the full name of the branch HEAD was on
     when it was decided (``None`` on a detached HEAD) and the commit HEAD was
     at (``None`` while the branch had none). The Git stage recorded after it
-    finalizes it; from then on the recorded commit names its branch itself
-    (:func:`_on_recorded_branch`), and the binding has nothing left to say.
+    finalizes it; from then on the recorded commit names its branch itself - the
+    branch a commit not made yet is made on (:func:`_on_recorded_branch`) and
+    the only one what it finalizes is written again on
+    (:func:`_require_finalized_branch`) - and the binding has nothing left to say.
     Until then it is the only thing that says where the decision was made.
 
     ``([], None)`` when nothing decided waits for its commit. Whatever cannot
@@ -704,8 +719,8 @@ def _bind_decision(mutation: Mutation, stage: str, records: list[dict[str, Any]]
     * While a decision waits for its commit, nothing is recorded unless HEAD is
       still where that decision was made, and a commit recorded then must name
       that same branch: this is where the decision's binding passes to the
-      commit's ``branch`` (:func:`_on_recorded_branch`), which guards it from
-      then on.
+      commit's ``branch`` (:func:`_on_recorded_branch`,
+      :func:`_require_finalized_branch`), which guards it from then on.
     * A stage that decides Project content carries the binding of the decision
       it joins, or - when none waits - the place HEAD is now, written in the
       same durable save as the stage itself. When Git cannot say which branch
@@ -736,6 +751,80 @@ def _bind_decision(mutation: Mutation, stage: str, records: list[dict[str, Any]]
     for record in records:
         if record["kind"] in FILE_EFFECT_KINDS:
             record[_DECIDED_ON] = dict(binding)
+
+
+# --------------------------------------------------------------------------- the branch a finalized effect is written on
+def _require_finalized_branch(mutation: Mutation, doing: str) -> None:
+    """STOP before an applied effect a recorded commit finalizes is written again anywhere but on that commit's branch.
+
+    Once the commit finalizing a stage is recorded, it names the branch the
+    stage was decided on (:func:`_bind_decision`), and a resume classifies every
+    recorded effect again against the working tree it meets. A tree whose
+    history does not hold that commit - another branch checked out after the
+    commit was made, before its push or before the operation finished - does
+    not hold what the commit carried, so every effect the mutation applied looks
+    unapplied there. Replaying them wrote the decision into a branch that never
+    made it and replayed the pushes recorded before it, and only then reached
+    the commit: its own classification asks for the branch only of a commit not
+    made yet (:func:`_on_recorded_branch`), so it refused merely because those
+    writes had left its paths changed - or, with a same-message commit on that
+    branch, took the commit as made and reported success. Git then refused to
+    check the recorded branch out again over what had been written.
+
+    So an effect the record holds as applied, which :meth:`Mutation.apply` would
+    write again now (:func:`unapplied_effects`), is written again only while
+    HEAD is on the branch named by the commit recorded right after it - the
+    commit that finalizes it, recorded only where its decision was made -
+    compared by its full name. On any other branch, on a detached HEAD, or where
+    Git cannot name the branch HEAD is on, nothing is replayed, recorded,
+    committed or pushed.
+
+    Nothing is asked of a resume that writes nothing applied again: on that
+    branch, on another branch whose history holds the commit, and wherever the
+    effects are still in place, a question Git cannot answer included, it goes
+    on exactly as before. A commit recorded without a branch - as every commit
+    recorded before commits carried their branch is - names none, and nothing
+    stands in for it: what it finalizes is left to the rules that always
+    classified it.
+    """
+    effects = mutation.effects
+    finalized_on: dict[int, object] = {}
+    following: object = _UNBOUND
+    for position in range(len(effects) - 1, -1, -1):
+        effect = effects[position]
+        if effect.get("kind") == "git_commit":
+            payload = effect.get("payload")
+            following = payload["branch"] if isinstance(payload, dict) and "branch" in payload else _UNBOUND
+        elif following is not _UNBOUND and effect.get("kind") in FILE_EFFECT_KINDS and effect.get("applied") is True:
+            finalized_on[position] = following
+    if not finalized_on:
+        return
+    repo = mutation.store.root
+    here = gitcmd.current_branch_ref(repo)
+    if all(branch == here for branch in finalized_on.values()):
+        return
+    positions = {id(effect): position for position, effect in enumerate(effects)}
+    for record in unapplied_effects(mutation):
+        branch = finalized_on.get(positions.get(id(record), -1), _UNBOUND)
+        if branch is not _UNBOUND and branch != here:
+            raise _off_finalized_branch(mutation, record, branch, here, doing)
+
+
+def _off_finalized_branch(
+    mutation: Mutation, record: dict[str, Any], branch: object, here: str | None, doing: str
+) -> ReconcileRequired:
+    if here is not None:
+        place = here
+    elif gitcmd.head_detached(mutation.store.root) is True:
+        place = "a detached HEAD"
+    else:
+        place = "a branch Git cannot name"
+    return ReconcileRequired(
+        f"mutation {mutation.id} applied effect {record['seq']} ({record['kind']}, stage {record.get('stage')!r}), "
+        f"and the commit recorded to finalize it names {branch}; HEAD is now on {place}, whose working tree does not "
+        "hold that effect. Writing it again here would put it on a branch that commit was not made on, so nothing is "
+        f"replayed, recorded, committed or pushed ({doing}); check out {branch} to continue: reconcile required"
+    )
 
 
 def _on_recorded_branch(repo: Path, payload: dict[str, Any]) -> bool:
