@@ -279,12 +279,15 @@ class RecordTests(IdentityCase):
 class UnreachableTests(IdentityCase):
     def test_a_history_that_no_longer_holds_the_commit_made_stops(self) -> None:
         """A refusal the message rule did not make: each of these used to be taken for the recorded commit."""
+        # where a rewrite keeps the tree, the parent and the message, its commit gets another author date: made within
+        # the same second as the commit it replaces, it would be that very commit again, under the recorded ID
         rewrites = {
             "amended with another message": lambda m: git(self.root, "commit", "-q", "--amend", "--only", "-m", "chore: reworded"),
             "amended keeping its message": lambda m: git(self.root, "commit", "-q", "--amend", "--only", "--no-edit",
                                                          "--date", "2001-01-01T00:00:00"),
             "reset, and committed again with its message": lambda m: (git(self.root, "reset", "-q", "--soft", "HEAD~1"),
-                                                                        git(self.root, "commit", "-q", "-m", m)),
+                                                                        git(self.root, "commit", "-q", "-m", m,
+                                                                            "--date", "2001-01-01T00:00:00")),
             "reset, the change left staged": lambda m: git(self.root, "reset", "-q", "--soft", "HEAD~1"),
         }
         for index, (label, rewrite) in enumerate(rewrites.items()):
