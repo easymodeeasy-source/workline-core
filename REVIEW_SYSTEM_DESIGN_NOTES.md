@@ -425,3 +425,146 @@ Do not infer from this memo that Workline should:
 - treat review count as convergence
 - treat every later-round finding as newly created by repair
 - make LOW-derived Works block the originating Roadmap/Phase
+
+## 21. A / B / C relationship to previous repair
+
+A finding discovered after a repair should not be classified by timing alone. Use the relationship to the previous repair.
+
+### A. New discovery
+
+The finding was observed later, but may already have existed before the previous repair.
+
+Typical example:
+
+```text
+Finding A: failure incorrectly becomes completed
+Repair A: fix completed handling
+Finding B: failure leaves a lock unreleased
+```
+
+Finding B is not repair-induced merely because it became visible after Repair A. The previous incorrect completion behavior may simply have hidden the lock problem.
+
+Treat A as an ordinary finding and apply the normal Problem/Improvement + HIGH/MID/LOW rules.
+
+### B. Recurrence / incomplete repair coverage
+
+The previous repair did not fully close the same substantive problem.
+
+Typical examples:
+
+- only one condition/path was repaired while equivalent paths still fail
+- a shared/common decision point should have been repaired instead of one call site
+- the set of paths to which the repair must apply was not enumerated completely
+
+B should trigger a check of **why the previous repair coverage was incomplete**, not merely another blind patch.
+
+### C. Repair-induced finding
+
+The previous repair itself created a problem that did not exist before that repair.
+
+C requires strong causality. “Observed after the repair” is not enough.
+
+Typical example:
+
+```text
+Finding A: failure incorrectly becomes completed
+Repair A: add wording/logic saying “in condition X, do not complete”
+Finding C: the new wording/logic is itself ambiguous or semantically wrong in a way that did not exist before Repair A
+```
+
+A candidate C may become B after investigation if the supposedly new problem actually existed in another path before the repair.
+
+Therefore A/B/C may begin as a provisional classification and become final only after checking the relationship to the previous repair.
+
+## 22. Repair Coverage Check
+
+Because B-type recurrence is expected to be common, Workline should try to prevent it before Formal Review.
+
+After a repair and before the normal Pre-Review Quality Pass, perform a lightweight **Repair Coverage Check**:
+
+1. Are there other paths with the same responsibility / decision?
+2. Should the shared/common mechanism be repaired instead of the observed local site?
+3. Can the set of paths to which this repair applies be enumerated?
+
+The goal is not exhaustive retesting. The goal is to detect a repair that only suppresses the observed symptom.
+
+Preferred flow:
+
+```text
+implementation / repair
+  -> change-impact classification
+  -> Repair Coverage Check
+  -> Pre-Review Quality Pass
+  -> evidence validity check
+  -> focused / targeted verification only as needed
+  -> Review Ready
+  -> Formal Review
+```
+
+If the Repair Coverage Check finds that the repair is local but the responsibility is shared, revise the repair before Formal Review rather than spending another Formal Review round discovering the omission.
+
+## 23. Formal Review execution model
+
+Current direction: Formal Review uses **multiple independent reviewers in parallel**, followed by a separate integration/adjudication stage.
+
+All reviewers inspect the **same fixed candidate version**. Do not repair findings while some reviewers are still examining that candidate.
+
+Preferred shape:
+
+```text
+candidate N
+  -> Reviewer A ┐
+  -> Reviewer B ├─ independent / parallel
+  -> Reviewer C ┤
+  -> Reviewer D ┘
+  -> collect raw reports
+  -> normalize / deduplicate / validate
+  -> classify Problem / Improvement
+  -> classify HIGH / MID / LOW
+  -> establish A / B / C relationship where relevant
+  -> define current repair set
+  -> Repair
+  -> candidate N+1
+```
+
+Reviewers should not see each other’s findings during discovery by default. This reduces anchoring and confirmation effects.
+
+### 23.1 Separation of roles
+
+Keep these responsibilities separate conceptually:
+
+- **Reviewer**: discover and explain potential findings
+- **Adjudication / integration**: determine whether claims are supported, merge duplicates, classify importance, and decide repair/defer/HUMAN handling
+- **Repair**: change the artifact
+
+A Reviewer should not silently convert discovery into repair while the Formal Review pass is still running.
+
+### 23.2 Base review viewpoints
+
+Working direction is a small set of stable base viewpoints, plus specialist reviewers when the candidate demands them.
+
+Candidate base viewpoints discussed so far:
+
+- requirements / intended outcome
+- correctness / failure / intermediate state
+- impact / integration / consistency with existing mechanisms
+- simplicity / detours / maintainability
+
+The exact number of base reviewers is **not yet fixed**. Current preference is roughly 3–4 base viewpoints rather than one general reviewer, with specialist review added when needed.
+
+## 24. Updated open design work
+
+Still to decide before production implementation:
+
+- exact data model for raw reports, normalized findings, A/B/C relationship, causality, and evidence
+- exact HUMAN escalation rules
+- exact trigger for repair instability after C-type findings, without reducing it to a rigid round counter
+- how Formal Review scope/completeness is recorded
+- exact base reviewer viewpoints and count
+- when specialist reviewers are added
+- how reviewer independence/context should be controlled
+- exact Work creation semantics for LOW-derived Works
+- how deferred LOW Works are later selected without inventing a new scheduler/controller
+- BL-002 Work review integration point
+- BL-003 Phase review integration point
+- exact production convergence rule
