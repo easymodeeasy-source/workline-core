@@ -541,30 +541,191 @@ A Reviewer should not silently convert discovery into repair while the Formal Re
 
 ### 23.2 Base review viewpoints
 
-Working direction is a small set of stable base viewpoints, plus specialist reviewers when the candidate demands them.
+The current base set is four viewpoints:
 
-Candidate base viewpoints discussed so far:
+- **A — Requirement / intended outcome**: desired state, requirement interpretation, completion conditions, missing required behavior
+- **B — Correctness / failure / intermediate state**: success/failure, retry, interruption, partial state, boundary behavior, repair-induced problems
+- **C — Impact / integration / existing design**: readers and writers, state/event/schema/lifecycle consistency, adjacent operations, existing mechanisms and normative documents
+- **D — Simplicity / design quality / maintainability**: local patching versus shared responsibility, duplicated mechanisms, avoidable complexity, detours, maintainability cost
 
-- requirements / intended outcome
-- correctness / failure / intermediate state
-- impact / integration / consistency with existing mechanisms
-- simplicity / detours / maintainability
+Reviewers may report findings outside their primary viewpoint, but the explicit split exists to avoid four general reviewers redundantly doing the same review.
 
-The exact number of base reviewers is **not yet fixed**. Current preference is roughly 3–4 base viewpoints rather than one general reviewer, with specialist review added when needed.
+Add specialist reviewers only when the candidate requires them, for example security, migration/data, concurrency/recovery, or UX concerns.
 
-## 24. Updated open design work
+## 24. Reviewer information boundary
+
+Use the principle:
+
+> **Discovery is fresh; adjudication is history-aware.**
+
+Base reviewers normally receive:
+
+- the fixed candidate
+- current requirement/specification/desired state
+- evidence needed to inspect the candidate
+
+They normally do **not** receive previous findings or repair history. This reduces anchoring on previously known defects.
+
+Adjudication receives the complete relevant history, including prior Findings, Repairs, A/B/C relationships, and evidence history.
+
+Specialist reviewers are fresh by default, but may receive the minimum historical context genuinely required for the specialist question.
+
+## 25. Review coverage / completeness record
+
+A review pass is not complete merely because every reviewer returned a verdict. Each reviewer should record at least:
+
+- assigned viewpoint
+- surface actually inspected
+- concrete questions/behaviors checked
+- evidence used
+- surface not inspected or not decidable
+
+For example:
+
+```text
+Reviewer B — correctness / failure / intermediate state
+
+covered:
+- success path
+- failure before write
+- failure after write
+- retry
+- resume after interruption
+
+not covered:
+- crash during external API call
+```
+
+This makes the strength and limits of a PASS inspectable later.
+
+A Formal Review pass over candidate N is discovery-complete when:
+
+- all required reviewers have completed
+- each required reviewer has a coverage record
+- uncovered/undecidable surface is explicit
+- raw reports for candidate N are frozen before repair begins
+
+Zero findings is not itself evidence of coverage completeness.
+
+## 26. Handling coverage gaps
+
+Do not restart the entire base review automatically because one uncovered surface is discovered.
+
+Classify each uncovered surface as:
+
+```text
+1. unrelated to this candidate/change
+   -> record and close for this review
+
+2. relevant, but sufficiently covered by valid existing evidence
+   -> attach the evidence and close the gap
+
+3. relevant and not sufficiently covered
+   -> perform additional review/verification
+```
+
+For category 3:
+
+- if a normal reviewer can cover it, add a targeted review
+- if specialist knowledge is required, add a specialist reviewer
+- if deciding it requires a product/spec/requirement judgment, route to HUMAN
+
+The candidate remains fixed during this additional discovery. Only after candidate N's review scope is complete should adjudication/repair begin.
+
+This preserves review quality without making every coverage gap trigger a full rerun of all four base reviewers.
+
+## 27. Formal Review convergence condition
+
+The intended convergence rule is based on **unresolved obligations**, not raw Finding count.
+
+A review cycle is converged only when all applicable obligations are closed:
+
+- all required reviewers completed
+- required review coverage is satisfied or explicitly resolved
+- unadjudicated raw reports = 0
+- unresolved HIGH = 0
+- unresolved MID = 0
+- each LOW has been converted to a traceable independent Work when not repaired immediately
+- required post-repair re-verification is complete
+- Repair Coverage Check for the latest repair is complete
+- no unresolved repair-induced Problem remains
+- no required HUMAN decision remains pending
+
+Therefore:
+
+```text
+new findings = 0
+```
+
+is neither sufficient nor necessary by itself.
+
+The more useful conceptual convergence target is:
+
+```text
+unresolved review obligations = 0
+```
+
+## 28. B/C repair-failure escalation
+
+Do not stop review merely because a fixed number of rounds elapsed. Escalate when evidence shows repeated **repair failure in the same semantic surface**.
+
+### 28.1 B recurrence
+
+One B recurrence does not automatically invalidate the entire approach. First determine why Repair Coverage was incomplete and repair it deliberately.
+
+If the **same Finding substantively recurs again as B** after that repair, stop ordinary local patching and change repair strategy.
+
+### 28.2 C repair-induced finding
+
+A C finding already requires re-evaluating the Repair that caused it, not merely patching the new symptom.
+
+If another causally supported C occurs in the **same repair/semantic surface** after the next repair, stop ordinary local patching and change repair strategy.
+
+### 28.3 Mixed B/C chain
+
+A mixed chain such as:
+
+```text
+Finding A
+  -> Repair 1
+  -> B recurrence
+  -> Repair 2
+  -> C repair-induced finding
+```
+
+also indicates repeated repair failure around the same semantic responsibility and should trigger a strategy change.
+
+The working principle is:
+
+> two supported repair failures in the same semantic surface are enough to stop assuming that another local patch is the right move.
+
+This is **not** a generic two-round cap. It applies only when B/C relationships to prior repairs are actually supported.
+
+## 29. Repair strategy change
+
+When the B/C escalation rule triggers, stop accumulating local patches and deliberately reconsider the repair approach.
+
+Possible strategy changes include:
+
+- repair the shared responsibility/common mechanism rather than another local site
+- widen the repair scope deliberately
+- reconsider the state/lifecycle model
+- replace or roll back an unstable prior Repair
+- restructure the solution around a simpler coherent invariant
+- route to HUMAN when the required change crosses a product/spec/security/capability boundary
+
+After a strategy change, perform the normal impact-based Pre-Review and Repair Coverage Check again. Do not treat strategy change as an exemption from verification.
+
+## 30. Updated open design work
 
 Still to decide before production implementation:
 
-- exact data model for raw reports, normalized findings, A/B/C relationship, causality, and evidence
-- exact HUMAN escalation rules
-- exact trigger for repair instability after C-type findings, without reducing it to a rigid round counter
-- how Formal Review scope/completeness is recorded
-- exact base reviewer viewpoints and count
-- when specialist reviewers are added
-- how reviewer independence/context should be controlled
+- exact data model for raw reports, normalized findings, A/B/C relationship, causality, coverage, and evidence
+- exact HUMAN escalation mechanics
+- exact persistent representation of review coverage/completeness
 - exact Work creation semantics for LOW-derived Works
 - how deferred LOW Works are later selected without inventing a new scheduler/controller
-- BL-002 Work review integration point
-- BL-003 Phase review integration point
-- exact production convergence rule
+- how the Review System attaches to Work completion (BL-002)
+- how the Review System attaches to Phase integration/completion (BL-003)
+- whether Roadmap-level planning/achievement needs a related but distinct review gate
+- exact canonical Skill/spec changes required for production rollout
