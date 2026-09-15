@@ -44,6 +44,7 @@ from .mutation import (
 from .oplock import project_operation
 from .ops import (
     Replan,
+    _plan_exclusion_ledgers,
     _plan_exclusion_request,
     _resume_plan_exclusion,
     apply_replan,
@@ -1047,6 +1048,8 @@ def _record_lifecycle(store: ProjectStore, operation: str, entity_id: str, event
     _decide_lifecycle(store, operation, entity_id, event_type, precheck)
     mutation, destination = _open(store, operation, {"entity": entity_id}, [entity_id])
     if not mutation.has_stage("event"):
+        # The event log is all a lifecycle decision commits.
+        gitops.ensure_separable_before_effects(mutation, [EVENT_LOG])
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, [event_type]))
     mutation.apply()
     head = _finalize(mutation, destination, f"chore(workline): {event_type} {entity_id}")
@@ -1244,6 +1247,7 @@ def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, re
                 add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
             )
             validate_projection(projection, "plan exclusion replan")
+        gitops.ensure_separable_before_effects(mutation, _plan_exclusion_ledgers(replan))
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, ["plan_excluded"]))
     mutation.apply()

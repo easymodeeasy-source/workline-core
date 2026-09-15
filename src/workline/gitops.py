@@ -1,6 +1,8 @@
 """Git safety helpers shared by operation owners.
 
 * pre-existing dirty state is captured at operation entry and never staged;
+* an operation whose commit could never be separated from that state is
+  refused before its first effect, not at its Git stage;
 * only paths the current operation owns are committed;
 * commit / push are recorded as mutation effects so a failure resumes from the
   Git stage without re-running domain writes;
@@ -16,7 +18,7 @@ from pathlib import Path
 from . import gitcmd
 from .destination import DEFAULT_REMOTE, PushDestination, ensure_push_destination
 from .errors import StopError
-from .mutation import Effect, Mutation
+from .mutation import Effect, Mutation, abandon_on_stop
 from .store import RUNTIME_DIR, ProjectStore
 
 __all__ = [
@@ -27,6 +29,7 @@ __all__ = [
     "ensure_git_ready",
     "ensure_push_destination",
     "ensure_separable",
+    "ensure_separable_before_effects",
     "finalize",
     "finalize_effects",
     "is_runtime_path",
@@ -76,6 +79,36 @@ def ensure_separable(preexisting: list[str], owned: list[str]) -> None:
             "pre-existing changes overlap operation-owned paths and cannot be separated safely: " + ", ".join(overlap),
             code="dirty_overlap",
         )
+
+
+def ensure_separable_before_effects(mutation: Mutation, paths: list[str]) -> None:
+    """Refuse a mutation that has recorded no effect when a pre-existing change overlaps ``paths``.
+
+    ``paths`` are what the operation commits whatever else it goes on to do:
+    the files its first stage writes and those of every later stage it has
+    already decided. Its Git stage (:func:`finalize`) refuses a commit that
+    overlaps the changes that were there before the operation, and that
+    snapshot is recorded once per mutation, so an operation that went on
+    anyway applied its events, ran its executor, committed and pushed part of
+    what it produced, and then stopped at a stage no retry could pass. The
+    same refusal is made here instead, on the very snapshot the Git stage
+    reads, before the first effect is recorded: the mutation is abandoned,
+    and nothing is written, run, committed or pushed.
+
+    The overlap is never separated. The operation decides on the Project as
+    the working tree holds it, the person's change included, so committing
+    only its own part of a file could publish a history its own preconditions
+    would refuse; the person commits or discards their change, and the
+    operation is run again.
+
+    A mutation that has recorded an effect is not refused here: its snapshot
+    names the paths that were dirty, not what they held, so nothing can be
+    told apart or taken over, and its Git stage stays as it was.
+    """
+    if mutation.effects:
+        return
+    with abandon_on_stop(mutation):
+        ensure_separable(record_preexisting_dirty(mutation, mutation.store.root), paths)
 
 
 def ensure_git_ready(repo: Path) -> str:

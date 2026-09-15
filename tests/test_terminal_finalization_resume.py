@@ -30,6 +30,7 @@ import unittest
 from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git
+from workline import gitops
 from workline import start as st
 from workline import yamlish
 from workline.create import RelationSpec, WorkSpec, create_standalone_work
@@ -299,13 +300,21 @@ class SingleWorkCompletionTests(FinalizationCase):
         self.assertNothingLeftOver()
 
     def test_a_finalization_stopped_before_it_was_recorded_is_not_reported_as_a_completion(self) -> None:
-        """No interruption needed: a pre-existing change to the event log stops the finalization commit."""
+        """A pre-existing change to the event log stopped the finalization commit of a START that went on anyway.
+
+        START now refuses that change before its first effect (BL-041, ``test_preexisting_change_preflight``); the
+        record such a START left behind is still not reported as a completion.
+        """
         w1 = self.phase().work_ids["w1"]
         with open(self.store.events_jsonl, "a", encoding="utf-8", newline="\n") as log:
             log.write("\n")
         call = lambda: st.start(self.store, w1, "single-work", self.executor())  # noqa: E731
-        with self.assertRaises(StopError) as first:
+        with self.assertRaises(StopError) as refused:
             call()
+        self.assertEqual((refused.exception.code, self.ran, MutationController(self.store).list_pending()), ("dirty_overlap", [], []))
+        with mock.patch.object(gitops, "ensure_separable_before_effects", lambda mutation, paths: None):
+            with self.assertRaises(StopError) as first:
+                call()  # as START did before it refused the change first
         self.assertEqual(first.exception.code, "dirty_overlap")
         (pending,) = MutationController(self.store).list_pending()
         before = self.snapshot()

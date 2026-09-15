@@ -291,6 +291,22 @@ def _stripped(text: object) -> object:
     return text.strip() if isinstance(text, str) else text
 
 
+def _plan_exclusion_ledgers(replan: Replan) -> list[str]:
+    """The ledgers a plan exclusion of ``replan`` commits, known before it records anything.
+
+    Its ``plan_excluded`` event, and what :func:`apply_replan` writes: the Roadmap
+    relations for relations it adds or removes, and Related for the Related its
+    new Works carry. The files of the Works it registers are created under IDs
+    reserved for it, so no change made before the operation can be in them.
+    """
+    ledgers = [f"{WORKLINE_DIR}/events/events.jsonl"]
+    if replan.add_relations or replan.remove_relation_ids:
+        ledgers.append(f"{WORKLINE_DIR}/relations/roadmap.yaml")
+    if any(spec.related for spec in replan.new_works.values()):
+        ledgers.append(f"{WORKLINE_DIR}/relations/related.yaml")
+    return ledgers
+
+
 @dataclass(frozen=True)
 class _ResumedPlanExclusion:
     """An interrupted plan exclusion shown to be this request's own, and what it decided."""

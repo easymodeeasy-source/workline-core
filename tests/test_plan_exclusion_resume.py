@@ -37,7 +37,7 @@ from unittest import mock
 from helpers import WorklineTestCase, completing_executor, git, scripted_executor
 from test_decision_branch_binding import DECIDED_ON, DecisionCase, after_recording
 from test_recorded_commit_resume import EVENT_LOG, MAIN, Interrupted, after_applying
-from workline import ops
+from workline import gitops, ops
 from workline import roadmap as rm
 from workline import start as st
 from workline import yamlish
@@ -541,11 +541,19 @@ class ReplayBeforeApplyTests(PlanExclusionCase):
         self.assertIn("plan exclusion replan: structure would be invalid", str(refusal))
 
     def test_a_commit_that_could_not_separate_its_paths_is_refused_before_the_event_is_replayed(self) -> None:
-        """The pre-existing change the first attempt noted overlaps what the commit would carry."""
+        """The pre-existing change the first attempt noted overlaps what the commit would carry.
+
+        A plan exclusion now refuses that change before its event (BL-041), so the record is the one a first attempt
+        that went on anyway left behind.
+        """
         w2, replan = self.replacement()
         roadmap_yaml = self.store.roadmap_yaml
         roadmap_yaml.write_text(roadmap_yaml.read_text(encoding="utf-8") + "\n", encoding="utf-8")
-        pending = self.interrupt(lambda: rm.plan_exclude_work(self.store, w2, replan()), "event recorded")
+        with self.assertRaises(StopError) as refused:
+            rm.plan_exclude_work(self.store, w2, replan())
+        self.assertEqual((refused.exception.code, MutationController(self.store).list_pending()), ("dirty_overlap", []))
+        with mock.patch.object(gitops, "ensure_separable_before_effects", lambda mutation, paths: None):
+            pending = self.interrupt(lambda: rm.plan_exclude_work(self.store, w2, replan()), "event recorded")
         self.assertIn(f"{WORKLINE_DIR}/relations/roadmap.yaml", pending["notes"]["preexisting_dirty"])
 
         refusal = self.assertRefusedBeforeReplay(lambda: rm.plan_exclude_work(self.store, w2, replan()), pending, StopError)

@@ -31,6 +31,7 @@ import unittest
 from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git
+from workline import gitops
 from workline import start as st
 from workline import yamlish
 from workline.create import RelatedSpec, RelationSpec, WorkSpec, create_standalone_work
@@ -896,12 +897,20 @@ class PreflightTests(CancelCase):
         self.assertEqual(self.introduced_by(w1, "work_cancelled"), [])  # the recorded events were not replayed
 
     def test_a_commit_that_cannot_be_separated_is_refused_before_anything_is_replayed(self) -> None:
-        """A change to the event log from before START would stop the cancel's commit; the retry stops before replaying."""
+        """A change to the event log from before START would stop the cancel's commit; the retry stops before replaying.
+
+        START now refuses that change before its first effect (BL-041), so the record is the one a START that went on
+        anyway left behind.
+        """
         (s1,) = self.standalone_chain("S1")
         with open(self.store.events_jsonl, "a", encoding="utf-8", newline="\n") as log:
             log.write("\n")
         call = lambda: st.start(self.store, s1, "single-work", self.executor({s1: st.Cancel(Replan(), "not needed")}))  # noqa: E731
-        pending = self.interrupt(cancel_windows(s1)["cancel recorded"], call)
+        with self.assertRaises(StopError) as refused:
+            call()
+        self.assertEqual((refused.exception.code, self.ran, MutationController(self.store).list_pending()), ("dirty_overlap", [], []))
+        with mock.patch.object(gitops, "ensure_separable_before_effects", lambda mutation, paths: None):
+            pending = self.interrupt(cancel_windows(s1)["cancel recorded"], call)
 
         self.assertStoppedUntouched([pending["mutation_id"]], call, code="dirty_overlap")
 

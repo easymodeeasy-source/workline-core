@@ -32,6 +32,7 @@ from .ops import (
     _as_recorded,
     _own_effects_free_view,
     _owned_paths,
+    _plan_exclusion_ledgers,
     _plan_exclusion_request,
     _ProvenRecord,
     _recorded_progress,
@@ -439,6 +440,10 @@ class _Session:
         # Work must read could not be put back if this execution removed it.
         self._protected_read_targets(view, work_id)
         plan = reading_plan(self.store, view, work)
+        # Whatever the executor returns, START does not end well without committing the
+        # event log - a question wait only defers that commit - so a change to it from
+        # before START is refused before any event is appended or the executor runs.
+        gitops.ensure_separable_before_effects(self.mutation, [_EVENT_LOG])
         self.mutation.extend_scope(entities=[work_id])
 
         # target / lifecycle ---------------------------------------------------
@@ -1696,6 +1701,7 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
                 add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
             )
             validate_projection(projection, "plan exclusion replan")
+        gitops.ensure_separable_before_effects(mutation, _plan_exclusion_ledgers(replan))
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", work_id, ["plan_excluded"]))
     mutation.apply()
