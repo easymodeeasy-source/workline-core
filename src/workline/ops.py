@@ -26,6 +26,7 @@ from .mutation import (
     Effect,
     Mutation,
     MutationController,
+    _classify_recorded,
     pending_for_slot,
     require_same_request,
     utc_now,
@@ -565,14 +566,14 @@ def _recorded_progress(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The recorded file effects the Project holds and the ones still to apply, when they show the order they were recorded in.
 
-    Each is classified as replaying it would classify it, with nothing written.
+    Each is classified as replaying it would classify it (``mutation._classify_recorded``), with nothing written.
     """
     controller = MutationController(store)
     applied: list[dict[str, Any]] = []
     unapplied: list[dict[str, Any]] = []
-    for effect in file_effects:
+    for position, effect in enumerate(file_effects):
         try:
-            classification = controller.classify(effect)
+            classification = _classify_recorded(controller, file_effects, position)
         except (KeyError, TypeError, AttributeError, ValueError, OSError, StopError) as exc:
             raise refuse(f"effect {effect.get('seq')} ({effect.get('kind')}) that cannot be classified ({exc})") from exc
         if classification == MISMATCH:

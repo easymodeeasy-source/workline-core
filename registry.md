@@ -359,6 +359,8 @@ operation ownerは、最初のdomain effectより前に、`mutation_id`、operat
 - 一致 → skip
 - 不一致 → `reconcile required` として停止。自動上書きしない
 
+同じmutationのrecordが、適用済みと記録したrelationの追加と、それより後のstageで記録した同じrelation（同じrelation file、IDとrecordのすべてのfield）の削除を持つ場合、そのrelationが正本に無いことはその自分の削除で説明できるので、追加を未適用として書き戻さず一致とする。削除自体の適用済みは問わない（削除を書いた後、適用済みを保存する前に中断した場合を含む）。削除を記録した後・適用する前に人がそのrelationを記録どおりに消した場合も、これと区別できないので同じ扱いになる。未適用とすると、削除の後のresumeのたびにrelationを書き戻して削除し直し、その間で止まればrelationが戻ったまま `reconcile required` から抜けられないためである。IDやrecordが一致しないrelation（同じtype / from / toのものを含む）、適用済みと記録していない追加、追加より前や同じstageにある削除、recordの削除で説明できない変更は、このmutationのものと推測せず従来どおり分類する。
+
 可能な限り参照される側を先に書き、参照する側を後に書く。
 
 ### Cleanup

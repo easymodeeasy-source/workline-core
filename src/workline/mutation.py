@@ -11,6 +11,9 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
 * on resume every recorded effect is classified against reality as
   unapplied / applied-matching / applied-mismatch, and a mismatch stops the
   operation as ``reconcile required``;
+* a relation the mutation added and a later stage of its own removed exactly is
+  applied while its file does not hold it, and never written again only to be
+  removed again (:func:`_classify_recorded`);
 * an effect that decides Project content is recorded with the branch it was
   decided on, and until the commit that finalizes it is recorded - which then
   names that same branch - nothing of the mutation is replayed or recorded on
@@ -352,8 +355,9 @@ class Mutation:
         _require_decided_branch(self, "replaying what it recorded")
         _require_finalized_branch(self, "replaying what it recorded")
         outcomes: list[tuple[int, str]] = []
-        for record in self.record.get("effects") or []:
-            classification = self.controller.classify(record)
+        effects = self.record.get("effects") or []
+        for position, record in enumerate(effects):
+            classification = _classify_recorded(self.controller, effects, position)
             if classification == MISMATCH:
                 raise ReconcileRequired(
                     f"mutation {self.id} effect {record['seq']} ({record['kind']}) applied with unexpected result: reconcile required"
@@ -445,6 +449,41 @@ class Mutation:
         self._save()
 
 
+def _classify_recorded(controller: "MutationController", effects: list[dict[str, Any]], position: int) -> str:
+    """Classify the effect at ``position`` of a mutation's recorded ``effects``, as replaying that record classifies it.
+
+    ``effects`` are in the order they were recorded - all of the record's, or
+    only its file effects. Each is classified against the Project on its own
+    (:meth:`MutationController.classify`), which takes an added relation its file
+    does not hold for one not added yet. The record itself can show otherwise:
+    the add is recorded as applied, and a stage recorded after the add's stage
+    removes exactly that relation - the same file, and the same record with its
+    ID and every field. A removal is recorded only while the file holds the
+    relation exactly as it names it, so the add had been written by then, and
+    the relation is missing because the mutation removed it itself - whether or
+    not an interruption right after that removal kept its own ``applied`` flag
+    from being saved. Such an add is applied, matching, and is not written again.
+    Classified on its own it was added again on every replay after its removal
+    and removed once more after that, and a replay stopped in between - by an
+    interruption, or a push preview that failed - left the relation back in its
+    file, where the record's own order no longer explains it.
+
+    Nothing else stands in for that removal. A relation under another ID, of the
+    same type and endpoints included, a removal recorded with another snapshot,
+    an add the record does not hold as applied, and a removal recorded before the
+    add or in the add's own stage leave the add classified as it always was.
+    """
+    record = effects[position]
+    classification = controller.classify(record)
+    if classification != UNAPPLIED or record["kind"] != "add_relation" or record.get("applied") is not True:
+        return classification
+    stage, payload = record.get("stage"), record["payload"]
+    for later in effects[position + 1:]:
+        if later.get("kind") == "remove_relation" and later.get("stage") != stage and later.get("payload") == payload:
+            return MATCHING
+    return classification
+
+
 def unapplied_effects(mutation: Mutation) -> list[dict[str, Any]]:
     """The recorded file effects :meth:`Mutation.apply` has still to write, in the order it writes them.
 
@@ -455,10 +494,11 @@ def unapplied_effects(mutation: Mutation) -> list[dict[str, Any]]:
     its destination, so they are passed over. Nothing is written or saved.
     """
     unapplied: list[dict[str, Any]] = []
-    for record in mutation.effects:
+    effects = mutation.effects
+    for position, record in enumerate(effects):
         if record["kind"] not in FILE_EFFECT_KINDS:
             continue
-        classification = mutation.controller.classify(record)
+        classification = _classify_recorded(mutation.controller, effects, position)
         if classification == MISMATCH:
             break
         if classification == UNAPPLIED:
