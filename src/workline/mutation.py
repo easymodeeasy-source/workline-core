@@ -15,6 +15,10 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   decided on, and until the commit that finalizes it is recorded - which then
   names that same branch - nothing of the mutation is replayed or recorded on
   any other (:func:`_open_decision`);
+* a commit the mutation makes is recorded with the ID of the commit it made, in
+  the same durable save that records it applied, and on the branch it was
+  recorded on it is recognized by that ID alone, never by its message
+  (:func:`_made_commit_held`);
 * a mutation of an established Project is opened, resumed and written only
   while its operation holds the Project execution lock
   (:mod:`workline.oplock`), which an operation receives only after passing the
@@ -95,6 +99,10 @@ _BRANCH_REF = re.compile(r"refs/heads/\S+")
 #: The key of a recorded effect that holds where the stage deciding it was decided (:func:`_open_decision`).
 _DECIDED_ON = "decided_on"
 
+#: The key of a recorded git_commit that holds the ID of the commit this mutation made for it (:func:`_make_commit`).
+_MADE_COMMIT = "commit_id"
+_NO_MADE_COMMIT = object()
+
 #: Work lifecycle events that open a Work's execution rather than decide what it produced. START records
 #: them before its executor runs, and a stage made only of them fixes no branch (``skills/start``).
 _OPENING_EVENTS = frozenset({"work_started", "work_resumed", "work_target_added"})
@@ -157,6 +165,9 @@ class Effect:
         A commit that finalizes a decision the mutation recorded earlier is
         recorded only while HEAD is still where that decision was made, so its
         ``branch`` is the decision's branch (:func:`_bind_decision`).
+
+        Which commit it becomes is known only once it is made: the Mutation
+        Controller then records its ID next to the payload (:func:`_make_commit`).
         """
         payload: dict[str, Any] = {"message": message, "paths": list(paths), "base_head": base_head}
         if branch is not None:
@@ -320,6 +331,8 @@ class Mutation:
 
         Before anything is classified or applied, a decision no recorded commit
         finalizes yet must still be where it was made (:func:`_require_decided_branch`).
+        A commit made here is recorded with its ID in the same save that records
+        it applied (:func:`_make_commit`).
         """
         self._writable()
         if self.status != "pending":
@@ -332,9 +345,13 @@ class Mutation:
                 raise ReconcileRequired(
                     f"mutation {self.id} effect {record['seq']} ({record['kind']}) applied with unexpected result: reconcile required"
                 )
+            identified = False
             if classification == UNAPPLIED:
-                self.controller.apply_effect(record)
-            if not record.get("applied"):
+                if record["kind"] == "git_commit":
+                    identified = _make_commit(self, record)
+                else:
+                    self.controller.apply_effect(record)
+            if not record.get("applied") or identified:
                 # also what lets a later classification recognize a commit as this mutation's own
                 record["applied"] = True
                 self._save()
@@ -789,6 +806,64 @@ def _head_advanced_independently(repo: Path, payload: dict[str, Any], head: str)
     )
 
 
+# --------------------------------------------------------------------------- the commit a mutation made
+def _make_commit(mutation: Mutation, record: dict[str, Any]) -> bool:
+    """Make the recorded commit and note on its record the ID of the commit made; whether that note changed.
+
+    The ID is only noted here, in memory: :meth:`Mutation.apply` writes it in
+    the same save that records the commit applied, so a record never holds one
+    without the other. An interruption after the commit succeeded and before
+    that save leaves neither, as it always did.
+
+    The commit made is the one HEAD names right after ``git commit`` succeeded
+    (:func:`_commit_just_made`). Nothing is looked up afterwards, and a commit
+    Git does not show to be exactly that one is noted as no ID at all.
+    """
+    repo = mutation.store.root
+    before = gitcmd.head_commit(repo)
+    mutation.controller.apply_effect(record)
+    made = _commit_just_made(repo, before)
+    noted = record.get(_MADE_COMMIT, _NO_MADE_COMMIT)
+    if made is None:
+        record.pop(_MADE_COMMIT, None)
+    else:
+        record[_MADE_COMMIT] = made
+    return record.get(_MADE_COMMIT, _NO_MADE_COMMIT) != noted
+
+
+def _commit_just_made(repo: Path, before: str | None) -> str | None:
+    """The ID of the commit ``git commit`` just made on top of ``before``; ``None`` when Git does not show exactly that.
+
+    It is the commit HEAD names right after the commit succeeded, and it counts
+    only as a new commit whose one parent is the commit HEAD was at before -
+    or, on a branch without commits yet, a commit with none. A hook that made
+    another commit after it, took it away again or moved HEAD elsewhere, and a
+    question Git cannot answer, leave the commit without an ID: it is then
+    recognized as a commit recorded before IDs were.
+    """
+    after = gitcmd.head_commit(repo)
+    if after is None or after == before or not _COMMIT_ID.fullmatch(after):
+        return None
+    if gitcmd.commit_parents(repo, after) != ([] if before is None else [before]):
+        return None
+    return after
+
+
+def _made_commit_held(repo: Path, made: object, head: str | None) -> bool:
+    """Whether HEAD's history still holds the commit a mutation recorded it made.
+
+    ``made`` must be a full commit ID, and Git must show HEAD is that commit or
+    descends from it. An amended, reset or rebased history does not hold it, and
+    a question Git cannot answer shows nothing.
+    """
+    return (
+        isinstance(made, str)
+        and _COMMIT_ID.fullmatch(made) is not None
+        and head is not None
+        and gitcmd.descends_from(repo, head, made) is True
+    )
+
+
 class MutationController:
     """Physical writer for a Project's canonical files."""
 
@@ -1136,14 +1211,19 @@ class MutationController:
                     return MATCHING if event.to_record() == rec else MISMATCH
             return UNAPPLIED
         if kind == "git_commit":
-            return self._classify_commit(payload, record.get("applied") is True)
+            return self._classify_commit(payload, record.get("applied") is True, record.get(_MADE_COMMIT, _NO_MADE_COMMIT))
         if kind == "git_push":
             return self._classify_push(payload)
         raise ValidationError(f"unknown effect kind: {kind}")
 
-    def _classify_commit(self, payload: dict[str, Any], applied: bool) -> str:
+    def _classify_commit(self, payload: dict[str, Any], applied: bool, made: object = _NO_MADE_COMMIT) -> str:
         """Classify a recorded commit, in this order:
 
+        * the record holds the commit as ``applied`` with the ID of the commit
+          this mutation made (``made``), and HEAD is on the branch the commit was
+          recorded on (:func:`_on_recorded_branch`) - applied, matching while
+          HEAD's history holds that commit (:func:`_made_commit_held`), applied
+          with an unexpected result otherwise;
         * the record already holds the commit as ``applied``, and a commit since
           ``base_head`` still carries the recorded message - applied, matching;
         * nothing is left to commit at the recorded paths - applied, matching;
@@ -1167,10 +1247,25 @@ class MutationController:
         being saved - is never taken for made because some commit carries its
         message. Only its paths holding nothing left to commit show that; short of
         it, the base, branch and history checks decide as for any other commit.
+
+        Nor is the message what shows a commit this mutation made: Git stores it
+        after its own cleanup - trailing whitespace, line endings, runs of blank
+        lines - and after whatever a ``commit-msg`` or ``prepare-commit-msg`` hook
+        wrote, so the commit it made may carry another message than the one
+        recorded. Such a commit is recorded with its ID, and on its branch that ID
+        alone decides: a history that no longer holds it (amended, reset,
+        rebased) is not taken back to the message, which cannot tell the commit
+        made from one written in its place. Off that branch the ID says nothing
+        about where the rest of the mutation goes on, so the commit is classified
+        as a commit without one. A commit recorded without an ID - made just
+        before an interruption kept its ID from being saved, or recorded before
+        IDs were - is classified as it always was.
         """
         repo = self.store.root
         head = gitcmd.head_commit(repo)
         base = payload.get("base_head")
+        if applied and made is not _NO_MADE_COMMIT and _on_recorded_branch(repo, payload):
+            return MATCHING if _made_commit_held(repo, made, head) else MISMATCH
         if head is not None and applied:
             rev_range = f"{base}..HEAD" if base else "HEAD"
             log = gitcmd.run_git(repo, "log", "--format=%H%x00%B%x01", rev_range, check=False)

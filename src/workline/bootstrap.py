@@ -275,6 +275,8 @@ _PENDING_FIELDS = CLOSED_RECORD_FIELDS - {"completed_at"}
 _EFFECT_FIELDS = frozenset({"seq", "stage", "kind", "payload", "applied"})
 #: Where a decided effect records the branch it was decided on (:mod:`workline.mutation`, BL-036).
 _DECIDED_ON = "decided_on"
+#: Where a commit the Mutation Controller made records the ID of that commit, with its applied flag (BL-037).
+_MADE_COMMIT = "commit_id"
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _BRANCH_REF = re.compile(r"refs/heads/\S+")
 #: Every order of stages a backfill records: the bootstrap it decided to write (only when there was none),
@@ -359,7 +361,7 @@ def _unprovable_record(record: dict) -> str | None:
     if not isinstance(effects, list) or not all(isinstance(effect, dict) for effect in effects):
         return "holds effects a backfill does not record"
     for index, effect in enumerate(effects):
-        allowed = _EFFECT_FIELDS | ({_DECIDED_ON} if effect.get("kind") == "write_file" else frozenset())
+        allowed = _EFFECT_FIELDS | {"write_file": {_DECIDED_ON}, "git_commit": {_MADE_COMMIT}}.get(effect.get("kind"), frozenset())
         if not _EFFECT_FIELDS <= set(effect) <= allowed or effect["seq"] != index + 1:
             return "holds effects a backfill does not record"
     if tuple((effect["stage"], effect["kind"]) for effect in effects) not in _RECORDED_SHAPES:
@@ -389,6 +391,11 @@ def _unprovable_record(record: dict) -> str | None:
             if "branch" not in payload and effect["applied"] is not True:
                 return ("recorded a commit it has not made without the branch it goes on, as a record written before "
                         "commits carried their branch does")
+            made = effect.get(_MADE_COMMIT)
+            if _MADE_COMMIT in effect and not (
+                effect["applied"] is True and isinstance(made, str) and _COMMIT_ID.fullmatch(made)
+            ):
+                return "records the commit it made in another form than the Mutation Controller does"
         elif effect["kind"] == "git_push":
             if set(payload) != {"remote", "branch", "locator"} or not all(
                 isinstance(value, str) and value for value in payload.values()
@@ -429,8 +436,13 @@ def _refuse_unowned_bootstrap(store: ProjectStore, record: dict) -> None:
     only through the commit it recorded. What HEAD holds is shown to be that
     commit only when the record holds the commit as made - it is saved right
     after the commit succeeded - and the one commit since the recorded base
-    that changed the bootstrap is it: its message and nothing but the
-    bootstrap. Anything else is not taken for it:
+    that changed the bootstrap is it, changing nothing but the bootstrap. A
+    record that holds the ID of the commit it made names it: the one commit
+    must be that commit, whatever message Git or a hook stored with it, and no
+    other commit is taken for it by its message. A record without the ID - the
+    commit made just before an interruption kept it from being saved, or a
+    record written before IDs were - is shown it by the recorded message.
+    Anything else is not taken for it:
 
     * HEAD holds the bootstrap while the record has not decided or not made its
       commit. It may be this backfill's own commit, made just before an
@@ -459,7 +471,12 @@ def _refuse_unowned_bootstrap(store: ProjectStore, record: dict) -> None:
         return
     payload = commit["payload"]
     changed_by = gitcmd.commits_touching(root, payload["base_head"], "HEAD", [BOOTSTRAP_REL_PATH])
-    if changed_by is None or len(changed_by) != 1 or not _is_backfill_commit(root, changed_by[0], payload):
+    if _MADE_COMMIT in commit:
+        made = commit[_MADE_COMMIT]
+        shown = changed_by == [made] and _changed_by(root, made) == set(payload["paths"])
+    else:
+        shown = changed_by is not None and len(changed_by) == 1 and _is_backfill_commit(root, changed_by[0], payload)
+    if not shown:
         raise ReconcileRequired(
             f"the unfinished bootstrap backfill {ids} recorded its commit as made, but since its base the bootstrap "
             "was not changed by that one commit alone, so what HEAD holds is not shown to be it; nothing is replayed "

@@ -297,6 +297,19 @@ def commit_touches(repo: Path, rev: str, paths: list[str]) -> set[str]:
     return {p.replace("\\", "/") for p in result.stdout.split("\0") if p}
 
 
+def commit_parents(repo: Path, commit: str) -> list[str] | None:
+    """The parents of local commit ``commit``, by object ID and in order; None when undeterminable.
+
+    A root commit has none. ``commit`` is named by its full object ID, and the
+    answer comes only when Git reports that very commit.
+    """
+    result = run_git(repo, "rev-list", "--parents", "-n", "1", commit, "--", check=False)
+    listed = result.stdout.split()
+    if not result.ok or not listed or listed[0] != commit:
+        return None
+    return listed[1:]
+
+
 def descends_from(repo: Path, commit: str, ancestor: str) -> bool | None:
     """Whether local commit ``commit`` is ``ancestor`` itself or descends from it; None when undeterminable.
 
