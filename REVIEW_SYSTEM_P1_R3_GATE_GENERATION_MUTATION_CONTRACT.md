@@ -1,208 +1,151 @@
 # Review System P1 — R3 Gate Generation Mutation Contract Freeze
 
-Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 2 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes how Candidate 7's minimum durable Review Gate generations enter canonical Project state. It is non-normative until implemented and routed through canonical authority.
 
-## 1. Live facts inspected
+## 1. Ownership rule
 
-The live mutation model gives every established-Project writer one top-level operation owner, one Project execution lock, and one durable mutation intent. Child registration cores join that mutation; they do not open another progression controller.
-
-The lock serializes active Project writers while the process lives. Crash releases it. Therefore pending mutation scope, not the OS lock alone, must preserve cross-crash generation exclusivity.
-
-Candidate 7 requires Review to remain an authorization gate, not a second progression/lifecycle owner.
-
-## 2. Frozen ownership rule
-
-Canonical Review gate state is written by the top-level operation currently using the gate.
-
-Examples:
+Canonical Review gate state is written by the top-level operation using the gate:
 
 ```text
 Roadmap planning Review -> Roadmap mutation owner
 Phase-entry Review      -> Roadmap mutation owner
 Work Formal Review      -> START mutation owner
-Project Policy Review   -> future Project Policy Change owner
-Global Policy Review    -> future Global Policy Change owner
+future Policy Review    -> corresponding Policy operation owner
 ```
 
 There is no standalone Review progression controller.
 
-## 3. Crash-safe generation allocation / pending-mutation conflict
+## 2. Crash-safe same-run generation serialization
 
-For every new Gate generation N+1, freeze this order:
+Project execution lock serializes only the live process. Pending mutation state carries exclusivity across crash.
 
-```text
-hold Project execution lock
--> load/validate full immutable Gate chain
--> determine exact N+1 canonical path
--> open/resume the owning Mutation with that exact path already in initial WriteScope.files
--> only then reserve IDs / record generation effects
-```
-
-The N+1 path may not be added only later through `extend_scope()`.
-
-If implementation later needs a Review conflict resource that cannot be expressed as an exact path before mutation open, it must introduce a logical conflict-resource primitive whose pending-mutation overlap semantics are equivalent or stricter. It may not rely on Project lock lifetime alone.
-
-This is the cross-process invariant:
+For every new generation transition:
 
 ```text
-pending intent for G(N+1) durable
-+ process crash / lock released
--> later invocation sees/resumes/refuses against that pending conflict
--> no second N+1/fork may be created
+hold Project lock
+-> inspect pending generation mutations for review_run_id
+-> if one exists: resume/reconcile it before calculating any new generation
+-> if conflicting/multiple: reconcile_required
+-> otherwise validate full immutable chain
+-> calculate exact N+1 path
+-> open mutation with BOTH exact generation path and stable same-run token in initial WriteScope.files
+-> only then reserve IDs / record effects
 ```
 
-## 4. Async reviewer/callback rule
+Initial scope:
 
-External reviewer/shadow callbacks do not directly mutate canonical Project state.
+```text
+.workline/review/gates/<review_run_id>/<generation:06d>.yaml
+.workline/review/gates/<review_run_id>/.generation-serialization
+```
+
+`.generation-serialization` is scope-only: never physically created or committed. It guarantees that unfinished N+1 and a hypothetical N+2 for the same run overlap mechanically.
+
+Therefore this window is closed:
+
+```text
+G(N+1) physical immutable create succeeds
+-> crash before effect.applied save
+-> new invocation sees N+1 in canonical chain
+```
+
+The new invocation must discover/resume the pending same-run mutation and cannot open N+2 while it remains pending.
+
+## 3. Async callback rule
+
+External reviewer/shadow callbacks do not mutate Project state directly.
 
 Durable sequence:
 
 ```text
-1. parent operation writes accepted task identity/descriptor in a new Gate generation
-2. that generation reaches the required canonical Git persistence boundary
-3. external execution happens
-4. result is returned/retrieved by a Project operation holding the lock
-5. task identity/result identity are validated
-6. settlement/adjudication are written in a new Gate generation
-7. only then may sealing/consumption proceed
+1. create clone-safe Candidate/task input provenance
+2. parent operation writes accepted task descriptor in new Gate generation
+3. provenance + accepted generation reach required local Git persistence boundary
+4. only then launch/retrieve external task
+5. result returns to an operation holding Project lock
+6. identity/result is validated against canonical task input
+7. settlement/adjudication is written as next generation
+8. only then may sealing/consumption proceed
 ```
 
-A process exiting after acceptance but before settlement leaves canonical task state accepted/unsettled. Authorization cannot infer success from missing runtime data.
+Runtime/provider result arrival alone does not settle anything.
 
-## 5. Clone-safe accepted task descriptor
+## 4. Clone-safe Candidate/request reconstruction
 
-A Gate generation that records a task as accepted must carry, directly or through an immutable canonical task descriptor referenced by the generation, at least:
+An accepted task descriptor must reference exact canonical reconstruction material, not only hashes.
+
+### Candidate material
+
+Canonical source:
+
+```text
+.workline/review/candidate-snapshots/<candidate_hash>.yaml
+```
+
+or deterministic `builder_v1` data whose builder identity/version and every required input are clone-safe and sufficient to regenerate the exact ReviewedArtifactProjection.
+
+Snapshot/builder material must bind exact path/object-kind/mode/deletion/symlink/gitlink/content identity semantics and the Git persistence identity required by R6. Binary data is represented canonically and exactly.
+
+### Task input
+
+Canonical source:
+
+```text
+.workline/review/task-inputs/<review_task_id>.yaml
+```
+
+Minimum binding:
 
 ```text
 task_id
 task_slot
 task_kind
-reviewer_or_adapter_identity
-reviewer_or_adapter_version
+reviewer_or_adapter_identity + version
+exact versioned request envelope
 request_digest
 candidate_hash
+candidate reconstruction reference/mode
 review_context_hash
 effective_policy_hash
 accepted_generation
 ```
 
-Provider/job handles may remain runtime-only. Losing `.workline/runtime/**` must not erase the task's identity or request binding. Canonical descriptor data must be sufficient to retrieve or rerun the task safely according to Effective Policy.
+Fresh clone/runtime loss may retrieve/rerun **the same task_id** only after reconstructing exact Candidate/request and recomputing matching digests/identities. Missing snapshot/builder input, unavailable adapter version, incomplete reconstruction, or digest mismatch is fail closed/reconcile; never allocate a substitute task ID silently.
 
-A bare `rtk_*` ID is not clone-safe task evidence.
+Provider job handles remain runtime-only and non-authoritative.
 
-Settlement must bind the same canonical task identity plus terminal disposition/result/adjudication digests.
+## 5. Immutable generation snapshot
 
-## 6. Immutable generation transition
+Each generation is a full minimum immutable snapshot and uses R1 create-only writer.
 
-A gate transition never edits an existing generation file. It creates the next immutable generation file.
-
-Conceptual sequence:
+Minimum fields include:
 
 ```text
-G1 open: T accepted
-G2 open: T settled / report-set changed
-G3 open: adjudication/repair obligation changed
-G4 sealed_authorized: authorization obligations resolved
+review_run_id
+generation
+previous_generation / previous_digest
+review_kind / target_identity / operation_identity
+candidate_hash / review_context_hash / effective_policy_hash
+evidence / coverage / raw-report / adjudication / obligation digests
+accepted task descriptors/references
+settled task bindings
+status = open | sealed_authorized
+receipt_id nullable
 ```
 
-Each generation is a full minimum snapshot, not merely an event delta.
+Predecessor digest uses R1 canonical-byte SHA-256 contract.
 
-Minimum record includes at least:
+## 6. Seal + Receipt
 
-```yaml
-workline: workline-review-gate
-version: 1
-review_run_id: rr_...
-generation: 4
-previous_generation: 3
-previous_digest: ...
-review_kind: ...
-target_identity: ...
-operation_identity: ...
-candidate_hash: ...
-review_context_hash: ...
-effective_policy_hash: ...
-evidence_digest: ...
-coverage_digest: ...
-raw_report_set_digest: ...
-adjudication_digest: ...
-obligation_digest: ...
-accepted_tasks: [...canonical descriptors/refs...]
-settled_tasks: [...terminal bindings...]
-status: open | sealed_authorized
-receipt_id: rcp_... | null
-```
+A seal that first issues R1 records both immutable creates in one Mutation stage. All effects are durable intent before physical application. A partial stage resumes exact remaining effects; no consumer may rely on the seal until exact ReviewStore reread validates both.
 
-Generation predecessor digest follows R1's exact canonical-byte SHA-256 contract.
+## 7. Invalidation / supersession
 
-## 7. Generation/Receipt write stage
+A newly supported invalidating fact creates a later `open` generation and supersession record before old Receipt may proceed. The same-run serialization rule applies to every settlement, seal and invalidation generation.
 
-Within the owning mutation, each generation is persisted at:
-
-```text
-.workline/review/gates/<review_run_id>/<generation:06d>.yaml
-```
-
-using R1's immutable create-only Review writer.
-
-A seal that first issues Receipt R1 records both immutable creates in one mutation stage:
-
-```text
-stage review-gate-G4
-  create immutable G4 sealed_authorized
-  create immutable Receipt R1
-```
-
-All effects are durable intent before any is applied. Physical application may still be partial; resume completes only the missing exact effect.
-
-No consuming stage may rely on the seal until exact ReviewStore reread validates both facts.
-
-## 8. Open generation creation and task launch cutoff
-
-If task existence matters to terminal authorization:
-
-```text
-reserve run/task IDs
--> determine G1 path and open mutation with path in initial WriteScope
--> write G1 with clone-safe accepted task descriptor
--> persist/commit canonical G1 as required
--> only then launch/continue external task
-```
-
-A task launched before durable canonical acceptance does not count as an accepted pre-cutoff task and must not silently enter the authorization set later.
-
-## 9. Settlement rule
-
-A task is settled only when the latest canonical generation records its terminal disposition and the report/adjudication/obligation digests required by that disposition.
-
-Conceptual dispositions:
-
-```text
-completed
-failed
-cancelled
-timed_out
-```
-
-Effective Policy decides whether a non-completed disposition satisfies an obligation. Runtime result arrival alone does not settle anything.
-
-## 10. Seal rule
-
-A generation may be `sealed_authorized` only if canonical inputs prove all required tasks/coverage/adjudication/repair/reverification/HUMAN/Candidate/Context/Policy obligations resolved.
-
-The seal stage reserves/writes the Receipt ID defined by R2. No mutable `authorized=true` flag elsewhere exists.
-
-## 11. Invalidation / supersession
-
-A supported fact invalidating a seal before consumption creates a later `open` generation and supersession record before the old Receipt can proceed.
-
-The repaired cross-crash generation serialization rule applies equally to invalidation generations.
-
-Consumer always rechecks latest validated Gate chain and supersession immediately before consumption.
-
-## 12. Mutation invocation binding
+## 8. Mutation invocation binding
 
 The owning mutation binds at least:
 
@@ -217,45 +160,21 @@ receipt_id when issued
 proof_phase
 ```
 
-Existing Roadmap/Phase/Work request identity remains authoritative and is augmented, not replaced.
+Existing Roadmap/Work request identity is augmented, never replaced.
 
-Mismatch on resume is reconcile/new Candidate according to the owning operation contract; never silently overwrite pending Review intent.
+## 9. Git persistence boundary
 
-## 13. Git persistence boundary
+Any gate/provenance fact relied on after clone/process loss must reach canonical tracked local Git state before dependent external launch/terminal boundary. Remote-less Projects remain valid.
 
-Any gate fact relied on after clone/process loss is canonical and must reach tracked local Git state before the dependent external/terminal boundary.
+## 10. No second state machine authority
 
-Remote-less Projects remain valid; clone-safe means canonical/tracked local state, not mandatory remote publication.
+Gate/provenance records are authorization evidence only. `state.py` never reads them to derive Work/Phase/Roadmap lifecycle or next selection.
 
-R1 committability preflight applies before first Review effect so canonical state is not created only to discover later that Git ignores it.
+## 11. Round-2 repair disposition
 
-## 14. No second state machine authority
+P1R-01 closed by same-run pending discovery + stable scope-only serialization token.
 
-Gate generations are authorization state only.
-
-Forbidden:
-
-```text
-state.py reads sealed_authorized -> Work complete
-Review chooses next Phase as lifecycle truth
-callback appends work_completed
-```
-
-Allowed:
-
-```text
-START/Roadmap queries exact current Review authorization
--> operation owner records its own canonical transition
-```
-
-## 15. External-review repair disposition
-
-Accepted and repaired here:
-
-- Project lock alone is not generation serialization;
-- exact N+1 path belongs in initial pending `WriteScope`;
-- accepted async task descriptors are clone-safe canonical facts;
-- every generation transition uses the same repaired serialization discipline.
+P1R-02 closed by immutable Candidate snapshot/task-input provenance and exact reconstruction-before-rerun semantics.
 
 Architecture blocker: `None`.
 
