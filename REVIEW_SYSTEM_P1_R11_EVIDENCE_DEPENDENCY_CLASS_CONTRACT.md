@@ -1,6 +1,6 @@
 # Review System P1 — R11 Evidence Dependency-Class Adapter Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 3 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes how Evidence adapters prove dependency completeness for Candidate 7 reuse and HEAD-advancement fast paths. It is non-normative until implementation and authority activation.
 
@@ -27,9 +27,10 @@ hardware
 external_service
 cache_state
 git_state
+review_provenance
 ```
 
-Future vocabulary changes do not inherit completeness automatically.
+`review_provenance` identifies the canonical reconstruction material used by accepted Review tasks. Future vocabulary changes do not inherit completeness automatically.
 
 ## 3. Adapter declaration
 
@@ -61,19 +62,48 @@ Anything not positively accounted for. Unknown Evidence may be fresh-use-only bu
 
 Use the same commit-tree path/mode/object identity discipline as R6. Dynamic discovery requires tracing/denial sufficient to make repository-file dependency coverage complete.
 
-## 6. Environment / subprocess / dynamic libraries
+## 6. Review provenance identities
+
+Evidence produced for an accepted Review task binds the exact canonical provenance used to reconstruct the Candidate/request, not only their result hashes.
+
+Minimum reusable Evidence identity includes:
+
+```text
+candidate_hash
+candidate_material_digest
+task_input_digest
+request_digest
+reviewer_or_adapter_identity + version
+review_context_hash
+effective_policy_hash
+```
+
+For deterministic builder mode, provenance identity additionally binds:
+
+```text
+builder identity
+builder version
+ordered complete clone-safe input identities
+projection semantics version
+```
+
+Changing snapshot bytes, task-input bytes, builder version, or any bound builder input identity invalidates automatic Evidence reuse even when reconstructed `candidate_hash` or `request_digest` remains unchanged, unless an explicit irrelevance proof is available.
+
+A complete `review_provenance` claim therefore requires every reconstruction input to be pinned/observed by canonical identity. Missing or incomparable provenance identity => `unknown` => no cross-Candidate reuse.
+
+## 7. Environment / subprocess / dynamic libraries
 
 Ambient inherited environment, untraced child processes, or unbound runtime libraries make corresponding classes unknown. Process-tree coverage must include child filesystem/network/dynamic-library activity.
 
-## 7. Nondeterministic classes
+## 8. Nondeterministic classes
 
 Clock/randomness/hardware/cache and similar surfaces require mechanical pin/freeze, denial/non-use guarantee, or a contract proving observed variation immaterial. Otherwise no cross-Candidate reuse.
 
-## 8. Network / external service
+## 9. Network / external service
 
 Network transport and external-service semantic identity are separate dependencies. Network access with unpinned remote semantics is not complete external-service coverage.
 
-## 9. Git-state class
+## 10. Git-state class
 
 Checks/operations that invoke Git or depend on repository Git behavior declare `git_state` required unless an isolated exported-tree contract positively excludes it.
 
@@ -96,7 +126,7 @@ The fact that an external helper was not observed in one run is not enough if th
 
 A signing-enabled Git default does not invalidate Review-v1 commit-local-v1 by itself because the frozen Review-v1 primitive explicitly disables signing. The effective fact that signing is disabled for that primitive is itself bound into Evidence/Git-state identity. A future signed Review-v1 contract is a different semantic identity.
 
-## 10. External-process versus subprocess/network classes
+## 11. External-process versus subprocess/network classes
 
 Git-configured external helpers are represented in `git_state` for Git semantic reachability and identity, while their execution-side effects also implicate `subprocess`, `network`, `filesystem_external`, or `external_service` as appropriate.
 
@@ -110,23 +140,42 @@ side-effect dependency classes mechanically covered/denied/pinned
 
 This prevents `git_state=complete` from hiding an uncontrolled signer/filter/hook network dependency.
 
-## 11. Evidence identity
+## 12. Evidence identity
 
-Reusable Evidence binds at least Candidate/Context/Policy, adapter/check identity, class vocabulary, required-class declaration digest, coverage-basis digest, concrete dependency identities, tool/runtime identity, result digest and flakiness/repetition contract where relevant.
+Reusable Evidence binds at least:
+
+```text
+candidate_hash
+candidate_material_digest
+task_input_digest
+request_digest
+review_context_hash
+effective_policy_hash
+adapter/check identity
+class vocabulary
+required-class declaration digest
+coverage-basis digest
+concrete dependency identities
+tool/runtime identity
+result digest
+flakiness/repetition contract where relevant
+```
 
 Any material bound identity change requires explicit irrelevance proof or reacquisition.
 
-## 12. Interaction with R6
+## 13. Interaction with R6
 
-HEAD advancement may reuse Evidence only when Evidence completeness is complete and all repo/non-repo material identities remain valid. Unknown completeness cannot establish the R6 fast path.
+HEAD advancement may reuse Evidence only when Evidence completeness is complete and all repository, Review-provenance and non-repo material identities remain valid. Unknown completeness cannot establish the R6 fast path.
 
-## 13. Adapter trust
+## 14. Adapter trust
 
 Trace/sandbox/basis implementations have their own identity/version and cannot self-certify completeness by outputting a boolean. Unsupported platforms/configurations fall to unknown.
 
-## 14. Round-3 repair disposition
+## 15. Round-4 repair disposition
 
-P1R2-NF-02 is closed at the Evidence boundary by binding Review-v1's signing-disabled commit mode and the reachable external Git-process surface into `git_state`, while also requiring the relevant subprocess/network/external dependency classes to be mechanically covered.
+This revision closes the later independent review's provenance-reuse seam by making Candidate snapshot/task-input/builder reconstruction identities first-class reusable-Evidence dependencies.
+
+Round-3 signing/external-process safeguards remain in force.
 
 Architecture blocker: `None`.
 
