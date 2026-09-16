@@ -13,7 +13,8 @@ whatever else it goes on to do - the event log for START and a lifecycle decisio
 files its replan writes for a plan exclusion. The mutation is abandoned, nothing is appended, run, written, committed
 or pushed, and the operation goes on normally once the person's change is committed or discarded. The person's change
 is never separated from the operation's own writes. Changes outside those paths are left alone as before, and a
-record that already holds effects is not refused this way: it keeps stopping at its Git stage.
+record that already holds effects is not refused this way: it keeps stopping at its Git stage - and, since BL-044
+reads a recorded hold back instead of deciding it again, a retry of one adds nothing while it does.
 """
 
 from __future__ import annotations
@@ -430,6 +431,18 @@ class LegacyRecordTests(PreflightCase):
         self.withdraw(line)
         self.assertStillStoppedAtTheGitStage(call, pending)  # nothing is guessed from what the change was
 
+    def test_a_stuck_hold_keeps_stopping_at_its_git_stage_and_grows_nothing(self) -> None:
+        """BL-044 reads the recorded hold back, so no retry decides it again (``test_recorded_hold_resume``)."""
+        self.phases()
+        line = self.person_event()
+        call = self.start(self.w1, outcome=st.Hold("later"))
+        pending = self.stuck(call)
+        self.assertEqual((self.ran, len(pending["effects"])), ([self.w1], 4))
+
+        self.assertStillStoppedAtTheGitStage(call, pending)
+        self.withdraw(line)
+        self.assertStillStoppedAtTheGitStage(call, pending)  # nothing is guessed from what the change was
+
     def test_a_stuck_lifecycle_decision_keeps_stopping_at_its_git_stage(self) -> None:
         self.phases()
         line = self.person_event()
@@ -523,22 +536,6 @@ class KnownResidualTests(PreflightCase):
         (pending,) = [r for r in self.records() if r["status"] == "pending"]
         self.assertEqual(sorted({e["stage"] for e in pending["effects"]}), [f"{self.w1}:lifecycle:0"])
         self.assertEqual((self.head(), self.remote_head()), (head, head))
-
-    def test_a_held_start_stuck_before_this_change_still_runs_again_on_every_retry(self) -> None:
-        self.phases()
-        self.person_event()
-        call = self.start(self.w1, outcome=st.Hold("later"))
-        with before_bl041(), self.assertRaises(StopError):
-            call()
-        counts = []
-        for _ in range(2):
-            with self.assertRaises(StopError) as stopped:
-                call()
-            self.assertEqual(stopped.exception.code, "dirty_overlap")
-            (pending,) = [r for r in self.records() if r["status"] == "pending"]
-            counts.append(len(pending["effects"]))
-
-        self.assertEqual((counts, self.ran), ([8, 12], [self.w1] * 3))
 
     def test_a_change_made_after_start_began_is_still_committed_with_it(self) -> None:
         """A person's event appended while the executor runs is not in the snapshot taken before it."""

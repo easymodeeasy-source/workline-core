@@ -154,6 +154,16 @@ work_target_removed
 work_held
 ```
 
+holdのlifecycle eventは、それを決定したbranchと、executorが返した理由を同じdurable writeでrecordへ記録する（`rules/git` のCommit / push）。理由はSTARTの呼び出し元への言葉でありProject正本の内容にはならないので、recordが同じ種類の同じ値として保てない理由（小数、object等）は記録しないだけで、holdを拒否しない。
+
+hold eventを記録した後、それを含むcommitを記録する前、またはそのcommit / pushの前に中断・STOPした場合、同じWork・同じmodeのSTART再実行は、現在stateからlifecycleを決め直す前にrecordを読む。holdのeventは `work_completed` / `work_cancelled` と違ってterminalではなく、適用済みのstateは「後のSTARTが正当にresumeできるheld Work」に見えるので、recordを読まない再実行は自分が今記録したholdをresumeし直し、`work_resumed` / `work_target_added` を追加してexecutorを呼び直し、返ってきたものを新しい決定として記録してしまう。stage名は毎回新しく採番されるため重複防止も働かない。
+
+recordがそのholdをこのSTART自身のものと示せる場合だけ続ける: 対象Workのlifecycle stageとして次の番号で記録され、holdの記録する2 event（`work_target_removed` / `work_held`）をちょうど予約済みIDで持ち、`work_held` のeffectに理由以外を載せておらず、single-workでは指定Workであり、holdより前に記録した決定はそれぞれ自分のcommitで確定済みであり、holdの後に記録されたstageがそのholdのcommitだけであり、そのcommitが未記録ならHEADのevent logがまだそのeventを持たないこと。続ける場合は、executorを再実行せず、eventを追加せず、新しいstageを作らず、他のWorkを選ばず、同じmutationで残っているcommit / pushだけを行い、記録した理由とともに `held` を返す。outerでもholdの後に次のWorkを選ばない（中断が無い場合と同じ）。
+
+示せない場合（複数の `work_held`、STARTが記録しない形のstage・event・予約ID・理由、holdの後の別stage、このmutationが記録していないcommitによってHEADのevent logが既にそのeventを持つ場合）は、何もreplayせずrecordを変更しないまま `reconcile_required` でSTOPする。理由を記録していない旧implementationのrecordは、holdが決定したものはevent自体なので同じように続け、`held` を理由なしで返す。この継続もholdを決定したbranchの上でだけ行う（`rules/git` のCommit / push）。開始前からの未commit変更でGit段階が止まるrecordは、従来どおり同じ `dirty_overlap` で止まり、再実行はeffect・event・executor呼び出しのどれも増やさない。
+
+holdを決定する前の中断（executorがまだholdを返しておらず、Work開始のlifecycleだけをrecordが持つ場合）は何も決定していないので、従来どおりexecutorから決め直す。question waitのresumeもこれに当たる。
+
 ## Work cancel
 
 開始済みWorkを正式に不要と判断してcurrent planから外す場合はSTARTがcancel operation ownerになる。
@@ -405,7 +415,7 @@ cancel eventを記録した後に中断・STOPした場合、同じWork・同じ
 
 ## outer continuation
 
-1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。START再実行（resume）では、そのmutationが記録した直前のWorkのterminal finalization（Terminal finalization参照）を終えるまで次のWorkを再計算しない。記録済みのcancelを続けた再実行は、そのcancelを終えたところでSTARTを終える。
+1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。START再実行（resume）では、そのmutationが記録した直前のWorkのterminal finalization（Terminal finalization参照）を終えるまで次のWorkを再計算しない。記録済みのcancelを続けた再実行は、そのcancelを終えたところでSTARTを終える。記録済みのholdを続けた再実行も同じで、そのholdを終えたところでSTARTを終える（Question wait / temporary move / true hold参照）。
 
 startable Workが1件に決まれば同一Phase内で継続。
 

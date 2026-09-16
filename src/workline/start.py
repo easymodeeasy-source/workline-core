@@ -26,7 +26,7 @@ from . import gitcmd, gitops, yamlish
 from .create import RelatedSpec, RelationSpec, WorkSpec, _registration_effects, register_works, resolve_ref
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .ids import is_valid_id
-from .mutation import FILE_EFFECT_KINDS, Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import FILE_EFFECT_KINDS, Effect, Mutation, MutationController, WriteScope, _decides, abandon_on_stop
 from .oplock import project_operation
 from .ops import (
     Replan,
@@ -494,7 +494,7 @@ class _Session:
             if isinstance(outcome, QuestionWait):
                 return StartResult("question_wait", work_id, self.mutation.id, phase_id=work.phase_id, detail=outcome.question)
             if isinstance(outcome, Hold):
-                self._lifecycle(work, ["work_target_removed", "work_held"])
+                self._record_hold(work, outcome)
                 self._commit("commit", f"chore(workline): hold {work.display}", [])
                 return StartResult("held", work_id, self.mutation.id, phase_id=work.phase_id, detail=outcome.reason, head=gitcmd.head_commit(self.store.root))
             if isinstance(outcome, Cancel):
@@ -854,6 +854,52 @@ class _Session:
         if work is None:
             raise ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable")
         return self._finalize_completion(work)
+
+    # hold ------------------------------------------------------------------
+    def _record_hold(self, work: Entity, outcome: Hold) -> None:
+        """Record the hold's lifecycle events together with the reason it was held for, then apply them.
+
+        The reason rides on the ``work_held`` effect, so it is durable in exactly
+        the save that records the hold's events - the save in which the Mutation
+        Controller also records the branch they are decided on (``rules/git``:
+        Commit / push). A retry then reports the hold the uninterrupted run would
+        have reported, without asking the executor again. A reason the record
+        cannot keep exactly (:func:`_hold_decision`) is not recorded and never
+        refuses the hold: it is the executor's word to START's caller, not
+        Project content, and the hold is finished from the events either way.
+        """
+        stage = stage_name(self.mutation, f"{work.id}:lifecycle")
+        effects = event_effects(self.mutation, stage, work.id, list(_HOLD_EVENTS))
+        decision = _hold_decision(outcome.reason)
+        if decision is not None:
+            effects[-1] = Effect(effects[-1].kind, {**effects[-1].payload, _HOLD_DECISION: decision})
+        self.mutation.add_effects(stage, effects)
+        self.mutation.apply()
+
+    def finish_hold(self, hold: "_ProvenHold") -> StartResult:
+        """Finish a hold this mutation recorded, deciding none of it again.
+
+        The record was shown to hold this START's own hold of that Work
+        (:func:`_hold_to_finish`), and replaying it applied every effect already
+        recorded. What is left is the Git stage: the commit carrying its events
+        and the push, or nothing at all when that commit is recorded too and
+        replaying it finished it. The executor is not asked, no event is added,
+        no lifecycle is chosen from the state this mutation's own events made,
+        and nothing is chosen or run after it - a hold ends the START in
+        ``outer`` mode as it does in ``single-work``.
+        """
+        work = ProjectView.load(self.store).works.get(hold.work_id)
+        if work is None:
+            raise ValidationError(f"Work unresolvable: {hold.work_id}", code="entity_unresolvable")
+        if not hold.committed:
+            self._commit("commit", f"chore(workline): hold {work.display}", [])
+        after = ProjectView.load(self.store)
+        if after.work_state(work.id).state != HELD:
+            raise StopError(f"{work.id} is not held after finalization", code="postcheck_failed")
+        return StartResult(
+            "held", work.id, self.mutation.id, tuple(self.completed), work.phase_id, hold.reason,
+            gitcmd.head_commit(self.store.root),
+        )
 
     # cancel ----------------------------------------------------------------
     def _cancel(self, view: ProjectView, work: Entity, outcome: Cancel) -> StartResult:
@@ -1957,6 +2003,203 @@ def _decide_cancel(proven: _ProvenRecord, read: _CancelRecord, cancel: _DecidedC
     return view
 
 
+# --------------------------------------------------------------------------- recorded hold
+#
+# A hold is decided by the executor, and START records it as two lifecycle
+# events and the commit that carries them. Those events are not terminal - the
+# Work is held, and a later START runs it again - so a retry that read only the
+# current state found a Work it may legitimately resume, and resumed the very
+# hold this mutation had just recorded: it appended ``work_resumed`` /
+# ``work_target_added``, asked the executor again, recorded whatever came back
+# as a new decision, and named every stage afresh, so nothing deduplicated it.
+# The record already marks that hold as a decision, with the branch it was
+# decided on; what was missing was a resume that reads it.
+
+_HOLD_DECISION = "hold"
+_HOLD_DECISION_VERSION = 1
+_HOLD_DECISION_FIELDS = frozenset({"version", "reason"})
+#: The lifecycle events a hold records, in the order it records them.
+_HOLD_EVENTS = ("work_target_removed", "work_held")
+
+
+def _hold_decision(reason: object) -> dict[str, Any] | None:
+    """The reason a hold was decided for, as its record reads it back, or ``None`` when the record cannot keep it.
+
+    Only the reason: everything else a resume needs - the Work, the stage, the
+    events and the IDs reserved for them - is in the effects the decision rides
+    on. The reason is the executor's word to START's caller and no Project
+    content is made from it, so one the record cannot keep exactly (a float, an
+    object, text holding a lone surrogate) is left out rather than refusing a
+    hold that would otherwise succeed. The retry then finishes the same hold and
+    reports it without a reason, exactly as it finishes a record written before
+    START kept one.
+    """
+    kept = _read_back({"version": _HOLD_DECISION_VERSION, "reason": reason})
+    return None if kept is _UNKEPT else kept
+
+
+def _hold_decision_problem(decision: object) -> str | None:
+    """What makes ``decision`` other than a hold decision START records, or ``None``."""
+    if not isinstance(decision, dict) or set(decision) != _HOLD_DECISION_FIELDS:
+        return "fields other than a hold decision's"
+    if type(decision["version"]) is not int or decision["version"] != _HOLD_DECISION_VERSION:
+        return f"version {decision['version']!r}, which this START does not read"
+    return None
+
+
+def _held_event(effect: object) -> dict[str, Any] | None:
+    """The ``work_held`` event an effect records, or ``None``."""
+    payload = effect.get("payload") if isinstance(effect, dict) and effect.get("kind") == "append_event" else None
+    event = payload.get("record") if isinstance(payload, dict) else None
+    return event if isinstance(event, dict) and event.get("type") == "work_held" else None
+
+
+@dataclass(frozen=True)
+class _ProvenHold:
+    """A hold exactly this START recorded, shown from its record, and what finishing it still needs."""
+
+    work_id: str
+    reason: object  # what it was held for, or ``None`` when the record keeps no reason
+    committed: bool  # the commit carrying the hold is recorded: replaying the record finishes it
+
+
+def _hold_refusal(mutation: Mutation) -> Callable[[str], ReconcileRequired]:
+    def refuse(reason: str) -> ReconcileRequired:
+        return ReconcileRequired(
+            f"START mutation {mutation.id} recorded a hold, but its record holds {reason}; nothing shows that "
+            "finishing it does what that hold decided, and it is left pending, exactly as it is: reconcile required"
+        )
+
+    return refuse
+
+
+def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold | None:
+    """The hold an interrupted run of exactly this START recorded and a retry finishes, or ``None``.
+
+    Read after the terminal finalization (:func:`_completion_to_finish`) and
+    before anything is replayed or chosen, because a hold that stopped part-way
+    leaves a Project this START would otherwise read as an invitation to run the
+    Work again: its own ``work_held`` makes the Work held, and ``run_work``
+    resumes a held Work. Every step reads only, and whatever refuses leaves the
+    record, the Project and Git exactly as they are:
+
+    * no ``work_held`` in the record - ``None``, and START goes on as it always
+      did; a hold the executor has not returned yet is not in the record at all,
+      since its events are recorded together with what they decide;
+    * more than one - ``reconcile required``: START holds one Work and stops;
+    * a hold that is provably this START's own - its stage is the next lifecycle
+      stage of that Work, holding exactly the two events a hold records for it,
+      under the IDs reserved for them and carrying nothing but the reason on the
+      ``work_held`` effect; in ``single-work`` mode it is the invoked Work; every
+      decision recorded before it is finalized by a commit of its own; nothing is
+      recorded after it but the commit that carries it; and, while that commit is
+      not recorded, HEAD's event log does not hold those events yet - that hold:
+      only its Git stage is left, and nothing else is decided, asked or run;
+    * anything else - ``reconcile required``, with the record left exactly as it
+      is.
+
+    A record written before START kept the reason is finished just the same and
+    reports the hold without one: what the hold decided is its two events, and
+    they are in the record. Where it may be finished is the Mutation Controller's
+    to say: it replays and records only on the branch the hold was decided on,
+    and refuses a decision that carries no branch at all (``rules/git``: Commit /
+    push).
+    """
+    effects = mutation.effects
+    held = [effect for effect in effects if _held_event(effect) is not None]
+    if not held:
+        return None
+    refuse = _hold_refusal(mutation)
+    if len(held) > 1:
+        raise refuse("more than one work_held event; START holds one Work and then stops")
+    if not all(
+        isinstance(effect, dict)
+        and isinstance(effect.get("stage"), str)
+        and isinstance(effect.get("kind"), str)
+        and isinstance(effect.get("payload"), dict)
+        for effect in effects
+    ):
+        raise refuse("effects that cannot be read")
+    stages = _recorded_stages(effects, refuse)
+    by_stage = {name: [effect for effect in effects if effect["stage"] == name] for name in stages}
+    (hold_effect,) = held
+    stage, position = hold_effect["stage"], stages.index(hold_effect["stage"])
+    subject = _held_event(hold_effect).get("entity")
+
+    # the Work: one this START could have held, and the one it was invoked for when it runs one alone
+    if not isinstance(subject, str) or not is_valid_id(subject, "work"):
+        raise refuse(f"a work_held event for {subject!r}, which is not a Work")
+    if mode != "outer" and subject != work_id:
+        raise refuse(f"the hold of {subject}, where this single-work START runs {work_id} alone")
+
+    # the stage: the lifecycle stage a hold of that Work records, holding exactly the events it records
+    number = len({name for name in stages[:position] if name.startswith(f"{subject}:lifecycle:")})
+    if stage != f"{subject}:lifecycle:{number}":
+        raise refuse(f"a hold stage named {stage!r}, where the hold of {subject} records it as its next lifecycle stage")
+    lifecycle = by_stage[stage]
+    events = [effect["payload"].get("record") for effect in lifecycle]
+    if len(lifecycle) != len(_HOLD_EVENTS) or not all(
+        effect["kind"] == "append_event"
+        and isinstance(event, dict)
+        and set(event) == _EVENT_FIELDS
+        and all(isinstance(event[field], str) and event[field] for field in _EVENT_FIELDS)
+        for effect, event in zip(lifecycle, events)
+    ):
+        raise refuse(f"a hold stage {stage!r} holding something other than the lifecycle events a hold records")
+    if [(event["type"], event["entity"]) for event in events] != [(t, subject) for t in _HOLD_EVENTS]:
+        raise refuse(f"a hold stage {stage!r} holding other events than the hold of one Work records")
+    if any(mutation.reserved(f"{stage}:event:{index}") != event["id"] for index, event in enumerate(events)):
+        raise refuse("hold events under IDs the hold did not reserve for them")
+    if set(lifecycle[0]["payload"]) != {"record"} or set(lifecycle[-1]["payload"]) not in (
+        {"record"},
+        {"record", _HOLD_DECISION},
+    ):
+        raise refuse("hold events carrying something other than the reason on the work_held event")
+    reason: object = None
+    if _HOLD_DECISION in lifecycle[-1]["payload"]:
+        decision = lifecycle[-1]["payload"][_HOLD_DECISION]
+        problem = _hold_decision_problem(decision)
+        if problem is not None:
+            raise refuse(f"a hold decision with {problem}")
+        reason = decision["reason"]
+
+    # around it: every decision before the hold finalized by a commit of its own, and after it only the commit
+    # carrying the hold - a hold ends the START, so nothing else is decided or run past it
+    finalized = max(
+        (index for index, name in enumerate(stages[:position]) if any(e["kind"] == "git_commit" for e in by_stage[name])),
+        default=-1,
+    )
+    undecided = [name for name in stages[finalized + 1:position] if _decides(by_stage[name])]
+    if undecided:
+        raise refuse(f"the decisions {undecided} before the hold that no commit of their own finalizes")
+    after = stages[position + 1:]
+    committed = bool(after)
+    if committed:
+        commit_stage = f"commit:{len([name for name in stages[:position + 1] if name.startswith('commit:')])}"
+        if after != [commit_stage]:
+            raise refuse(f"the stages {after} after the hold stage, where a hold records only its commit {commit_stage!r}")
+        work = ProjectView.load(mutation.store).works.get(subject)
+        commit = by_stage[commit_stage][0]["payload"]
+        paths = commit.get("paths")
+        if (
+            work is None
+            or [effect["kind"] for effect in by_stage[commit_stage]] not in (["git_commit"], ["git_commit", "git_push"])
+            or commit.get("message") != f"chore(workline): hold {work.display}"
+            or not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) for path in paths)
+            or not set(paths) <= set(_owned_paths([e for e in effects if e["kind"] in FILE_EFFECT_KINDS]))
+        ):
+            raise refuse(f"a {commit_stage} stage other than the commit carrying the hold")
+    elif _in_head_event_log(mutation.store, [event["id"] for event in events]):
+        raise ReconcileRequired(
+            f"START mutation {mutation.id} recorded the hold of {subject}, but a commit it did not record already "
+            "holds those events, so its own commit and push cannot be shown; it is left pending, exactly as it is: "
+            "reconcile required"
+        )
+    return _ProvenHold(subject, reason, committed)
+
+
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
@@ -1991,8 +2234,12 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
                 "left as they are: reconcile required"
             )
         # A terminal lifecycle this mutation recorded without its finalization is
-        # answered from the record before anything is replayed or chosen.
-        finishing = _completion_to_finish(mutation, work_id, mode) if mutation.resumed and cancel is None else None
+        # answered from the record before anything is replayed or chosen; so is a
+        # hold, which is not terminal but is just as much a decision this START
+        # already made and must not make again.
+        reading = mutation.resumed and cancel is None
+        finishing = _completion_to_finish(mutation, work_id, mode) if reading else None
+        holding = _hold_to_finish(mutation, work_id, mode) if reading and finishing is None else None
         gitops.record_preexisting_dirty(mutation, store.root)
         mutation.apply()  # resume: replay every recorded effect before continuing
         state = view.work_state(work_id)
@@ -2009,6 +2256,9 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
             result = session.finish_cancel(cancel)
         elif finishing is not None:
             result = session.finish_completion(finishing)
+        elif holding is not None:
+            # The hold ends this START as it would have uninterrupted: no other Work is chosen or run after it.
+            result = session.finish_hold(holding)
         elif mutation.resumed:
             ambiguous: str | None = None
             if mode == "outer":
