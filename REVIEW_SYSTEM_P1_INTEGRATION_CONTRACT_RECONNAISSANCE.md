@@ -1,12 +1,10 @@
 # Review System P1 — Integration Contract Reconnaissance Checkpoint
 
-Status: ROUND 2 CONTRACT REPAIRS FROZEN / IMPLEMENTATION NOT STARTED / RE-REVIEW REQUIRED
+Status: ROUND 3 CONTRACT REPAIRS FROZEN / IMPLEMENTATION NOT STARTED / FINAL FOCUSED RE-REVIEW REQUIRED
 
-This checkpoint records Candidate 7 P1 Integration Contract Reconnaissance, first independent-review repair, and second independent-readiness repair.
+Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code until implementation/activation.
 
-Runtime authority remains `registry.md`, registry-routed canonical Skills and live code until implementation/activation.
-
-## 1. Architecture baseline
+## Architecture baseline
 
 ```text
 Candidate 7 architecture: RETAIN
@@ -15,120 +13,49 @@ HUMAN decisions: 0
 Candidate 8 required: No
 ```
 
-Review remains a subordinate authorization/quality gate. `ProjectView/state.py` remains lifecycle/progression authority only from canonical entities/relations/events. Review metadata never becomes lifecycle truth.
+Review remains a subordinate authorization/quality gate. `ProjectView/state.py` remains lifecycle/progression authority from canonical entities/relations/events. Review metadata never becomes lifecycle truth.
 
-## 2. First independent review
+## Repair history
 
-Nine contract seams were accepted and repaired: K1 commit-ID crash recovery, generation serialization, no-follow writer safety, clone-safe task descriptor, immutable create-only records, terminal Consumption totality, Roadmap ownership of Phase-entry self-selection, Git committability preflight and canonical predecessor digest/test coverage.
+Round 1 is recorded in `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_AFTER_EXTERNAL_REVIEW.md`.
 
-Umbrella checkpoint:
+Round 2 is recorded in `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND2.md` and froze same-run generation recovery, exact clone-safe Candidate/request task provenance, durable legacy/review-v1 terminal classification, and commit-local hook/filter side-effect controls.
 
-`REVIEW_SYSTEM_P1_CONTRACT_REPAIR_AFTER_EXTERNAL_REVIEW.md`
-
-## 3. Second independent readiness review
-
-Second review result:
+Round 3 is recorded in `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND3.md` and closes the two remaining MID seams from the latest independent review:
 
 ```text
-F1 K1 identity crash recovery       RESOLVED
-F2 generation serialization         PARTIAL -> P1R-01
-F3 write-time no-follow safety      RESOLVED
-F4 clone-safe async task            PARTIAL -> P1R-02
-F5 immutable create-only            RESOLVED
-F6 Consumption totality             PARTIAL -> P1R-03
-F7 Roadmap authority ownership      RESOLVED
-F8 Git committability preflight     RESOLVED
-F9 predecessor digest exactness     RESOLVED
-
-P1R-04 LOW improvement: accepted
-Verdict: REPAIR
+P1R2-NF-01 activation-prefix digest representation ambiguity
+P1R2-NF-02 commit signing / broader external-process surface
 ```
 
-Round-2 umbrella checkpoint:
+## Round 3 frozen changes
 
-`REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND2.md`
+### R4
 
-## 4. Round-2 frozen repairs
+`work-terminal-activation-digest-v1` hashes canonical parsed Event records, not raw `events.jsonl` bytes. It preserves all schema-allowed fields, uses lexicographically sorted compact JSON, UTF-8, and exactly one LF per canonical Event line. Valid CRLF/LF and blank-line representation normalization does not change the digest; semantic Event mutation/reorder/insert/delete does.
 
-### P1R-01 — same-run generation recovery
+### R5/R6/R11
 
-Every generation mutation declares in initial `WriteScope.files`:
+Review-v1 `commit_local-v1` must classify every external executable/process reachable by the exact staging/local-commit path. P1 explicitly disables commit signing (`--no-gpg-sign` equivalent). Signing-disabled mode is part of the versioned Git persistence semantics and Evidence/ReviewValidity identity. Content-defining filters cannot be silently disabled when doing so changes persisted semantics.
 
-```text
-exact generation file path
-+ .workline/review/gates/<review_run_id>/.generation-serialization
-```
+### R12
 
-The latter is scope-only, never a physical/canonical file. Before calculating a new generation, pending same-run generation mutations must be discovered and resumed/reconciled. Thus physical G(N+1) creation followed by crash before `applied` save cannot let a second invocation open G(N+2).
+Tests now include activation digest stability/mutation detection and a `commit.gpgSign=true` + custom signer fixture proving the signer is not invoked before Review proof, plus identity binding for signing-disabled commit semantics.
 
-Affected contracts: R2, R3, R12.
-
-### P1R-02 — exact clone-safe task reconstruction
-
-P1 adds immutable provenance:
+## Current checkpoint
 
 ```text
-.workline/review/candidate-snapshots/<candidate_hash>.yaml
-.workline/review/task-inputs/<review_task_id>.yaml
-```
-
-Accepted task launch requires exact Candidate/request reconstruction material, not merely IDs/digests. Fresh clone must reconstruct exact Candidate/request, recompute matching digests and reuse the same task ID. Missing/incomplete material fails closed.
-
-Affected contracts: R1, R3, R12.
-
-### P1R-03 — durable legacy/review-v1 terminal classification
-
-P3 adds immutable activation:
-
-```text
-.workline/review/activation/work-terminal-v1.yaml
-```
-
-It binds the exact pre-activation legacy event prefix using count + SHA-256 and activation base. Post-activation review-v1 `work_completed` events carry explicit non-lifecycle operation-contract metadata. Missing/unknown/contradictory marker after activation reconciles; never legacy fallback. `state.py` ignores Review event metadata.
-
-Affected contracts: R1, R4, R5, R12.
-
-### P1R-04 — hook/filter external side-effect guard
-
-Review-v1 `commit_local()` must make no uncontrolled external/network side effect before proof. Applicable hooks/filters capable of external side effects must be mechanically denied/contained or commit fails closed. Content-defining filters cannot simply be disabled if doing so changes Git persistence semantics.
-
-Affected contracts: R5, R12; R6/R11 continue to bind Git/tool dependency identity.
-
-## 5. Current contract documents
-
-Round-2 changes are directly reflected in:
-
-- `REVIEW_SYSTEM_P1_R1_DURABLE_LAYOUT_CONTRACT.md`
-- `REVIEW_SYSTEM_P1_R2_ID_RESERVATION_CONTRACT.md`
-- `REVIEW_SYSTEM_P1_R3_GATE_GENERATION_MUTATION_CONTRACT.md`
-- `REVIEW_SYSTEM_P1_R4_CONSUMPTION_UNIQUENESS_CONTRACT.md`
-- `REVIEW_SYSTEM_P1_R5_START_COMMIT_PROOF_PUSH_CONTRACT.md`
-- `REVIEW_SYSTEM_P1_R12_RECOVERY_INVARIANT_TEST_CONTRACT.md`
-
-R6/R7/R8/R9/R10/R11 retain their previous repaired/frozen meaning unless explicitly referenced by the Round-2 checkpoint.
-
-## 6. Current state
-
-```text
-Candidate 7 architecture: RETAIN
-Architecture blockers: 0
-HUMAN decisions: 0
-Candidate 8 required: No
-
-P1R-01: REPAIRED/FROZEN
-P1R-02: REPAIRED/FROZEN
-P1R-03: REPAIRED/FROZEN
-P1R-04: ACCEPTED/FROZEN
+Round 1 findings: REPAIRED/FROZEN
+Round 2 findings: REPAIRED/FROZEN
+Round 3 findings: REPAIRED/FROZEN
 
 P1 implementation: NOT STARTED
-Implementation activation: BLOCKED pending independent re-review
+Implementation activation: BLOCKED pending final focused independent re-review
 ```
 
-## 7. Next stage
+## Next stage
 
-Run another focused independent Implementation Readiness re-review against live `main` and the Round-2 repaired contracts.
-
-Allowed final verdicts:
+Run one focused independent readiness review of the Round 3 repairs and cross-contract regressions. Final verdict must be one of:
 
 ```text
 REPAIR
@@ -136,4 +63,4 @@ HUMAN
 READY_FOR_P1_IMPLEMENTATION
 ```
 
-Only `READY_FOR_P1_IMPLEMENTATION` permits P1 implementation to start.
+If no concrete HIGH/MID seam and no HUMAN decision remains, stop the contract-review loop and begin P1 implementation.
