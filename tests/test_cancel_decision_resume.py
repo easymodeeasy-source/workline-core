@@ -392,6 +392,8 @@ class DecisionRecordTests(CancelCase):
             }],
             "add_relations": [{"type": "requires_completion", "from": "007", "to": i1}],
             "remove_relations": [removed],
+            # and how the Project showed the Work, which the cancel's commit message renders (BL-047)
+            "display": "W-01",
         })
         # The IDs stay the record's reservations; the decision does not repeat them.
         reserved = pending["reserved_ids"]

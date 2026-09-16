@@ -39,8 +39,11 @@ from .mutation import (
 )
 from .oplock import project_operation
 from .ops import (
+    DECIDED_DISPLAY,
+    Finalization,
     Replan,
     _as_recorded,
+    _EXCLUSION_DECISION,
     _own_effects_free_view,
     _owned_paths,
     _plan_exclusion_ledgers,
@@ -52,7 +55,11 @@ from .ops import (
     _registration_matches,
     _resume_plan_exclusion,
     apply_replan,
+    decided_display,
     event_effects,
+    exclusion_decision,
+    finalization_message,
+    finalization_proven,
     owned_canonical_paths,
     plan_replan,
     problems_text,
@@ -536,7 +543,7 @@ class _Session:
                 return StartResult("question_wait", work_id, self.mutation.id, phase_id=work.phase_id, detail=outcome.question)
             if isinstance(outcome, Hold):
                 self._record_hold(work, outcome)
-                self._commit("commit", f"chore(workline): hold {work.display}", [])
+                self._commit("commit", finalization_message(_HELD, work.display), [])
                 return StartResult("held", work_id, self.mutation.id, phase_id=work.phase_id, detail=outcome.reason, head=gitcmd.head_commit(self.store.root))
             if isinstance(outcome, Cancel):
                 return self._cancel(view, work, outcome)
@@ -922,7 +929,7 @@ class _Session:
         """
         stage = stage_name(self.mutation, f"{work.id}:lifecycle")
         effects = event_effects(self.mutation, stage, work.id, list(_HOLD_EVENTS))
-        decision = _hold_decision(outcome.reason)
+        decision = _hold_decision(outcome.reason, work.display)
         if decision is not None:
             effects[-1] = Effect(effects[-1].kind, {**effects[-1].payload, _HOLD_DECISION: decision})
         self.mutation.add_effects(stage, effects)
@@ -944,7 +951,10 @@ class _Session:
         if work is None:
             raise ValidationError(f"Work unresolvable: {hold.work_id}", code="entity_unresolvable")
         if not hold.committed:
-            self._commit("commit", f"chore(workline): hold {work.display}", [])
+            # The display the hold was decided on, so the commit a retry makes carries the message the hold
+            # decided on rather than one made from a display changed since (BL-047); a record written before
+            # one was recorded keeps the display the Project shows now, exactly as it always did.
+            self._commit("commit", finalization_message(_HELD, hold.display or work.display), [])
         after = ProjectView.load(self.store)
         if after.work_state(work.id).state != HELD:
             raise StopError(f"{work.id} is not held after finalization", code="postcheck_failed")
@@ -968,9 +978,11 @@ class _Session:
             add_works={work_ids[k]: spec for k, spec in outcome.replan.new_works.items()},
         )
         validate_projection(projection, "cancel replan")
-        decision = _cancel_decision(work.id, prefix, outcome, removals)
+        decision = _cancel_decision(work.id, prefix, outcome, removals, work.display)
         self._record_cancel(work, [t for _, t in events], decision)
-        return self._carry_cancel(work, prefix, outcome.replan, removals, additions, work_ids, outcome.reason)
+        return self._carry_cancel(
+            work, prefix, outcome.replan, removals, additions, work_ids, outcome.reason, work.display
+        )
 
     def _record_cancel(self, work: Entity, types: list[str], decision: dict[str, Any]) -> None:
         """Record the cancel's lifecycle events together with the decision that made them, then apply them.
@@ -997,11 +1009,18 @@ class _Session:
         additions: list[Relation],
         work_ids: dict[str, str],
         reason: object,
+        display: str,
     ) -> StartResult:
-        """Everything of a cancel after its lifecycle events: the replan, the structural validation, the commit."""
+        """Everything of a cancel after its lifecycle events: the replan, the structural validation, the commit.
+
+        ``display`` is how the Project showed the Work when the cancel was
+        decided - taken from the decision by a resume - so the commit a retry
+        makes carries the message the cancel decided on, not one made from a
+        display changed since (BL-047).
+        """
         apply_replan(self.mutation, prefix, replan, removals, additions, work_ids)
         _structure_or_stop(self.store, "cancel structural validation")
-        self._commit("commit", f"chore(workline): cancel {work.display}", [])
+        self._commit("commit", finalization_message(_CANCELLED, display), [])
         return StartResult("cancelled", work.id, self.mutation.id, tuple(self.completed), work.phase_id, reason, gitcmd.head_commit(self.store.root))
 
     def finish_cancel(self, cancel: "_ProvenCancel") -> StartResult:
@@ -1023,7 +1042,8 @@ class _Session:
                 gitcmd.head_commit(self.store.root),
             )
         return self._carry_cancel(
-            work, cancel.prefix, cancel.replan, cancel.removals, cancel.additions, cancel.work_ids, cancel.reason
+            work, cancel.prefix, cancel.replan, cancel.removals, cancel.additions, cancel.work_ids, cancel.reason,
+            cancel.display if cancel.display is not None else work.display,
         )
 
     # derived / fix Works -----------------------------------------------------
@@ -1435,6 +1455,8 @@ def _in_head_event_log(store: ProjectStore, event_ids: list[str]) -> bool:
 _CANCEL_DECISION = "cancel"
 _CANCEL_DECISION_VERSION = 1
 _DECISION_FIELDS = frozenset({"version", "work_id", "prefix", "reason", "new_works", "add_relations", "remove_relations"})
+#: The finalization each of these recovery decisions ends in (``ops.finalization_message``).
+_CANCELLED, _HELD, _EXCLUDED = "cancel", "hold", "plan_excluded"
 _NEW_WORK_FIELDS = frozenset({
     "key", "name", "desired_state", "phase_id", "roadmap_id", "work_kind", "confirmation_target", "related",
     "derivation_detail",
@@ -1629,7 +1651,9 @@ def _outcome_from_record(outcome: dict[str, Any]) -> object:
     )
 
 
-def _cancel_decision(work_id: str, prefix: str, outcome: Cancel, removals: list[Relation]) -> dict[str, Any]:
+def _cancel_decision(
+    work_id: str, prefix: str, outcome: Cancel, removals: list[Relation], display: str
+) -> dict[str, Any]:
     """What a START cancel decided, exactly as its recovery record reads it back - or the refusal.
 
     Everything a resume needs that no effect recorded with the cancel's events
@@ -1675,6 +1699,7 @@ def _cancel_decision(work_id: str, prefix: str, outcome: Cancel, removals: list[
             ],
             "add_relations": [{"type": r.type, "from": r.from_ref, "to": r.to_ref} for r in replan.add_relations],
             "remove_relations": [relation.to_record() for relation in removals],
+            DECIDED_DISPLAY: display,
         }
     except (AttributeError, TypeError) as exc:
         raise ValidationError(
@@ -1682,6 +1707,12 @@ def _cancel_decision(work_id: str, prefix: str, outcome: Cancel, removals: list[
             "together with everything it decided, so nothing of it is recorded"
         ) from exc
     kept = _read_back(decision)
+    if kept is _UNKEPT:
+        # The display is how a Project shows the Work, not part of what the cancel decides: one the record
+        # cannot keep exactly is left out - the cancel is then finished by the shape of its own finalization
+        # (``ops.finalization_proven``) - rather than refusing a cancel that would otherwise succeed (BL-047).
+        decision = {key: value for key, value in decision.items() if key != DECIDED_DISPLAY}
+        kept = _read_back(decision)
     if kept is _UNKEPT:
         where, value = _unkept_part(decision, "cancel")
         raise ValidationError(
@@ -1766,6 +1797,8 @@ class _ProvenCancel:
     removals: list[Relation]
     committed: bool  # the commit carrying the cancel is recorded: replaying the record finishes it
     view: ProjectView  # the Project without the cancel's own applied effects: what the decision was made on
+    #: How the Project showed the Work when the cancel was decided, or ``None`` when the record holds none (BL-047).
+    display: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1848,7 +1881,7 @@ def _cancel_to_finish(store: ProjectStore, entry: Entity, mode: str) -> _ProvenC
     )
     return _ProvenCancel(
         record["mutation_id"], read.work_id, cancel.prefix, read.decision["reason"], cancel.replan, cancel.work_ids,
-        cancel.additions, cancel.removals, cancel.committed, view,
+        cancel.additions, cancel.removals, cancel.committed, view, cancel.display,
     )
 
 
@@ -1944,10 +1977,12 @@ def _decision_problem(decision: object) -> str | None:
     and a new Work's key and the endpoints and confirmation targets that name
     one.
     """
-    if not isinstance(decision, dict) or set(decision) != _DECISION_FIELDS:
+    if not isinstance(decision, dict) or set(decision) not in (_DECISION_FIELDS, _DECISION_FIELDS | {DECIDED_DISPLAY}):
         return "fields other than a cancel decision's"
     if type(decision["version"]) is not int or decision["version"] != _CANCEL_DECISION_VERSION:
         return f"version {decision['version']!r}, which this START does not read"
+    if DECIDED_DISPLAY in decision and (not isinstance(decision[DECIDED_DISPLAY], str) or not decision[DECIDED_DISPLAY]):
+        return "a display that is not a non-empty string"
     if not isinstance(decision["work_id"], str) or not isinstance(decision["prefix"], str):
         return "a Work or a prefix that is not text"
     new_works, additions, removals = decision["new_works"], decision["add_relations"], decision["remove_relations"]
@@ -2044,6 +2079,8 @@ class _DecidedCancel:
     additions: list[Relation]
     removals: list[Relation]
     committed: bool
+    #: How the Project showed the Work when the cancel was decided, or ``None`` when the record holds none (BL-047).
+    display: str | None = None
 
 
 def _prove_cancel(
@@ -2149,7 +2186,7 @@ def _prove_cancel(
         paths = commit.get("paths")
         if (
             [effect["kind"] for effect in finalize] not in (["git_commit"], ["git_commit", "git_push"])
-            or commit.get("message") != f"chore(workline): cancel {work.display}"
+            or not finalization_proven(_CANCELLED, decision.get(DECIDED_DISPLAY), commit.get("message"))
             or not isinstance(paths, list)
             or not paths
             or not all(isinstance(path, str) for path in paths)
@@ -2169,7 +2206,9 @@ def _prove_cancel(
         dict(reserved), read.effects, read.by_stage, current, work_ids, additions,
         removals if remove_stage in read.by_stage else None, finalize, file_effects, applied, unapplied,
     )
-    return proven, _DecidedCancel(prefix, replan, work_ids, additions, removals, committed)
+    return proven, _DecidedCancel(
+        prefix, replan, work_ids, additions, removals, committed, decision.get(DECIDED_DISPLAY)
+    )
 
 
 def _decide_cancel(proven: _ProvenRecord, read: _CancelRecord, cancel: _DecidedCancel, refuse) -> ProjectView:
@@ -2229,28 +2268,43 @@ _HOLD_DECISION_FIELDS = frozenset({"version", "reason"})
 _HOLD_EVENTS = ("work_target_removed", "work_held")
 
 
-def _hold_decision(reason: object) -> dict[str, Any] | None:
-    """The reason a hold was decided for, as its record reads it back, or ``None`` when the record cannot keep it.
+def _hold_decision(reason: object, display: str) -> dict[str, Any] | None:
+    """What a hold was decided as, as its record reads it back, or ``None`` when the record can keep none of it.
 
-    Only the reason: everything else a resume needs - the Work, the stage, the
-    events and the IDs reserved for them - is in the effects the decision rides
-    on. The reason is the executor's word to START's caller and no Project
-    content is made from it, so one the record cannot keep exactly (a float, an
-    object, text holding a lone surrogate) is left out rather than refusing a
-    hold that would otherwise succeed. The retry then finishes the same hold and
-    reports it without a reason, exactly as it finishes a record written before
-    START kept one.
+    The reason it was held for, and how the Project showed the Work when it was
+    decided - the display its finalization commit message renders, so a retry
+    neither rebuilds that message from a display changed since nor refuses the
+    hold over one (BL-047). Everything else a resume needs - the Work, the stage,
+    the events and the IDs reserved for them - is in the effects the decision
+    rides on.
+
+    Neither part refuses a hold the record cannot keep exactly (a float, an
+    object, text holding a lone surrogate): the reason is the executor's word to
+    START's caller and no Project content is made from it, and a hold without a
+    recorded display is finished by the shape of its own finalization
+    (``ops.finalization_proven``), exactly as one recorded before START kept a
+    display is. Whichever part cannot be kept leaves the decision as it was
+    without it - a reason the record cannot keep still records nothing at all,
+    exactly as before (BL-044) - and a retry finishes the same hold either way.
     """
+    kept = _read_back({"version": _HOLD_DECISION_VERSION, "reason": reason, DECIDED_DISPLAY: display})
+    if kept is not _UNKEPT and _hold_decision_problem(kept) is None:
+        return kept
     kept = _read_back({"version": _HOLD_DECISION_VERSION, "reason": reason})
     return None if kept is _UNKEPT else kept
 
 
 def _hold_decision_problem(decision: object) -> str | None:
     """What makes ``decision`` other than a hold decision START records, or ``None``."""
-    if not isinstance(decision, dict) or set(decision) != _HOLD_DECISION_FIELDS:
+    if not isinstance(decision, dict) or set(decision) not in (
+        _HOLD_DECISION_FIELDS,
+        _HOLD_DECISION_FIELDS | {DECIDED_DISPLAY},
+    ):
         return "fields other than a hold decision's"
     if type(decision["version"]) is not int or decision["version"] != _HOLD_DECISION_VERSION:
         return f"version {decision['version']!r}, which this START does not read"
+    if DECIDED_DISPLAY in decision and (not isinstance(decision[DECIDED_DISPLAY], str) or not decision[DECIDED_DISPLAY]):
+        return "a display that is not a non-empty string"
     return None
 
 
@@ -2268,6 +2322,8 @@ class _ProvenHold:
     work_id: str
     reason: object  # what it was held for, or ``None`` when the record keeps no reason
     committed: bool  # the commit carrying the hold is recorded: replaying the record finishes it
+    #: How the Project showed the Work when the hold was decided, or ``None`` when the record holds none (BL-047).
+    display: str | None = None
 
 
 def _hold_refusal(mutation: Mutation) -> Callable[[str], ReconcileRequired]:
@@ -2363,6 +2419,7 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
     ):
         raise refuse("hold events carrying something other than the reason on the work_held event")
     reason: object = None
+    held_display = decided_display(lifecycle[-1]["payload"], _HOLD_DECISION)
     if _HOLD_DECISION in lifecycle[-1]["payload"]:
         decision = lifecycle[-1]["payload"][_HOLD_DECISION]
         problem = _hold_decision_problem(decision)
@@ -2391,7 +2448,7 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
         if (
             work is None
             or [effect["kind"] for effect in by_stage[commit_stage]] not in (["git_commit"], ["git_commit", "git_push"])
-            or commit.get("message") != f"chore(workline): hold {work.display}"
+            or not finalization_proven(_HELD, held_display, commit.get("message"))
             or not isinstance(paths, list)
             or not paths
             or not all(isinstance(path, str) for path in paths)
@@ -2404,7 +2461,7 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
             "holds those events, so its own commit and push cannot be shown; it is left pending, exactly as it is: "
             "reconcile required"
         )
-    return _ProvenHold(subject, reason, committed)
+    return _ProvenHold(subject, reason, committed, held_display)
 
 
 # --------------------------------------------------------------------------- recorded derivations
@@ -2822,20 +2879,23 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
         if view.work_state(work_id).state != UNSTARTED:
             raise SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}")
 
-    def message(view: ProjectView) -> str:
-        return f"chore(workline): plan_excluded {view.works[work_id].display}"
-
     # Resumed exactly as Roadmap's plan exclusion is (``roadmap._plan_exclude_locked``). The slot names this
     # operation, not START's own invocation: a START record of the same Work is never taken for one of these, and
     # START's own resume (:func:`_completion_to_finish`) reads only the mutation ``_start_locked`` opens.
     slot = {"operation": "start-plan-exclude", "work_id": work_id}
     request = _plan_exclusion_request(work_id, replan)
-    resumed = _resume_plan_exclusion(store, OWNER, slot, work_id, replan, request, precheck, message)
+    resumed = _resume_plan_exclusion(
+        store, OWNER, slot, work_id, replan, request, precheck, Finalization(kind=_EXCLUDED),
+    )
     if resumed is not None:
         view = resumed.view
     else:
         view = _structure_or_stop(store, "precheck")
         precheck(view)
+    # The display this exclusion is decided on: the one its own record holds, so the message it commits and
+    # the message its record is proven against are the one display, decided once (BL-047). A record written
+    # before one was recorded keeps the display the Project shows now, exactly as it always did.
+    display = resumed.display if resumed is not None and resumed.display is not None else view.works[work_id].display
     destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
     mutation = controller.open(OWNER, {**slot, "request": request}, WriteScope(entities=(work_id,), files=LEDGER_FILES))
@@ -2857,13 +2917,15 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
             validate_projection(projection, "plan exclusion replan")
         gitops.ensure_separable_before_effects(mutation, _plan_exclusion_ledgers(replan))
     if not mutation.has_stage("event"):
-        mutation.add_effects("event", event_effects(mutation, "event", work_id, ["plan_excluded"]))
+        effects = event_effects(mutation, "event", work_id, ["plan_excluded"])
+        effects[-1] = Effect(effects[-1].kind, {**effects[-1].payload, _EXCLUSION_DECISION: exclusion_decision(display)})
+        mutation.add_effects("event", effects)
     mutation.apply()
     apply_replan(mutation, "replan", replan, removals, additions, work_ids)
     gitops.finalize(
         mutation,
         "finalize",
-        message(view),
+        finalization_message(_EXCLUDED, display),
         owned_canonical_paths(mutation),
         destination=destination,
     )

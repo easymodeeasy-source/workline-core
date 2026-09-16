@@ -115,8 +115,13 @@ def before_bl041():
 
 
 def before_the_reason_was_kept():
-    """The implementation before this change, which recorded a hold's events without the reason it was held for."""
-    return mock.patch.object(st, "_hold_decision", lambda reason: None)
+    """The implementation before this change, which recorded a hold's events without a decision at all.
+
+    That is also what a record written before START kept the display the hold's
+    commit message renders holds (BL-047), so a hold recorded this way is
+    finished by the shape of its own finalization.
+    """
+    return mock.patch.object(st, "_hold_decision", lambda reason, display: None)
 
 
 class HoldCase(WorklineTestCase):

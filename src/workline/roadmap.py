@@ -43,6 +43,7 @@ from .mutation import (
 )
 from .oplock import project_operation
 from .ops import (
+    Finalization,
     Replan,
     _plan_exclusion_ledgers,
     _plan_exclusion_request,
@@ -1229,7 +1230,7 @@ def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, re
     request = _plan_exclusion_request(entity_id, replan)
     identity = {"entity": entity_id, "request": request}
     slot = {"operation": operation, "entity": entity_id}
-    resumed = _resume_plan_exclusion(store, OWNER, slot, entity_id, replan, request, precheck, lambda view: message)
+    resumed = _resume_plan_exclusion(store, OWNER, slot, entity_id, replan, request, precheck, Finalization(exact=lambda view: message))
     if resumed is not None:
         mutation, destination = _open(store, operation, identity, [entity_id])
         work_ids, removals, additions = resumed.work_ids, resumed.removals, resumed.additions

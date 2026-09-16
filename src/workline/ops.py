@@ -315,6 +315,8 @@ class _ResumedPlanExclusion:
     work_ids: dict[str, str]
     removals: list[Relation]
     additions: list[Relation]
+    #: The display the record holds the request was decided on, or ``None`` when it holds none (BL-047).
+    display: str | None = None
 
 
 def _resume_plan_exclusion(
@@ -325,7 +327,7 @@ def _resume_plan_exclusion(
     replan: Replan,
     request: dict[str, Any],
     precheck: Callable[[ProjectView], None],
-    message: Callable[[ProjectView], str],
+    finalization: Finalization,
 ) -> _ResumedPlanExclusion | None:
     """Decide how the unfinished plan exclusion of ``slot`` is continued, writing nothing.
 
@@ -364,9 +366,9 @@ def _resume_plan_exclusion(
         _proven_reservations(record, replan, refuse)
         return None
     proven = _prove_plan_exclusion(store, record, target, replan, refuse)
-    view, removals = _decide_plan_exclusion(proven, target, replan, precheck, message, refuse)
+    view, removals = _decide_plan_exclusion(proven, target, replan, precheck, finalization, refuse)
     _refuse_before_replay(store, owner, record, proven, replan, removals)
-    return _ResumedPlanExclusion(view, proven.work_ids, removals, proven.additions)
+    return _ResumedPlanExclusion(view, proven.work_ids, removals, proven.additions, proven.decided_display)
 
 
 def _refusal(record: dict[str, Any], described: str) -> Callable[[str], ReconcileRequired]:
@@ -507,6 +509,123 @@ def _recorded_displays(
     return displays
 
 
+# --------------------------------------------------------------------------- finalization messages
+#
+# A cancel, a hold and START's plan exclusion each end in one commit whose
+# message shows a reader which Work it was about, by the display the Project
+# showed that Work under. A display is how a Project shows a Work, not part of
+# what the Work is - there is no uniqueness rule for it, nothing is looked up by
+# it, and a duplicate display leaves the Project valid (BL-045) - so a person may
+# change one at any time, including while an operation that already committed to
+# a message is waiting to be finished.
+#
+# Rebuilding the expected message from the Work's display *now* therefore proved
+# a durable record against a value the record does not hold: a display-only edit
+# after the finalization was recorded refused an already-decided - and possibly
+# already-pushed - operation for good, and blocked every other Work in the
+# Project behind its write scope (BL-047). The display an operation decided on is
+# recorded with its decision instead, in the save before the one that records the
+# commit, and the message is proven against that.
+
+#: The key a recovery decision keeps the Work's display under - how the Project showed the Work when the
+#: operation decided, which is what its finalization commit message renders.
+DECIDED_DISPLAY = "display"
+
+#: The key a plan exclusion's decision rides on its ``plan_excluded`` event under, and its form.
+_EXCLUSION_DECISION = "exclusion"
+_EXCLUSION_DECISION_VERSION = 1
+_EXCLUSION_DECISION_FIELDS = frozenset({"version", DECIDED_DISPLAY})
+
+#: What each finalization commit message renders before that display.
+_FINALIZATION_PREFIXES = {
+    "cancel": "chore(workline): cancel ",
+    "hold": "chore(workline): hold ",
+    "plan_excluded": "chore(workline): plan_excluded ",
+}
+
+
+def finalization_message(kind: str, display: str) -> str:
+    """The commit message a ``kind`` finalization carries for a Work the Project shows as ``display``."""
+    return f"{_FINALIZATION_PREFIXES[kind]}{display}"
+
+
+def decided_display(payload: object, key: str) -> str | None:
+    """The display a decision under ``key`` in ``payload`` recorded, or ``None`` when it recorded none.
+
+    ``None`` is what every record written before an operation recorded one reads
+    as, and what one whose display the record could not keep exactly reads as:
+    both are finished by the shape of their own finalization instead
+    (:func:`finalization_proven`).
+    """
+    decision = payload.get(key) if isinstance(payload, dict) else None
+    display = decision.get(DECIDED_DISPLAY) if isinstance(decision, dict) else None
+    return display if isinstance(display, str) and display else None
+
+
+def finalization_proven(kind: str, decided: str | None, recorded: object) -> bool:
+    """Whether ``recorded`` is the finalization message a ``kind`` operation makes, as its record shows it.
+
+    With the display that operation decided on, exactly the message it renders
+    from it - the same equality as before, on the value the record holds rather
+    than on the one the Project shows now.
+
+    Without one - a record written before the display was recorded with the
+    decision - what a resume can still show: that the message is *this* kind of
+    finalization and carries a Work's display at all. That tells this commit
+    apart from every other message an operation writes (``cancel`` from ``hold``,
+    ``derive from``, ``branch from``, ``complete``, ``plan_excluded``, a fix-planned
+    or a result commit, and from anything that is not one of them), and refuses a
+    message with nothing where the display goes. It does not tell two displays of
+    the same kind apart, which is the one thing about a legacy record that cannot
+    be shown from the record at all; everything else a finalization is - the
+    effect kinds, the paths, the stable Work ID the decision names, the branch it
+    was decided on and the commit it made - is proven exactly as before, and a
+    record written from now on is held to the exact message again.
+    """
+    if not isinstance(recorded, str):
+        return False
+    if decided is not None:
+        return recorded == finalization_message(kind, decided)
+    prefix = _FINALIZATION_PREFIXES[kind]
+    return recorded.startswith(prefix) and len(recorded) > len(prefix)
+
+
+def exclusion_decision(display: str) -> dict[str, Any]:
+    """What a plan exclusion records on its ``plan_excluded`` event: the display its finalization renders."""
+    return {"version": _EXCLUSION_DECISION_VERSION, DECIDED_DISPLAY: display}
+
+
+def _exclusion_decision_problem(decision: object) -> str | None:
+    """What makes ``decision`` other than a plan exclusion decision, or ``None``."""
+    if not isinstance(decision, dict) or set(decision) != _EXCLUSION_DECISION_FIELDS:
+        return "fields other than a plan exclusion decision's"
+    if type(decision["version"]) is not int or decision["version"] != _EXCLUSION_DECISION_VERSION:
+        return f"version {decision['version']!r}, which this operation does not read"
+    if not isinstance(decision[DECIDED_DISPLAY], str) or not decision[DECIDED_DISPLAY]:
+        return "a display that is not a non-empty string"
+    return None
+
+
+@dataclass(frozen=True)
+class Finalization:
+    """How a plan exclusion's recorded finalization message is shown, on a resume, to be the one it makes.
+
+    ``kind`` names a finalization whose message renders the target's display
+    (:func:`finalization_message`), proven against the display the record holds.
+    ``exact`` is for an owner whose message renders nothing a Project can change -
+    Roadmap's plan exclusion names its target by its stable ID - where the
+    recorded message is simply that message. Exactly one of them is given.
+    """
+
+    kind: str | None = None
+    exact: Callable[[ProjectView], str] | None = None
+
+    def proven(self, view: ProjectView, decided: str | None, recorded: object) -> bool:
+        if self.kind is None:
+            return recorded == self.exact(view)
+        return finalization_proven(self.kind, decided, recorded)
+
+
 @dataclass(frozen=True)
 class _ProvenRecord:
     """What :func:`_prove_plan_exclusion` read out of a record, for the decision and the check before replay."""
@@ -522,6 +641,9 @@ class _ProvenRecord:
     file_effects: list[dict[str, Any]]
     applied: list[dict[str, Any]]
     unapplied: list[dict[str, Any]]
+    #: The display the event stage recorded the request was decided on, or ``None`` for a record written
+    #: before one was recorded, and for an owner whose message renders none (BL-047).
+    decided_display: str | None = None
 
 
 def _prove_plan_exclusion(
@@ -546,12 +668,19 @@ def _prove_plan_exclusion(
     by_stage = {stage: [effect for effect in effects if effect.get("stage") == stage] for stage in stages}
 
     event_effect, *extra_events = by_stage[_EVENT_STAGE]
-    payload = event_effect.get("payload")
+    event_payload = event_effect.get("payload")
+    payload = event_payload
     event = payload.get("record") if isinstance(payload, dict) else None
+    # The decision rides on the event, so the display the request's finalization message was made from is
+    # durable in exactly the save that records the event - before the one that records that commit (BL-047).
+    if _EXCLUSION_DECISION in (event_payload or {}):
+        problem = _exclusion_decision_problem((event_payload or {}).get(_EXCLUSION_DECISION))
+        if problem is not None:
+            raise refuse(f"a plan exclusion decision with {problem}")
     if (
         extra_events
         or event_effect.get("kind") != "append_event"
-        or set(payload or {}) != {"record"}
+        or set(payload or {}) not in ({"record"}, {"record", _EXCLUSION_DECISION})
         or not isinstance(event, dict)
         or set(event) != {"id", "type", "entity", "at"}
         or event["id"] != reserved[f"{_EVENT_STAGE}:event:0"]
@@ -620,7 +749,7 @@ def _prove_plan_exclusion(
     applied, unapplied = _recorded_progress(store, file_effects, stages[-1], finalize is not None, refuse)
     return _ProvenRecord(
         reserved, effects, by_stage, current, work_ids, additions, recorded_removals, finalize, file_effects, applied,
-        unapplied,
+        unapplied, decided_display(event_payload, _EXCLUSION_DECISION),
     )
 
 
@@ -675,7 +804,7 @@ def _decide_plan_exclusion(
     target: str,
     replan: Replan,
     precheck: Callable[[ProjectView], None],
-    message: Callable[[ProjectView], str],
+    finalization: Finalization,
     refuse,
 ) -> tuple[ProjectView, list[Relation]]:
     """The request decided again as its owner decides it, on the Project without this mutation's own applied effects.
@@ -692,7 +821,9 @@ def _decide_plan_exclusion(
     if problems:
         raise ValidationError(f"precheck: {problems_text(problems)}", code="structure_invalid")
     precheck(view)
-    if proven.finalize is not None and proven.finalize[0]["payload"].get("message") != message(view):
+    if proven.finalize is not None and not finalization.proven(
+        view, proven.decided_display, proven.finalize[0]["payload"].get("message")
+    ):
         raise refuse("a finalization other than the commit this request makes")
     removals = proven.recorded_removals if proven.recorded_removals is not None else _resolve_removals(view, replan)
     validate_projection(
