@@ -23,6 +23,7 @@ from .store import RUNTIME_DIR, ProjectStore
 
 __all__ = [
     "DEFAULT_REMOTE",
+    "OVERLAP_MESSAGE",
     "PushDestination",
     "canonical_dirty_paths",
     "capture_preexisting_dirty",
@@ -33,6 +34,7 @@ __all__ = [
     "finalize",
     "finalize_effects",
     "is_runtime_path",
+    "narrow_preexisting_dirty",
     "preexisting_dirty_snapshot",
     "record_preexisting_dirty",
 ]
@@ -72,13 +74,45 @@ def record_preexisting_dirty(mutation: Mutation, repo: Path, *, exclude: tuple[s
     return list(noted)
 
 
+OVERLAP_MESSAGE = "pre-existing changes overlap operation-owned paths and cannot be separated safely: "
+
+
 def ensure_separable(preexisting: list[str], owned: list[str]) -> None:
     overlap = sorted(set(preexisting) & set(owned))
     if overlap:
-        raise StopError(
-            "pre-existing changes overlap operation-owned paths and cannot be separated safely: " + ", ".join(overlap),
-            code="dirty_overlap",
-        )
+        raise StopError(OVERLAP_MESSAGE + ", ".join(overlap), code="dirty_overlap")
+
+
+def narrow_preexisting_dirty(mutation: Mutation, repo: Path) -> list[str]:
+    """Drop from the recorded snapshot the paths that are not changed any more, and keep every other.
+
+    The snapshot is taken once and never taken again
+    (:func:`record_preexisting_dirty`), so that an operation can never come to
+    treat what its own executor produced as a change that was there before it.
+    That also means a path it names is named for the rest of the mutation, and
+    the operation's commit is refused for that path however the person answers:
+    after they commit their change, after they discard it, with the whole
+    working tree clean. A path the snapshot names that is no longer changed has
+    nothing left to be separated from, so it is dropped here and the same
+    operation goes on the next time it is run.
+
+    Only dropped, never added, and only where nothing of this run has been
+    written yet: the set may shrink as the person resolves their changes, and
+    can never grow to cover what the operation itself produced.
+
+    A path is never dropped because this mutation wrote it. The snapshot names
+    paths and not what they held, so a path carrying both the person's change
+    and the operation's own writes cannot be told apart, and dropping it would
+    commit their change as part of the operation's own.
+    """
+    noted = record_preexisting_dirty(mutation, repo)
+    if not noted:
+        return noted
+    current = set(capture_preexisting_dirty(repo))
+    still = [path for path in noted if path in current]
+    if len(still) != len(noted):
+        mutation.set_note("preexisting_dirty", still)
+    return still
 
 
 def ensure_separable_before_effects(mutation: Mutation, paths: list[str]) -> None:

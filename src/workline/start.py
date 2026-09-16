@@ -16,6 +16,7 @@ the structural rules the live specification assigns to it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import json
 import os
 import stat
@@ -64,6 +65,16 @@ from .validate import condition_applies, validate_structure
 
 OWNER = "start"
 MODES = ("single-work", "outer")
+# What a Work refused for a result path of its own carries until it is run again
+# (``skills/start``: Work result). One refused Work's own result, kept so that the
+# retry after the person resolves their change does not run the executor over
+# their file a second time - not a store of executor results: nothing else is
+# kept, and it is dropped as soon as that result is past the refusal.
+_REFUSED_RESULT = "refused_result"
+_REFUSED_RESULT_VERSION = 1
+# Above this much, the result is not kept and the retry asks the executor again,
+# exactly as it does today. A recovery record is rewritten whole on every save.
+_REFUSED_RESULT_LIMIT = 1 << 20
 LEDGER_FILES = (
     f"{WORKLINE_DIR}/relations/roadmap.yaml",
     f"{WORKLINE_DIR}/relations/related.yaml",
@@ -391,6 +402,9 @@ class _Session:
         self.mode = mode
         self.executor = executor
         self.completed: list[str] = []
+        # What the paths already changed when this operation began held, read once
+        # before any executor of this session runs (:meth:`_protect_preexisting`).
+        self._preexisting: dict[str, tuple[bytes, int] | None] | None = None
 
     # git ---------------------------------------------------------------
     def _commit(self, prefix: str, message: str, paths: list[str], *, include_canonical: bool = True) -> None:
@@ -444,6 +458,12 @@ class _Session:
         # event log - a question wait only defers that commit - so a change to it from
         # before START is refused before any event is appended or the executor runs.
         gitops.ensure_separable_before_effects(self.mutation, [_EVENT_LOG])
+        # Before anything of this run is written: the paths already changed when this
+        # operation began that are still changed now (``rules/git``: Commit / push), and
+        # what they hold, so a result path among them can be refused without the
+        # executor's write over the person's file being what is left behind.
+        gitops.narrow_preexisting_dirty(self.mutation, self.store.root)
+        self._protect_preexisting()
         self.mutation.extend_scope(entities=[work_id])
 
         # target / lifecycle ---------------------------------------------------
@@ -463,7 +483,8 @@ class _Session:
             context = ExecutionContext(self.store, view, work, view.work_state(work_id), phase, roadmap, plan, self.mutation.id, self.mode, attempt)
             protected = self._protected_read_targets(view, work_id)
             try:
-                outcome = self.executor(context)
+                kept = self._refused_result(work_id)
+                outcome = self.executor(context) if kept is None else self._reuse_refused_result(kept)
             except BaseException as failure:
                 self._put_back_after_failure(protected, failure)
                 raise
@@ -585,6 +606,189 @@ class _Session:
             message += "; could not be put back: " + ", ".join(unrestored)
         raise StopError(message, code="related_target_removed")
 
+    # changes that were there before this operation ---------------------------
+    def _protect_preexisting(self) -> None:
+        """Read, once per session and before any executor runs, what the already-changed paths hold.
+
+        These are the paths the operation recorded as changed when it began
+        (``rules/git``: Commit / push). What the executor goes on to return as a
+        result is not known until it returns, so the only moment their content
+        can still be read is this one. ``None`` stands for a path that is not
+        there - a deletion the person has not committed - which is put back by
+        removing what was created in its place.
+
+        A directory or a link is not carried: putting one back is not writing
+        bytes, and this never writes over one. A path that cannot be read is not
+        carried either. Either way the refusal says so rather than claiming the
+        person's work was kept.
+        """
+        if self._preexisting is not None:
+            return
+        held: dict[str, tuple[bytes, int] | None] = {}
+        for path in gitops.record_preexisting_dirty(self.mutation, self.store.root):
+            target = self.store.root / path
+            if target.is_symlink() or target.is_dir():
+                continue
+            if not target.exists():
+                held[path] = None
+                continue
+            try:
+                held[path] = (target.read_bytes(), target.stat().st_mode)
+            except OSError:
+                continue
+        self._preexisting = held
+
+    def _put_back_preexisting(self, paths: list[str]) -> tuple[list[str], list[str]]:
+        """Put ``paths`` back to what they held when this operation began; report what could not be.
+
+        Exactly those paths, byte for byte, and nothing else in the working tree:
+        the operation is refusing its own result, not reverting the Project.
+        """
+        restored: list[str] = []
+        unrestored: list[str] = []
+        for path in sorted(set(paths)):
+            held = (self._preexisting or {}).get(path, _UNPROTECTED)
+            target = self.store.root / path
+            if held is _UNPROTECTED or target.is_symlink():
+                unrestored.append(path)
+                continue
+            try:
+                if held is None:
+                    if target.exists():
+                        target.unlink()
+                else:
+                    content, mode = held
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+                    os.chmod(target, stat.S_IMODE(mode))
+                restored.append(path)
+            except OSError:
+                unrestored.append(path)
+        return restored, unrestored
+
+    def _refuse_overlapping_result(self, work: Entity, outcome: object, overlap: list[str], contested: list[str]) -> None:
+        """Refuse a result whose paths carry a change from before this operation, leaving that change as it was.
+
+        The executor has run, and at ``contested`` it has written over what the
+        person had not committed. The two cannot be separated (``rules/git``:
+        Commit / push), so the operation stops - but not on top of their work:
+        what they had is put back exactly as it was, and what the executor
+        produced is kept in this mutation's record, so that the retry after they
+        commit or discard their change finishes the same Work without running the
+        executor over their file again.
+        """
+        self._keep_refused_result(work, outcome, overlap, contested)
+        restored, unrestored = self._put_back_preexisting(contested)
+        message = gitops.OVERLAP_MESSAGE + ", ".join(overlap)
+        if restored:
+            message += "; put back as it stood before this operation: " + ", ".join(restored)
+        if unrestored:
+            message += "; could not be put back: " + ", ".join(unrestored)
+        raise StopError(message, code="dirty_overlap")
+
+    # the result a refusal keeps ---------------------------------------------
+    def _keep_refused_result(self, work: Entity, outcome: object, overlap: list[str], contested: list[str]) -> None:
+        """Keep what the executor returned, and what it left at ``contested``, for the retry.
+
+        Only for this refusal: the executor finished normally and returned a
+        result, and the operation stops because a change that was already there
+        when it began is at a path that result owns. Anything this record cannot
+        keep exactly - a result too large to sit in a record rewritten on every
+        save, an outcome a resume would not read back as the same one - is simply
+        not kept, and the retry asks the executor again exactly as it does today.
+        """
+        recorded = _recorded_outcome(outcome)
+        held = self._contested_content(contested)
+        if recorded is None or held is None:
+            return
+        note = {
+            "version": _REFUSED_RESULT_VERSION,
+            "work_id": work.id,
+            "overlap": sorted(overlap),
+            "outcome": recorded,
+            "contested": held,
+        }
+        if _read_back(note) is _UNKEPT:
+            return
+        self.mutation.set_note(_REFUSED_RESULT, note)
+
+    def _contested_content(self, contested: list[str]) -> list[dict[str, Any]] | None:
+        """What the executor left at ``contested``, or ``None`` when this record would not hold it.
+
+        Bytes as they are: what a Work produces is not always text, and a result
+        put back differently is not the result. ``None`` content stands for a path
+        the executor removed, which is put back by removing it again.
+        """
+        held: list[dict[str, Any]] = []
+        total = 0
+        for path in sorted(set(contested)):
+            target = self.store.root / path
+            if target.is_symlink() or target.is_dir():
+                return None
+            if not target.exists():
+                held.append({"path": path, "content": None, "mode": None})
+                continue
+            try:
+                raw = target.read_bytes()
+                mode = stat.S_IMODE(target.stat().st_mode)
+            except OSError:
+                return None
+            total += len(raw)
+            if total > _REFUSED_RESULT_LIMIT:
+                return None
+            held.append({"path": path, "content": base64.b64encode(raw).decode("ascii"), "mode": mode})
+        return held
+
+    def _refused_result(self, work_id: str) -> dict[str, Any] | None:
+        """The result this mutation kept for ``work_id`` when it refused it, or ``None``.
+
+        A note that is there but is not one this reads back is not guessed at:
+        nothing of it is used, replayed or written, and the operation stops.
+        """
+        note = self.mutation.note(_REFUSED_RESULT)
+        if note is None:
+            return None
+        if not _reusable_result(note):
+            raise ReconcileRequired(
+                f"mutation {self.mutation.id} holds a refused result this START does not read back; nothing is "
+                "replayed and the record is left as it is: reconcile required"
+            )
+        return note if note["work_id"] == work_id else None
+
+    def _reuse_refused_result(self, kept: dict[str, Any]) -> object:
+        """Finish the Work from the result its refusal kept, without asking the executor again.
+
+        The refusal is made again first, on the paths it was made for: while any
+        of them still carries the change that was there before this operation,
+        nothing is put back over it and the operation stops exactly as it did,
+        having written nothing at all.
+        """
+        still = sorted(set(gitops.record_preexisting_dirty(self.mutation, self.store.root)) & set(kept["overlap"]))
+        if still:
+            raise StopError(gitops.OVERLAP_MESSAGE + ", ".join(still), code="dirty_overlap")
+        for entry in kept["contested"]:
+            target = self.store.root / entry["path"]
+            if target.is_symlink():
+                raise ReconcileRequired(
+                    f"the result kept for {kept['work_id']} names {entry['path']}, which is now a link; nothing is "
+                    "written and the record is left as it is: reconcile required"
+                )
+            if entry["content"] is None:
+                if target.exists():
+                    target.unlink()
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(base64.b64decode(entry["content"]))
+            if entry["mode"] is not None:
+                os.chmod(target, stat.S_IMODE(entry["mode"]))
+        return _outcome_from_record(kept["outcome"])
+
+    def _drop_refused_result(self, work_id: str) -> None:
+        """Forget the kept result once what it holds is past the refusal that kept it."""
+        note = self.mutation.note(_REFUSED_RESULT)
+        if isinstance(note, dict) and note.get("work_id") == work_id:
+            self.mutation.set_note(_REFUSED_RESULT, None)
+
     def _put_back_after_failure(self, snapshot: dict[str, tuple[bytes, int]], failure: BaseException) -> None:
         """Put back what a failed execution removed, without taking over its failure.
 
@@ -612,7 +816,9 @@ class _Session:
         owned = sorted(set(result_paths) | set(deleted_paths))
         if owned:
             preexisting = gitops.record_preexisting_dirty(self.mutation, self.store.root)
-            gitops.ensure_separable(preexisting, owned)
+            overlap = sorted(set(preexisting) & set(owned))
+            if overlap:
+                self._refuse_overlapping_result(work, outcome, overlap, overlap)
             # Without an executor-supplied message the default stays neutral:
             # whether a result is a feature, a fix or documentation is the
             # executor's product judgement, and Workline never infers it from
@@ -622,6 +828,7 @@ class _Session:
             # rather than describe it. Only that emptiness test strips: a
             # message with anything in it is committed exactly as given.
             self._commit(f"{work.id}:results", _result_message(outcome.message, work), owned, include_canonical=False)
+            self._drop_refused_result(work.id)
         self._lifecycle(work, ["work_target_removed", "work_completed"])
         return self._finalize_completion(work)
 
@@ -780,8 +987,18 @@ class _Session:
         elif outcome.integration is not None:
             raise SpecViolation("standalone Works have no phase integration")
         relations += list(outcome.relations)
+        # The registration writes relation files, and which ones is known only now,
+        # from what the executor returned. A change that was there before this
+        # operation in one of them is refused here, before a Work, a derivation
+        # detail or a relation of this derivation is recorded or applied: recording
+        # them first left every retry adding another set over the same change.
+        ledgers = _derive_ledgers(specs, relations)
+        overlap = sorted(set(gitops.record_preexisting_dirty(self.mutation, self.store.root)) & set(ledgers))
+        if overlap:
+            self._refuse_overlapping_result(work, outcome, overlap, [])
         stage = stage_name(self.mutation, f"{work.id}:derive")
         result = register_works(self.mutation, stage, specs, relations)
+        self._drop_refused_result(work.id)
         return result.work_ids
 
     def _human_ng(self, view: ProjectView, work: Entity, outcome: HumanNG) -> dict[str, str]:
@@ -975,6 +1192,187 @@ _ADDITION_FIELDS = frozenset({"type", "from", "to"})
 _EVENT_FIELDS = frozenset({"id", "type", "entity", "at"})
 #: The lifecycle events a cancel records, in the order it records them.
 _CANCEL_EVENTS = (["work_cancelled"], ["work_target_removed", "work_cancelled"])
+
+
+# --------------------------------------------------------------------------- the result a refusal keeps
+
+_UNPROTECTED = object()
+
+_DERIVED_FIELDS = {
+    "name", "desired_state", "related", "before_integration", "work_kind",
+    "confirmation_target", "derivation_detail", "return_to",
+}
+_CONTESTED_FIELDS = {"path", "content", "mode"}
+_REFUSED_FIELDS = {"version", "work_id", "overlap", "outcome", "contested"}
+
+
+def _derive_ledgers(specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> list[str]:
+    """The relation files a registration of ``specs`` and ``relations`` writes.
+
+    The Work files and derivation details it writes carry IDs this mutation
+    reserves for them, so no change from before the operation can be at those
+    paths; only the relation files can be (``create.register_works``).
+    """
+    ledgers = []
+    if relations:
+        ledgers.append(f"{WORKLINE_DIR}/relations/roadmap.yaml")
+    if any(spec.related for spec in specs.values()):
+        ledgers.append(f"{WORKLINE_DIR}/relations/related.yaml")
+    return ledgers
+
+
+def _recorded_derived(work: DerivedWork) -> dict[str, Any]:
+    """One derived Work exactly as the executor declared it."""
+    return {
+        "name": work.name,
+        "desired_state": work.desired_state,
+        "related": [{"type": r.type, "to": r.to, "condition": r.condition} for r in work.related],
+        "before_integration": work.before_integration,
+        "work_kind": work.work_kind,
+        "confirmation_target": work.confirmation_target,
+        "derivation_detail": work.derivation_detail,
+        "return_to": work.return_to,
+    }
+
+
+def _recorded_outcome(outcome: object) -> dict[str, Any] | None:
+    """``outcome`` in the form its record keeps, or ``None`` when this refusal does not keep it.
+
+    Only the two outcomes a result path or a derivation's relation files can
+    refuse. Nothing is normalised: a retry rebuilds from this the outcome the
+    uninterrupted run carried on with, endpoints and order as given.
+    """
+    try:
+        if isinstance(outcome, Completed):
+            return {
+                "kind": "completed",
+                "result_paths": [p.replace("\\", "/") for p in outcome.result_paths],
+                "deleted_paths": [p.replace("\\", "/") for p in outcome.deleted_paths],
+                "message": outcome.message,
+            }
+        if isinstance(outcome, Derive):
+            return {
+                "kind": "derive",
+                "works": [{"key": key, "work": _recorded_derived(derived)} for key, derived in outcome.works.items()],
+                "integration": _recorded_derived(outcome.integration) if outcome.integration is not None else None,
+                "relations": [{"type": r.type, "from": r.from_ref, "to": r.to_ref} for r in outcome.relations],
+                "move": outcome.move,
+            }
+    except (AttributeError, TypeError):
+        return None
+    return None
+
+
+def _reusable_derived(work: object) -> bool:
+    if not isinstance(work, dict) or set(work) != _DERIVED_FIELDS:
+        return False
+    target = work["confirmation_target"]
+    return (
+        isinstance(work["name"], str)
+        and isinstance(work["desired_state"], str)
+        and isinstance(work["before_integration"], bool)
+        and isinstance(work["return_to"], bool)
+        and all(work[field] is None or isinstance(work[field], str)
+                for field in ("work_kind", "derivation_detail"))
+        and (_names_one(target) or target is None
+             or isinstance(target, list) and all(_names_one(item) for item in target))
+        and isinstance(work["related"], list)
+        and all(
+            isinstance(related, dict)
+            and set(related) == _RELATED_FIELDS
+            and isinstance(related["type"], str)
+            and isinstance(related["to"], str)
+            and (related["condition"] is None or isinstance(related["condition"], dict))
+            for related in work["related"]
+        )
+    )
+
+
+def _reusable_outcome(outcome: object) -> bool:
+    if not isinstance(outcome, dict):
+        return False
+    if outcome.get("kind") == "completed":
+        return (
+            set(outcome) == {"kind", "result_paths", "deleted_paths", "message"}
+            and all(isinstance(outcome[field], list) and all(_names_one(path) for path in outcome[field])
+                    for field in ("result_paths", "deleted_paths"))
+            and (outcome["message"] is None or isinstance(outcome["message"], str))
+        )
+    if outcome.get("kind") == "derive":
+        return (
+            set(outcome) == {"kind", "works", "integration", "relations", "move"}
+            and isinstance(outcome["works"], list)
+            and outcome["works"]
+            and all(isinstance(item, dict) and set(item) == {"key", "work"}
+                    and _names_one(item["key"]) and _reusable_derived(item["work"])
+                    for item in outcome["works"])
+            and (outcome["integration"] is None or _reusable_derived(outcome["integration"]))
+            and isinstance(outcome["relations"], list)
+            and all(isinstance(rel, dict) and set(rel) == {"type", "from", "to"}
+                    and all(_names_one(rel[part]) for part in ("type", "from", "to"))
+                    for rel in outcome["relations"])
+            and isinstance(outcome["move"], bool)
+        )
+    return False
+
+
+def _decodes(content: object) -> bool:
+    """Whether kept content is text a result can actually be put back from."""
+    if content is None:
+        return True
+    try:
+        base64.b64decode(content, validate=True)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _reusable_result(note: object) -> bool:
+    """Whether a kept result is one this START reads back as the one it recorded."""
+    return (
+        isinstance(note, dict)
+        and set(note) == _REFUSED_FIELDS
+        and note["version"] == _REFUSED_RESULT_VERSION
+        and _names_one(note["work_id"])
+        and isinstance(note["overlap"], list)
+        and note["overlap"]
+        and all(_names_one(path) for path in note["overlap"])
+        and isinstance(note["contested"], list)
+        and all(
+            isinstance(entry, dict)
+            and set(entry) == _CONTESTED_FIELDS
+            and _names_one(entry["path"])
+            and (entry["content"] is None or isinstance(entry["content"], str) and _decodes(entry["content"]))
+            and (entry["mode"] is None or isinstance(entry["mode"], int) and not isinstance(entry["mode"], bool))
+            for entry in note["contested"]
+        )
+        and _reusable_outcome(note["outcome"])
+    )
+
+
+def _derived_from_record(work: dict[str, Any]) -> DerivedWork:
+    return DerivedWork(
+        work["name"],
+        work["desired_state"],
+        related=tuple(RelatedSpec(r["type"], r["to"], r["condition"]) for r in work["related"]),
+        before_integration=work["before_integration"],
+        work_kind=work["work_kind"],
+        confirmation_target=work["confirmation_target"],
+        derivation_detail=work["derivation_detail"],
+        return_to=work["return_to"],
+    )
+
+
+def _outcome_from_record(outcome: dict[str, Any]) -> object:
+    """The outcome a kept result records, rebuilt as the executor returned it."""
+    if outcome["kind"] == "completed":
+        return Completed(tuple(outcome["result_paths"]), outcome["message"], tuple(outcome["deleted_paths"]))
+    return Derive(
+        {item["key"]: _derived_from_record(item["work"]) for item in outcome["works"]},
+        _derived_from_record(outcome["integration"]) if outcome["integration"] is not None else None,
+        tuple(RelationSpec(rel["type"], rel["from"], rel["to"]) for rel in outcome["relations"]),
+        outcome["move"],
+    )
 
 
 def _cancel_decision(work_id: str, prefix: str, outcome: Cancel, removals: list[Relation]) -> dict[str, Any]:
