@@ -1,6 +1,6 @@
 # Review System P1 — R1 Durable Layout / Loader / Bootstrap Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
 
 This is a non-normative implementation-contract checkpoint for Candidate 7 P1. Runtime authority remains `registry.md` plus registry-routed canonical Skills and live code until this contract is implemented and routed into authority.
 
@@ -36,7 +36,7 @@ P1 adds one canonical namespace, created lazily on first Review write:
       └─ <superseded_receipt_id>.yaml
 ```
 
-P1 does **not** create or require empty `.workline/review/` directories during Project開始. They appear through ordinary mutation `write_file` effects when the first canonical Review record is persisted.
+P1 does **not** create or require empty `.workline/review/` directories during Project開始. They appear through ordinary mutation effects when the first canonical Review record is persisted.
 
 This avoids meaningless empty-directory bootstrap/backfill work and matches the existing Project layout convention that only files, not empty directories, are clone-safe state.
 
@@ -81,6 +81,14 @@ Rules:
 - the effective latest generation is obtained only after validating the full contiguous chain for that run;
 - a missing number, duplicate semantic generation, bad predecessor, unknown field version, unreadable file, or conflicting chain is fail-closed / reconcile required.
 
+Predecessor digest is frozen as:
+
+```text
+SHA-256(versioned canonical UTF-8 serialization bytes)
+```
+
+Canonical Review rendering uses UTF-8 and LF line endings. The digest is over those canonical bytes, not over an in-memory mapping and not over a post-filter Git blob. Git persistence proof separately proves the committed path reproduces those bytes under the Git semantics bound by R6.
+
 Candidate 7's conceptual `superseded` generation state is represented by the existence of a later valid generation in the chain rather than rewriting an immutable older generation. Stored generation terminal state is therefore `open` or `sealed_authorized`; supersession is derived from the validated chain.
 
 ## 5. Receipt files
@@ -111,7 +119,7 @@ A supersession record is immutable and keyed by the Receipt it invalidates. The 
 
 ```yaml
 superseded_receipt_id: ...
-superseded_by_receipt_id: ...   # nullable only where the replacement is not yet issued but invalidation is durable
+superseded_by_receipt_id: ...
 review_run_id: ...
 from_generation: ...
 to_generation: ...
@@ -122,9 +130,43 @@ Only one canonical supersession file may exist for a Receipt. Exact matching rep
 
 This file is Review authorization metadata, not a lifecycle event.
 
-## 8. Loader boundary
+## 8. Immutable create-only writer contract
 
-P1 adds a dedicated `ReviewStore` (module location may be chosen during implementation, but responsibility is frozen) rather than teaching `ProjectView` to load Review state.
+Gate generation, Receipt, Consumption and supersession records use a Review-safe immutable create primitive/validation mode.
+
+Frozen behavior:
+
+```text
+target absent
+-> create exact canonical bytes
+
+target exists with exact expected bytes
+-> MATCHING / idempotent replay
+
+target exists with different bytes/content/type
+-> reconcile_required
+
+existing immutable Review object + generic update/base semantics
+-> mechanically forbidden
+```
+
+A caller convention is insufficient. Mutation validation must reject overwrite/update semantics for canonical immutable Review paths. The same immutable-create validation runs before replaying a recorded Review effect on resume.
+
+## 9. Write-time containment / no-follow contract
+
+Review structural validation does not by itself make a later write safe.
+
+Immediately before a canonical Review create operation is physically applied, the writer must positively prove containment from Project root through `.workline/review` to the target parent using lstat/no-follow semantics. Every existing component must be the expected in-Project plain directory. Symlink, junction, reparse point, unexpected indirection, or unprovable identity is refused.
+
+The target parent identity must be rechecked at the final create/replace boundary so a validation-pass-then-parent-swap TOCTOU cannot redirect Review bytes outside the Project.
+
+Project execution lock serializes Workline writers only; it is not evidence that an external filesystem actor could not change path topology.
+
+On failure, no bytes may be written outside the Project canonical Review namespace.
+
+## 10. Loader boundary
+
+P1 adds a dedicated `ReviewStore` rather than teaching `ProjectView` to load Review state.
 
 `ReviewStore` owns:
 
@@ -136,11 +178,12 @@ P1 adds a dedicated `ReviewStore` (module location may be chosen during implemen
 - Receipt lookup;
 - Consumption lookup/cardinality indexes;
 - supersession lookup;
-- canonical rendering for expected write effects.
+- canonical rendering for expected write effects;
+- predecessor digest calculation from canonical bytes.
 
 `ProjectView` / `state.py` MUST NOT read Review files to derive Work/Phase/Roadmap lifecycle or progression.
 
-## 9. Project validation boundary
+## 11. Project validation boundary
 
 `validate_project()` gains a Review structural validation pass **outside** `ProjectView`:
 
@@ -157,7 +200,7 @@ If `.workline/review/` exists, unknown entries, symlink/reparse indirection wher
 
 Review validation reports problems; it never repairs.
 
-## 10. Project開始 / bootstrap contract
+## 12. Project開始 / bootstrap contract
 
 Frozen decision:
 
@@ -167,22 +210,31 @@ Frozen decision:
 - preserve Project開始's existing pre-effect residue rule: any pre-existing `.workline/review/` in a not-yet-established target is partial/unknown canonical state and is not adopted by guess;
 - existing established Projects become Review-capable lazily when the first Review operation writes canonical Review records under the normal Project lock/mutation contract.
 
-## 11. Git contract
+## 13. Git committability preflight
 
-Every canonical Review write path is explicit in `WriteScope.files` and in the exact Git commit path list. Existing Mutation validation already forbids committing `.workline/runtime/**`; that rule remains.
+Before the first canonical Review effect of a mutation is recorded/applied, every Review path that operation expects to commit must be checked with Git's own ignore/exclude evaluation.
 
-Review directories/files are not managed through `.gitignore` mutation. Workline continues not to edit Project ignore configuration.
+If Git reports the path ignored, or Workline cannot determine committability, STOP before any canonical Review effect. This must account for repository ignore rules, `.git/info/exclude`, global excludes and other Git-visible ignore sources through Git's own decision rather than by parsing only `.gitignore`.
 
-## 12. Future extension boundary
+Workline never edits Project ignore/exclude configuration to make Review paths committable.
 
-P5 may add full history under additional `.workline/review/` subtrees (runs/findings/repairs/causality/evidence/patch notes). Those future records must not change the P1 meaning of gates, Receipts, Consumptions, or supersessions and must not become lifecycle truth.
+Every canonical Review write path remains explicit in `WriteScope.files` and exact commit path lists. Runtime metadata remains forbidden from commit.
 
-P6/P7 may add policy records. They use the same canonical-vs-runtime boundary but are not pre-invented in P1.
+## 14. Future extension boundary
 
-## 13. Architecture blocker / HUMAN
+P5 may add full history under additional `.workline/review/` subtrees. Those future records must not change the P1 meaning of gates, Receipts, Consumptions, or supersessions and must not become lifecycle truth.
+
+P6/P7 may add policy records. They use the same canonical-vs-runtime and immutable-writer boundary but are not pre-invented in P1.
+
+## 15. External-review repair disposition
+
+Accepted and repaired here:
+
+- write-time symlink/junction/reparse/TOCTOU safety;
+- immutable create-only semantics;
+- first-write Git committability preflight;
+- exact generation predecessor digest contract.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-The live store, durable writer, Mutation write boundary, Project-start layout, and validation architecture support this contract without changing Candidate 7 authority/lifecycle boundaries.
