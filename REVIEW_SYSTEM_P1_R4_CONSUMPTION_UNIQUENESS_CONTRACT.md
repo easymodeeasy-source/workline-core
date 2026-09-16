@@ -1,192 +1,125 @@
 # Review System P1 — R4 Consumption Logical Uniqueness Contract Freeze
 
-Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 2 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the common Consumption identity/cardinality contract under Candidate 7. It is non-normative until implemented and routed through canonical authority.
 
-## 1. Live facts inspected
+## 1. Common Consumption invariant
 
-The live Mutation Controller already provides recovery-safe ID reservation, exact replay classification, one Project execution lock, and durable multi-effect stages.
-
-These mechanisms can make a terminal event + Consumption pair replay-safe, but path uniqueness alone does not enforce Candidate 7's logical cardinality or Work-terminal totality. ReviewStore-level validation is required.
-
-## 2. Common Consumption record
-
-Every Consumption is immutable and stored at:
-
-```text
-.workline/review/consumptions/<consumption_id>.yaml
-```
-
-Common core:
-
-```yaml
-workline: workline-review-consumption
-version: 1
-consumption_id: rcs_...
-receipt_id: rcp_...
-review_run_id: rr_...
-review_generation: N
-review_kind: ...
-target_identity: ...
-operation_identity: ...
-operation_mutation_id: mut_...
-authorized_candidate_hash: ...
-kind_binding: {...}
-```
-
-The referenced Receipt must exist, be valid, bind the same identities, and be currently consumable when the owning operation records the Consumption stage.
-
-## 3. Stable physical identity
-
-The consuming operation reserves Consumption before recording its effect:
-
-```text
-review-consumption:<receipt_id>
-```
-
-Same exact canonical bytes at the reserved immutable path are idempotent MATCHING. Different bytes at the same path are reconcile required under R1's immutable create-only writer.
-
-## 4. Global logical uniqueness indexes
-
-`ReviewStore` builds canonical scan/index views:
-
-```text
-by_receipt[receipt_id]
-by_terminal_event[event_id]
-by_kind_persisted_result[key]
-```
-
-Any uniqueness-constrained index with conflicting records fails closed. No mutable counter/index file is introduced.
-
-## 5. Common cardinality
-
-Frozen common invariant:
+P1 common foundation:
 
 ```text
 one Authorization Receipt -> at most one valid Consumption
+one terminal_event_id      -> at most one valid Consumption
 ```
 
-Before creating C1:
+`ReviewStore` builds canonical immutable indexes by Receipt, terminal event and kind-specific persisted result. Exact replay is idempotent; conflicting tuples reconcile.
+
+## 2. Work terminal binding
+
+Work terminal Consumption binds at least:
 
 ```text
-none for R1 -> create
-exact semantic existing C1 -> idempotent reuse
-conflicting Consumption for R1 -> reconcile
+receipt_id
+review_run_id
+review_generation
+authorized_candidate_hash
+authorized_result_commit_sha = K1
+terminal_event_id = E1
+terminal_event_type = work_completed
+work_id
+operation_mutation_id
+operation_identity
 ```
 
-A superseded Receipt cannot receive a new Consumption.
+Receipt authorizes exact Candidate/K1 eligibility; E1 consumes Receipt; C1 binds R1 + proven K1 + E1 + operation.
 
-## 6. Work terminal binding
+## 3. P3 totality
 
-Work terminal `kind_binding` contains at least:
-
-```yaml
-kind: work_terminal_v1
-authorized_result_commit_sha: <K1>
-terminal_event_id: evt_...
-terminal_event_type: work_completed
-work_id: w_...
-```
-
-The non-circular binding remains:
+Before review-v1 START gating activates:
 
 ```text
-Receipt R1 authorizes Candidate/K1 eligibility
-terminal event E1 consumes R1
-Consumption C1 binds R1 + exact proven K1 + E1 + operation mutation
+one review-v1 work_completed event -> exactly one matching valid Consumption
 ```
 
-Receipt/Consumption bytes do not self-reference the commit containing themselves.
+This totality is Review/operation consistency only. `state.py` still derives lifecycle from events and ignores Review metadata.
 
-P1 uniqueness foundation:
+Allowed temporary one-sided state only when a matching pending terminal Mutation proves both event+Consumption were one durable stage and the missing effect remains recoverable.
+
+Without matching pending intent, E1-only or C1-only review-v1 state is invalid/reconcile.
+
+## 4. Durable legacy/review-v1 classification
+
+P3 creates and proves one immutable activation record before the first review-v1 Work terminalization:
 
 ```text
-receipt_id        -> 0 or 1 Consumption
-terminal_event_id -> 0 or 1 Consumption
+.workline/review/activation/work-terminal-v1.yaml
 ```
 
-## 7. P3 Work-terminal totality
-
-Before review-v1 START terminal gating is activated, the stronger invariant is mandatory:
+It binds:
 
 ```text
-one review-v1 terminal event -> exactly one matching valid Consumption
+operation_contract = review-v1
+legacy_event_count = N
+legacy_event_prefix_sha256
+activation_base_head
 ```
 
-This requires a durable operation-contract identity that makes it mechanically decidable after clone whether a terminal event belongs to `review-v1`. Absence/presence of arbitrary Review files alone is not this marker.
+`legacy_event_prefix_sha256` is the SHA-256 of the exact canonical pre-activation event-log prefix represented by the first N events under the versioned activation digest contract.
 
-Allowed transient recovery state:
+Classification after clone:
 
 ```text
-review-v1 terminal event exists
-Consumption missing
-matching pending mutation proves event + Consumption were one durably recorded terminal stage
--> recoverable transient; resume must complete C1 before terminal publication/final completion
+activation record present + prefix count/digest valid
+-> first N events are positively classified pre-activation legacy
+-> every later work_completed must carry explicit review-v1 operation-contract metadata
+
+post-activation work_completed missing marker
+unknown marker
+contradictory marker/activation prefix
+-> reconcile_required; never legacy fallback
 ```
 
-Invalid state:
+Absence of arbitrary Review files is never legacy proof. Absence of the activation record means review-v1 Work terminalization has not been positively activated; an explicit review-v1 event without matching activation is contradictory and invalid.
+
+## 5. Event metadata carrier
+
+P3 extends canonical event record parsing/rendering so terminal events may carry versioned non-lifecycle metadata. For review-v1 `work_completed`, minimum metadata is:
 
 ```text
-review-v1 terminal event exists
-Consumption missing
-no matching pending recovery intent
--> fail closed / reconcile required
+operation_contract: review-v1
+review_receipt_id
+review_run_id
+review_generation
 ```
 
-If effect ordering/corruption permits Consumption without its exact required transition, that state is likewise invalid unless a matching pending stage proves the transition is the remaining unapplied effect.
+Event identity/type/entity/at remain lifecycle inputs. `ProjectView/state.py` ignores the added operation-contract metadata. Review consistency validation reads it only to classify totality and bind exact Consumption.
 
-This totality check is a Review/operation consistency invariant only. `state.py` continues deriving lifecycle from canonical events, not Consumption metadata.
+Unknown/contradictory operation-contract metadata fails closed; it is not stripped into legacy semantics.
 
-## 8. Terminal event reservation/order
+## 6. Terminal stage ordering
 
-START reserves terminal event ID and Consumption ID before the terminal stage.
-
-Deterministic stage order:
+START reserves E1 and C1 before the terminal stage. Stage effect order:
 
 ```text
-1. AuthorizedTransitionProjection effects
+1. AuthorizedTransitionProjection events
 2. OperationMetadataProjection Consumption immutable create
 ```
 
-All effects are durable intent before the first apply. Crash after E1 but before C1 is recovered by classification/replay, not by physical atomicity assumptions.
+All effects are durable intent before apply. No terminal commit/push proceeds until the stage rereads complete and uniqueness/totality prerequisites applicable to that point pass.
 
-No terminal commit/push may proceed until the stage rereads complete and uniqueness/totality prerequisites applicable at that point pass.
+## 7. Planning/Policy kinds
 
-## 9. Planning and Policy bindings
+Planning and Policy Consumption never invent fake Work terminal events. Their uniqueness remains Receipt-based plus kind-specific semantic persisted-result binding.
 
-Planning kinds have no fake terminal event. Their Consumption binds exact semantic projection/result identity and registration commit.
+## 8. Round-2 repair disposition
 
-Policy kinds similarly bind reviewed before/after policy semantics and exact persisted proof. Exact schemas remain P6/P7 work; common one-Receipt-at-most-one-Consumption applies.
+P1R-03 is closed by freezing both:
 
-## 10. Validation timing
+- durable P3 activation boundary anchored to the exact pre-activation event prefix;
+- explicit review-v1 terminal Event metadata carrier that state derivation ignores.
 
-Validation runs:
-
-```text
-before stage record:
-  current Receipt + no conflicting canonical Consumption
-
-after stage apply / before terminal commit:
-  exact Consumption exists + indexes valid
-
-after local terminal commit / before push:
-  exact persisted transition/metadata proof
-
-after clone/full validation for review-v1 terminal state:
-  totality check using durable operation-contract identity and pending-recovery exception only
-```
-
-Resume repeats checks from canonical files and mutation intent.
-
-## 11. External-review repair disposition
-
-Accepted and repaired here:
-
-- 0-or-1 uniqueness is explicitly only the P1 common foundation;
-- P3 activation requires `review-v1 terminal event -> exactly one Consumption`;
-- only a matching pending terminal stage permits temporary one-sided local state;
-- no second lifecycle authority is introduced.
+This distinguishes positive legacy history from post-activation malformed/unknown terminal events after clone.
 
 Architecture blocker: `None`.
 
