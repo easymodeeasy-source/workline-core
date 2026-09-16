@@ -1,6 +1,6 @@
 # Review System P1 — R3 Gate Generation Mutation Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 2 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes how Candidate 7's minimum durable Review Gate generations enter canonical Project state. It is non-normative until implemented and routed through canonical authority.
 
@@ -61,13 +61,14 @@ Durable sequence:
 
 ```text
 1. create clone-safe Candidate/task input provenance
-2. parent operation writes accepted task descriptor in new Gate generation
-3. provenance + accepted generation reach required local Git persistence boundary
-4. only then launch/retrieve external task
-5. result returns to an operation holding Project lock
-6. identity/result is validated against canonical task input
-7. settlement/adjudication is written as next generation
-8. only then may sealing/consumption proceed
+2. compute canonical provenance identities
+3. parent operation writes accepted task descriptor in new Gate generation
+4. provenance + accepted generation reach required local Git persistence boundary
+5. only then launch/retrieve external task
+6. result returns to an operation holding Project lock
+7. identity/result is validated against canonical task input
+8. settlement/adjudication is written as next generation
+9. only then may sealing/consumption proceed
 ```
 
 Runtime/provider result arrival alone does not settle anything.
@@ -116,7 +117,46 @@ Fresh clone/runtime loss may retrieve/rerun **the same task_id** only after reco
 
 Provider job handles remain runtime-only and non-authoritative.
 
-## 5. Immutable generation snapshot
+## 5. Canonical provenance identities
+
+Round 4 adds explicit identities for the immutable provenance records themselves so Review-validity reuse cannot depend only on `candidate_hash` or `request_digest`.
+
+Frozen definitions:
+
+```text
+candidate_material_digest
+= SHA-256(versioned canonical bytes of the exact candidate snapshot record)
+```
+
+For deterministic builder mode, `candidate_material_digest` instead hashes the versioned canonical builder envelope containing:
+
+```text
+builder identity
+builder version
+ordered complete clone-safe input identities
+candidate_hash
+projection semantics version
+```
+
+The exact task-input record has:
+
+```text
+task_input_digest
+= SHA-256(versioned canonical bytes of the exact task-input record)
+```
+
+An accepted Gate task descriptor binds both:
+
+```text
+candidate_material_digest
+task_input_digest
+```
+
+along with `candidate_hash`, `request_digest`, adapter/reviewer identity and the existing Context/Policy identities.
+
+These provenance digests identify **how the accepted task and Candidate are reconstructed**, not only the resulting artifact/request identity. Therefore a well-formed replacement of snapshot/task-input/builder provenance that happens to reconstruct the same `candidate_hash` or `request_digest` is still a Review-validity material change unless an explicit irrelevance proof exists.
+
+## 6. Immutable generation snapshot
 
 Each generation is a full minimum immutable snapshot and uses R1 create-only writer.
 
@@ -130,6 +170,7 @@ review_kind / target_identity / operation_identity
 candidate_hash / review_context_hash / effective_policy_hash
 evidence / coverage / raw-report / adjudication / obligation digests
 accepted task descriptors/references
+  including candidate_material_digest + task_input_digest
 settled task bindings
 status = open | sealed_authorized
 receipt_id nullable
@@ -137,15 +178,15 @@ receipt_id nullable
 
 Predecessor digest uses R1 canonical-byte SHA-256 contract.
 
-## 6. Seal + Receipt
+## 7. Seal + Receipt
 
 A seal that first issues R1 records both immutable creates in one Mutation stage. All effects are durable intent before physical application. A partial stage resumes exact remaining effects; no consumer may rely on the seal until exact ReviewStore reread validates both.
 
-## 7. Invalidation / supersession
+## 8. Invalidation / supersession
 
 A newly supported invalidating fact creates a later `open` generation and supersession record before old Receipt may proceed. The same-run serialization rule applies to every settlement, seal and invalidation generation.
 
-## 8. Mutation invocation binding
+## 9. Mutation invocation binding
 
 The owning mutation binds at least:
 
@@ -162,19 +203,21 @@ proof_phase
 
 Existing Roadmap/Work request identity is augmented, never replaced.
 
-## 9. Git persistence boundary
+## 10. Git persistence boundary
 
 Any gate/provenance fact relied on after clone/process loss must reach canonical tracked local Git state before dependent external launch/terminal boundary. Remote-less Projects remain valid.
 
-## 10. No second state machine authority
+## 11. No second state machine authority
 
 Gate/provenance records are authorization evidence only. `state.py` never reads them to derive Work/Phase/Roadmap lifecycle or next selection.
 
-## 11. Round-2 repair disposition
+## 12. Round-4 repair disposition
 
-P1R-01 closed by same-run pending discovery + stable scope-only serialization token.
+P1R-01 remains closed by same-run pending discovery + stable scope-only serialization token.
 
-P1R-02 closed by immutable Candidate snapshot/task-input provenance and exact reconstruction-before-rerun semantics.
+P1R-02 clone reconstruction remains closed by immutable Candidate snapshot/task-input provenance and exact reconstruction-before-rerun semantics.
+
+The later independent review's provenance-reuse seam is closed by binding `candidate_material_digest` and `task_input_digest` into accepted Gate task descriptors and requiring R6/R11 to treat them as material dependencies.
 
 Architecture blocker: `None`.
 
