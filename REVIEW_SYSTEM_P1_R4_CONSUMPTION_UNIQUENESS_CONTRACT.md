@@ -1,6 +1,6 @@
 # Review System P1 — R4 Consumption Logical Uniqueness Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 2 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 3 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the common Consumption identity/cardinality contract under Candidate 7. It is non-normative until implemented and routed through canonical authority.
 
@@ -65,12 +65,39 @@ legacy_event_prefix_sha256
 activation_base_head
 ```
 
-`legacy_event_prefix_sha256` is the SHA-256 of the exact canonical pre-activation event-log prefix represented by the first N events under the versioned activation digest contract.
+### 4.1 `work-terminal-activation-digest-v1`
 
-Classification after clone:
+The activation prefix digest is **not** a hash of raw physical `events.jsonl` bytes. Valid historical Projects may contain CRLF and blank physical lines, and ordinary event-log rewriting may normalize representation without changing historical Event meaning.
+
+The frozen digest algorithm is:
 
 ```text
-activation record present + prefix count/digest valid
+1. Read the pre-activation event log through the canonical Event parser.
+2. Ignore blank physical lines exactly as the live Event reader does.
+3. Parse and validate every nonblank JSON object as one complete Event record.
+4. `legacy_event_count` = number of parsed Event records before activation.
+5. For the first N parsed records, produce canonical activation-digest JSON bytes:
+   - preserve every schema-allowed field, including non-lifecycle metadata;
+   - object keys sorted lexicographically by Unicode code point;
+   - JSON separators exactly `,` and `:` with no insignificant whitespace;
+   - strings encoded as UTF-8 JSON with `ensure_ascii=false` semantics;
+   - no NaN/Infinity/non-JSON numeric values;
+   - append exactly one LF byte after each canonical JSON object.
+6. Concatenate those N canonical record lines in event order.
+7. `legacy_event_prefix_sha256` = SHA-256 of the concatenated canonical bytes.
+```
+
+The digest therefore binds **Event record identity/order/content**, not incidental CRLF/blank-line representation.
+
+If the Event schema later adds an allowed metadata field, the activation digest serializer preserves that field. Unknown/unparseable fields under the active schema are not silently dropped; validation fails closed.
+
+A changed, reordered, deleted, inserted or metadata-mutated pre-activation Event changes the canonical prefix digest. Merely rewriting CRLF to LF or removing blank physical lines does not.
+
+### 4.2 Classification after clone
+
+```text
+activation record present
++ first N parsed canonical Event records reproduce the stored activation digest
 -> first N events are positively classified pre-activation legacy
 -> every later work_completed must carry explicit review-v1 operation-contract metadata
 
@@ -112,14 +139,9 @@ All effects are durable intent before apply. No terminal commit/push proceeds un
 
 Planning and Policy Consumption never invent fake Work terminal events. Their uniqueness remains Receipt-based plus kind-specific semantic persisted-result binding.
 
-## 8. Round-2 repair disposition
+## 8. Round-3 repair disposition
 
-P1R-03 is closed by freezing both:
-
-- durable P3 activation boundary anchored to the exact pre-activation event prefix;
-- explicit review-v1 terminal Event metadata carrier that state derivation ignores.
-
-This distinguishes positive legacy history from post-activation malformed/unknown terminal events after clone.
+P1R2-NF-01 is closed by freezing `work-terminal-activation-digest-v1` as a canonical parsed-Event serialization rather than raw event-log bytes. This preserves exact classification across valid CRLF/blank-line legacy representations while still detecting semantic historical mutation.
 
 Architecture blocker: `None`.
 
