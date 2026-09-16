@@ -1,6 +1,6 @@
 # Review System P1 — R2 Review IDs / Reservation Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
 
 This is a non-normative P1 contract checkpoint under Candidate 7. Runtime authority remains `registry.md` plus registry-routed canonical Skills and live code until implementation activates this contract.
 
@@ -10,15 +10,7 @@ This is a non-normative P1 contract checkpoint under Candidate 7. Runtime author
 
 Current kinds are mutation / roadmap / phase / work / relation / event / derivation. There are no Review-specific IDs yet.
 
-`Mutation.reserve_id(key, kind)` is already the recovery-safe primitive for IDs that must survive retry/resume. It:
-
-- reuses an existing reservation by key;
-- validates the reserved ID kind;
-- creates a new ID only when absent;
-- persists it immediately in the mutation intent before later effects refer to it;
-- refuses reservation on the wrong decided/finalized branch.
-
-Therefore Review IDs should extend this one stable-ID system, not add another generator or random-ID subsystem.
+`Mutation.reserve_id(key, kind)` is already the recovery-safe primitive for IDs that must survive retry/resume. It reuses an existing reservation by key, validates kind, persists the new ID immediately, and refuses reservation on the wrong decided/finalized branch.
 
 ## 2. Frozen Review ID kinds and prefixes
 
@@ -40,135 +32,124 @@ rcs_<ULID>
 rtk_<ULID>
 ```
 
-The prefixes are deliberately distinct from existing `r` Roadmap and `rel` relation prefixes and from each other.
-
-Implementation must extend `PREFIXES`, `_ID_RE`, `kind_of()` and `is_valid_id()` through the existing `ids.py` authority rather than creating Review-local regexes that can drift.
+Implementation extends the existing central `ids.py` authority rather than creating Review-local generators or regexes.
 
 ## 3. What is not a new stable ID
 
 The following are not ULID entities:
 
-- Review generation: positive integer, scoped to one `review_run_id`;
-- Candidate identity: cryptographic hash/digest of the frozen Candidate identity contract;
+- Review generation: positive integer scoped to one `review_run_id`;
+- Candidate identity: cryptographic digest;
 - Review Context identity: digest;
 - Effective Policy identity: digest/version identity;
 - Coverage/adjudication/obligation identities: digests;
-- supersession: keyed by the superseded Receipt ID, no extra supersession ULID required in P1.
-
-This keeps identity semantics explicit: object IDs identify durable records; digests identify exact semantic content; generation orders one Review Run.
+- supersession: keyed by the superseded Receipt ID.
 
 ## 4. Reservation ownership
 
 ### 4.1 Review Run ID
 
-A `review_run_id` is reserved by the mutation of the operation that first opens that Review gate.
-
-The reservation key is deterministic within that operation and target, conceptually:
+Semantic reservation key:
 
 ```text
 review-run:<review_kind>:<target_identity>
 ```
 
-The exact string encoding may be implemented as a structured helper, but the semantic key is frozen: same operation + same Review gate target resumes the same Run ID; a different target/kind must not alias it.
+Same operation + same Review gate target resumes the same Run ID; different target/kind must not alias it.
 
 ### 4.2 Receipt ID
 
-A Receipt ID is reserved only when a specific generation is eligible to become `sealed_authorized`, before the Receipt path/content is recorded.
-
-Semantic reservation key:
+Reserved only when a specific generation is eligible to become `sealed_authorized`.
 
 ```text
 review-receipt:<review_run_id>:<generation>
 ```
 
-Retrying the seal of the same generation reuses the same Receipt ID.
-
 A new generation cannot reuse an older generation's Receipt ID.
 
 ### 4.3 Consumption ID
 
-A Consumption ID is reserved by the **consuming operation's mutation**, before any stage that writes the canonical transition/Consumption pair.
-
-Semantic reservation key:
+Reserved by the consuming operation's mutation before the terminal/consumption stage.
 
 ```text
 review-consumption:<receipt_id>
 ```
 
-This directly supports Candidate 7's `one Receipt -> at most one valid Consumption` recovery invariant. A retry of the same consuming mutation reuses the reservation.
-
-The logical uniqueness checks in R4 remain mandatory; stable reservation alone is not enough.
+Logical uniqueness checks in R4 remain mandatory; reservation alone is insufficient.
 
 ### 4.4 Review task ID
 
-A mandatory/shadow reviewer or verification task gets a stable `review_task` ID **before acceptance becomes durable** in a Gate Generation Record.
-
-Semantic reservation key:
+Reserved before acceptance becomes durable.
 
 ```text
 review-task:<review_run_id>:<task-slot>
 ```
 
-`task-slot` is a deterministic orchestration slot identity (reviewer role/check identity plus generation-local ordinal only where the policy genuinely permits repeated distinct tasks). It is not a timestamp or callback-generated value.
+`task-slot` is deterministic orchestration identity, not a timestamp/callback value.
 
-A retry/resume that represents the same accepted task must reuse the same task ID; an intentional new task must receive a new slot and ID.
-
-## 5. Generation numbering
+## 5. Generation numbering and crash-safe serialization
 
 Generation is not reserved through `Mutation.reserve_id()`.
 
-The next generation number is derived from the validated immutable Gate chain:
+Next generation is derived from the validated immutable Gate chain:
 
 ```text
 no generations -> 1
 latest valid generation N -> N + 1
 ```
 
-Before writing generation `N+1`, the writer binds it to generation N and N's digest. If the chain is malformed, non-contiguous, or changes between read and write under the operation lock, fail closed rather than guessing the next number.
+The previous statement that the Project execution lock alone serializes generation allocation is superseded.
 
-The Project execution lock is the serialization mechanism; there is no independent generation counter file.
+The lock serializes only the live process. Crash releases it, so cross-crash serialization is provided by pending mutation conflict.
+
+Frozen sequence:
+
+```text
+hold Project execution lock
+-> validate chain and determine exact N+1 path
+-> open/resume owning Mutation with exact N+1 path already in initial WriteScope.files
+-> only then reserve/record/apply generation-related effects
+```
+
+The exact next-generation path must not be introduced only later via `extend_scope()`.
+
+If a future Review resource cannot be known as an exact physical path before `MutationController.open()`, implementation must add an explicit logical conflict-resource mechanism with equivalent pending-mutation overlap semantics. Late scope extension is not accepted as the serialization mechanism.
+
+Therefore a crash after the N+1 pending intent is durable but before the generation write cannot allow a second invocation to allocate another N+1/fork.
 
 ## 6. No ID generation outside durable operation intent
 
 Once a Review-aware state-changing operation has a mutation, any stable Review ID later referenced by canonical effects must originate from that mutation's durable reservation before the effect is recorded.
 
-Forbidden patterns:
+Forbidden:
 
 ```text
-new_id("review_receipt")
--> construct canonical Receipt effect
--> only later save it in mutation notes
+new_id(...)
+-> canonical effect
+-> later save identity in notes
 ```
 
-or callback-side random ID generation later adopted by the Project.
+or callback-side random IDs later adopted by the Project.
 
-The mutation record is the recovery authority for newly allocated IDs.
-
-Read-only calculations may compute hashes/digests freely because those are content identities, not allocated stable IDs.
+Read-only digests are content identities and are not allocated stable IDs.
 
 ## 7. Cross-mutation handoff
 
-A later operation may refer to an already-canonical Review ID loaded and validated by `ReviewStore`; it does not re-reserve that existing ID as a new allocation.
+A later operation may refer to an already-canonical Review ID loaded and validated by `ReviewStore`; it does not re-reserve that existing ID.
 
-Example:
-
-```text
-START Review mutation reserves rcp_X and commits Receipt rcp_X
-later terminal consumption stage/mutation reads canonical rcp_X
-and reserves new rcs_Y keyed by rcp_X
-```
-
-The referenced Receipt must pass ReviewStore validity/current-authorization checks before the consuming operation reserves/records its Consumption.
+A referenced Receipt must pass ReviewStore validity/current-authorization checks before the consuming operation records its Consumption.
 
 ## 8. Clone/retry semantics
 
-Canonical Review records carry their IDs in their contents and filenames. A clone therefore preserves established Review IDs without runtime mutation records.
+Canonical Review records carry IDs in content and filenames. A clone preserves established IDs without runtime mutation records.
 
-A runtime mutation record is needed only to resume an allocation/effect that has not yet reached its canonical committed state. If a canonical record exists with a different ID/content than the pending reservation predicts, that is not adopted by similarity: reconcile required.
+A runtime mutation record is needed only to resume allocation/effects not yet canonically committed. If canonical state conflicts with pending reservation, reconcile required; do not adopt by similarity.
+
+For accepted Review tasks, the stable task ID alone is not sufficient clone-safe task identity. R3 requires canonical task descriptor data in Gate state so a clone can reconstruct/rerun the accepted task after runtime metadata is gone.
 
 ## 9. Validation additions
 
-Implementation must add Review ID validation through the central ID functions and ReviewStore must enforce:
+Central ID functions and ReviewStore enforce:
 
 ```text
 filename ID == in-record ID
@@ -177,12 +158,16 @@ kind_of(ID) == expected Review record kind
 
 Unknown/old Review prefixes are not silently mapped to a current kind.
 
-Generation filenames are validated separately as integers; they never pass through `kind_of()`.
+Generation filenames are separately validated integers.
 
-## 10. Architecture blocker / HUMAN
+## 10. External-review repair disposition
+
+Accepted and repaired here:
+
+- Project execution lock is no longer claimed to be sufficient generation serialization;
+- exact next-generation path is part of initial pending-mutation `WriteScope`;
+- clone-safe task identity is delegated to the canonical descriptor contract in R3.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-The existing ID and mutation reservation model directly supports the frozen Review identity contract; implementation needs only extension of the central kind table/regex and Review-specific deterministic reservation helpers.
