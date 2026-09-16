@@ -1,6 +1,6 @@
 # Review System P1 — R9 Phase Entry `PersistedProjectionAdapter` Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the P1/P2 adapter contract that proves a reviewed `PhaseEntryDesign` is what canonical Project state contains after expansion. It is non-normative until implementation and authority activation.
 
@@ -9,16 +9,16 @@ This checkpoint freezes the P1/P2 adapter contract that proves a reviewed `Phase
 The live Roadmap-owned Phase-entry path already provides:
 
 - `PhaseEntryDesign` as the pre-write semantic object;
-- `design_identity(design)` durably embedded in the Roadmap mutation invocation before IDs are reserved;
-- stable reserved Work/relation IDs through registration helpers;
-- separate normal Work / integration / optional human-confirmation registration stages;
+- `design_identity(design)` embedded in the Roadmap mutation invocation;
+- stable reserved Work/relation IDs;
+- separate normal Work / integration / optional human-confirmation stages;
 - canonical `planned_next` and `requires_completion` relations;
-- canonical `work_kind=phase_integration_check` and optional `human_confirmation` with confirmation target;
-- structural validation before final commit;
+- canonical integration/human-confirmation kinds;
+- structural validation before commit;
 - fresh `ProjectView.load()` after persistence;
-- an `entry` field that currently influences the immediate return/selection but is **not itself persisted as canonical Phase/Work/Relation state**.
+- an `entry` field that influences immediate selection/return but is not persisted as canonical progression state.
 
-The last point matters for semantic round-trip and is frozen explicitly below rather than hidden.
+That last point is the relevant live seam.
 
 ## 2. Adapter responsibility
 
@@ -31,11 +31,11 @@ load_persisted(phase_id, created_ids, ProjectView)
 normalize_persisted(loaded_result)
 ```
 
-Round-trip equality applies to the **persisted semantic component** of the reviewed design. Operation-only continuation hints must be proven not to carry unique plan meaning that disappears after the operation.
+It verifies persisted semantic round-trip. It does **not** own Roadmap planning meaning.
 
 ## 3. Persisted semantic component
 
-Frozen persisted semantics are:
+Frozen persisted semantics include:
 
 ```text
 normal Works in declared order:
@@ -60,104 +60,92 @@ optional human confirmation:
 relations:
 - reviewed planned_next
 - reviewed requires_completion
-- generated requires_completion from every normal Work to integration
-- generated requires_completion from integration to confirmation when present
+- generated requires_completion normal Work -> integration
+- generated requires_completion integration -> confirmation when present
 
 origin/affiliation:
 - phase_id
 - roadmap_id
 ```
 
-Allocated entity/relation IDs and display values are generated persistence identities, not user-authored semantics, but they are part of the exact expected physical projection once reserved.
+Generated IDs/display values are persistence identities, not user-authored semantics, but enter exact expected physical proof once reserved.
 
-## 4. `entry` live-contract finding and frozen Review-v1 rule
+## 4. `entry` finding: authority ownership repaired
 
-Current `PhaseEntryDesign.entry` is not persisted. The live code can accept an explicit `entry` specifically to disambiguate several Works that the persisted `planned_next` graph itself does not uniquely order. After a successful expansion commit, only the returned `entry_work_id` carries that immediate choice; a fresh clone/ProjectView cannot reconstruct the fact that the caller explicitly chose it.
+Current live Roadmap behavior allows explicit `entry` to disambiguate several otherwise equally planned Works. Because `entry` itself is not persisted as canonical plan state, a fresh clone cannot reconstruct that explicit one-shot choice from entities/relations/events alone.
 
-Candidate 7 forbids Review metadata from becoming a normative progression source, so P1/P2 must **not** solve this by reading a Receipt/Consumption later to decide which Work starts.
+Candidate 7 forbids Review metadata from becoming progression authority.
 
-Frozen Review-v1 contract:
+The previous R9 wording reached the right safety outcome but assigned too much semantic ownership to the adapter. This is repaired as follows.
+
+### 4.1 Roadmap-owned review-v1 planning precondition
+
+At P2 activation, the canonical Roadmap authority must explicitly own this stronger precondition for review-v1 planning:
 
 ```text
-A reviewed PhaseEntryDesign MUST be canonically self-selecting.
+A reviewed PhaseEntryDesign must be canonically self-selecting.
 ```
 
 Meaning:
 
-- remove the ephemeral `entry` hint from the persisted comparison;
-- evaluate the resulting canonical design graph with the same startable/planned-next rules used by `ProjectView`;
-- it must leave zero or one unique first Work as appropriate for the design;
-- if several equally planned startable Works remain, Review-v1 Phase entry is not READY even if `design.entry` names one;
-- an explicit `entry`, when present, must equal the unique Work the canonical persisted plan itself selects.
+- evaluate the design without relying on ephemeral `entry` as persisted plan meaning;
+- the canonical graph/state produced by the design must leave zero or one unique first Work as appropriate;
+- if several equally planned startable Works remain, the design is not valid for review-v1 even if `entry` names one;
+- if `entry` is supplied, it must equal the unique Work the canonical graph itself selects.
 
-Thus `entry` remains an immediate operation convenience/check, not hidden persisted meaning. A crash/clone can recover the intended next Work from canonical relations/state without consulting Review metadata.
+### 4.2 Adapter role
 
-Legacy Phase entry behavior is unchanged until P2 activation; the stronger rule applies to `review-v1` planning contracts.
+`PersistedProjectionAdapter` only verifies that the Roadmap-owned precondition and semantic round-trip hold. It may not invent, weaken or strengthen Roadmap planning semantics on its own.
 
-This is a contract refinement discovered by live reconnaissance, not a new progression authority or architecture loop.
+Legacy Phase-entry behavior remains unchanged until explicit review-v1 planning activation.
+
+This is an authority refinement/migration inside the existing Roadmap owner, not Candidate 8 and not a second progression controller.
 
 ## 5. Stable reservation map
 
-The adapter consumes the exact mutation reservations for:
+Adapter consumes exact reservations for normal design keys, integration, optional confirmation, and relation slots.
 
-```text
-each normal design key -> Work ID
-integration             -> Work ID
-confirmation            -> Work ID if present
-relation reservation slots -> relation IDs
-```
-
-References in reviewed relations are resolved through these stable keys/IDs exactly as canonical registration resolves them.
-
-No semantic reconstruction uses Work names/display numbers as identity fallback.
+No reconstruction uses names/display numbers as identity fallback.
 
 ## 6. Expected canonical effects
 
-`project_expected()` generates/reuses the same canonical effects as registration:
+`project_expected()` reuses canonical WorkSpec/render/registration helpers or shared pure functions extracted from them. A second hand-coded renderer is not acceptable.
 
-```text
-Work entity files
-Related relation additions
-Roadmap relation additions
-```
+Expected effects cover Work entity files, Related additions, Roadmap relation additions, integration dependencies and optional confirmation dependency.
 
-for normal Works, integration, optional confirmation and all generated dependency edges.
-
-It must reuse canonical WorkSpec/render/registration helpers or shared pure functions extracted from them. A second hand-coded renderer is not acceptable because the proof would merely compare one implementation against a different interpretation.
-
-Before persistence, the projected view must pass the same registration/structure validation the live operation requires.
+Projected structure must pass the same registration/structure validation used by live Roadmap registration.
 
 ## 7. Persisted reconstruction
 
-After the local registration commit:
+After local registration commit:
 
 - reload fresh `ProjectView`;
 - select created Works by exact reserved IDs;
 - verify Phase/Roadmap affiliation and Work kinds;
-- reconstruct reviewed Related and Roadmap relations for those IDs;
-- distinguish reviewed edges from generated integration/confirmation edges using exact expected relation IDs/records;
-- reconstruct the canonical first-Work selection from ProjectView startability/planned-next semantics;
-- compare to the normalized reviewed persisted semantics and the Review-v1 self-selecting rule.
+- reconstruct Related/Roadmap relations using exact expected IDs/records;
+- reconstruct canonical first-Work selection from normal ProjectView semantics;
+- compare normalized persisted semantics against reviewed semantics;
+- verify the Roadmap-owned review-v1 self-selecting precondition.
 
-Filesystem/ID order is not semantic declared Work order. Where declaration order matters for rendering/display, recover it from the reviewed reservation map and prove expected persisted display/effect separately.
+Declaration order is recovered from the reviewed reservation map where needed; filesystem/ID order is not silently treated as semantic order.
 
 ## 8. Equality conditions
 
 PASS requires:
 
 ```text
-all expected Works exist exactly once
-all expected Related/Roadmap relations exist exactly once
-no unexpected operation-owned Work/relation exists
-normal/integration/confirmation kinds and targets match
-origin/phase/roadmap affiliation matches
-normalized persisted design semantics == reviewed persisted semantic component
+all expected Works exactly once
+all expected relations exactly once
+no unexpected operation-owned Work/relation
+kinds/targets/origin/affiliation match
+normalized persisted semantics == reviewed persisted semantic component
+Roadmap-owned review-v1 self-selecting precondition holds
 canonical plan uniquely identifies the same first Work when one is expected
 structure validation passes
 exact physical commit-delta proof passes
 ```
 
-A matching `design_identity` alone is insufficient.
+`design_identity` alone is insufficient.
 
 ## 9. Planning Consumption binding
 
@@ -176,20 +164,37 @@ registration commit SHA
 adapter/loader identity
 ```
 
-The `canonical first Work ID` is evidence of what canonical plan semantics select after write. It does not become a separate progression authority; START/Roadmap still derive selection from Project state on future invocations.
+`canonical first Work ID` is evidence of canonical plan semantics, not a separate progression source.
 
 ## 10. Recovery
 
-A pending expansion only resumes when the live `design_identity()` matches exactly, as today. Reserved IDs/effects are reused.
+A pending expansion resumes only when live `design_identity()` matches exactly. Reserved IDs/effects are reused.
 
-After replay/finalization, semantic round-trip runs again. If the canonical graph no longer reconstructs the reviewed design or unique first Work, stop/reconcile rather than accepting the historical invocation identity as proof of current meaning.
+After replay/finalization, semantic round-trip and Roadmap-owned self-selection validation run again. If canonical graph no longer reconstructs reviewed meaning, stop/reconcile.
 
-A completed expansion with no pending mutation is not re-expanded to recover an ephemeral `entry`; Review-v1 prevents that information loss by requiring the persisted graph itself to determine the same choice.
+A completed expansion is never re-expanded merely to recover an ephemeral `entry`.
 
-## 11. Architecture blocker / HUMAN
+## 11. Review-v1 entry cases
+
+Frozen cases:
+
+```text
+canonical graph uniquely selects A, entry=A -> valid
+canonical graph uniquely selects A, entry=B -> invalid
+canonical graph leaves A/B ambiguous, entry=A -> invalid for review-v1
+no explicit entry, canonical graph uniquely selects A -> valid
+```
+
+These cases are owned by Roadmap authority at P2 activation and verified by the adapter/tests.
+
+## 12. External-review repair disposition
+
+Accepted and repaired here:
+
+- canonical self-selection remains required for review-v1;
+- semantic ownership moves explicitly to Roadmap authority;
+- adapter is verification/projection only and does not become a planning authority.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-Live reconnaissance found one concrete Phase-entry seam (`entry` is not persisted). It is closed at the P1/P2 contract level by forbidding Review-v1 plans from relying on that ephemeral hint to resolve canonical ambiguity, preserving Candidate 7's rule that Review metadata is not progression truth.
