@@ -1,6 +1,6 @@
 # Review System P1 — R1 Durable Layout / Loader / Bootstrap Contract Freeze
 
-Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / ROUND 2 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This is a non-normative implementation-contract checkpoint for Candidate 7 P1. Runtime authority remains `registry.md` plus registry-routed canonical Skills and live code until this contract is implemented and routed into authority.
 
@@ -32,13 +32,21 @@ P1 adds one canonical namespace, created lazily on first Review write:
    │  └─ <receipt_id>.yaml
    ├─ consumptions/
    │  └─ <consumption_id>.yaml
-   └─ supersessions/
-      └─ <superseded_receipt_id>.yaml
+   ├─ supersessions/
+   │  └─ <superseded_receipt_id>.yaml
+   ├─ candidate-snapshots/
+   │  └─ <candidate_hash>.yaml
+   ├─ task-inputs/
+   │  └─ <review_task_id>.yaml
+   └─ activation/
+      └─ work-terminal-v1.yaml
 ```
 
 P1 does **not** create or require empty `.workline/review/` directories during Project開始. They appear through ordinary mutation effects when the first canonical Review record is persisted.
 
 This avoids meaningless empty-directory bootstrap/backfill work and matches the existing Project layout convention that only files, not empty directories, are clone-safe state.
+
+`candidate-snapshots/` and `task-inputs/` are clone-safe Review provenance needed to reconstruct accepted tasks after runtime loss. `activation/work-terminal-v1.yaml` is introduced only at P3 activation and classifies pre-activation legacy terminal history versus post-activation review-v1 terminal events. None is lifecycle truth.
 
 ## 3. Runtime layout remains separate
 
@@ -48,18 +56,17 @@ The following is allowed for ephemeral execution material only:
 .workline/runtime/review/
 ```
 
-Subdirectories may hold candidate scratch data, raw reviewer reports, temporary adapter output, or learning scratch material, but:
+Subdirectories may hold candidate scratch data, raw reviewer reports, temporary adapter output, provider job handles, or learning scratch material, but:
 
 ```text
 runtime Review data
 != canonical Review gate truth
 != evidence by itself
 != authorization
+!= sole task reconstruction material
 ```
 
-A clone or runtime cleanup may remove it. Anything required to decide whether an authorization is currently consumable must be reconstructible from `.workline/review/` canonical records plus canonical Project/Git state.
-
-Open Review work may need to re-run an adapter/reviewer after clone if only its scratch/raw body was runtime-resident. That is acceptable and fail-closed. A sealed authorization may never depend on an unavailable runtime-only fact.
+A clone or runtime cleanup may remove it. Anything required to decide whether an authorization is currently consumable or to reconstruct an accepted task must be reconstructible from `.workline/review/` canonical records plus canonical Project/Git state.
 
 ## 4. Gate generation files
 
@@ -89,151 +96,129 @@ SHA-256(versioned canonical UTF-8 serialization bytes)
 
 Canonical Review rendering uses UTF-8 and LF line endings. The digest is over those canonical bytes, not over an in-memory mapping and not over a post-filter Git blob. Git persistence proof separately proves the committed path reproduces those bytes under the Git semantics bound by R6.
 
-Candidate 7's conceptual `superseded` generation state is represented by the existence of a later valid generation in the chain rather than rewriting an immutable older generation. Stored generation terminal state is therefore `open` or `sealed_authorized`; supersession is derived from the validated chain.
+Candidate 7's conceptual `superseded` generation state is represented by the existence of a later valid generation in the chain rather than rewriting immutable old files. Stored generation terminal state is `open` or `sealed_authorized`; supersession is derived from the validated chain.
 
-## 5. Receipt files
+## 5. Receipt / Consumption / supersession files
+
+Receipt:
 
 ```text
 .workline/review/receipts/<receipt_id>.yaml
 ```
 
-Each Receipt is immutable, one file per stable Receipt ID. Filename and in-record ID must match exactly. A Receipt binds one `sealed_authorized` generation and its Candidate/Context/Policy/Coverage/Adjudication/obligation identities.
-
-Receipt existence alone is never lifecycle truth and never equals consumption.
-
-## 6. Consumption files
+Consumption:
 
 ```text
 .workline/review/consumptions/<consumption_id>.yaml
 ```
 
-Each Consumption is immutable and references one Receipt plus kind-specific persisted-result/transition identity. Its logical uniqueness is validated separately; path uniqueness alone is insufficient. R4 freezes those cardinality rules.
-
-## 7. Supersession files
+Supersession:
 
 ```text
 .workline/review/supersessions/<superseded_receipt_id>.yaml
 ```
 
-A supersession record is immutable and keyed by the Receipt it invalidates. The record contains at minimum:
+All are immutable. Receipt existence alone is never lifecycle truth and never equals Consumption. Logical Consumption uniqueness/totality is R4 responsibility.
 
-```yaml
-superseded_receipt_id: ...
-superseded_by_receipt_id: ...
-review_run_id: ...
-from_generation: ...
-to_generation: ...
-reason_code: ...
+## 6. Candidate snapshot and task-input provenance
+
+Accepted task launch requires clone-safe reconstruction material.
+
+Canonical snapshot path:
+
+```text
+.workline/review/candidate-snapshots/<candidate_hash>.yaml
 ```
 
-Only one canonical supersession file may exist for a Receipt. Exact matching replay is idempotent; different content at the same path is reconcile required.
+Canonical task-input path:
 
-This file is Review authorization metadata, not a lifecycle event.
+```text
+.workline/review/task-inputs/<review_task_id>.yaml
+```
+
+Both use the same immutable create-only/no-follow/Git-committability contract as other Review records.
+
+Candidate snapshot records exact ReviewedArtifactProjection reconstruction material, or a deterministic builder identity plus all clone-safe inputs sufficient to recreate the identical projection. A digest alone is never treated as reconstruction material.
+
+Task-input binds the exact versioned request envelope, request digest, task/reviewer/adapter identity+version, candidate reference/reconstruction mode, Review Context, Effective Policy, and accepted generation.
+
+If clone/runtime loss leaves insufficient material to reconstruct the exact request/Candidate, fail closed; do not silently create a replacement task identity.
+
+## 7. Work-terminal activation record
+
+P3 introduces one immutable activation record:
+
+```text
+.workline/review/activation/work-terminal-v1.yaml
+```
+
+It binds at minimum:
+
+```text
+operation_contract = review-v1
+legacy_event_count
+legacy_event_prefix_sha256
+activation_base_head
+```
+
+The prefix digest is over the exact canonical first N bytes/records of `events/events.jsonl` according to the versioned activation serializer contract. The activation record is committed/proven before the first review-v1 `work_completed` event is allowed.
+
+The activation record is Review/operation consistency metadata only. `ProjectView/state.py` must not derive lifecycle or selection from it.
 
 ## 8. Immutable create-only writer contract
 
-Gate generation, Receipt, Consumption and supersession records use a Review-safe immutable create primitive/validation mode.
+Gate generation, Receipt, Consumption, supersession, Candidate snapshot, task-input and activation records use a Review-safe immutable create primitive/validation mode.
 
 Frozen behavior:
 
 ```text
-target absent
--> create exact canonical bytes
-
-target exists with exact expected bytes
--> MATCHING / idempotent replay
-
-target exists with different bytes/content/type
--> reconcile_required
-
-existing immutable Review object + generic update/base semantics
--> mechanically forbidden
+target absent -> create exact canonical bytes
+exact same bytes -> MATCHING / idempotent replay
+different bytes/content/type -> reconcile_required
+existing immutable Review object + generic update/base semantics -> mechanically forbidden
 ```
-
-A caller convention is insufficient. Mutation validation must reject overwrite/update semantics for canonical immutable Review paths. The same immutable-create validation runs before replaying a recorded Review effect on resume.
 
 ## 9. Write-time containment / no-follow contract
 
-Review structural validation does not by itself make a later write safe.
+Immediately before a canonical Review create is physically applied, the writer positively proves containment from Project root through `.workline/review` to the target parent using lstat/no-follow semantics. Every existing component must be the expected in-Project plain directory. Symlink, junction, reparse point, unexpected indirection, or unprovable identity is refused.
 
-Immediately before a canonical Review create operation is physically applied, the writer must positively prove containment from Project root through `.workline/review` to the target parent using lstat/no-follow semantics. Every existing component must be the expected in-Project plain directory. Symlink, junction, reparse point, unexpected indirection, or unprovable identity is refused.
-
-The target parent identity must be rechecked at the final create/replace boundary so a validation-pass-then-parent-swap TOCTOU cannot redirect Review bytes outside the Project.
-
-Project execution lock serializes Workline writers only; it is not evidence that an external filesystem actor could not change path topology.
-
-On failure, no bytes may be written outside the Project canonical Review namespace.
+The target parent identity is rechecked at the final create/replace boundary so TOCTOU cannot redirect Review bytes outside the Project.
 
 ## 10. Loader boundary
 
-P1 adds a dedicated `ReviewStore` rather than teaching `ProjectView` to load Review state.
+P1 adds dedicated `ReviewStore` rather than teaching `ProjectView` to load Review state.
 
-`ReviewStore` owns:
+`ReviewStore` owns canonical Review paths, record parsing/version checks, filename/ID/generation consistency, immutable shape validation, gate-chain validation, Receipt/Consumption/supersession lookup, candidate/task provenance lookup, activation lookup, canonical rendering and predecessor digest calculation.
 
-- canonical Review paths;
-- YAML record parsing/version checks;
-- filename/ID/generation consistency;
-- immutable-record shape validation;
-- gate-chain validation and latest-generation lookup;
-- Receipt lookup;
-- Consumption lookup/cardinality indexes;
-- supersession lookup;
-- canonical rendering for expected write effects;
-- predecessor digest calculation from canonical bytes.
-
-`ProjectView` / `state.py` MUST NOT read Review files to derive Work/Phase/Roadmap lifecycle or progression.
+`ProjectView` / `state.py` MUST NOT read Review records to derive Work/Phase/Roadmap lifecycle or progression.
 
 ## 11. Project validation boundary
 
-`validate_project()` gains a Review structural validation pass **outside** `ProjectView`:
+`validate_project()` gains a Review structural validation pass outside `ProjectView`.
 
-```text
-validate_project_yaml
-+ self-hosting validation
-+ ProjectView / domain structure validation
-+ ReviewStore structural validation (when review namespace exists)
-```
+Projects with no `.workline/review/` remain structurally valid. Absence of Review records alone does not classify a Work terminal event as legacy after review-v1 activation has occurred; P3 activation record + event classification owns that distinction.
 
-Legacy/P1-not-yet-used Projects with no `.workline/review/` remain structurally valid. Absence of Review records does not itself mean `legacy` or `review-v1`; operation-contract identity is handled in P3.
-
-If `.workline/review/` exists, unknown entries, symlink/reparse indirection where a plain canonical file/directory is required, malformed records, non-contiguous generation chains, duplicate logical IDs, or conflicting immutable facts fail validation.
-
-Review validation reports problems; it never repairs.
+Unknown entries, symlink/reparse indirection where a plain file/directory is required, malformed records, non-contiguous generation chains, duplicate logical IDs, conflicting immutable facts, malformed provenance, or contradictory activation state fail closed.
 
 ## 12. Project開始 / bootstrap contract
 
-Frozen decision:
-
-- do **not** add a placeholder/manifest solely to track an empty Review directory;
-- do **not** require Project開始 to backfill `.workline/review/`;
-- do **not** treat `.workline/runtime/review/` as canonical state;
-- preserve Project開始's existing pre-effect residue rule: any pre-existing `.workline/review/` in a not-yet-established target is partial/unknown canonical state and is not adopted by guess;
-- existing established Projects become Review-capable lazily when the first Review operation writes canonical Review records under the normal Project lock/mutation contract.
+No placeholder/manifest is created solely to track empty Review directories. Existing Projects become Review-capable lazily. Pre-existing `.workline/review/` in a not-yet-established target remains partial/unknown state and is not adopted by guess.
 
 ## 13. Git committability preflight
 
-Before the first canonical Review effect of a mutation is recorded/applied, every Review path that operation expects to commit must be checked with Git's own ignore/exclude evaluation.
-
-If Git reports the path ignored, or Workline cannot determine committability, STOP before any canonical Review effect. This must account for repository ignore rules, `.git/info/exclude`, global excludes and other Git-visible ignore sources through Git's own decision rather than by parsing only `.gitignore`.
-
-Workline never edits Project ignore/exclude configuration to make Review paths committable.
-
-Every canonical Review write path remains explicit in `WriteScope.files` and exact commit path lists. Runtime metadata remains forbidden from commit.
+Before the first canonical Review effect of a mutation is recorded/applied, every Review path that operation expects to commit must be checked with Git's own ignore/exclude evaluation. Ignored or unanswerable committability STOPs before canonical Review effects. Workline never edits ignore/exclude configuration to make Review paths committable.
 
 ## 14. Future extension boundary
 
-P5 may add full history under additional `.workline/review/` subtrees. Those future records must not change the P1 meaning of gates, Receipts, Consumptions, or supersessions and must not become lifecycle truth.
+P5 may add further history under `.workline/review/`; P6/P7 may add policy records. Those extensions must preserve this canonical-vs-runtime, immutable-writer, no-hidden-authority boundary.
 
-P6/P7 may add policy records. They use the same canonical-vs-runtime and immutable-writer boundary but are not pre-invented in P1.
+## 15. Round-2 repair disposition
 
-## 15. External-review repair disposition
+Round 2 adds:
 
-Accepted and repaired here:
-
-- write-time symlink/junction/reparse/TOCTOU safety;
-- immutable create-only semantics;
-- first-write Git committability preflight;
-- exact generation predecessor digest contract.
+- clone-safe Candidate snapshot / task-input provenance;
+- P3 work-terminal activation marker path/role;
+- explicit statement that those records use the same immutable/no-follow/Git preflight rules.
 
 Architecture blocker: `None`.
 
