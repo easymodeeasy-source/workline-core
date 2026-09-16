@@ -1,18 +1,18 @@
 # Review System P1 — R12 Recovery / Invariant Test Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the minimum interruption and invariant test matrix required before P1/P2/P3 Review contracts may be considered implemented. It is non-normative until implementation and authority activation.
 
-## 1. Live test/recovery foundation inspected
+## 1. Live recovery foundation
 
-The existing repository already has broad recovery-oriented tests for mutation staging, branch binding, declared write scopes, lifecycle resume, bootstrap resume, cancellation decisions, finalized-effect branch behavior and end-to-end operation flows.
+Existing tests already cover mutation staging, branch binding, declared write scopes, lifecycle resume, bootstrap resume, cancellation decisions, finalized-effect branch behavior and end-to-end flows.
 
-The live Mutation Controller is explicitly designed so a stage can be partially applied: all effects are durably recorded first, then each effect is classified against reality as UNAPPLIED / MATCHING / MISMATCH on resume. Review tests must extend this style rather than replacing it with mocks that skip real persisted intent/state.
+Review tests extend the same durable-intent/replay model. They must exercise real persisted mutation/canonical/Git state rather than mocks that skip recovery semantics.
 
 ## 2. Test philosophy
 
-Every critical Review boundary is tested in three dimensions where applicable:
+Critical boundaries are tested across:
 
 ```text
 A. uninterrupted happy path
@@ -20,287 +20,289 @@ B. crash/interruption after each durable boundary
 C. conflicting external/local change before resume
 ```
 
-Assertions must cover both:
+Assertions cover both what happened exactly once and what must not have happened yet, especially push, lifecycle terminalization, duplicate Review records, executor re-run, generation fork and ID reallocation.
 
-```text
-what DID happen exactly once
-what MUST NOT have happened yet
-```
-
-especially push, lifecycle terminalization, duplicate Receipt/Consumption, executor re-run and ID reallocation.
-
-Tests prefer real temporary Git repositories and real canonical file/mutation records, following existing test conventions. Network-dependent push cases use local bare remotes where possible.
-
-## 3. R1/R2 canonical layout and IDs
+## 3. R1/R2 layout, immutable writer, IDs and committability
 
 Required tests:
 
-- legacy Project with no `.workline/review/` validates;
-- first canonical Review write lazily creates exact review directories/files;
-- `.workline/runtime/review/` never satisfies canonical ReviewStore lookup;
-- malformed/unknown Review path/file causes structural validation failure;
-- symlink/reparse substitution at canonical Review paths is refused where applicable;
-- Gate filename/run/generation mismatch is rejected;
-- non-contiguous generation chain is rejected;
-- predecessor digest mismatch is rejected;
-- central Review ID prefixes round-trip through `new_id/kind_of/is_valid_id`;
-- retry of same mutation reservation reuses Review IDs;
-- same reservation key requested with another kind reconciles/refuses;
-- generation numbering derives from validated chain and cannot skip/duplicate.
+- Project without `.workline/review/` validates;
+- first Review fact lazily creates exact directories/files;
+- runtime Review data never satisfies canonical lookup;
+- malformed/unknown Review path fails validation;
+- Gate filename/run/generation mismatch rejected;
+- non-contiguous generation chain rejected;
+- predecessor digest mismatch rejected;
+- central Review ID prefixes round-trip;
+- retry reuses Review reservations;
+- reservation key with another kind refuses/reconciles;
+- generation numbering cannot skip/duplicate;
+- immutable Review path exact bytes -> MATCHING;
+- immutable Review path different bytes -> reconcile;
+- generic update/base semantics on immutable Review path -> mechanically rejected;
+- first Review write to a Git-ignored/excluded Review path STOPs before any canonical Review effect is recorded/applied;
+- Workline does not edit ignore/exclude configuration.
 
-## 4. R3 Gate Generation interruption matrix
+### Write-time TOCTOU test
 
-At minimum test:
+```text
+Review validation passes
+-> before effect apply, target parent under `.workline/review/` is replaced by symlink/junction/reparse pointing outside Project
+-> immutable create is attempted
+```
+
+Expected: STOP/reconcile, and no outside-Project bytes are created/modified.
+
+### Predecessor digest tests
+
+- versioned canonical renderer uses UTF-8/LF and stable SHA-256;
+- semantic-equivalent but non-canonical bytes are normalized/rejected before persistence, not treated as another valid digest form;
+- predecessor canonical bytes changed -> chain failure;
+- fresh clone reproduces canonical bytes/digest.
+
+## 4. R3 generation interruption / fork matrix
 
 ### Accepted task durability
 
 ```text
-G1 accepted T1 persisted
--> process exits before launching/retrieving result
--> resume sees T1 unsettled
--> authorization cannot seal
+G1 with clone-safe accepted task descriptor committed
+-> process exits before task result
+-> runtime removed or clone fresh
+-> task identity/request binding reconstructs from canonical G1
+-> task remains unsettled and seal forbidden
 ```
 
-### Result arrives before settlement generation
+### Result before settlement generation
+
+Runtime/provider result exists but crash occurs before canonical G2. Clone/resume has only G1, so T1 remains unsettled and authorization cannot seal.
+
+### Settlement generation partial state
+
+Test:
 
 ```text
-external/runtime result exists
--> crash before canonical G2
--> clone/resume has only G1
--> T1 remains unsettled; no seal
+G2 stage/intent recorded, effect unapplied
+G2 file written, mutation applied flag unsaved
+G2 locally committed, later stage not recorded
 ```
 
-### Settlement generation partial write/commit
+Resume must not duplicate generation/task ID or lose obligation.
+
+### Generation fork after lock loss
+
+Mandatory case:
 
 ```text
-G2 effect recorded, write unapplied
-G2 file written, mutation flag unsaved
-G2 committed locally, later stage not recorded
+latest generation N validated
+-> exact G(N+1) path included in initial WriteScope when mutation opens
+-> pending intent durable
+-> no generation effect applied
+-> process crashes / OS lock disappears
+-> second invocation attempts same Review run next generation
 ```
 
-Each resumes without duplicate generation/task ID or loss of obligation.
+Expected: it resumes/refuses against first pending mutation; no second N+1/fork exists.
 
-### Seal + Receipt same stage
+### Seal + Receipt partial stage
 
-Interrupt:
+Interrupt before/after each physical effect and before local commit. Consumption must remain impossible until exact Gate+Receipt pair validates.
 
-```text
-before either write
-Gsealed written / Receipt absent
-Receipt written / stage applied flag not saved (if effect order permits)
-after both writes / before local commit
-after commit / before proof or push
-```
+### New report invalidation
 
-Resume must never permit consumption until both exact canonical facts validate.
-
-### New report invalidates seal
-
-```text
-sealed G4/R1
--> new supported report requires G5 open + R1 supersession
--> crash after either effect
--> resume cannot consume R1
-```
+Sealed G4/R1 then G5 open + R1 supersession, with crash after either effect. Resume cannot consume R1.
 
 ## 5. R4 terminal event + Consumption matrix
 
-Using a Review-v1 Work, interrupt after:
+Interrupt after:
 
 ```text
-terminal stage durably recorded, no effects applied
+terminal stage intent durable / no effects
 work_target_removed applied
 work_completed E1 applied
 Consumption C1 written
 stage flags partially unsaved
-terminal K2 committed locally
-terminal K2 proof passed
+terminal K2 locally committed
+K2 proof passed
 terminal push fails/succeeds
 ```
 
-Required invariants:
+Required:
 
 - no duplicate E1;
 - no second Consumption ID;
 - exact R1/E1/K1/operation tuple reused;
-- Receipt cardinality remains 0-or-1;
-- E1 cardinality remains 0-or-1;
-- if E1 exists and C1 is temporarily absent locally, pending mutation deterministically fills C1 before terminal publication/final completion;
-- conflict inserted at C1 path is reconcile, never overwrite;
-- conflicting second Consumption for same Receipt/Event makes Review validation fail closed.
+- receipt/event uniqueness remains 0-or-1;
+- conflicting C1 path -> reconcile, never overwrite;
+- conflicting second Consumption -> validation fail closed.
+
+### P3 totality states
+
+Test all:
+
+```text
+review-v1 E1 + matching C1
+-> valid
+
+review-v1 E1 only + matching pending terminal stage proving C1 remaining
+-> recoverable transient
+
+review-v1 E1 only + no matching pending stage
+-> invalid / reconcile
+```
+
+Test symmetric Consumption-only corruption/recovery state where ordering permits.
+
+Review metadata alone must not change `ProjectView` lifecycle.
 
 ## 6. R5 result commit / proof / push matrix
 
-Required Work result cases:
+Required cases:
 
 ```text
-executor returns Completed
--> K1 commit not yet recorded
+K1 effect not recorded
 K1 effect recorded / commit not made
-K1 made / mutation commit ID save interrupted
-K1 made + identified / post-commit proof not run
+K1 made / commit_id+applied durable save interrupted
+K1 made + durable ID / post-commit proof not run
 proof fails
 proof passes / push not recorded
 push recorded / network failure
 push succeeds / terminal stage not begun
 ```
 
-Assertions:
+### Exact K1 reconstruction after save interruption
 
-- executor is not rerun merely to finish a proven existing K1 path;
-- no push occurs before proof pass/binding;
-- failed proof never creates push effect;
-- push retry uses same destination/branch/commit and rechecks latest authorization;
-- result K1 may be remotely published while Work remains non-terminal until K2;
-- no-result Work creates/proves authorization metadata K1 before terminal consumption;
-- legacy operation behavior remains unchanged until explicit review-v1 activation.
-
-## 7. R6 Review-validity HEAD advancement tests
-
-Cases:
-
-- unrelated intervening commit with complete proven closure -> reuse allowed;
-- intervening commit touches Review Context dependency -> new Candidate;
-- touches test helper/evidence dependency -> new Candidate or evidence reacquisition as contract dictates;
-- `.gitattributes`/filter/tool config material change -> no fast-path reuse;
-- closure completeness unknown -> new Candidate even when recorded result paths untouched;
-- base rewritten/rebased -> reconcile/Git incompatibility, not semantic fast path;
-- merge in intervening history with material dependency touched in a parent -> detected;
-- changed-then-reverted dependency still counts as changed for reuse decision;
-- non-repo runtime/tool identity change invalidates reuse where bound.
-
-No test may pass fast path solely because `commits_touching(result_paths)==[]`.
-
-## 8. R7 Class A tests
-
-Required cases:
-
-- operation-owned transformed K1 eligible -> exact C2 Review -> R2 -> metadata-only K2 -> proof -> push;
-- K1 contains unexpected/non-owned path -> Class A refused/reconcile;
-- K1 multiple-parent -> refused;
-- branch/lineage changes during C2 Review -> adoption invalid;
-- push dry-run says `=` for exact K1 before K2 -> already published/historical escape, no normal adoption;
-- dry-run fast-forward/new branch -> unpublished classification may continue;
-- dry-run reject/unknown -> reconcile;
-- K2 exact metadata-only -> accepted;
-- hook adds domain/transition delta to K2 -> reconcile;
-- K2 metadata bytes transformed unexpectedly -> reconcile;
-- **no recursive R3/K3 Receipt chain is created**;
-- failure after K2 commit but before push resumes same K2 proof/push.
-
-## 9. R8 Roadmap semantic round-trip tests
-
-Construct reviewed `RoadmapPlan` cases covering:
-
-- multiple Phases in declared order;
-- scope/out-of-scope absent vs present semantics;
-- planned/requires Phase relations;
-- stable reserved IDs across resume;
-- canonical render/loader normalization.
-
-Fault-injection variants deliberately change:
+Mandatory fault injection:
 
 ```text
-relation type/endpoint
-Phase desired state
-Roadmap section
-created ID
-extra/missing entity/relation
-serializer/loader interpretation fixture
+record commit effect
+-> real git commit succeeds producing K1
+-> crash before mutation records commit_id/applied
+-> resume
 ```
 
-Request identity may remain syntactically present, but semantic round-trip must fail.
+PASS only when the repaired R5 positive proof establishes exact branch, exact one-parent relation to recorded base, complete expected parent->tree delta, no extra post-commit commit, complete Git inspection and current Review identities. Then the same K1 ID is durably backfilled before Review proof/push proceeds.
 
-Successful case must bind exact registration commit/projection into Planning Consumption.
+Negative fixtures:
 
-## 10. R9 Phase-entry semantic round-trip tests
+- matching message but wrong tree;
+- extra commit after K1;
+- wrong parent;
+- changed branch;
+- unexpected mode/blob/deletion/link/gitlink entry;
+- unanswerable Git query;
+- conflicting existing durable commit ID.
 
-Cover:
+All negative cases reconcile. Message match alone never identifies K1.
 
-- multiple normal Works;
-- integration generation/dependencies;
-- optional human confirmation + target;
-- Related edges;
-- planned_next / requires_completion;
-- stable reserved IDs/resume;
-- exact Phase/Roadmap origin.
+General assertions:
 
-Critical `entry` cases:
+- executor not rerun merely to finish a positively recovered K1 path;
+- no push before proof pass/binding;
+- failed proof creates no push effect;
+- push retry rechecks exact destination/branch/commit/latest authorization;
+- authorized K1 may be remotely present while Work remains non-terminal until K2;
+- no-result Work gets metadata-only K1;
+- legacy semantics unchanged before review-v1 activation.
+
+## 7. R6 Review-validity HEAD advancement
+
+Cases include:
+
+- unrelated intervening commit + complete proven closure -> reuse allowed;
+- Review Context/evidence/tool/Git semantic dependency touched -> no reuse as appropriate;
+- `.gitattributes`/filter/config/hook semantics changed -> no fast path;
+- closure completeness unknown -> new Candidate;
+- rewritten/rebased base -> reconcile;
+- merge material dependency touched in parent -> detected;
+- changed then reverted still counts;
+- non-repo material identity change invalidates reuse.
+
+No test passes reuse only because result paths were untouched.
+
+## 8. R7 Class A
+
+Required:
+
+- positively identified operation-owned transformed K1 -> exact C2/R2/K2 path;
+- K1 lacking durable made ID may enter only after R5 positive reconstruction proves its identity;
+- unexpected/non-owned path -> reconcile;
+- multiple parent -> refused;
+- branch/lineage change -> adoption invalid;
+- destination already contains K1 (`=` while HEAD K1) -> historical escape/reconcile path, not normal adoption;
+- new/fast-forward may continue;
+- rejection/unknown -> reconcile;
+- K2 exact metadata-only -> accepted;
+- hook adds domain/transition delta -> reconcile;
+- no recursive Receipt chain;
+- crash after K2 before push resumes exact K2 proof/push.
+
+## 9. R8 Roadmap semantic round-trip
+
+Cover multiple Phases/order, optional sections, relations, stable IDs and canonical normalization. Fault inject changed relation/desired-state/section/ID/extra-missing entity or loader interpretation. Request identity alone must not make semantic proof pass.
+
+## 10. R9 Phase-entry semantic round-trip / authority
+
+Cover normal Works, integration, confirmation, Related, planned/requires edges, stable reservations/resume and origin.
+
+Roadmap-owned review-v1 precondition cases:
 
 ```text
 canonical graph uniquely selects A, entry=A -> PASS
-canonical graph uniquely selects A, entry=B -> reject before persistence/Review READY
-canonical graph leaves A/B ambiguous, entry=A -> review-v1 reject (ephemeral hint cannot be sole persisted meaning)
+canonical graph uniquely selects A, entry=B -> reject
+canonical graph ambiguous A/B, entry=A -> reject for review-v1
 no explicit entry, canonical graph uniquely selects A -> PASS
 ```
 
-After clone/reload, unique first Work must be derivable without Review metadata.
+Tests must demonstrate the rule is enforced by the Roadmap review-v1 planning path and merely verified by the adapter. Adapter-only semantic override is not accepted.
 
-## 11. R10 Policy adapter contract tests
+After clone/reload, first Work remains derivable without Review metadata.
 
-P1 tests only the generic protocol/harness:
+## 11. R10 Policy adapter harness
 
-- adapter after-state round-trip equality passes for a synthetic deterministic adapter;
-- byte-equal but semantic-default-different fixture fails;
-- stale before-version fails;
-- loader/schema identity change invalidates proof;
-- unimplemented Project/Global Policy adapter fails explicitly, never falls back to `project.yaml`/generic dictionary storage.
+P1 tests only generic protocol/harness. Unimplemented Project/Global adapters fail explicitly; no fallback generic policy store is invented.
 
-Actual policy schemas are tested in P6/P7.
+## 12. R11 Evidence completeness
 
-## 12. R11 Evidence completeness tests
+Synthetic adapters cover required/observed/pinned/denied/unknown dependencies; dynamic/subprocess/network/env/cache/tool/runtime cases; unknown means no cross-Candidate reuse; prompt-only claims never count as mechanical denial/coverage.
 
-For synthetic adapters:
+## 13. Clone/runtime-cleanup
 
-- every required class covered/pinned/denied -> complete;
-- one required class unknown -> no cross-Candidate reuse;
-- undeclared ambient environment -> unknown;
-- subprocess child escapes trace -> corresponding classes unknown;
-- network denied mechanically -> may count denied;
-- prompt-only “no network” -> not denied;
-- vocabulary version change invalidates automatic completeness;
-- tool/runtime identity change invalidates reuse;
-- complete repo dependencies unchanged -> reuse permitted;
-- one repo dependency changed/reverted -> invalidated;
-- flaky single PASS cannot be promoted to reusable certainty without its repetition contract.
-
-## 13. Clone/runtime-cleanup tests
-
-For a Project with canonical open/sealed Review state:
+For open/sealed canonical Review state:
 
 ```text
-remove .workline/runtime/** or clone repository fresh
--> ReviewStore reconstructs gate/Receipt/Consumption state from canonical files
--> ProjectView lifecycle remains based only on entities/relations/events
+remove `.workline/runtime/**` or clone fresh
+-> Gate/Receipt/Consumption/accepted-task descriptors reconstruct from canonical files
+-> `ProjectView` lifecycle remains entities/relations/events only
 ```
 
-Open task scratch may be gone and must be rerun/retrieved; sealed authorization may not depend on missing runtime-only data.
+A sealed authorization may never depend on runtime-only task identity.
 
-## 14. Authority boundary tests
+## 14. Authority boundary
 
-Mechanical tests must prove:
+Mechanical tests prove:
 
-- Review metadata cannot make `state.py` report a Work/Phase/Roadmap lifecycle transition;
-- adding/removing Receipt/Consumption alone does not change `ProjectView` lifecycle;
-- Roadmap/START remain owners of their domain transitions;
-- Review write stages occur under the same Project execution-lock/mutation authority as the owning top-level operation;
-- a foreign Project context cannot mutate Review canonical state;
-- concurrent top-level writer sees ordinary Project lock refusal.
+- Review metadata cannot directly change Work/Phase/Roadmap lifecycle;
+- Roadmap/START remain transition owners;
+- R9 self-selection semantic is Roadmap-owned at review-v1 activation;
+- Review writes use the same Project lock/mutation authority;
+- foreign Project context cannot mutate Review state;
+- concurrent active writer gets ordinary Project-lock refusal;
+- cross-crash generation conflict is still caught through pending initial WriteScope.
 
-## 15. Required test gate before activation
+## 15. Activation gates
 
-P1 common infrastructure is not considered implementation-complete until all R1-R7/R10/R11 common-contract tests pass.
+P1 common infrastructure is not implementation-complete until repaired R1-R7/R10/R11 tests pass.
 
-P2 Planning Review activation additionally requires R8/R9 round-trip/recovery tests.
+P2 Planning activation additionally requires R8/R9 tests.
 
-P3 START Review-v1 activation additionally requires full R4/R5 terminal/commit/push/Class-A interruption matrix and compatibility tests.
+P3 START activation additionally requires full R4/R5/R7 terminal/commit/proof/push interruption and totality tests.
 
-A passing happy-path suite without interruption/fault-injection coverage is insufficient for activation.
+Happy path alone is insufficient.
 
-## 16. Architecture blocker / HUMAN
+## 16. External-review repair disposition
+
+This revision adds explicit tests for every accepted independent-review seam: K1 identity save interruption, generation fork after lock loss, write-time path TOCTOU, immutable create-only enforcement, clone-safe async task descriptor, terminal totality, first-write committability and canonical predecessor digest.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-The live test suite already uses the same recovery-oriented style. P1 work is to extend it across every newly introduced durable Review boundary.
