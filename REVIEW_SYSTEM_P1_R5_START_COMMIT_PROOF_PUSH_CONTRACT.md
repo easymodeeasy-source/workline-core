@@ -1,25 +1,25 @@
 # Review System P1 — R5 START Result Commit / Proof / Push Split Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the Git transaction shape required by Candidate 7 for Review-v1 Work completion. It is non-normative until implementation and canonical authority activation.
 
 ## 1. Live behavior confirmed
 
-Today `gitops.finalize()` records a `git_commit` and optional `git_push` in the same mutation stage, then calls `mutation.apply()`. Therefore, when a remote exists, a successful local commit is immediately followed by the push before caller code regains control.
+Today `gitops.finalize()` records `git_commit` and optional `git_push` in one mutation stage and applies both before caller control returns. START `_Session._commit()` therefore cannot currently insert Review proof between local commit and push.
 
-START `_Session._commit()` always uses this helper. Current Work completion is:
+Current Work completion is conceptually:
 
 ```text
 executor Completed
 -> completion_precheck
--> result commit + push (when result paths exist)
--> append work_target_removed + work_completed
+-> result commit + push
+-> terminal lifecycle events
 -> terminal canonical commit + push
--> postcheck completed
+-> postcheck
 ```
 
-This is safe under the current lifecycle contract but cannot satisfy Candidate 7's Review-v1 invariant:
+Review-v1 requires:
 
 ```text
 local result commit K1
@@ -27,161 +27,184 @@ local result commit K1
 -> only then push K1
 ```
 
-The current Mutation Controller already supports separate stages and separately classifiable `git_commit` / `git_push` effects, so the needed split is an API/operation-flow change, not a new Git engine.
+The current Mutation model already has separately classifiable commit and push effects, so the split remains an API/flow change rather than a new Git engine.
 
-## 2. Frozen common Git helper split
-
-P1/P3 implementation must split current `gitops.finalize()` responsibility into recoverable primitives with these semantics:
+## 2. Frozen helper split
 
 ### `commit_local(...)`
 
-Records/applies **only** a `git_commit` effect for an exact path set and returns/exposes the exact commit object ID that the Mutation Controller proved it made.
+Records/applies only an exact `git_commit` effect.
 
 Required properties:
 
-- same pre-existing dirty/separability checks as current finalize;
-- one-parent commit contract where Candidate 7 requires it;
-- stable mutation stage on retry;
-- exact made commit identity comes from the recorded `_MADE_COMMIT`/equivalent mutation fact, not commit message search;
-- no network contact and no `git_push` effect.
+- preserve pre-existing dirty/separability checks;
+- stable stage on retry;
+- no network contact;
+- expose an exact operation-made commit identity only when that identity is durably recorded or positively reconstructed under section 3;
+- never use commit message as commit identity.
 
 ### `push_committed(...)`
 
-Records/applies **only** the authorized `git_push` effect after the caller has completed the required post-commit proof.
+Records/applies only an authorized `git_push` effect after required post-commit proof.
 
 Required properties:
 
-- use the already verified Project push destination/pin;
-- verify current branch/lineage still contains the exact commit/proven commit chain being published;
-- preserve existing dry-run classification and destination recheck immediately before push;
+- verified Project destination/pin;
+- exact branch/lineage still contains authorized commit/chain;
+- existing dry-run classification/destination recheck preserved;
 - stable stage on retry;
-- no implicit new commit.
+- no implicit commit.
 
-Legacy operations may keep a compatibility wrapper equivalent to current `finalize(commit+push)` until their operation contract is explicitly migrated. Review-v1 paths use the split primitives.
+Legacy operations may retain a compatibility wrapper equivalent to current finalize until explicitly migrated. Review-v1 paths use the split boundary.
 
-## 3. Normal Review-v1 Work completion topology
+## 3. Mandatory recovery: commit succeeded, commit ID not durably saved
 
-For a Work whose ReviewedArtifactProjection is non-empty, freeze this topology:
+Live Mutation has this interruption window:
 
 ```text
-B = verified Candidate base commit
+recorded git_commit effect
+-> git commit succeeds
+-> HEAD = K
+-> process crashes before effect.applied / commit_id durable save
+```
 
-working tree Candidate + canonical sealed Gate generation + Receipt R1
+A later clean-looking tree or matching commit message is not proof that K is the mutation's commit.
+
+When a recorded Review-v1 commit effect has no durable made-commit ID, the implementation may backfill K only if all of these are positively proven:
+
+```text
+1. current branch ref == recorded commit branch
+2. current HEAD is one exact commit K
+3. parents(K) == [recorded base_head]
+   (or explicitly valid root-parent shape)
+4. complete recorded-base -> K tree delta equals the exact expected commit projection
+5. no extra post-commit commit exists between recorded base and K
+6. every Git/tree query required by the proof succeeded completely
+7. current Candidate/Context/Policy/authorization identities required at this proof phase still match
+```
+
+The complete tree proof includes path entry identity, content/blob identity, mode, deletion, symlink/gitlink semantics, and case/path semantics applicable to the repository. It is not merely `changed_against_head()==empty` or recorded-path non-conflict.
+
+If every predicate passes:
+
+```text
+K is positively reconstructed as this recorded mutation's exact K1
+-> durably backfill K into the mutation commit effect record
+-> persist applied/commit identity under the normal recovery record durability rule
+-> only then may post-commit Review proof continue
+```
+
+If any predicate is false or unprovable: `reconcile_required`, except where the separately proven R7 Class A entry conditions apply. Never create/push a proof checkpoint first and infer commit identity later.
+
+Backfill is idempotent only for the same exact K. A conflicting durable ID or changed branch/HEAD/parent/tree is reconcile required.
+
+## 4. Normal Review-v1 Work completion topology
+
+For non-empty ReviewedArtifactProjection:
+
+```text
+B = verified Candidate base
+
+working tree Candidate + sealed Gate + Receipt R1
 ↓
 local K1 commit
-  - ReviewedArtifactProjection
-  - required pre-consumption OperationMetadataProjection (R1 and exact gate metadata)
+↓
+resolve exact K1 identity
+  - from durable made-commit ID
+  - or section 3 positive reconstruction/backfill
 ↓
 POST-COMMIT PROOF K1
   A. ReviewedArtifactProjection equality
   B. OperationMetadataProjection equality
-  C. complete K1 parent->tree delta scope equality
+  C. complete parent->tree delta scope equality
   D. verified base / Review-validity check
-  E. Receipt/Gate identity current
+  E. Receipt/Gate current
 ↓
-AUTHORIZED PUSH K1 (if Project has a configured destination)
+AUTHORIZED PUSH K1
 ↓
-record/apply terminal stage
-  AuthorizedTransitionProjection:
-    work_target_removed as applicable
-    work_completed E1
-  OperationMetadataProjection:
-    Consumption C1 binding R1 + K1 + E1
+terminal stage
+  AuthorizedTransitionProjection: work_target_removed as applicable + work_completed E1
+  OperationMetadataProjection: Consumption C1 binding R1 + K1 + E1
 ↓
 local K2 terminal commit
 ↓
+resolve exact K2 identity by the same commit identity discipline
+↓
 POST-COMMIT PROOF K2
-  - exact transition projection
-  - exact Consumption metadata projection
-  - complete K1->K2 delta scope
-  - no ReviewedArtifact/domain result delta
+  exact transition/metadata projection
+  complete K1->K2 delta
+  no ReviewedArtifact/domain result delta
 ↓
 AUTHORIZED PUSH K2
 ↓
-postcheck lifecycle + ReviewStore cardinality
+postcheck lifecycle + ReviewStore invariants
 ↓
 mutation complete
 ```
 
-K1 and K2 are normal one-parent commits.
+The remote may temporarily contain authorized K1 while the Work remains non-terminal until K2. Retry resumes the pending terminal mutation.
 
-The remote may temporarily have K1 without K2 if the terminal step later fails. That is intentional: K1 is an authorized reviewed result commit, while Work lifecycle remains non-terminal until K2. Retry resumes the pending mutation and finishes terminalization. Publication of an authorized result is not equivalent to lifecycle completion.
+## 5. No-result Work
 
-## 4. Work with no result-path delta
-
-A Review-v1 Work with an empty ReviewedArtifactProjection still needs a durable authorization artifact before terminal consumption.
-
-Frozen rule:
+An empty ReviewedArtifactProjection still requires clone-safe authorization:
 
 ```text
 sealed Gate + Receipt R1
--> local K1 metadata-only authorization commit
--> exact metadata/scope proof
--> authorized push K1 if remote
--> terminal stage / K2 as above
+-> metadata-only local K1
+-> exact commit identity resolution
+-> metadata/scope proof
+-> authorized push K1 if configured
+-> terminal stage/K2
 ```
 
-K1 in this case contains no Work result path; it carries only the exact canonical Review gate/Receipt metadata required to establish clone-safe authorization.
+## 6. Receipt self-reference boundary
 
-This avoids a special in-memory-only authorization path and gives Consumption a concrete authorized result commit identity.
+Receipt does not contain the SHA of the commit containing itself. It binds Candidate/Context/Policy/generation/obligation identities. Consumption later binds exact proven K1.
 
-## 5. Why Receipt may be in K1 without self-reference
+This avoids self-referential commit bytes.
 
-Receipt contains Candidate/Context/Policy/generation/obligation identities, not the SHA of the commit containing the Receipt. Therefore R1 may be deterministically rendered before K1 and included in K1.
+## 7. K1 proof before push
 
-`authorized_result_commit_sha` is stored in the later Consumption, not R1.
+After `commit_local`, caller code regains control before any push effect is recorded.
 
-Thus normal flow has no metadata-only K2 solely to save R1; Candidate 7's special metadata-only adoption K2 is reserved for Class A where K1 already exists before replacement Receipt R2 can be written.
+Proof inspects actual commit object/tree/parent and relevant Git persistence semantics. Hooks, filters, line endings, modes, symlinks/gitlinks and attributes are reasons to inspect actual Git result rather than assume the expected worktree became the commit.
 
-## 6. K1 proof must happen before push
+A failed/unproven K1 never receives a normal push effect.
 
-The proof boundary is a real operation stage, not prose. After `commit_local`, caller code must regain control before any `git_push` is recorded.
+## 8. Push binding
 
-The proof must inspect the actual commit object/tree and parent rather than assuming that the worktree/index/expected path list implies what Git committed. Hooks, filters, line-ending conversion, executable mode changes, symlink/gitlink behavior, and other Git transformations are precisely why actual commit proof exists.
-
-If K1 differs but is fully operation-owned and eligible for Candidate 7 Class A, route to R7. Otherwise reconcile; never push the unproven commit.
-
-## 7. Push proof binding
-
-A push stage is authorized against an exact local commit identity/chain. Before recording or replaying push:
+Before recording/replaying push:
 
 ```text
-current branch ref == recorded expected branch
-HEAD/history contains exact authorized K1 (or terminal K2 for terminal push)
-configured destination == pinned recorded destination
-push dry-run classifies only allowed new/fast-forward/up-to-date state
+current branch ref == expected branch
+HEAD/history contains exact authorized K1/K2
+configured destination == pinned destination
+push dry-run is an allowed new/fast-forward/up-to-date state
+latest durable Review authorization still validates
 ```
 
-If HEAD advanced after proof, Review-validity/lineage rules must establish whether the exact authorized commit remains valid and whether the intended push is still safe. A branch rewrite/reset/rebase is reconcile, not an automatic recomputation.
+History rewrite/reset/rebase or unprovable lineage is reconcile, not automatic recomputation.
 
-## 8. Terminal stage and K2
+## 9. Terminal K2
 
-The event + Consumption effects are one Mutation stage before K2. K2 finalizes exactly those canonical transition/metadata writes.
+K2 finalizes exact terminal transition + Consumption metadata. It needs exact post-commit proof but no new Receipt.
 
-K2 does not need another Review Receipt because it is a deterministic consumption of R1, not a new ReviewedArtifact Candidate.
+If a hook/transformation changes K2 outside deterministic expected projection, reconcile. Do not recursively enter Class A for terminal K2.
 
-It does require exact post-commit proof before push:
+## 10. Mutation/Git capabilities required
 
-```text
-actual K2 parent == expected K1/current authorized terminal base
-actual K2 delta == expected AuthorizedTransitionProjection + OperationMetadataProjection
-no unexpected result/domain paths
-```
+Implementation needs:
 
-If a hook/transformation changes K2 outside that deterministic projection, reconcile. Do not invoke Class A recursively for terminal metadata/transition K2.
+- commit-only mutation stage;
+- push-only mutation stage;
+- durable access to a recorded made commit ID;
+- positive reconstruction/backfill of a missing commit ID under section 3;
+- exact branch/parent/lineage inspection;
+- complete actual parent->commit tree delta inspection;
+- Review proof checkpoint binding before any Review-v1 push effect;
+- latest authorization recheck on resume.
 
-## 9. Mutation API additions required
-
-Exact Python names can vary, but the following capabilities are frozen:
-
-- read the exact commit ID made by one named mutation stage without message heuristics;
-- record/apply commit-only stage;
-- record/apply push-only stage;
-- assert exact branch/commit lineage before push;
-- inspect actual parent->commit tree delta including path entry identity;
-- prove that no push effect for a Review-v1 result/terminal commit exists before its required proof checkpoint is durably satisfied/bound in the mutation.
-
-The Review proof checkpoint bound into the mutation includes at least:
+Proof checkpoint binds at least:
 
 ```text
 review_run_id
@@ -195,38 +218,38 @@ commit_sha
 proof_phase
 ```
 
-A resumed push may proceed only if this bound proof checkpoint still matches the latest durable valid Review authorization.
+## 11. Legacy activation
 
-## 10. Legacy activation
-
-P3 activation must preserve explicit operation-contract identity:
+Explicit operation-contract identity distinguishes:
 
 ```text
 legacy -> existing completion Git semantics
-review-v1 -> split local commit / proof / push semantics
+review-v1 -> split commit/proof/push semantics
 unknown/contradictory -> reconcile
 ```
 
-Absence of Review files alone is not evidence that an operation is legacy.
+Absence of Review files alone is not legacy evidence. Finished legacy Work is not retroactively reviewed.
 
-No already-finished legacy Work is retroactively reviewed.
+## 12. No forceful Git repair
 
-## 11. No forceful Git repair
-
-This contract does not introduce amend/reset/rebase/force-push/clean as recovery tools.
+No amend/reset/rebase/force push/clean recovery is introduced.
 
 Mismatch handling remains:
 
 ```text
-operation-owned transformed K1 -> possible Class A adoption (R7)
-unexpected/non-owned delta      -> reconcile
-lineage/ref unprovable          -> reconcile
+fully operation-owned transformed K1 -> possible Class A only under R7
+unexpected/non-owned delta           -> reconcile
+lineage/ref/unproven identity         -> reconcile
 ```
 
-## 12. Architecture blocker / HUMAN
+## 13. External-review repair disposition
+
+Accepted and repaired here:
+
+- exact K1/K2 identity recovery for commit-success/save-crash window;
+- durable positive-proof backfill before any Review proof/push;
+- Class A cannot rely on a merely plausible unrecorded commit identity.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-The live code confirms the required split is necessary, and the existing Mutation effect model already supplies the primitives needed to implement it safely.
