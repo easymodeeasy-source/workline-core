@@ -549,19 +549,23 @@ class _Session:
                 return self._cancel(view, work, outcome)
             if isinstance(outcome, Derive):
                 # A replayed derivation carries which decision moved the target, so the
-                # commit that carries the move is the one that decision makes.
+                # commit that carries the move is the one that decision makes - rendered
+                # from the display that decision was made on, not from one changed since
+                # (BL-048). A derivation kept before its display was keeps the display the
+                # Project shows now, exactly as it always did.
                 moved_by = replay.moved_by if replay is not None else "derive"
                 self._derive(view, work, outcome, replay)
                 if outcome.move:
                     self._lifecycle(work, ["work_target_removed"])
-                    self._commit("commit", _move_message(work, moved_by), [])
+                    decided = replay.display if replay is not None and replay.display is not None else work.display
+                    self._commit("commit", _move_message(decided, moved_by), [])
                     return StartResult("moved", work_id, self.mutation.id, phase_id=work.phase_id, head=gitcmd.head_commit(self.store.root))
                 self._commit("commit", f"chore(workline): derive from {work.display}", [])
                 continue
             if isinstance(outcome, HumanNG):
                 self._human_ng(view, work, outcome)
                 self._lifecycle(work, ["work_target_removed"])
-                self._commit("commit", _move_message(work, "human_ng"), [])
+                self._commit("commit", _move_message(work.display, "human_ng"), [])
                 return StartResult("moved", work_id, self.mutation.id, phase_id=work.phase_id, head=gitcmd.head_commit(self.store.root))
             raise ValidationError(f"executor returned an unknown outcome: {outcome!r}")
 
@@ -1181,6 +1185,16 @@ class _Session:
         :func:`_read_back`) is not guessed at and never refuses the derivation:
         the list is marked as no longer speaking for every derivation, and a
         resume asks the executor again exactly as it does today.
+
+        The display the Project showed the Work under is kept with it: a
+        derivation that moves the target ends in a commit whose message renders
+        that display, and a resume proves and makes that commit from the value
+        decided here rather than from a display changed since (BL-048). The
+        display is how a Project shows the Work, not part of what was decided, so
+        one the record cannot keep exactly - or none at all - is left out instead
+        of turning the list incomplete: the derivation is kept all the same, and
+        its move is finished by the shape of its own finalization, exactly as one
+        kept before displays were.
         """
         kept = self.mutation.note(_DERIVATIONS)
         if kept is None:
@@ -1192,13 +1206,12 @@ class _Session:
         recorded = _recorded_outcome(outcome)
         note = None
         if entries is not None and recorded is not None:
-            note = {
-                "version": _DERIVATIONS_VERSION,
-                "complete": True,
-                "derivations": list(entries) + [
-                    {"work_id": work.id, "stage": stage, "outcome": recorded, "moved_by": moved_by}
-                ],
-            }
+            entry = {"work_id": work.id, "stage": stage, "outcome": recorded, "moved_by": moved_by}
+            note = {"version": _DERIVATIONS_VERSION, "complete": True, "derivations": list(entries) + [entry]}
+            if work.display:
+                displayed = {**note, "derivations": list(entries) + [{**entry, DECIDED_DISPLAY: work.display}]}
+                if _read_back(displayed) is not _UNKEPT:
+                    note = displayed
         if note is None or _read_back(note) is _UNKEPT:
             if entries is None:
                 return  # it says that already
@@ -1264,7 +1277,11 @@ class _Session:
         if work is None:
             raise ValidationError(f"Work unresolvable: {move.work_id}", code="entity_unresolvable")
         if not move.committed:
-            self._commit("commit", _move_message(work, move.moved_by), [])
+            # The display the move was decided on, so the commit a retry makes carries the message that move
+            # decided rather than one made from a display changed since (BL-048); a move kept before its display
+            # was keeps the display the Project shows now, exactly as it always did.
+            decided = move.display if move.display is not None else work.display
+            self._commit("commit", _move_message(decided, move.moved_by), [])
         state = ProjectView.load(self.store).work_state(work.id)
         if state.terminal or state.has_target:
             raise StopError(f"{work.id} is {state.state} and still carries its target after the move", code="postcheck_failed")
@@ -2467,15 +2484,27 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
 # --------------------------------------------------------------------------- recorded derivations
 
 
-def _move_message(work: Entity, moved_by: str) -> str:
-    """The commit message the decision that removed ``work``'s target carries."""
-    if moved_by == "human_ng":
-        return f"chore(workline): {work.display} NG; fix planned"
-    return f"chore(workline): branch from {work.display}"
+#: The finalization a decision that removed its Work's target ends in (``ops.finalization_message``), by the
+#: decision that moved it: a derivation's temporary move, or a human confirmation judged NG.
+_MOVE_FINALIZATIONS = {"derive": "branch", "human_ng": "human_ng"}
+
+#: What a kept derivation holds; one kept since the display it was decided on is recorded with it holds that too.
+_DERIVATION_FIELDS = frozenset({"work_id", "stage", "outcome", "moved_by"})
+
+
+def _move_message(display: str, moved_by: str) -> str:
+    """The commit message the decision that removed a Work's target carries, for the display it was decided on."""
+    return finalization_message(_MOVE_FINALIZATIONS[moved_by], display)
 
 
 def _reusable_derivations(note: object) -> bool:
-    """Whether ``note`` is the derivation record this START writes, read back unchanged."""
+    """Whether ``note`` is the derivation record this START writes, read back unchanged.
+
+    An entry holds the display its derivation was decided on, a non-empty
+    string, or - kept before displays were, or with one the record could not
+    keep - no display at all (BL-048). Any other field refuses the note, as it
+    always did.
+    """
     if not isinstance(note, dict) or set(note) != {"version", "complete", "derivations"}:
         return False
     if note["version"] != _DERIVATIONS_VERSION or not isinstance(note["complete"], bool):
@@ -2484,7 +2513,14 @@ def _reusable_derivations(note: object) -> bool:
         return False
     return all(
         isinstance(entry, dict)
-        and set(entry) == {"work_id", "stage", "outcome", "moved_by"}
+        and (
+            set(entry) == _DERIVATION_FIELDS
+            or (
+                set(entry) == _DERIVATION_FIELDS | {DECIDED_DISPLAY}
+                and isinstance(entry[DECIDED_DISPLAY], str)
+                and bool(entry[DECIDED_DISPLAY])
+            )
+        )
         and _names_one(entry["work_id"])
         and is_valid_id(entry["work_id"], "work")
         and _names_one(entry["stage"])
@@ -2506,6 +2542,8 @@ class _ProvenDerivation:
     moved_by: str
     # whether the registration stage that derivation decides is in the record
     recorded: bool
+    # the display the Work was shown under when it was decided, or None where the record kept none (BL-048)
+    display: str | None = None
 
 
 @dataclass(frozen=True)
@@ -2515,6 +2553,8 @@ class _ProvenMove:
     work_id: str
     moved_by: str
     committed: bool
+    # the display that move was decided on, or None for one kept before displays were (BL-048)
+    display: str | None = None
 
 
 def _derivation_refusal(mutation: Mutation) -> Callable[[str], ReconcileRequired]:
@@ -2526,6 +2566,32 @@ def _derivation_refusal(mutation: Mutation) -> Callable[[str], ReconcileRequired
         )
 
     return refuse
+
+
+def _move_finalization_refusal(
+    mutation: Mutation, move: _ProvenDerivation, stage: str, message: object
+) -> ReconcileRequired:
+    """The refusal of a recorded move commit whose message is not the finalization that move decided.
+
+    It names the decision, the message the record holds and the one the move
+    finalizes with, so what was not shown is visible - and says that how the
+    Project shows the Work now plays no part in it (BL-048).
+    """
+    kind = _MOVE_FINALIZATIONS[move.moved_by]
+    decision = "a human confirmation judged NG" if move.moved_by == "human_ng" else "a move"
+    if move.display is not None:
+        expected = f"{finalization_message(kind, move.display)!r}, from the display {move.display!r} it was decided on"
+    else:
+        expected = (
+            f"a message of the form {finalization_message(kind, '<display>')!r}, the record having been kept before "
+            "the display it was decided on was"
+        )
+    return ReconcileRequired(
+        f"START mutation {mutation.id} recorded {decision} of {move.work_id}, but its record holds a {stage} stage "
+        f"other than the commit carrying the move: that commit's message is {message!r}, where the move finalizes "
+        f"as {expected}. The display the Project shows the Work under now is not part of this proof, so nothing is "
+        "replayed and the record is left as it is: reconcile required"
+    )
 
 
 def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[_ProvenDerivation, ...]:
@@ -2625,7 +2691,7 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
                         )
             proven[entry["stage"]] = _ProvenDerivation(
                 subject, entry["stage"], _outcome_from_record(entry["outcome"]), entry["moved_by"],
-                entry["stage"] in recorded,
+                entry["stage"] in recorded, entry.get(DECIDED_DISPLAY),
             )
     return tuple(proven[entry["stage"]] for entry in entries)
 
@@ -2648,6 +2714,14 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
     ``outer`` mode it chooses the next Work - since what is left to finish is
     that Work's, not this move's. A removal or a commit recorded in a form this
     START does not write refuses instead, leaving everything as it is.
+
+    A recorded commit is the one carrying the move only with the message that
+    move decided: rendered from the display kept with the derivation, exactly,
+    or - for a derivation kept before its display was - of that finalization's
+    shape (``ops.finalization_proven``). The Work the Project holds now shows
+    only that it still resolves by its stable ID; the display it is shown under
+    now is not part of what was decided, and a person may change it at any time
+    without touching the record (BL-048).
     """
     if not derivations:
         return None
@@ -2685,11 +2759,13 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
         work = ProjectView.load(mutation.store).works.get(last.work_id)
         commit = [effect for effect in effects if effect["stage"] == commit_stage]
         paths = commit[0]["payload"].get("paths")
+        if work is None or [effect["kind"] for effect in commit] not in (["git_commit"], ["git_commit", "git_push"]):
+            raise refuse(f"a {commit_stage} stage other than the commit carrying the move")
+        message = commit[0]["payload"].get("message")
+        if not finalization_proven(_MOVE_FINALIZATIONS[last.moved_by], last.display, message):
+            raise _move_finalization_refusal(mutation, last, commit_stage, message)
         if (
-            work is None
-            or [effect["kind"] for effect in commit] not in (["git_commit"], ["git_commit", "git_push"])
-            or commit[0]["payload"].get("message") != _move_message(work, last.moved_by)
-            or not isinstance(paths, list)
+            not isinstance(paths, list)
             or not paths
             or not all(isinstance(path, str) for path in paths)
             or not set(paths) <= set(_owned_paths([e for e in effects if e["kind"] in FILE_EFFECT_KINDS]))
@@ -2701,7 +2777,7 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
             "already holds that event, so its own commit and push cannot be shown; it is left pending, exactly as "
             "it is: reconcile required"
         )
-    return _ProvenMove(last.work_id, last.moved_by, committed)
+    return _ProvenMove(last.work_id, last.moved_by, committed, last.display)
 
 
 def _recorded_registration(

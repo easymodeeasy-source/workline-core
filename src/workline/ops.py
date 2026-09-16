@@ -511,21 +511,22 @@ def _recorded_displays(
 
 # --------------------------------------------------------------------------- finalization messages
 #
-# A cancel, a hold and START's plan exclusion each end in one commit whose
-# message shows a reader which Work it was about, by the display the Project
-# showed that Work under. A display is how a Project shows a Work, not part of
-# what the Work is - there is no uniqueness rule for it, nothing is looked up by
-# it, and a duplicate display leaves the Project valid (BL-045) - so a person may
-# change one at any time, including while an operation that already committed to
-# a message is waiting to be finished.
+# A cancel, a hold, START's plan exclusion and a START derivation that moved its
+# Work's target (a temporary move, or a human confirmation judged NG) each end in
+# one commit whose message shows a reader which Work it was about, by the display
+# the Project showed that Work under. A display is how a Project shows a Work,
+# not part of what the Work is - there is no uniqueness rule for it, nothing is
+# looked up by it, and a duplicate display leaves the Project valid (BL-045) - so
+# a person may change one at any time, including while an operation that already
+# committed to a message is waiting to be finished.
 #
 # Rebuilding the expected message from the Work's display *now* therefore proved
 # a durable record against a value the record does not hold: a display-only edit
 # after the finalization was recorded refused an already-decided - and possibly
 # already-pushed - operation for good, and blocked every other Work in the
-# Project behind its write scope (BL-047). The display an operation decided on is
-# recorded with its decision instead, in the save before the one that records the
-# commit, and the message is proven against that.
+# Project behind its write scope (BL-047, and BL-048 for a move). The display an
+# operation decided on is recorded with its decision instead, in the save before
+# the one that records the commit, and the message is proven against that.
 
 #: The key a recovery decision keeps the Work's display under - how the Project showed the Work when the
 #: operation decided, which is what its finalization commit message renders.
@@ -536,17 +537,22 @@ _EXCLUSION_DECISION = "exclusion"
 _EXCLUSION_DECISION_VERSION = 1
 _EXCLUSION_DECISION_FIELDS = frozenset({"version", DECIDED_DISPLAY})
 
-#: What each finalization commit message renders before that display.
-_FINALIZATION_PREFIXES = {
-    "cancel": "chore(workline): cancel ",
-    "hold": "chore(workline): hold ",
-    "plan_excluded": "chore(workline): plan_excluded ",
+#: What each finalization commit message renders around that display: the text before it and the text after it.
+#: ``branch`` is the commit carrying a derivation that moved its Work's target, and ``human_ng`` the one carrying
+#: a human confirmation judged NG - the one message whose display is followed by more text.
+_FINALIZATION_SHAPES = {
+    "cancel": ("chore(workline): cancel ", ""),
+    "hold": ("chore(workline): hold ", ""),
+    "plan_excluded": ("chore(workline): plan_excluded ", ""),
+    "branch": ("chore(workline): branch from ", ""),
+    "human_ng": ("chore(workline): ", " NG; fix planned"),
 }
 
 
 def finalization_message(kind: str, display: str) -> str:
     """The commit message a ``kind`` finalization carries for a Work the Project shows as ``display``."""
-    return f"{_FINALIZATION_PREFIXES[kind]}{display}"
+    prefix, suffix = _FINALIZATION_SHAPES[kind]
+    return f"{prefix}{display}{suffix}"
 
 
 def decided_display(payload: object, key: str) -> str | None:
@@ -571,23 +577,27 @@ def finalization_proven(kind: str, decided: str | None, recorded: object) -> boo
 
     Without one - a record written before the display was recorded with the
     decision - what a resume can still show: that the message is *this* kind of
-    finalization and carries a Work's display at all. That tells this commit
-    apart from every other message an operation writes (``cancel`` from ``hold``,
-    ``derive from``, ``branch from``, ``complete``, ``plan_excluded``, a fix-planned
-    or a result commit, and from anything that is not one of them), and refuses a
-    message with nothing where the display goes. It does not tell two displays of
-    the same kind apart, which is the one thing about a legacy record that cannot
-    be shown from the record at all; everything else a finalization is - the
-    effect kinds, the paths, the stable Work ID the decision names, the branch it
-    was decided on and the commit it made - is proven exactly as before, and a
-    record written from now on is held to the exact message again.
+    finalization and carries a Work's display at all - exactly the text that
+    kind renders before the display and exactly the text it renders after it,
+    with something between them. That tells this commit apart from every other
+    message an operation writes (``cancel`` from ``hold``, ``derive from``,
+    ``branch from``, ``complete``, ``plan_excluded``, a fix-planned, a create or a
+    result commit, and from anything that is not one of them), and refuses a
+    message with nothing where the display goes. The text after the display is
+    what shows a fix-planned message at all: the text before it is where every
+    Workline message starts. It does not tell two displays of the same kind
+    apart, which is the one thing about a legacy record that cannot be shown from
+    the record at all; everything else a finalization is - the effect kinds, the
+    paths, the stable Work ID the decision names, the branch it was decided on
+    and the commit it made - is proven exactly as before, and a record written
+    from now on is held to the exact message again.
     """
     if not isinstance(recorded, str):
         return False
     if decided is not None:
         return recorded == finalization_message(kind, decided)
-    prefix = _FINALIZATION_PREFIXES[kind]
-    return recorded.startswith(prefix) and len(recorded) > len(prefix)
+    prefix, suffix = _FINALIZATION_SHAPES[kind]
+    return len(recorded) > len(prefix) + len(suffix) and recorded.startswith(prefix) and recorded.endswith(suffix)
 
 
 def exclusion_decision(display: str) -> dict[str, Any]:
