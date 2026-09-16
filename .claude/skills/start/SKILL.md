@@ -199,6 +199,12 @@ Mutation Controller = physical writer
 START = Git operation owner
 ```
 
+executorが派生を返した時、STARTはその派生の決定（executorが返した内容）を、それを登録するstageより前にrecordへ記録する。中断やquestion waitの後の同じWork・同じmodeのSTART再実行は、そのcycleをexecutorから決め直す前にrecordを読み、記録済みの派生をこのSTART自身のものと示せる場合だけ、その決定で続ける: executorを呼ばず、記録済みのregistration stageをそのまま使い、Work・派生detail・relationを二度登録しない。示せない場合はrecordを変更しないまま `reconcile_required` で停止する。決定を記録する前の中断と、recordが保てない決定（記録しないだけで派生自体は拒否しない）は、従来どおりexecutorから決め直す。
+
+示せる条件: 各Workの派生が `<Work>:derive:<n>` として決定順に記録され、未記録はその末尾1件までであること（決定を記録した直後の中断）。記録済みのstageが決定したbranchを持ち、派生と次の派生の間に記録されたstageがその派生のcommitだけであること。single-workでは指定Workの派生だけであること。targetを外した派生がそのWorkの派生の最後であること。記録済みstageの内容がその決定の作る登録と完全一致すること（`rules/git` の記録済みstageの判定。displayはstage自身が記録した値）。
+
+派生は1 cycleに1件で、targetを外さない派生の後は同じWorkの次のattemptが続く。targetを外す派生（Question wait / temporary move / human_confirmation NG参照）はそのWorkのcycleを終わらせる決定なので、target削除まで記録済みなら残りのGit段階（commit / push）だけを行って `moved` を返す: executorを呼ばず、Workを開き直さず、lifecycle eventもstageも追加しない。commitのmessageはその決定のもの（派生なら `chore(workline): branch from <display>`、NGなら `chore(workline): <display> NG; fix planned`）。outerではその後に次のWorkを選ぶ（中断が無い場合と同じ）。同じWorkが後で新しいcycleとして開かれた場合（NG後の再確認等）、そのcycleは自分の派生を決める。
+
 CREATEが登録前の構造検査で拒否した派生Work / fix Work（`skills/create` 参照）は、Work file・relation・Relatedのいずれも書かれない。拒否までにSTARTがそのWorkへ記録したlifecycle event（`work_started` / `work_target_added` 等）は、executor実行中の他のSTOPと同じくSTART mutationに残り、同じWork・同じmodeのSTARTでresumeする。
 
 ## Integration ownership

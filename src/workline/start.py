@@ -26,7 +26,16 @@ from . import gitcmd, gitops, yamlish
 from .create import RelatedSpec, RelationSpec, WorkSpec, register_works, resolve_ref
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .ids import is_valid_id
-from .mutation import FILE_EFFECT_KINDS, Effect, Mutation, MutationController, WriteScope, _decides, abandon_on_stop
+from .mutation import (
+    FILE_EFFECT_KINDS,
+    Effect,
+    Mutation,
+    MutationController,
+    WriteScope,
+    _DECIDED_ON,
+    _decides,
+    abandon_on_stop,
+)
 from .oplock import project_operation
 from .ops import (
     Replan,
@@ -76,6 +85,17 @@ _REFUSED_RESULT_VERSION = 1
 # Above this much, the result is not kept and the retry asks the executor again,
 # exactly as it does today. A recovery record is rewritten whole on every save.
 _REFUSED_RESULT_LIMIT = 1 << 20
+# What this mutation's own derivations decided (``skills/start``: Derived fix Work).
+# A derivation is a decision START made: its registration stage carries the branch it
+# was decided on and every effect it writes, and this is the executor's own outcome
+# kept beside it, in the order the cycles decided them, so that a resume registers
+# those same derivations instead of asking the executor for another one. Written
+# before the stage it names is recorded, so no recorded registration is ever without
+# the decision that made it. ``complete`` turns false once an outcome this record
+# cannot keep exactly leaves the list unable to speak for every derivation, and the
+# resume then asks the executor again exactly as it does today.
+_DERIVATIONS = "derivations"
+_DERIVATIONS_VERSION = 1
 LEDGER_FILES = (
     f"{WORKLINE_DIR}/relations/roadmap.yaml",
     f"{WORKLINE_DIR}/relations/related.yaml",
@@ -394,6 +414,7 @@ class _Session:
         destination: gitops.PushDestination | None,
         mode: str,
         executor: Executor,
+        derivations: "tuple[_ProvenDerivation, ...]" = (),
     ) -> None:
         self.store = store
         self.mutation = mutation
@@ -402,6 +423,10 @@ class _Session:
         self.destination = destination
         self.mode = mode
         self.executor = executor
+        # The derivations this mutation already decided, proven from its record before
+        # anything was replayed (:func:`_derivations_to_reuse`): the cycle that decided
+        # each one registers it again instead of asking the executor.
+        self.derivations = derivations
         self.completed: list[str] = []
         # What the paths already changed when this operation began held, read once
         # before any executor of this session runs (:meth:`_protect_preexisting`).
@@ -438,6 +463,9 @@ class _Session:
             return StartResult("completed", work_id, self.mutation.id, phase_id=work.phase_id)
         if state.terminal:
             raise SpecViolation(f"Work {work_id} is {state.state}; terminal Works are not started")
+        # A derivation belongs to the cycle that decided it, and a cycle runs with the Work
+        # carrying its target. One opened here is a new cycle, which decides its own.
+        opening = not (state.state == IN_PROGRESS and state.has_target)
         phase = view.phases.get(work.phase_id) if work.phase_id else None
         if phase is not None:
             if view.phase_lifecycle(phase.id) != ACTIVE:
@@ -475,6 +503,7 @@ class _Session:
         elif state.state == IN_PROGRESS and not state.has_target:
             self._lifecycle(work, ["work_target_added"])
 
+        cycle = () if opening else self._cycle_derivations(work_id)
         attempt = 0
         while True:
             attempt += 1
@@ -484,8 +513,18 @@ class _Session:
             context = ExecutionContext(self.store, view, work, view.work_state(work_id), phase, roadmap, plan, self.mutation.id, self.mode, attempt)
             protected = self._protected_read_targets(view, work_id)
             try:
-                kept = self._refused_result(work_id)
-                outcome = self.executor(context) if kept is None else self._reuse_refused_result(kept)
+                # What this cycle already decided comes from the record, not from the
+                # executor: a derivation it registered, or a result its own refusal kept.
+                # Its cycles decide derivations in order, so its n-th deriving attempt is
+                # the one that decided the n-th derivation the record holds for it; the
+                # first attempt the record says nothing about asks the executor.
+                replay = cycle[attempt - 1] if attempt <= len(cycle) else None
+                kept = self._refused_result(work_id) if replay is None else None
+                outcome = (
+                    replay.outcome if replay is not None
+                    else self.executor(context) if kept is None
+                    else self._reuse_refused_result(kept)
+                )
             except BaseException as failure:
                 self._put_back_after_failure(protected, failure)
                 raise
@@ -501,17 +540,20 @@ class _Session:
             if isinstance(outcome, Cancel):
                 return self._cancel(view, work, outcome)
             if isinstance(outcome, Derive):
-                self._derive(view, work, outcome)
+                # A replayed derivation carries which decision moved the target, so the
+                # commit that carries the move is the one that decision makes.
+                moved_by = replay.moved_by if replay is not None else "derive"
+                self._derive(view, work, outcome, replay)
                 if outcome.move:
                     self._lifecycle(work, ["work_target_removed"])
-                    self._commit("commit", f"chore(workline): branch from {work.display}", [])
+                    self._commit("commit", _move_message(work, moved_by), [])
                     return StartResult("moved", work_id, self.mutation.id, phase_id=work.phase_id, head=gitcmd.head_commit(self.store.root))
                 self._commit("commit", f"chore(workline): derive from {work.display}", [])
                 continue
             if isinstance(outcome, HumanNG):
                 self._human_ng(view, work, outcome)
                 self._lifecycle(work, ["work_target_removed"])
-                self._commit("commit", f"chore(workline): {work.display} NG; fix planned", [])
+                self._commit("commit", _move_message(work, "human_ng"), [])
                 return StartResult("moved", work_id, self.mutation.id, phase_id=work.phase_id, head=gitcmd.head_commit(self.store.root))
             raise ValidationError(f"executor returned an unknown outcome: {outcome!r}")
 
@@ -976,7 +1018,15 @@ class _Session:
         )
 
     # derived / fix Works -----------------------------------------------------
-    def _derive(self, view: ProjectView, work: Entity, outcome: Derive) -> dict[str, str]:
+    def _derive(
+        self,
+        view: ProjectView,
+        work: Entity,
+        outcome: Derive,
+        replay: "_ProvenDerivation | None" = None,
+        *,
+        moved_by: str = "derive",
+    ) -> dict[str, str]:
         if not outcome.works and outcome.integration is None:
             raise ValidationError("Derive without Works")
         for key in outcome.works:
@@ -984,6 +1034,13 @@ class _Session:
                 raise ValidationError("reserved Work key: integration")
         phase_id = work.phase_id
         roadmap_id = view.phases[phase_id].roadmap_id if phase_id else None
+        # A derivation replayed from the record is decided again on the Project it was
+        # decided on: the resume applied this very stage before the cycle ran, so an
+        # integration it registered must not be counted as one that was already there.
+        recorded = replay.stage if replay is not None and self.mutation.has_stage(replay.stage) else None
+        judged = view if recorded is None else _own_effects_free_view(
+            view, [effect for effect in self.mutation.stage_effects(recorded) if effect.get("applied")]
+        )
         specs: dict[str, WorkSpec] = {}
         relations: list[RelationSpec] = []
         for key, derived in outcome.works.items():
@@ -1002,7 +1059,7 @@ class _Session:
                 relations.append(RelationSpec("return_to", key, work.id))
         normal_keys = [k for k, d in outcome.works.items() if d.work_kind is None]
         if phase_id is not None:
-            unfinished = view.unfinished_integrations(phase_id)
+            unfinished = judged.unfinished_integrations(phase_id)
             if len(unfinished) >= 2:
                 raise SpecViolation(f"Phase {phase_id} has {len(unfinished)} unfinished integrations: structural anomaly, STOP")
             if outcome.integration is not None:
@@ -1043,10 +1100,149 @@ class _Session:
         overlap = sorted(set(gitops.record_preexisting_dirty(self.mutation, self.store.root)) & set(ledgers))
         if overlap:
             self._refuse_overlapping_result(work, outcome, overlap, [])
-        stage = stage_name(self.mutation, f"{work.id}:derive")
-        result = register_works(self.mutation, stage, specs, relations)
+        # A derivation this mutation already decided is registered under the stage that
+        # decided it, so its Works, its derivation details and its relations are the ones
+        # the record holds - not a second set under a stage named after them
+        # (:func:`_derivations_to_reuse`). The decision is kept before the stage is
+        # recorded, so no recorded registration is ever without it.
+        if replay is None:
+            stage = stage_name(self.mutation, f"{work.id}:derive")
+            self._record_derivation(work, stage, outcome, moved_by)
+        else:
+            stage = replay.stage
+        if recorded is None:
+            # The stage is not in the record - it is being recorded now, or was kept and
+            # interrupted before it could be - so the registration records it, under the IDs
+            # reserved for that same stage. What it refuses before recording anything writes
+            # no Work, no derivation detail and no relation (``skills/create``): nothing of
+            # that derivation was carried out, so the decision goes with it and the retry
+            # asks the executor again, exactly as it does today.
+            try:
+                result = register_works(self.mutation, stage, specs, relations)
+            except BaseException:
+                self._forget_derivation(stage)
+                raise
+            self._drop_refused_result(work.id)
+            return result.work_ids
+        # Registering it again would validate Works that now exist and count a recorded
+        # integration twice, so the stage is read back instead, exactly as a replayed
+        # replan's registration is (:func:`ops.apply_replan`): it is shown to be the
+        # registration this derivation decides, its reservations give the Work IDs, and the
+        # resume has already applied its effects.
+        work_ids = _recorded_registration(self.mutation, recorded, specs, relations)
+        after = _structure_or_stop(self.store, "derivation replay postcheck")
+        for work_id in work_ids.values():
+            if after.works.get(work_id) is None:
+                raise ValidationError(f"postcheck: {work_id} not resolvable after its registration was replayed", code="postcheck_failed")
         self._drop_refused_result(work.id)
-        return result.work_ids
+        return work_ids
+
+    # the derivations this mutation decided ----------------------------------
+    def _record_derivation(self, work: Entity, stage: str, outcome: Derive, moved_by: str) -> None:
+        """Keep this derivation, under the stage that registers it, before that stage is recorded.
+
+        What the executor returned is the decision: the registration effects say
+        what is written, but only the outcome says which derivation this cycle
+        decided, and a resume that cannot read it back has nothing to register
+        but a new one. It is kept in the order the cycles decide them, in the
+        save before the stage exists, so a record never holds a registration
+        whose decision is missing.
+
+        An outcome this record cannot keep exactly (:func:`_recorded_outcome`,
+        :func:`_read_back`) is not guessed at and never refuses the derivation:
+        the list is marked as no longer speaking for every derivation, and a
+        resume asks the executor again exactly as it does today.
+        """
+        kept = self.mutation.note(_DERIVATIONS)
+        if kept is None:
+            entries: list[dict[str, Any]] | None = []
+        elif _reusable_derivations(kept) and kept["complete"]:
+            entries = kept["derivations"]
+        else:
+            entries = None  # it already says it cannot speak for every derivation
+        recorded = _recorded_outcome(outcome)
+        note = None
+        if entries is not None and recorded is not None:
+            note = {
+                "version": _DERIVATIONS_VERSION,
+                "complete": True,
+                "derivations": list(entries) + [
+                    {"work_id": work.id, "stage": stage, "outcome": recorded, "moved_by": moved_by}
+                ],
+            }
+        if note is None or _read_back(note) is _UNKEPT:
+            if entries is None:
+                return  # it says that already
+            note = {"version": _DERIVATIONS_VERSION, "complete": False, "derivations": []}
+        self.mutation.set_note(_DERIVATIONS, note)
+
+    def _forget_derivation(self, stage: str) -> None:
+        """Forget a derivation whose registration was refused before its stage was recorded.
+
+        A stage the record holds stays: whatever refused it came after the
+        decision was carried out. One it does not hold wrote nothing at all, so
+        there is nothing for a resume to register again.
+        """
+        if self.mutation.has_stage(stage):
+            return
+        note = self.mutation.note(_DERIVATIONS)
+        if not _reusable_derivations(note) or not note["complete"]:
+            return
+        kept = [entry for entry in note["derivations"] if entry["stage"] != stage]
+        if len(kept) != len(note["derivations"]):
+            self.mutation.set_note(_DERIVATIONS, {**note, "derivations": kept})
+
+    def _cycle_derivations(self, work_id: str) -> tuple["_ProvenDerivation", ...]:
+        """The derivations of the cycle this run continues, in the order that cycle decided them.
+
+        A Work can run more than one cycle in one mutation: a derivation that
+        moves its target ends a cycle, and an ``outer`` continuation may open
+        another after the Works it planned are done - the confirmation that was
+        judged NG is confirmed again. Each cycle decides its own derivations, so
+        the ones to register again are those recorded after the lifecycle stage
+        that opened the cycle being continued; a derivation kept before its stage
+        was recorded is that cycle's too, since the cycle that kept it still
+        carried the target.
+        """
+        mine = [derivation for derivation in self.derivations if derivation.work_id == work_id]
+        if not mine:
+            return ()
+        effects = self.mutation.effects
+        stages: list[str] = []
+        for effect in effects:
+            if effect["stage"] not in stages:
+                stages.append(effect["stage"])
+        opened = -1
+        for index, name in enumerate(stages):
+            if name.startswith(f"{work_id}:lifecycle:") and not _decides([e for e in effects if e["stage"] == name]):
+                opened = index
+        current = {name for name in stages[opened + 1:] if name.startswith(f"{work_id}:derive:")}
+        return tuple(derivation for derivation in mine if derivation.stage in current or not derivation.recorded)
+
+    def finish_derive_move(self, move: "_ProvenMove") -> StartResult:
+        """Finish a move a derivation of this START decided, deciding none of it again.
+
+        The record was shown to hold this START's own derivation of that Work and
+        the removal of its target (:func:`_derive_move_to_finish`), and replaying
+        it applied every effect already recorded. What is left is the Git stage:
+        the commit carrying the registration and the removal, and the push - or
+        nothing at all when that commit is recorded too and replaying it finished
+        it. The executor is not asked, no Work is registered again, no event and
+        no stage is added, and the Work's cycle ends here exactly as it does
+        without an interruption.
+        """
+        work = ProjectView.load(self.store).works.get(move.work_id)
+        if work is None:
+            raise ValidationError(f"Work unresolvable: {move.work_id}", code="entity_unresolvable")
+        if not move.committed:
+            self._commit("commit", _move_message(work, move.moved_by), [])
+        state = ProjectView.load(self.store).work_state(work.id)
+        if state.terminal or state.has_target:
+            raise StopError(f"{work.id} is {state.state} and still carries its target after the move", code="postcheck_failed")
+        return StartResult(
+            "moved", work.id, self.mutation.id, tuple(self.completed), work.phase_id,
+            head=gitcmd.head_commit(self.store.root),
+        )
 
     def _human_ng(self, view: ProjectView, work: Entity, outcome: HumanNG) -> dict[str, str]:
         if work.work_kind != "human_confirmation":
@@ -1056,7 +1252,7 @@ class _Session:
         relations = [RelationSpec("requires_completion", "integration", work.id)]
         relations += list(outcome.relations)
         derive = Derive(dict(outcome.fix_works), outcome.integration, tuple(relations), move=True)
-        return self._derive(view, work, derive)
+        return self._derive(view, work, derive, moved_by="human_ng")
 
     # continuation ------------------------------------------------------------
     def next_work(self, view: ProjectView, phase_id: str | None, entry: Entity, just_completed: str | None) -> Entity | None:
@@ -1283,11 +1479,13 @@ def _recorded_derived(work: DerivedWork) -> dict[str, Any]:
 
 
 def _recorded_outcome(outcome: object) -> dict[str, Any] | None:
-    """``outcome`` in the form its record keeps, or ``None`` when this refusal does not keep it.
+    """``outcome`` in the form its record keeps, or ``None`` when this record does not keep it.
 
-    Only the two outcomes a result path or a derivation's relation files can
-    refuse. Nothing is normalised: a retry rebuilds from this the outcome the
-    uninterrupted run carried on with, endpoints and order as given.
+    The outcomes a record carries: the two a result path or a derivation's
+    relation files can refuse (:meth:`_Session._keep_refused_result`), and the
+    derivation a cycle decided (:meth:`_Session._record_derivation`). Nothing is
+    normalised: a resume rebuilds from this the outcome the uninterrupted run
+    carried on with, endpoints and order as given.
     """
     try:
         if isinstance(outcome, Completed):
@@ -2200,6 +2398,296 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
     return _ProvenHold(subject, reason, committed)
 
 
+# --------------------------------------------------------------------------- recorded derivations
+
+
+def _move_message(work: Entity, moved_by: str) -> str:
+    """The commit message the decision that removed ``work``'s target carries."""
+    if moved_by == "human_ng":
+        return f"chore(workline): {work.display} NG; fix planned"
+    return f"chore(workline): branch from {work.display}"
+
+
+def _reusable_derivations(note: object) -> bool:
+    """Whether ``note`` is the derivation record this START writes, read back unchanged."""
+    if not isinstance(note, dict) or set(note) != {"version", "complete", "derivations"}:
+        return False
+    if note["version"] != _DERIVATIONS_VERSION or not isinstance(note["complete"], bool):
+        return False
+    if not isinstance(note["derivations"], list):
+        return False
+    return all(
+        isinstance(entry, dict)
+        and set(entry) == {"work_id", "stage", "outcome", "moved_by"}
+        and _names_one(entry["work_id"])
+        and is_valid_id(entry["work_id"], "work")
+        and _names_one(entry["stage"])
+        and entry["moved_by"] in ("derive", "human_ng")
+        and isinstance(entry["outcome"], dict)
+        and entry["outcome"].get("kind") == "derive"
+        and _reusable_outcome(entry["outcome"])
+        for entry in note["derivations"]
+    )
+
+
+@dataclass(frozen=True)
+class _ProvenDerivation:
+    """A derivation this mutation decided, read back from its record before anything is replayed."""
+
+    work_id: str
+    stage: str
+    outcome: Derive
+    moved_by: str
+    # whether the registration stage that derivation decides is in the record
+    recorded: bool
+
+
+@dataclass(frozen=True)
+class _ProvenMove:
+    """A recorded derivation that removed its Work's target, with only its Git stage left."""
+
+    work_id: str
+    moved_by: str
+    committed: bool
+
+
+def _derivation_refusal(mutation: Mutation) -> Callable[[str], ReconcileRequired]:
+    def refuse(reason: str) -> ReconcileRequired:
+        return ReconcileRequired(
+            f"START mutation {mutation.id} recorded derivations of its own, but its record holds {reason}; nothing "
+            "shows which derivation each cycle decided, so nothing is replayed and the record is left as it is: "
+            "reconcile required"
+        )
+
+    return refuse
+
+
+def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[_ProvenDerivation, ...]:
+    """The derivations this START already decided, which its resume registers again instead of deciding.
+
+    A derivation is a decision (``skills/start``: Derived fix Work): the
+    registration stage it makes carries the branch it was decided on and every
+    effect it writes, and the outcome the executor returned is kept beside it in
+    the same record. Without reading them back, a resume falls into the cycle
+    that decided them, asks the executor again, and records whatever comes back
+    as another derivation - under a stage named after the recorded one, so under
+    other reserved IDs, as other Works, other derivation details and other
+    relations. An interruption is not needed for that: a question wait ends the
+    START with the record pending and the next invocation starts its cycles from
+    the first one again.
+
+    Read before anything is replayed or chosen, after the readbacks of the
+    decisions that end a Work (:func:`_completion_to_finish`,
+    :func:`_hold_to_finish`, :func:`_cancel_to_finish`), because a derivation
+    leaves the Work running and those end it. Every step reads only, and
+    whatever refuses leaves the record, the Project and Git exactly as they are:
+
+    * no derivations in the record - ``()``, and START goes on as it always did.
+      A record written before START kept them says nothing about which
+      derivation a cycle decided, and neither does one that says it can no
+      longer speak for every derivation; both ask the executor again, exactly as
+      they do today;
+    * derivations that are provably this START's own - each Work's are its
+      ``<Work>:derive:<n>`` stages in the order it decided them, at most one of
+      them not recorded yet (the run was interrupted between keeping the
+      decision and recording the stage), each recorded one carrying the branch
+      it was decided on and followed by nothing but the commit that carries it,
+      and a derivation that moved the target last for its Work; in
+      ``single-work`` mode they are the invoked Work's - those derivations: the
+      cycles that decided them register them again from the record, and no
+      executor is asked for them;
+    * anything else - ``reconcile required``, with the record left exactly as it
+      is.
+
+    Whether each recorded stage is the registration its derivation decides is
+    shown where it is registered again (:func:`_refuse_unmatched_registration`),
+    against the specs and relations that derivation makes. Where it may be
+    replayed at all is the Mutation Controller's to say (``rules/git``: Commit /
+    push).
+    """
+    note = mutation.note(_DERIVATIONS)
+    if note is None:
+        return ()
+    refuse = _derivation_refusal(mutation)
+    if not _reusable_derivations(note):
+        raise refuse("a form this START does not read back")
+    entries: list[dict[str, Any]] = note["derivations"]
+    if not note["complete"] or not entries:
+        return ()
+    subjects: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        subjects.setdefault(entry["work_id"], []).append(entry)
+    if mode != "outer" and set(subjects) != {work_id}:
+        raise refuse(
+            f"derivations of {sorted(subjects)}, where this single-work START runs {work_id} alone"
+        )
+    effects = mutation.effects
+    if not all(
+        isinstance(effect, dict)
+        and isinstance(effect.get("stage"), str)
+        and isinstance(effect.get("kind"), str)
+        and isinstance(effect.get("payload"), dict)
+        for effect in effects
+    ):
+        raise refuse("effects that cannot be read")
+    stages = _recorded_stages(effects, refuse)
+    proven: dict[str, _ProvenDerivation] = {}
+    for subject, mine in subjects.items():
+        named = [entry["stage"] for entry in mine]
+        if named != [f"{subject}:derive:{index}" for index in range(len(mine))]:
+            raise refuse(f"the derivations {named}, where a Work's are its derive stages in the order it decided them")
+        recorded = [name for name in stages if name.startswith(f"{subject}:derive:")]
+        if recorded != named[: len(recorded)] or len(named) - len(recorded) > 1:
+            raise refuse(f"the registration stages {recorded} recorded for the derivations {named}")
+        for index, entry in enumerate(mine):
+            if entry["outcome"]["move"] and index != len(mine) - 1:
+                raise refuse("a derivation that removed the target and another after it, where a move ends the cycle")
+            if entry["stage"] in recorded:
+                position = stages.index(entry["stage"])
+                if not any(_DECIDED_ON in effect for effect in effects if effect["stage"] == entry["stage"]):
+                    raise refuse(f"a registration {entry['stage']!r} recorded without the branch it was decided on")
+                if index + 1 < len(recorded):
+                    between = stages[position + 1: stages.index(recorded[index + 1])]
+                    if len(between) != 1 or not between[0].startswith("commit:") or any(
+                        effect["kind"] not in ("git_commit", "git_push")
+                        for effect in effects
+                        if effect["stage"] == between[0]
+                    ):
+                        raise refuse(
+                            f"the stages {between} between {entry['stage']!r} and the derivation after it, where a "
+                            "derivation records only the commit that carries it"
+                        )
+            proven[entry["stage"]] = _ProvenDerivation(
+                subject, entry["stage"], _outcome_from_record(entry["outcome"]), entry["moved_by"],
+                entry["stage"] in recorded,
+            )
+    return tuple(proven[entry["stage"]] for entry in entries)
+
+
+def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivation, ...]) -> _ProvenMove | None:
+    """The move a recorded derivation of this START decided and a retry finishes, or ``None``.
+
+    A derivation that removes its Work's target ends that Work's cycle
+    (``skills/start``: Temporary move, Human confirmation NG), so the run has
+    nothing left to ask the executor: what is missing is the commit that carries
+    the registration and the removal, and the push. Finishing it from the record
+    is what keeps the resume from re-opening the Work - a Work whose target was
+    removed reads as one to run again, and running it again adds
+    ``work_target_added`` and ``work_target_removed`` a second time on top of
+    deciding the derivation again.
+
+    ``None`` where the run records the move itself: the removal is not in the
+    record yet, so the cycle that decided the derivation records it exactly as it
+    would have. ``None`` too where the mutation went on past the move - in
+    ``outer`` mode it chooses the next Work - since what is left to finish is
+    that Work's, not this move's. A removal or a commit recorded in a form this
+    START does not write refuses instead, leaving everything as it is.
+    """
+    if not derivations:
+        return None
+    last = derivations[-1]
+    if not last.outcome.move or not last.recorded:
+        return None
+    refuse = _derivation_refusal(mutation)
+    effects = mutation.effects
+    stages = _recorded_stages(effects, refuse)
+    position = stages.index(last.stage)
+    after = stages[position + 1:]
+    number = len({name for name in stages[:position] if name.startswith(f"{last.work_id}:lifecycle:")})
+    lifecycle = f"{last.work_id}:lifecycle:{number}"
+    if not after or after[0] != lifecycle:
+        return None
+    removal = [effect for effect in effects if effect["stage"] == lifecycle]
+    event = removal[0]["payload"].get("record") if removal else None
+    if not (
+        len(removal) == 1
+        and removal[0]["kind"] == "append_event"
+        and set(removal[0]["payload"]) == {"record"}
+        and isinstance(event, dict)
+        and set(event) == _EVENT_FIELDS
+        and all(isinstance(event[field], str) and event[field] for field in _EVENT_FIELDS)
+        and (event["type"], event["entity"]) == ("work_target_removed", last.work_id)
+        and mutation.reserved(f"{lifecycle}:event:0") == event["id"]
+    ):
+        raise refuse(f"a {lifecycle!r} stage other than the removal of the target the move records")
+    rest = after[1:]
+    committed = bool(rest)
+    if committed:
+        commit_stage = f"commit:{len([name for name in stages[:position + 1] if name.startswith('commit:')])}"
+        if rest != [commit_stage]:
+            return None
+        work = ProjectView.load(mutation.store).works.get(last.work_id)
+        commit = [effect for effect in effects if effect["stage"] == commit_stage]
+        paths = commit[0]["payload"].get("paths")
+        if (
+            work is None
+            or [effect["kind"] for effect in commit] not in (["git_commit"], ["git_commit", "git_push"])
+            or commit[0]["payload"].get("message") != _move_message(work, last.moved_by)
+            or not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) for path in paths)
+            or not set(paths) <= set(_owned_paths([e for e in effects if e["kind"] in FILE_EFFECT_KINDS]))
+        ):
+            raise refuse(f"a {commit_stage} stage other than the commit carrying the move")
+    elif _in_head_event_log(mutation.store, [event["id"]]):
+        raise ReconcileRequired(
+            f"START mutation {mutation.id} recorded the move of {last.work_id}, but a commit it did not record "
+            "already holds that event, so its own commit and push cannot be shown; it is left pending, exactly as "
+            "it is: reconcile required"
+        )
+    return _ProvenMove(last.work_id, last.moved_by, committed)
+
+
+def _recorded_registration(
+    mutation: Mutation, stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]
+) -> dict[str, str]:
+    """The Work IDs a recorded registration stage reserved, once it is shown to be the one this derivation decides.
+
+    A derivation replayed from the record is not registered again - that would
+    validate Works that now exist and count a recorded integration twice - so
+    what the stage holds has to be what the decision makes, or this record is not
+    continued. Every stable Work ID, every reserved relation and derivation ID,
+    each Work's frontmatter and whole body, the derivation details and the
+    relation payloads are compared exactly, in the order the stage records them,
+    with each Work's display taken from the stage that recorded it rather than
+    renumbered from the Works a Project holds now (BL-045).
+    """
+    recorded = mutation.stage_effects(stage)
+
+    def reserved(key: str, kind: str) -> str:
+        value = mutation.reserved(key)
+        if not isinstance(value, str) or not is_valid_id(value, kind):
+            raise ReconcileRequired(
+                f"START mutation {mutation.id} holds the registration {stage!r} of a derivation it decided with no "
+                f"{kind} ID reserved under {key!r}; nothing is replayed and the record is left as it is: reconcile "
+                "required"
+            )
+        return value
+
+    work_ids = {key: reserved(f"{stage}:work:{key}", "work") for key in specs}
+    relation_ids = [reserved(f"{stage}:rel:{index}", "relation") for index in range(len(relations))]
+    related_ids = {
+        (key, index): reserved(f"{stage}:related:{key}:{index}", "relation")
+        for key, spec in specs.items()
+        for index in range(len(spec.related))
+    }
+    derivation_ids = {
+        key: reserved(f"{stage}:der:{key}", "derivation")
+        for key, spec in specs.items()
+        if spec.derivation_detail is not None
+    }
+    resolved = [
+        Relation(relation_ids[index], spec.type, resolve_ref(spec.from_ref, work_ids), resolve_ref(spec.to_ref, work_ids))
+        for index, spec in enumerate(relations)
+    ]
+    if not _registration_matches(recorded, specs, work_ids, resolved, related_ids, derivation_ids):
+        raise ReconcileRequired(
+            f"START mutation {mutation.id} holds a {stage!r} stage other than the registration the derivation it "
+            "decided makes; nothing is replayed and the record is left as it is: reconcile required"
+        )
+    return work_ids
+
+
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
@@ -2240,13 +2728,18 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         reading = mutation.resumed and cancel is None
         finishing = _completion_to_finish(mutation, work_id, mode) if reading else None
         holding = _hold_to_finish(mutation, work_id, mode) if reading and finishing is None else None
+        # A derivation leaves the Work running, so it is read after the decisions that end
+        # one: the cycles that decided these register them again from the record instead of
+        # asking the executor, and a derivation that removed the target is finished here.
+        derivations = _derivations_to_reuse(mutation, work_id, mode) if reading and finishing is None and holding is None else ()
+        moving = _derive_move_to_finish(mutation, derivations) if derivations else None
         gitops.record_preexisting_dirty(mutation, store.root)
         mutation.apply()  # resume: replay every recorded effect before continuing
         state = view.work_state(work_id)
         if state.terminal and not mutation.resumed:
             raise SpecViolation(f"Work {work_id} is {state.state}")
 
-        session = _Session(store, mutation, destination, mode, executor)
+        session = _Session(store, mutation, destination, mode, executor, derivations)
         phase_id = work.phase_id
         current: Entity | None = work
         result: StartResult
@@ -2259,6 +2752,10 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         elif holding is not None:
             # The hold ends this START as it would have uninterrupted: no other Work is chosen or run after it.
             result = session.finish_hold(holding)
+        elif moving is not None:
+            # The move ends that Work's cycle as it would have uninterrupted; in outer mode
+            # the continuation below chooses the next Work from there, as it does then.
+            result = session.finish_derive_move(moving)
         elif mutation.resumed:
             ambiguous: str | None = None
             if mode == "outer":

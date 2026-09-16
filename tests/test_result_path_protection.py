@@ -504,7 +504,9 @@ class LegacyRecordTests(ResultPathCase):
             self.assertEqual(refused.exception.code, "dirty_overlap")
             self.assertEqual(self.counts(), stuck_counts)  # neither repaired nor grown
 
-        self.assertEqual(self.ran, [self.w1] * 2)  # asked once more, then answered from the kept result
+        # The derivation this record decided is registered again from the record (BL-046), so the
+        # executor is not asked a second time at all; the refusal it stops at is the same one.
+        self.assertEqual(self.ran, [self.w1])
         self.assertEqual((self.head(), self.remote_head()), (head, head))  # nothing of theirs is committed or pushed
         self.assertIn(f"M {ROADMAP_YAML}", self.dirty())
 
