@@ -1,6 +1,6 @@
 # Review System P1 — R12 Recovery / Invariant Test Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 2 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 3 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the minimum interruption/invariant test matrix required before Review contracts may activate.
 
@@ -54,16 +54,16 @@ Expected: first pending mutation resumes/refuses; no second N+1/fork.
 ```text
 G(N+1) immutable physical create succeeds
 -> crash before effect.applied save
--> chain now visibly includes N+1
+-> chain visibly includes N+1
 -> second invocation would otherwise calculate N+2
 ```
 
 Expected:
 
-- pending same-run mutation is discovered before new generation calculation;
-- stable `.generation-serialization` scope token causes same-run overlap;
+- pending same-run mutation discovered before new generation calculation;
+- stable serialization token overlaps hypothetical later generation scope;
 - first mutation resumes/classifies N+1 MATCHING;
-- no N+2 mutation intent/file is created until first mutation settles.
+- no N+2 mutation intent/file until first mutation settles.
 
 Also test multiple/conflicting pending same-run generation mutations -> reconcile.
 
@@ -71,33 +71,13 @@ Also test multiple/conflicting pending same-run generation mutations -> reconcil
 
 Before launch, canonical Candidate snapshot/builder data + task-input + accepted Gate generation must be committed as required.
 
-Test:
+Test fresh clone/runtime deletion reconstructs exact Candidate + request, recomputes matching hashes and reruns/retrieves same `task_id`.
 
-```text
-accepted task committed
--> remove `.workline/runtime/**` or fresh clone
--> load task input
--> reconstruct exact Candidate + request
--> recompute matching candidate_hash/request_digest
--> same task_id is retrieved/rerun
-```
-
-Negative cases:
-
-- candidate snapshot missing;
-- snapshot content digest mismatch;
-- deterministic builder unavailable/version drift;
-- required builder input missing;
-- adapter/reviewer version unavailable;
-- reconstructed request digest differs.
-
-All negatives fail closed/reconcile and MUST NOT silently allocate a new task ID.
-
-Provider job handle loss alone is not authority loss when canonical reconstruction material is complete.
+Negative cases include snapshot missing/digest mismatch, builder unavailable/version drift, required input missing, adapter/reviewer version unavailable and request digest mismatch. All fail closed and never silently allocate a new task ID.
 
 ## 5. Gate settlement / seal / invalidation
 
-Cover accepted task unsettled after crash, result arrival before canonical settlement, G2 partial write/flag save, seal+Receipt partial stage, and invalidating G5+supersession partial stage. No seal/consumption can rely on runtime-only success.
+Cover accepted task unsettled after crash, result arrival before canonical settlement, G2 partial write/flag save, seal+Receipt partial stage, and invalidating G5+supersession partial stage. No seal/consumption relies on runtime-only success.
 
 ## 6. R4 terminal uniqueness / totality / activation
 
@@ -111,16 +91,50 @@ C1 only without matching pending transition -> invalid/reconcile
 conflicting second C -> fail closed
 ```
 
-Activation classification tests:
+### Activation classification / digest-v1
 
-1. valid activation record + exact legacy event prefix count/digest -> first N events accepted as pre-activation legacy;
-2. post-activation `work_completed` with explicit `operation_contract=review-v1` + valid C1 -> valid;
-3. post-activation `work_completed` missing marker -> reconcile, never legacy fallback;
-4. unknown marker -> reconcile;
-5. marker contradicts activation/run/Receipt binding -> reconcile;
-6. activation prefix count/digest mismatch -> reconcile;
-7. explicit review-v1 terminal marker without valid activation record -> contradictory/reconcile;
-8. adding Review metadata to Event does not change `ProjectView/state.py` lifecycle result.
+Mandatory representation-stability cases:
+
+1. Create valid legacy `events.jsonl` using CRLF and inserted blank physical lines.
+2. Parse through canonical Event reader.
+3. Create activation record using `work-terminal-activation-digest-v1`.
+4. Append first post-activation review-v1 event through normal event append/rewrite path.
+5. Re-read after representation normalization.
+6. Expected: first-N canonical parsed Event digest remains identical and activation stays valid.
+
+Mutation-detection cases:
+
+```text
+change one historical Event field
+reorder historical Event records
+delete/insert historical Event record
+change allowed historical metadata field
+```
+
+Expected: activation prefix digest mismatch -> reconcile.
+
+Blank-line placement and CRLF-vs-LF changes alone must not change activation digest.
+
+Serializer-specific tests freeze:
+
+- parsed nonblank Event record count semantics;
+- canonical JSON key ordering;
+- no insignificant JSON whitespace;
+- UTF-8 / non-ASCII preservation;
+- exactly one LF per canonical Event line;
+- preservation of every schema-allowed field;
+- unknown/unparseable field fails closed rather than being dropped.
+
+Classification cases:
+
+- valid activation + valid prefix -> first N legacy;
+- post-activation review-v1 marker + matching C1 -> valid;
+- post-activation marker missing -> reconcile;
+- unknown marker -> reconcile;
+- contradictory marker/run/Receipt -> reconcile;
+- activation prefix mismatch -> reconcile;
+- explicit review-v1 event without valid activation -> reconcile;
+- Review Event metadata does not change `ProjectView/state.py` lifecycle.
 
 ## 7. R5 K1/K2 identity / proof / push
 
@@ -128,27 +142,65 @@ Cover commit effect not made, made+ID save interrupted, positive reconstruction/
 
 No push/publication before exact proof.
 
-## 8. Hooks / filters external-side-effect guard
+## 8. Complete commit-local external-process guard
 
-Mandatory Review-v1 tests:
+Mandatory Review-v1 tests now cover all reachable external process classes for the exact staging/local-commit path, not only hooks/filters.
 
-- active post-commit hook attempts `git push`/network side effect before proof;
-- applicable clean/process filter attempts external network/service access;
-- hook/filter identity changes between Candidate proof and commit.
+### Hooks
+
+- active `pre-commit`, `prepare-commit-msg`, `commit-msg`, `post-commit` attempting network/push/file side effect;
+- non-default `core.hooksPath`;
+- hook identity change between Candidate proof and commit.
+
+Expected: uncontained side effect -> STOP/fail closed before commit. If mechanically suppressed, suppression mode is bound in Git semantics identity.
+
+### Filters/process/LFS
+
+- applicable clean/process filter attempts external service/network access;
+- LFS clean/process path where selected by attributes;
+- content-defining filter cannot be safely contained.
+
+Expected: contained with bound identity or fail closed; content-defining filter is never silently disabled merely for safety.
+
+### Commit signing
+
+Mandatory case:
+
+```text
+git config commit.gpgSign true
+configure custom signing program/helper that would create external/network side effect
+invoke Review-v1 commit_local-v1
+```
 
 Expected:
 
 ```text
-uncontained external side effect
--> STOP/fail closed before reviewed publication boundary
--> remote ref/service-visible state does not change
+commit_local explicitly disables signing (`--no-gpg-sign` equivalent)
+-> signer is not invoked
+-> no signer-visible external/network side effect occurs
+-> resulting commit enters normal exact K proof
 ```
 
-If hooks are mechanically suppressed, test that suppression is part of bound Git persistence semantics. If a content-defining filter cannot be safely contained, commit_local must not silently disable it; it fails closed.
+Also test that `Review-v1 signing-disabled` is present in bound R6/R11 Git semantics identity. If a test fixture removes/changes that contract mode, reuse/proof identity must change/fail as specified.
+
+### Reachability discrimination
+
+Prove that configuration for helpers not reachable by the exact add/commit path (for example smudge-only or textconv-only fixtures) does not cause false execution, while a configuration that makes an external helper reachable enters the classified surface.
 
 ## 9. R6 HEAD advancement / evidence closure
 
 Cover unrelated proven-disjoint advancement, material context/evidence/Git/tool changes, merges, changed-then-reverted dependencies, unknown completeness, rewritten base and non-repo identity drift. Path non-conflict alone never proves Review validity.
+
+Include changes to:
+
+```text
+commit signing mode
+reachable signing/helper configuration
+hook suppression/containment mode
+applicable filter execution identity
+```
+
+Expected: changed material Git semantics invalidate reuse unless explicitly proven irrelevant under the versioned contract.
 
 ## 10. R7 Class A
 
@@ -156,11 +208,13 @@ Cover positive operation-owned transformed K1, non-owned/unexpected delta, multi
 
 ## 11. R8/R9 semantic round-trip
 
-Roadmap and Phase-entry tests cover exact reserved IDs, canonical reload, generated integration/confirmation edges and fault injection. R9 review-v1 self-selection must be enforced by Roadmap-owned planning precondition, not adapter-only override.
+Roadmap and Phase-entry tests cover exact reserved IDs, canonical reload, generated integration/confirmation edges and fault injection. R9 review-v1 self-selection is enforced by Roadmap-owned planning precondition, not adapter-only override.
 
 ## 12. R10/R11
 
 Policy adapter harness remains generic only. Evidence tests cover observed/pinned/denied/unknown dependency classes, dynamic/subprocess/network/env/cache/tool/runtime cases, with unknown preventing cross-Candidate reuse.
+
+For Git-state evidence, signing-disabled mode and any reachable external commit helper must be represented together with the relevant subprocess/network/external-service dependency coverage.
 
 ## 13. Authority boundary
 
@@ -179,14 +233,12 @@ P1 common infrastructure is not complete until repaired common tests pass. P2 ad
 
 Happy path alone is insufficient.
 
-## 15. Round-2 repair disposition
+## 15. Round-3 repair disposition
 
-This revision adds explicit coverage for:
+This revision closes the two remaining Round-2 readiness findings with explicit tests for:
 
-- P1R-01 physical-create / flag-save generation fork window;
-- P1R-02 fresh-clone exact Candidate/request reconstruction and same-task rerun;
-- P1R-03 legacy/review-v1 activation classification and malformed-marker fail-closed;
-- P1R-04 hook/filter external-side-effect prevention.
+- `work-terminal-activation-digest-v1` stability across valid legacy CRLF/blank-line representation normalization while detecting semantic Event mutation;
+- commit-signing/external-process side-effect prevention and binding of signing-disabled Review-v1 commit semantics.
 
 Architecture blocker: `None`.
 
