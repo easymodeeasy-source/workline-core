@@ -1,6 +1,6 @@
 # Review System P1 — R12 Recovery / Invariant Test Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 3 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the minimum interruption/invariant test matrix required before Review contracts may activate.
 
@@ -75,6 +75,42 @@ Test fresh clone/runtime deletion reconstructs exact Candidate + request, recomp
 
 Negative cases include snapshot missing/digest mismatch, builder unavailable/version drift, required input missing, adapter/reviewer version unavailable and request digest mismatch. All fail closed and never silently allocate a new task ID.
 
+### Review-provenance reuse identity
+
+Mandatory Round-4 HEAD-advancement cases:
+
+```text
+A. candidate_hash unchanged
+   candidate snapshot canonical bytes changed
+   -> candidate_material_digest changes
+   -> prior Evidence/Review reuse rejected
+
+B. request_digest unchanged
+   task-input canonical bytes changed in other bound provenance
+   -> task_input_digest changes
+   -> prior Evidence/Review reuse rejected
+
+C. deterministic builder output unchanged
+   builder version changes
+   -> provenance identity changes
+   -> prior Evidence/Review reuse rejected
+
+D. deterministic builder output unchanged
+   one clone-safe builder input reference/identity changes
+   -> provenance identity changes
+   -> prior Evidence/Review reuse rejected
+```
+
+Positive control:
+
+```text
+candidate_hash/request_digest/provenance digests/builder identities all unchanged
+AND complete R6/R11 closure proves all other material surfaces unchanged
+-> provenance alone does not force reacquisition
+```
+
+No test may treat equal `candidate_hash` as sufficient when `candidate_material_digest` or `task_input_digest` differs.
+
 ## 5. Gate settlement / seal / invalidation
 
 Cover accepted task unsettled after crash, result arrival before canonical settlement, G2 partial write/flag save, seal+Receipt partial stage, and invalidating G5+supersession partial stage. No seal/consumption relies on runtime-only success.
@@ -144,7 +180,7 @@ No push/publication before exact proof.
 
 ## 8. Complete commit-local external-process guard
 
-Mandatory Review-v1 tests now cover all reachable external process classes for the exact staging/local-commit path, not only hooks/filters.
+Mandatory Review-v1 tests cover all reachable external process classes for the exact staging/local-commit path, not only hooks/filters.
 
 ### Hooks
 
@@ -185,7 +221,7 @@ Also test that `Review-v1 signing-disabled` is present in bound R6/R11 Git seman
 
 ### Reachability discrimination
 
-Prove that configuration for helpers not reachable by the exact add/commit path (for example smudge-only or textconv-only fixtures) does not cause false execution, while a configuration that makes an external helper reachable enters the classified surface.
+Prove that configuration for helpers not reachable by the exact add/commit path does not cause false execution, while a configuration that makes an external helper reachable enters the classified surface.
 
 ## 9. R6 HEAD advancement / evidence closure
 
@@ -194,13 +230,16 @@ Cover unrelated proven-disjoint advancement, material context/evidence/Git/tool 
 Include changes to:
 
 ```text
+candidate_material_digest
+task_input_digest
+builder identity/version/input identities
 commit signing mode
 reachable signing/helper configuration
 hook suppression/containment mode
 applicable filter execution identity
 ```
 
-Expected: changed material Git semantics invalidate reuse unless explicitly proven irrelevant under the versioned contract.
+Expected: changed material Review provenance or Git semantics invalidates reuse unless explicitly proven irrelevant under the versioned contract.
 
 ## 10. R7 Class A
 
@@ -214,7 +253,7 @@ Roadmap and Phase-entry tests cover exact reserved IDs, canonical reload, genera
 
 Policy adapter harness remains generic only. Evidence tests cover observed/pinned/denied/unknown dependency classes, dynamic/subprocess/network/env/cache/tool/runtime cases, with unknown preventing cross-Candidate reuse.
 
-For Git-state evidence, signing-disabled mode and any reachable external commit helper must be represented together with the relevant subprocess/network/external-service dependency coverage.
+Review-provenance tests bind Candidate snapshot/task-input/builder identities separately from result hashes. Git-state evidence binds signing-disabled mode and any reachable external commit helper together with relevant subprocess/network/external-service dependency coverage.
 
 ## 13. Authority boundary
 
@@ -233,12 +272,9 @@ P1 common infrastructure is not complete until repaired common tests pass. P2 ad
 
 Happy path alone is insufficient.
 
-## 15. Round-3 repair disposition
+## 15. Round-4 repair disposition
 
-This revision closes the two remaining Round-2 readiness findings with explicit tests for:
-
-- `work-terminal-activation-digest-v1` stability across valid legacy CRLF/blank-line representation normalization while detecting semantic Event mutation;
-- commit-signing/external-process side-effect prevention and binding of signing-disabled Review-v1 commit semantics.
+This revision adds explicit tests for the remaining provenance-reuse seam while retaining the already-frozen Round-3 activation serializer and commit-signing/external-process tests.
 
 Architecture blocker: `None`.
 
