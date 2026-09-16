@@ -15,8 +15,16 @@ from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Callable, Iterable
 
-from . import gitops
-from .create import RelationSpec, WorkSpec, _check_registration, _registration_effects, register_works, resolve_ref
+from . import gitops, yamlish
+from .create import (
+    RelationSpec,
+    WorkSpec,
+    _allocated_displays,
+    _check_registration,
+    _registration_effects,
+    register_works,
+    resolve_ref,
+)
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .ids import is_valid_id, new_id
 from .mutation import (
@@ -443,6 +451,70 @@ def _as_recorded(effects: Iterable[dict[str, Any] | Effect]) -> str:
     )
 
 
+def _registration_matches(
+    recorded: list[dict[str, Any]],
+    specs: dict[str, WorkSpec],
+    work_ids: dict[str, str],
+    relations: list[Relation],
+    related_ids: dict[tuple[str, int], str],
+    derivation_ids: dict[str, str],
+) -> bool:
+    """Whether ``recorded`` is the registration stage these inputs decide - the display numbering aside.
+
+    Everything a registration is is compared exactly, in the order the stage
+    records it: the effect kinds, the file paths, the stable Work IDs, the rest
+    of each Work's frontmatter and its whole body, the derivation details, the
+    reserved relation and derivation IDs, and the relation payloads. A Work's
+    display alone is taken from the stage that recorded it instead of being
+    rebuilt.
+
+    A display is how a Project shows a Work, not part of what the Work is: the
+    Project holds no uniqueness rule for it, nothing is looked up by it, a
+    duplicate display is structurally valid, and a projection stands a Work up
+    under ``W-??``. It is allocated from the Works a Project holds, so a Work
+    another owner registered after this stage was recorded renumbers a rebuilt
+    expectation while nothing about the stage itself changed - and the same
+    foreign Work registered before the stage was recorded changed nothing at
+    all. Proving a recorded stage against a recomputed display refused the
+    first of those and not the second (BL-045); the stage's own display keeps
+    both on the same answer, and is what a resume writes.
+
+    Only a display the Project would refuse to hold at all - no Work write for
+    a new Work, one it cannot read, or a display that is not a non-empty
+    string - leaves the stage unproven, exactly as any other difference does.
+    """
+    displays = _recorded_displays(recorded, specs, work_ids)
+    if displays is None:
+        return False
+    expected = _registration_effects(specs, work_ids, relations, related_ids, derivation_ids, displays)
+    return _as_recorded(recorded) == _as_recorded(expected)
+
+
+def _recorded_displays(
+    recorded: list[dict[str, Any]], specs: dict[str, WorkSpec], work_ids: dict[str, str]
+) -> dict[str, str] | None:
+    """The display each new Work's own entity write in ``recorded`` holds, or ``None`` when one of them holds none."""
+    written: dict[Any, list[str]] = {}
+    for effect in recorded:
+        payload = effect.get("payload")
+        if effect.get("kind") == "write_file" and isinstance(payload, dict) and isinstance(payload.get("content"), str):
+            written.setdefault(payload.get("path"), []).append(payload["content"])
+    displays: dict[str, str] = {}
+    for key in specs:
+        contents = written.get(ProjectStore.entity_rel_path("work", work_ids[key]), [])
+        if len(contents) != 1:
+            return None
+        try:
+            meta, _ = yamlish.load_frontmatter(contents[0])
+        except yamlish.YamlishError:
+            return None
+        display = meta.get("display")
+        if not isinstance(display, str) or not display:
+            return None
+        displays[key] = display
+    return displays
+
+
 @dataclass(frozen=True)
 class _ProvenRecord:
     """What :func:`_prove_plan_exclusion` read out of a record, for the decision and the check before replay."""
@@ -516,11 +588,7 @@ def _prove_plan_exclusion(
             for key, spec in replan.new_works.items()
             if spec.derivation_detail is not None
         }
-        # The Works the Project held when the stage was recorded: while this mutation is pending, its new Works are the
-        # only ones registered since.
-        base_number = len(current.works) - sum(1 for work_id in work_ids.values() if work_id in current.works)
-        expected = _registration_effects(replan.new_works, work_ids, additions, related_ids, derivation_ids, base_number)
-        if _as_recorded(by_stage[works_stage]) != _as_recorded(expected):
+        if not _registration_matches(by_stage[works_stage], replan.new_works, work_ids, additions, related_ids, derivation_ids):
             raise refuse(f"a {works_stage} stage other than the registration this request decides")
     if relations_stage in by_stage:
         if _as_recorded(by_stage[relations_stage]) != _as_recorded(Effect.add_relation("roadmap", r) for r in additions):
@@ -739,7 +807,8 @@ def _refuse_before_replay(
             if spec.derivation_detail is not None
         }
         future += _registration_effects(
-            replan.new_works, proven.work_ids, resolved, related_ids, derivation_ids, len(at_registration.works)
+            replan.new_works, proven.work_ids, resolved, related_ids, derivation_ids,
+            _allocated_displays(replan.new_works, len(at_registration.works)),
         )
     elif proven.additions and not replan.new_works and relations_stage not in proven.by_stage:
         future += [Effect.add_relation("roadmap", relation) for relation in proven.additions]

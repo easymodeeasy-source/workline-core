@@ -23,7 +23,7 @@ import stat
 from typing import Any, Callable
 
 from . import gitcmd, gitops, yamlish
-from .create import RelatedSpec, RelationSpec, WorkSpec, _registration_effects, register_works, resolve_ref
+from .create import RelatedSpec, RelationSpec, WorkSpec, register_works, resolve_ref
 from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from .ids import is_valid_id
 from .mutation import FILE_EFFECT_KINDS, Effect, Mutation, MutationController, WriteScope, _decides, abandon_on_stop
@@ -39,6 +39,7 @@ from .ops import (
     _recorded_progress,
     _recorded_stages,
     _refuse_before_replay,
+    _registration_matches,
     _resume_plan_exclusion,
     apply_replan,
     event_effects,
@@ -1916,14 +1917,13 @@ def _prove_cancel(
             for key, spec in replan.new_works.items()
             if spec.derivation_detail is not None
         }
-        # The Works the Project held when the stage was recorded: while this mutation is pending, its new Works are the
-        # only ones registered since.
-        base_number = len(current.works) - sum(1 for identifier in work_ids.values() if identifier in current.works)
         try:
-            expected = _registration_effects(replan.new_works, work_ids, additions, related_ids, derivation_ids, base_number)
+            matches = _registration_matches(
+                read.by_stage[works_stage], replan.new_works, work_ids, additions, related_ids, derivation_ids
+            )
         except (AttributeError, TypeError, ValueError) as exc:
             raise refuse(f"new Works the registration cannot write ({exc})") from exc
-        if _as_recorded(read.by_stage[works_stage]) != _as_recorded(expected):
+        if not matches:
             raise refuse(f"a {works_stage} stage other than the registration its decision makes")
     if relations_stage in read.by_stage:
         if _as_recorded(read.by_stage[relations_stage]) != _as_recorded(Effect.add_relation("roadmap", r) for r in additions):

@@ -97,6 +97,16 @@ def _display(prefix: str, number: int) -> str:
     return f"{prefix}-{number:02d}"
 
 
+def _allocated_displays(specs: "dict[str, WorkSpec]", base_number: int) -> dict[str, str]:
+    """The display a fresh registration gives each new Work: after the ``base_number`` Works already held, in declared order.
+
+    A display is how a Project shows a Work, not part of what the Work is, so
+    it is allocated once - here - and never recomputed from the Works a Project
+    holds later (BL-045).
+    """
+    return {key: _display("W", base_number + offset + 1) for offset, key in enumerate(specs)}
+
+
 def resolve_ref(ref: str, mapping: dict[str, str]) -> str:
     if ref in mapping:
         return mapping[ref]
@@ -262,7 +272,8 @@ def register_works(
     effects: list[Effect] = []
     if not recorded:
         effects = _registration_effects(
-            specs, work_ids, resolved_relations, related_ids, derivation_ids, store.count_entities("work")
+            specs, work_ids, resolved_relations, related_ids, derivation_ids,
+            _allocated_displays(specs, store.count_entities("work")),
         )
     if refuse_before_apply:
         refuse_invalid_work_writes(mutation, effects, structure)
@@ -317,19 +328,20 @@ def _registration_effects(
     relations: list[Relation],
     related_ids: dict[tuple[str, int], str],
     derivation_ids: dict[str, str],
-    base_number: int,
+    displays: dict[str, str],
 ) -> list[Effect]:
     """The effects a registration stage records, in the order it records them.
 
-    ``base_number`` is how many Works the Project held before the stage; the new
-    Works are numbered after them in declared order. A resumed replan rebuilds a
-    recorded stage from the same inputs to show the stage is the one its request
-    decides.
+    ``displays`` holds the display each new Work is written with, keyed as
+    ``specs`` is: :func:`_allocated_displays` for a stage being recorded now,
+    and the displays the stage itself recorded for a resumed replan rebuilding
+    it (BL-045). A resumed replan rebuilds a recorded stage from the same
+    inputs to show the stage is the one its request decides.
     """
     effects: list[Effect] = []
-    for offset, (key, spec) in enumerate(specs.items()):
+    for key, spec in specs.items():
         work_id = work_ids[key]
-        meta: dict[str, Any] = {"id": work_id, "display": _display("W", base_number + offset + 1), "type": "work"}
+        meta: dict[str, Any] = {"id": work_id, "display": displays[key], "type": "work"}
         if spec.phase_id is not None:
             meta["phase_id"] = spec.phase_id
             meta["origin"] = {"type": "roadmap", "roadmap_id": spec.roadmap_id, "phase_id": spec.phase_id}
