@@ -1,6 +1,6 @@
 # Review System P1 — R6 HEAD Advancement / Review-Validity Closure Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 3 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the positive-proof contract for allowing an intervening HEAD advance without creating a new Review Candidate. It is non-normative until implemented and activated through canonical authority.
 
@@ -8,7 +8,7 @@ This checkpoint freezes the positive-proof contract for allowing an intervening 
 
 The current Mutation Controller already has a Git-write compatibility fast path for a recorded commit whose base HEAD has advanced. `_head_advanced_independently()` allows the commit to remain UNAPPLIED when recorded base is an ancestor of current HEAD, branch matches, and intervening commits do not touch recorded paths.
 
-This proves path/Git-write compatibility only. It does not prove Review Context, Evidence, toolchain, Git transformation/external-process semantics, tests or semantic dependencies stayed unchanged.
+This proves path/Git-write compatibility only. It does not prove Review Context, Evidence, provenance, toolchain, Git transformation/external-process semantics, tests or semantic dependencies stayed unchanged.
 
 Candidate 7 therefore requires a separate Review-validity closure.
 
@@ -20,6 +20,7 @@ Every frozen Review Candidate carries a versioned `ReviewValidityClosure` identi
 version: 1
 base_commit_sha: ...
 repo_dependencies: [...]
+review_provenance_dependencies: [...]
 git_semantics: {...}
 review_context_dependencies: [...]
 evidence_dependencies: [...]
@@ -36,31 +37,67 @@ If any required section cannot prove completeness, HEAD-advance reuse is `unknow
 
 Repo-backed material identities come from the verified Git tree and distinguish path, mode, object type/object ID and absence/deletion. Symlink, executable mode and gitlink semantics are preserved. Ambiguous path/case identity makes completeness unknown.
 
-## 4. Closure classes
+## 4. Review provenance dependencies
+
+Accepted-task provenance is a first-class material dependency.
+
+For every accepted task, the closure binds at least:
+
+```text
+candidate_hash
+candidate_material_digest
+task_input_digest
+request_digest
+reviewer_or_adapter_identity + version
+review_context_hash
+effective_policy_hash
+```
+
+For snapshot mode, `candidate_material_digest` is the SHA-256 of the versioned canonical Candidate snapshot bytes.
+
+For deterministic builder mode, the bound provenance includes the exact canonical builder envelope digest and the builder identity/version plus every clone-safe input identity needed to reconstruct the exact projection.
+
+For task input, `task_input_digest` is the SHA-256 of the exact versioned canonical task-input bytes.
+
+The important rule is:
+
+```text
+same candidate_hash
+!= automatically same Review provenance
+```
+
+If snapshot bytes, task-input bytes, builder version, or any bound builder input identity changes across HEAD advancement, prior Review/Evidence is not reusable unless an explicit irrelevance proof exists. Otherwise freeze a new Candidate/reacquire Evidence as required.
+
+A well-formed manual/external Git replacement of immutable provenance records is still a material historical change even if it reconstructs the same artifact/request hash.
+
+## 5. Closure classes
 
 At minimum:
 
 ### A. ReviewedArtifact semantic dependencies
 Material files/configuration affecting reviewed artifact meaning.
 
-### B. Review Context provenance
+### B. Review provenance
+Candidate snapshot/task-input/builder envelopes and all identities needed to reconstruct the accepted Candidate/request.
+
+### C. Review Context provenance
 Requirement/Work/Phase/Roadmap/registry/Skill/spec and other Context sources.
 
-### C. Evidence dependencies
+### D. Evidence dependencies
 Tests, fixtures, helpers, build/generated-input definitions, manifests and adapter-declared inputs.
 
-### D. Effective Policy / verifier inputs
+### E. Effective Policy / verifier inputs
 Policy/profile/reviewer/check configuration and version identities.
 
-### E. Git persistence / commit execution semantics
+### F. Git persistence / commit execution semantics
 Material Git settings/files/process modes that can transform persisted content, change commit behavior, or cause pre-proof external side effects.
 
-### F. Tool/runtime/dependency identities
+### G. Tool/runtime/dependency identities
 Interpreter/compiler/runtime/library/external identities.
 
 R11 dependency completeness is reused here.
 
-## 5. Git semantics surface
+## 6. Git semantics surface
 
 P1 implementation must positively inspect applicable Git semantics and use `unknown` where completeness cannot be established.
 
@@ -78,11 +115,11 @@ Material surface includes, when applicable:
 - submodule/gitlink identity;
 - any other effective Git-configured external executable reachable by the exact staging/local-commit path.
 
-Signing-disabled mode is not an incidental command-line detail. It is part of the Review-v1 Git persistence/commit-execution identity. A future signed Review-v1 contract is a different semantic version and does not reuse evidence/proof merely because tree bytes match.
+Signing-disabled mode is part of the Review-v1 Git persistence/commit-execution identity. A future signed Review-v1 contract is a different semantic version and does not reuse evidence/proof merely because tree bytes match.
 
-Surfaces that Git supports but the exact path cannot invoke (for example smudge-only filters or textconv under a plain add/commit path) need not be declared material unless configuration makes them reachable.
+Surfaces that Git supports but the exact path cannot invoke need not be declared material unless configuration makes them reachable.
 
-## 6. External-process completeness
+## 7. External-process completeness
 
 For the Review-v1 staging/local-commit boundary, a complete closure must establish either:
 
@@ -98,11 +135,11 @@ An unclassified reachable external process makes Git semantics completeness unkn
 
 This applies before proof; no later tree equality can erase an uncontrolled pre-proof side effect.
 
-## 7. Uncommitted ambient state
+## 8. Uncommitted ambient state
 
 Final Evidence runs against the Frozen Candidate in isolated verification workspace + declared Context. Hidden ambient worktree/index/env dependency makes completeness unknown unless explicitly bound.
 
-## 8. Positive fast-path decision
+## 9. Positive fast-path decision
 
 Review/Evidence reuse across B->H requires both:
 
@@ -115,17 +152,18 @@ Branch/lineage and operation-owned write safety pass.
 closure.completeness == complete
 AND B ancestor of H
 AND intervening changed material surfaces are proven outside the complete closure
+AND all bound Review provenance identities unchanged
 AND non-repo bound identities unchanged
 ```
 
 Non-path identities are compared directly; they are not coerced into fake paths.
 
-## 9. Unknown is not false
+## 10. Unknown is not false
 
 ```text
 cannot enumerate changed surface
 OR closure completeness unknown
-OR dependency identity uncomparable
+OR provenance dependency identity uncomparable
 OR Git semantic/external-process source unresolved
 OR tool/external identity unavailable
 => Review-validity unknown
@@ -134,21 +172,23 @@ OR tool/external identity unavailable
 
 Absence of discovered change is never proof of invariance.
 
-## 10. New Candidate behavior
+## 11. New Candidate behavior
 
 If semantic Review validity is unknown/invalid after HEAD advancement, freeze a new Candidate against H and reuse only Evidence whose own R11 completeness/invariance proof succeeds. Git conflicts remain reconcile territory; semantic drift alone normally creates a new Candidate.
 
-## 11. Merge/result commit boundary
+## 12. Merge/result commit boundary
 
 Intervening merges may be handled only with complete changed-surface traversal. Review-v1 result/terminal commits themselves remain one-parent unless a future explicit contract changes that.
 
-## 12. Closure digest and Review binding
+## 13. Closure digest and Review binding
 
 Canonical closure digest is bound into Candidate/Review Context evidence identity and Gate/Receipt proof material. Definition/version changes invalidate prior automatic reuse.
 
-## 13. Round-3 repair disposition
+## 14. Round-4 repair disposition
 
-P1R2-NF-02 is reflected here by making commit signing mode and the complete reachable external-process execution surface explicit Git-semantics dependencies. Review-v1 commit-local-v1 is unsigned by construction; a different signing contract is a new bound semantic version.
+This revision closes the later independent review's provenance-reuse seam by adding explicit Review-provenance dependencies (`candidate_material_digest`, `task_input_digest`, builder envelope/input identities) to the ReviewValidityClosure and HEAD-advancement decision.
+
+Round-3 signing/external-process closure remains in force.
 
 Architecture blocker: `None`.
 
