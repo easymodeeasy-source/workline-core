@@ -22,6 +22,12 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   the same durable save that records it applied, and on the branch it was
   recorded on it is recognized by that ID alone, never by its message
   (:func:`_made_commit_held`);
+* every write to a Project file records what the path held before it and what it
+  wrote there, and a path is written again, and committed, only while it still
+  holds exactly that: owning the path is not owning the bytes, so a change
+  another subject made to it after the operation began is never written over,
+  taken into the mutation's own state, or committed as its own
+  (:func:`_require_own_bytes_before_write`, :func:`_require_own_bytes_committed`);
 * an effect the mutation applied and a recorded commit finalizes is written
   again only on the branch that commit names: a resume that would write it
   anywhere else stops before anything is replayed or recorded
@@ -41,6 +47,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -114,6 +121,20 @@ _NO_MADE_COMMIT = object()
 #: them before its executor runs, and a stage made only of them fixes no branch (``skills/start``).
 _OPENING_EVENTS = frozenset({"work_started", "work_resumed", "work_target_added"})
 
+#: The key of a recorded file effect that holds what its path held before it wrote (:meth:`Mutation.add_effects`).
+_HELD_BEFORE = "held_before"
+#: The key of a recorded file effect that holds what it wrote there (:meth:`Mutation.apply`).
+_WROTE = "wrote"
+#: The note holding what an owner showed is its own at a path no effect of its writes (:func:`declare_own_content`).
+_OWN_CONTENT = "own_content"
+
+#: What :func:`_content_digest` answers with: the bytes at a path, the target of a link, or no path at all.
+_BYTES = "sha256:"
+_LINK = "link:"
+_ABSENT = "absent"
+#: What :func:`declare_own_content` records for a path it could not read, so that no later state matches it.
+_UNREADABLE = "unreadable"
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -121,6 +142,56 @@ def utc_now() -> str:
 
 def _normalize(text: str) -> str:
     return text.replace("\r\n", "\n")
+
+
+# --------------------------------------------------------------------------- what a path holds
+
+def effect_path(effect: "dict[str, Any] | Effect") -> str | None:
+    """The canonical Project path this effect writes; ``None`` for one that writes no file.
+
+    The one place that mapping lives, so what an operation says it owns
+    (:func:`workline.ops._owned_paths`) and what the Mutation Controller proves
+    it wrote are the same path.
+    """
+    kind, payload = (effect["kind"], effect["payload"]) if isinstance(effect, dict) else (effect.kind, effect.payload)
+    if kind == "write_file":
+        return payload["path"]
+    if kind in ("add_relation", "remove_relation"):
+        return f"{WORKLINE_DIR}/relations/{payload['file']}.yaml"
+    if kind == "append_event":
+        return f"{WORKLINE_DIR}/events/events.jsonl"
+    return None
+
+
+def _text_digest(text: str) -> str:
+    """What :func:`_content_digest` answers for a path holding exactly ``text``.
+
+    :func:`durable_write_text` writes the text as UTF-8 and translates no line
+    ending, so these are the bytes the file comes to hold, and a write and a
+    later reading of it are compared as the same bytes.
+    """
+    return _BYTES + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _content_digest(path: Path) -> str | None:
+    """What the Project holds at ``path`` right now, as one comparable value; ``None`` when it cannot be read.
+
+    The bytes as they are on disk - not the text a reader makes of them, which
+    turns CRLF into LF and would take a rewritten file for an unchanged one, and
+    not anything Git stores, whose own content filters (``core.autocrlf``,
+    ``.gitattributes``, smudge / clean) answer about another sequence of bytes
+    than the one a write put there. A link is compared by what it points at,
+    which is what Git would carry, and is never followed to the bytes at the
+    other end.
+    """
+    try:
+        if path.is_symlink():
+            return _LINK + hashlib.sha256(os.readlink(path).encode("utf-8", "surrogatepass")).hexdigest()
+        if not path.exists():
+            return _ABSENT
+        return _BYTES + hashlib.sha256(path.read_bytes()).hexdigest()
+    except (OSError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -320,6 +391,15 @@ class Mutation:
         unfinalized decision was made on (:func:`_bind_decision`), nor where an
         applied effect a recorded commit finalizes would have to be written
         again off that commit's branch (:func:`_require_finalized_branch`).
+
+        A stage that writes a Project file carries, in that same write, what
+        each of those files holds now, so that the first write of this mutation
+        to a path can tell the state it decided against from one another
+        subject changed in between (:func:`_require_own_bytes_before_write`).
+        A path this mutation has written before is held to what it wrote there
+        instead, so a snapshot taken after such a change can never stand in for
+        it. A file that cannot be read now carries nothing: a write that then
+        happens anyway is classified as it always was.
         """
         self._writable()
         if self.status != "pending":
@@ -333,6 +413,11 @@ class Mutation:
             seq += 1
             record = {"seq": seq, "stage": stage, "kind": effect.kind, "payload": effect.payload, "applied": False}
             self.controller.validate_effect(record, recorded + pending_records, self.owner)
+            path = effect_path(record)
+            if path is not None:
+                held = _content_digest(self.store.abs(path))
+                if held is not None:
+                    record[_HELD_BEFORE] = held
             pending_records.append(record)
         _bind_decision(self, stage, pending_records)
         _require_finalized_branch(self, f"recording stage {stage!r}")
@@ -348,6 +433,14 @@ class Mutation:
         written again off that commit's branch (:func:`_require_finalized_branch`).
         A commit made here is recorded with its ID in the same save that records
         it applied (:func:`_make_commit`).
+
+        A write happens only while its file still holds what this mutation left
+        there, or what it recorded finding there before its first write
+        (:func:`_require_own_bytes_before_write`), and the bytes it is about to
+        write are recorded durably before it writes them, so that what it wrote
+        is known however the write ends. A commit is made only while every path
+        it would carry holds exactly what this mutation put there
+        (:func:`_require_own_bytes_committed`).
         """
         self._writable()
         if self.status != "pending":
@@ -365,8 +458,16 @@ class Mutation:
             identified = False
             if classification == UNAPPLIED:
                 if record["kind"] == "git_commit":
+                    _require_own_bytes_committed(self, effects, position, record)
                     identified = _make_commit(self, record)
                 else:
+                    _require_own_bytes_before_write(self, effects, position, record)
+                    planned = self.controller._planned_write(record)
+                    if planned is not None:
+                        wrote = _text_digest(planned[1])
+                        if record.get(_WROTE) != wrote:
+                            record[_WROTE] = wrote
+                            self._save()
                     self.controller.apply_effect(record)
             if not record.get("applied") or identified:
                 # also what lets a later classification recognize a commit as this mutation's own
@@ -935,7 +1036,179 @@ def _head_advanced_independently(repo: Path, payload: dict[str, Any], head: str)
     )
 
 
+# --------------------------------------------------------------------------- the bytes a mutation owns
+
+def declare_own_content(mutation: Mutation, paths: "Iterable[str]") -> None:
+    """Record what the Project holds at ``paths`` right now as this mutation's own.
+
+    For the paths an operation commits that none of its effects writes: what
+    START's executor produced and what it deleted, and a file an owner showed
+    already holds exactly what it would have written. The owner has just
+    established their content, so what they hold at this moment is what the
+    operation is responsible for, and the Git stage commits them only while they
+    still hold it (:func:`_require_own_bytes_committed`).
+
+    A path this cannot read is recorded as unreadable rather than left out, so
+    the commit refuses it instead of taking it for a path nothing owns. A path
+    an effect of this mutation writes is passed over: what that write recorded
+    putting there says more than this does, and is what decides for it.
+
+    Nothing is saved when this says exactly what the record already holds: an
+    owner that establishes the same content again on a retry leaves the record
+    byte for byte as it was, so a run that goes on to stop changes nothing.
+    """
+    written = {effect_path(effect) for effect in mutation.effects}
+    held = mutation.note(_OWN_CONTENT)
+    before = dict(held) if isinstance(held, dict) else {}
+    declared = dict(before)
+    for path in sorted(set(paths) - written):
+        digest = _content_digest(mutation.store.abs(path))
+        declared[path] = digest if digest is not None else _UNREADABLE
+    if declared != before:
+        mutation.set_note(_OWN_CONTENT, declared)
+
+
+def _own_content(mutation: Mutation) -> dict[str, str]:
+    declared = mutation.note(_OWN_CONTENT)
+    if not isinstance(declared, dict):
+        return {}
+    return {path: value for path, value in declared.items() if isinstance(path, str) and isinstance(value, str)}
+
+
+def _last_wrote(effects: list[dict[str, Any]], path: str) -> str | None:
+    """What the last effect of ``effects`` that wrote ``path`` recorded writing there."""
+    wrote = None
+    for effect in effects:
+        if effect_path(effect) == path and isinstance(effect.get(_WROTE), str):
+            wrote = effect[_WROTE]
+    return wrote
+
+
+def _witnessless(effects: list[dict[str, Any]], path: str) -> bool:
+    """Whether some effect of ``effects`` writes ``path`` while recording nothing about its content.
+
+    Such an effect was recorded before a mutation recorded what it writes, so
+    what its path holds now cannot be shown either way, and it is treated as it
+    was then.
+    """
+    return any(
+        effect_path(effect) == path and _HELD_BEFORE not in effect and _WROTE not in effect
+        for effect in effects
+    )
+
+
+def _proves_own_content(effects: list[dict[str, Any]], declared: dict[str, str]) -> bool:
+    """Whether this record holds any account at all of the content it owns."""
+    return bool(declared) or any(_HELD_BEFORE in effect or _WROTE in effect for effect in effects)
+
+
+def _require_own_bytes_before_write(
+    mutation: Mutation, effects: list[dict[str, Any]], position: int, record: dict[str, Any]
+) -> None:
+    """STOP unless the file this effect writes still holds what this mutation left there.
+
+    Writing a Project file is not writing the whole file: an appended event
+    keeps every line already in the log, and a relation added or removed
+    re-renders the ledger out of what it reads there. So a change another
+    subject made to that file after this operation began is carried into what
+    the write produces - taken over as this mutation's own state where it parses
+    (a relation record it then reads back as one of its own), and destroyed
+    where it does not (a line the renderer cannot reproduce). Neither is this
+    operation's to do (``rules/git`` 基本原則), and the check the commit makes
+    cannot catch either, because by then the write has already made the file
+    hold exactly what the mutation expected.
+
+    So the file is held to what this mutation last wrote there, and, before its
+    first write, to what its stage recorded finding there
+    (:meth:`Mutation.add_effects`). What it wrote outranks what it found: a
+    snapshot taken after another subject's change must never stand in for the
+    mutation's own bytes. A mismatch stops before anything is written, replayed
+    or recorded, and leaves that change exactly where it is - nothing is staged,
+    committed, pushed, put back or taken away. The person commits or discards
+    it, and the operation runs again (``rules/git``: ownership競合はreconcile
+    required).
+
+    An effect recorded before a mutation recorded any of this is applied as it
+    always was.
+    """
+    path = effect_path(record)
+    if path is None:
+        return
+    expected = _last_wrote(effects[:position], path) or record.get(_HELD_BEFORE)
+    if not isinstance(expected, str):
+        return
+    if _content_digest(mutation.store.abs(path)) != expected:
+        raise ReconcileRequired(
+            f"mutation {mutation.id} effect {record['seq']} ({record['kind']}) would write {path}, which no longer "
+            "holds what this operation left there; a change it does not own would be taken into its own state or "
+            "written over, so nothing is written, committed or pushed and the change is left exactly as it is: "
+            "reconcile required"
+        )
+
+
+def _require_own_bytes_committed(
+    mutation: Mutation, effects: list[dict[str, Any]], position: int, record: dict[str, Any]
+) -> None:
+    """STOP unless every path this commit would carry holds exactly what this mutation put there.
+
+    Owning a path is not owning the bytes at it. ``git add`` and
+    ``git commit --only`` carry whatever the working tree holds at the paths
+    they are given, and the operation knows only that it wrote *somewhere* in
+    each of them; a change another subject made to one after the operation began
+    is as much "different from HEAD" as its own writes, and is committed, pushed
+    and reported as the operation's own result. So each path is compared, right
+    before it is staged, against what this mutation recorded putting there: what
+    its last write to that path wrote (:meth:`Mutation.apply`), or, for a path
+    no effect of its writes, what its owner showed is its own
+    (:func:`declare_own_content`).
+
+    Only the paths that would actually carry something are compared: a path
+    identical to HEAD adds nothing to the commit, whatever the record says about
+    it. A path that would carry something this mutation cannot account for is
+    refused exactly as a changed one is - it is a change the operation did not
+    make. Nothing is staged, committed or pushed, and the change is left where
+    it is.
+
+    Every committed path was clean when the operation began (BL-041,
+    :func:`workline.gitops.ensure_separable`), which is what makes the
+    comparison sound: a difference from HEAD that is not this mutation's own was
+    made after it began. A record from before a mutation recorded any of this,
+    and a path whose writer was recorded then, keep the behaviour they had.
+    """
+    paths = [path for path in record["payload"]["paths"] if isinstance(path, str)]
+    changed = gitcmd.changed_against_head(mutation.store.root, paths)
+    if not changed:
+        return
+    earlier = effects[:position]
+    declared = _own_content(mutation)
+    proves = _proves_own_content(earlier, declared)
+    foreign: list[str] = []
+    unaccounted: list[str] = []
+    for path in sorted(changed):
+        expected = _last_wrote(earlier, path) or declared.get(path)
+        if expected is None:
+            if _witnessless(earlier, path) or not proves:
+                continue  # recorded before a mutation recorded what it writes
+            unaccounted.append(path)
+            continue
+        if _content_digest(mutation.store.abs(path)) != expected:
+            foreign.append(path)
+    if not foreign and not unaccounted:
+        return
+    detail = []
+    if foreign:
+        detail.append("no longer holds what this operation wrote there: " + ", ".join(foreign))
+    if unaccounted:
+        detail.append("differs from HEAD through no write of this operation: " + ", ".join(unaccounted))
+    raise ReconcileRequired(
+        f"mutation {mutation.id} cannot show the change it would commit is its own - "
+        + "; ".join(detail)
+        + "; nothing is staged, committed or pushed and the change is left exactly as it is: reconcile required"
+    )
+
+
 # --------------------------------------------------------------------------- the commit a mutation made
+
 def _make_commit(mutation: Mutation, record: dict[str, Any]) -> bool:
     """Make the recorded commit and note on its record the ID of the commit made; whether that note changed.
 
@@ -1453,29 +1726,42 @@ class MutationController:
         )
 
     # application ---------------------------------------------------------------
-    def apply_effect(self, record: dict[str, Any]) -> None:
+    def _planned_write(self, record: dict[str, Any]) -> tuple[Path, str] | None:
+        """The file this effect writes and the exact text it puts there; ``None`` for one that writes no file.
+
+        The same computation :meth:`apply_effect` performs, so that what a
+        mutation records having written (:meth:`Mutation.apply`) is what the
+        write puts on disk, and never a second, separately written rendering of
+        it that could come to differ.
+        """
         kind = record["kind"]
         payload = record["payload"]
         if kind == "write_file":
-            durable_write_text(self.store.abs(payload["path"]), payload["content"], tmp_dir=self.store.tmp)
-            return
+            return self.store.abs(payload["path"]), payload["content"]
         if kind == "add_relation":
-            path = self.store.relation_file(payload["file"])
             relations = self.store.read_relation_file(payload["file"])
             relations.append(Relation.from_record(payload["record"]))
-            durable_write_text(path, render_relations(relations), tmp_dir=self.store.tmp)
-            return
+            return self.store.relation_file(payload["file"]), render_relations(relations)
         if kind == "remove_relation":
-            path = self.store.relation_file(payload["file"])
             relations = [r for r in self.store.read_relation_file(payload["file"]) if r.id != payload["record"]["id"]]
-            durable_write_text(path, render_relations(relations), tmp_dir=self.store.tmp)
-            return
+            return self.store.relation_file(payload["file"]), render_relations(relations)
         if kind == "append_event":
             text = _normalize(self.store.events_text())
             if text and not text.endswith("\n"):
                 text += "\n"
             text += yamlish.escape_line_separators(json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":"))) + "\n"
-            durable_write_text(self.store.events_jsonl, text, tmp_dir=self.store.tmp)
+            return self.store.events_jsonl, text
+        if kind in ("git_commit", "git_push"):
+            return None
+        raise ValidationError(f"unknown effect kind: {kind}")
+
+    def apply_effect(self, record: dict[str, Any]) -> None:
+        kind = record["kind"]
+        payload = record["payload"]
+        planned = self._planned_write(record)
+        if planned is not None:
+            path, text = planned
+            durable_write_text(path, text, tmp_dir=self.store.tmp)
             return
         if kind == "git_commit":
             repo = self.store.root

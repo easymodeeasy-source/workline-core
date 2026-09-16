@@ -31,7 +31,15 @@ import re
 
 from . import gitcmd, gitops
 from .errors import ReconcileRequired, StopError
-from .mutation import CLOSED_RECORD_FIELDS, Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import (
+    CLOSED_RECORD_FIELDS,
+    Effect,
+    Mutation,
+    MutationController,
+    WriteScope,
+    abandon_on_stop,
+    declare_own_content,
+)
 from .oplock import project_operation
 from .registry import PROJECT_ROUTER_SKILL_ID, validate_registry
 from .store import BOOTSTRAP_REL_PATH, WORKLINE_DIR, ProjectStore
@@ -257,6 +265,11 @@ def _backfill_locked(store: ProjectStore, root: Path) -> BackfillResult:
 
     if state == ABSENT and not mutation.has_stage("bootstrap"):
         mutation.add_effects("bootstrap", [Effect.write_file(BOOTSTRAP_REL_PATH, render_bootstrap())])
+    # When no effect writes it, the file is already there holding byte for byte
+    # what this backfill would have written, so it is this operation's artifact
+    # on that word alone - and the Git stage commits it only while it still
+    # holds it (:func:`workline.mutation.declare_own_content`).
+    declare_own_content(mutation, owned)
     mutation.apply()
     gitops.finalize(mutation, "commit", BACKFILL_COMMIT_MESSAGE, owned, destination=destination)
 
@@ -277,6 +290,11 @@ _EFFECT_FIELDS = frozenset({"seq", "stage", "kind", "payload", "applied"})
 _DECIDED_ON = "decided_on"
 #: Where a commit the Mutation Controller made records the ID of that commit, with its applied flag (BL-037).
 _MADE_COMMIT = "commit_id"
+#: Where an effect records what its path held before it wrote and what it wrote there (BL-043).
+_HELD_BEFORE = "held_before"
+_WROTE = "wrote"
+#: The note holding what an operation owns at a path no effect of its writes (BL-043).
+_OWN_CONTENT = "own_content"
 _COMMIT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _BRANCH_REF = re.compile(r"refs/heads/\S+")
 #: Every order of stages a backfill records: the bootstrap it decided to write (only when there was none),
@@ -355,13 +373,15 @@ def _unprovable_record(record: dict) -> str | None:
     if record["reserved_ids"] != {}:
         return "reserved IDs, which a backfill never does"
     notes = record["notes"]
-    if not isinstance(notes, dict) or not set(notes) <= {"preexisting_dirty"}:
+    if not isinstance(notes, dict) or not set(notes) <= {"preexisting_dirty", _OWN_CONTENT}:
         return "holds notes a backfill does not write"
     effects = record["effects"]
     if not isinstance(effects, list) or not all(isinstance(effect, dict) for effect in effects):
         return "holds effects a backfill does not record"
     for index, effect in enumerate(effects):
-        allowed = _EFFECT_FIELDS | {"write_file": {_DECIDED_ON}, "git_commit": {_MADE_COMMIT}}.get(effect.get("kind"), frozenset())
+        allowed = _EFFECT_FIELDS | {
+            "write_file": {_DECIDED_ON, _HELD_BEFORE, _WROTE}, "git_commit": {_MADE_COMMIT}
+        }.get(effect.get("kind"), frozenset())
         if not _EFFECT_FIELDS <= set(effect) <= allowed or effect["seq"] != index + 1:
             return "holds effects a backfill does not record"
     if tuple((effect["stage"], effect["kind"]) for effect in effects) not in _RECORDED_SHAPES:

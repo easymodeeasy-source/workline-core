@@ -35,6 +35,7 @@ from .mutation import (
     _DECIDED_ON,
     _decides,
     abandon_on_stop,
+    declare_own_content,
 )
 from .oplock import project_operation
 from .ops import (
@@ -852,11 +853,19 @@ class _Session:
     def _complete(self, view: ProjectView, work: Entity, outcome: Completed) -> StartResult:
         result_paths = tuple(p.replace("\\", "/") for p in outcome.result_paths)
         deleted_paths = tuple(p.replace("\\", "/") for p in outcome.deleted_paths)
-        completion_precheck(self.store, view, work, result_paths, deleted_paths)
         # Created, modified and deleted results are one owned set: they are
         # protected from pre-existing changes together and finalized in the
         # same commit, by exact path.
         owned = sorted(set(result_paths) | set(deleted_paths))
+        if owned:
+            # What the executor produced is this operation's result from the
+            # moment it returned - the first moment those paths are known - so
+            # the Git stage commits them only while they still hold exactly it.
+            # A rewrite in between would otherwise replace the Work's own
+            # product with someone else's bytes, under its own result message,
+            # and still be reported completed (``rules/git``: Commit / push).
+            declare_own_content(self.mutation, owned)
+        completion_precheck(self.store, view, work, result_paths, deleted_paths)
         if owned:
             preexisting = gitops.record_preexisting_dirty(self.mutation, self.store.root)
             overlap = sorted(set(preexisting) & set(owned))

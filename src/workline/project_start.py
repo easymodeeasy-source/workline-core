@@ -49,7 +49,7 @@ from .destination import DEFAULT_REMOTE, resolve_active_push_locator
 from .errors import StopError
 from .ids import is_valid_id
 from .implementation import require_configured_implementation
-from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop, declare_own_content
 from .registry import validate_registry
 from .self_hosting import refuse_self_hosting
 from .store import (
@@ -529,6 +529,13 @@ def _initialize(
         if state == ABSENT:
             effects.append(Effect.write_file(BOOTSTRAP_REL_PATH, render_bootstrap()))
         mutation.add_effects("create", effects)
+    if BOOTSTRAP_REL_PATH in owned:
+        # When no effect writes it, the bootstrap Skill file is already there
+        # holding byte for byte what Project開始 would have written, so it is
+        # this operation's artifact on that word alone - and the initial commit
+        # carries it only while it still holds it
+        # (:func:`workline.mutation.declare_own_content`).
+        declare_own_content(mutation, [BOOTSTRAP_REL_PATH])
     mutation.apply()
     for name in ("roadmaps", "phases", "works", "derivations"):
         (store.workline / name).mkdir(parents=True, exist_ok=True)

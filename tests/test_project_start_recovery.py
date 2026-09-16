@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import hashlib
+import hashlib
 import inspect
 import ntpath
 import os
@@ -401,7 +402,14 @@ class NewStartPreventionTests(RecoveryTestCase):
             result = self.start(root)
 
         self.assertInitialized(root, result)
-        self.assertEqual(notes[result.mutation_id], {"preexisting_dirty": []})
+        # No effect writes that file - it already holds exactly what Project開始 would have
+        # written - so the initial commit carries it on the owner's own word about its content,
+        # and only while it still holds it (BL-043).
+        digest = "sha256:" + hashlib.sha256(render_bootstrap().encode("utf-8")).hexdigest()
+        self.assertEqual(
+            notes[result.mutation_id],
+            {"preexisting_dirty": [], "own_content": {BOOTSTRAP_REL_PATH: digest}},
+        )
         self.assertEqual(bootstrap.read_bytes(), render_bootstrap().encode("utf-8"))
 
 

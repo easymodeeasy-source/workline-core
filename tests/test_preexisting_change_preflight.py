@@ -29,7 +29,7 @@ from workline import gitops
 from workline import roadmap as rm
 from workline import start as st
 from workline.create import RelatedSpec, RelationSpec, WorkSpec, create_standalone_work
-from workline.errors import StopError
+from workline.errors import ReconcileRequired, StopError
 from workline.ids import new_id
 from workline.mutation import Mutation, MutationController
 from workline.ops import Replan
@@ -537,8 +537,15 @@ class KnownResidualTests(PreflightCase):
         self.assertEqual(sorted({e["stage"] for e in pending["effects"]}), [f"{self.w1}:lifecycle:0"])
         self.assertEqual((self.head(), self.remote_head()), (head, head))
 
-    def test_a_change_made_after_start_began_is_still_committed_with_it(self) -> None:
-        """A person's event appended while the executor runs is not in the snapshot taken before it."""
+    def test_a_change_made_after_start_began_is_refused_by_the_content_proof_not_by_this_snapshot(self) -> None:
+        """A person's event appended while the executor runs is not in the snapshot taken before it (BL-043).
+
+        This preflight is about the state the operation began in, and the snapshot it reads is
+        deliberately never taken again, so a path clean at entry is never looked at here again. What
+        that change is refused by is the proof the Git stage makes about the bytes it would commit
+        (``mutation._require_own_bytes_committed``) - a different refusal, on a different axis, and
+        this one's own code and message stay for the pre-existing case.
+        """
         self.phases()
         done = completing_executor(self.store, self.ran)
         appended = {}
@@ -547,10 +554,12 @@ class KnownResidualTests(PreflightCase):
             appended["line"] = self.person_event()
             return done(ctx)
 
-        self.assertEqual(st.start(self.store, self.w1, "single-work", executor).status, "completed")
+        with self.assertRaises(ReconcileRequired) as refused:
+            st.start(self.store, self.w1, "single-work", executor)
 
-        self.assertIn(appended["line"].strip(), git(self.root, "show", f"HEAD:{EVENT_LOG}"))
-        self.assertEqual((self.dirty(), self.head()), ([], self.remote_head()))
+        self.assertIn(EVENT_LOG, refused.exception.message)
+        self.assertNotIn(appended["line"].strip(), git(self.root, "show", f"HEAD:{EVENT_LOG}"))
+        self.assertIn(appended["line"].strip(), (self.root / EVENT_LOG).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

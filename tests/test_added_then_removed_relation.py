@@ -16,7 +16,8 @@ as applied, in the one rule ``Mutation.apply``, ``unapplied_effects`` and the pr
 whether or not the removal's own applied flag was saved. Nothing else stands for that removal: a relation of the
 same shape under another ID, a removal with another snapshot, an add the record does not hold as applied, a removal
 recorded before the add or in its stage, and a person's edit the record does not explain keep the classification -
-and the refusal - they always had.
+and the refusal - they always had. A person's edit to the ledger itself is refused before anything is written over
+it (BL-043); once the ledger holds again what the mutation wrote there, the same retry ends as it always did.
 """
 
 from __future__ import annotations
@@ -435,19 +436,42 @@ class RemovedTests(PairCase):
 
 # --------------------------------------------------------------------------- the removal recorded, the relation deleted by hand (D-2)
 class DeletedByHandTests(PairCase):
-    def test_deleting_the_relation_after_its_removal_was_recorded_ends_as_that_removal_would(self) -> None:
-        """The state a removal written before its flag was saved leaves, and the one its twin leaves: both go on."""
+    def test_deleting_the_relation_by_hand_is_refused_and_ends_as_that_removal_would_once_it_is_back(self) -> None:
+        """A person's edit to the ledger is a change this mutation did not make (BL-043).
+
+        Taking it over would re-render the ledger out of what they left there and commit the result as the
+        operation's own, so the removal is refused before it writes and their edit is left exactly as it is.
+        Once the ledger holds again what this mutation wrote there, the same retry goes on and leaves the state
+        that removal leaves - the relation is still removed once, and never added again.
+        """
         for index, shape in enumerate(("S1", "S3d")):
             with self.subTest(shape=shape):
                 call, pending = self.interrupted(shape, "removals recorded", f"by-hand-{index}")
                 self.assertFalse(self.effect_of_r(pending, "remove_relation")["applied"])
+                ledger = self.store.root / ROADMAP
+                left, head = ledger.read_bytes(), gitcmd.head_commit(self.store.root)
+                shape_before = [(e["stage"], e["kind"]) for e in pending["effects"]]
                 self.without_r()
+                edited = ledger.read_bytes()
+
+                with self.assertRaises(StopError) as refused:
+                    call()
+
+                self.assertEqual(refused.exception.code, "reconcile_required")
+                self.assertIn(ROADMAP, refused.exception.message)
+                # Their edit is left exactly as it is, nothing is committed, and the record grows nothing:
+                # the removal they made by hand reads as applied, as it always did, and that is all.
+                self.assertEqual(ledger.read_bytes(), edited)
+                self.assertEqual(gitcmd.head_commit(self.store.root), head)
+                (resumed,) = MutationController(self.store).list_pending()
+                self.assertEqual([(e["stage"], e["kind"]) for e in resumed["effects"]], shape_before)
+                ledger.write_bytes(left)  # the person puts back what the operation had written
                 executed: list[str] = []
 
                 result = self.watching(call, executed)
 
                 self.assertEqual((result.status, result.mutation_id), ("cancelled", pending["mutation_id"]))
-                self.assertEqual(executed, ["remove_relation", "git_commit", "git_push"])  # W1->I1 only
+                self.assertEqual(executed, ["remove_relation", "remove_relation", "git_commit", "git_push"])
                 self.assertNotIn(self.r["id"], self.relation_ids())
                 self.assertCancelled(self.w1)
 

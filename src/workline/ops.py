@@ -35,6 +35,7 @@ from .mutation import (
     Mutation,
     MutationController,
     _classify_recorded,
+    effect_path,
     pending_for_slot,
     require_same_request,
     utc_now,
@@ -65,16 +66,7 @@ def owned_canonical_paths(mutation: Mutation) -> list[str]:
 
 def _owned_paths(effects: Iterable[dict[str, Any] | Effect]) -> list[str]:
     """Canonical paths the effects - recorded, or about to be - write."""
-    paths: set[str] = set()
-    for effect in effects:
-        kind, payload = (effect["kind"], effect["payload"]) if isinstance(effect, dict) else (effect.kind, effect.payload)
-        if kind == "write_file":
-            paths.add(payload["path"])
-        elif kind in ("add_relation", "remove_relation"):
-            paths.add(f"{WORKLINE_DIR}/relations/{payload['file']}.yaml")
-        elif kind == "append_event":
-            paths.add(f"{WORKLINE_DIR}/events/events.jsonl")
-    return sorted(paths)
+    return sorted({path for path in (effect_path(effect) for effect in effects) if path is not None})
 
 
 # --------------------------------------------------------------------------- replan
