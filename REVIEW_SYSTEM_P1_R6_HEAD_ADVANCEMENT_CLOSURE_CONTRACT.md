@@ -1,24 +1,20 @@
 # Review System P1 — R6 HEAD Advancement / Review-Validity Closure Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 3 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the positive-proof contract for allowing an intervening HEAD advance without creating a new Review Candidate. It is non-normative until implemented and activated through canonical authority.
 
 ## 1. Live behavior confirmed
 
-The current Mutation Controller already has a Git-write compatibility fast path for a recorded commit whose base HEAD has advanced. `_head_advanced_independently()` allows the commit to remain UNAPPLIED when:
+The current Mutation Controller already has a Git-write compatibility fast path for a recorded commit whose base HEAD has advanced. `_head_advanced_independently()` allows the commit to remain UNAPPLIED when recorded base is an ancestor of current HEAD, branch matches, and intervening commits do not touch recorded paths.
 
-- recorded base is a valid ancestor of current HEAD;
-- current HEAD is still on the recorded branch;
-- `commits_touching(base, head, recorded_paths)` reports no intervening commit touching those paths.
+This proves path/Git-write compatibility only. It does not prove Review Context, Evidence, toolchain, Git transformation/external-process semantics, tests or semantic dependencies stayed unchanged.
 
-This is intentionally path/Git-write compatibility. It does not prove that Review Context, Evidence, toolchain, Git filters, tests, or semantic dependencies stayed unchanged.
-
-Candidate 7 therefore keeps that mechanism for write safety but requires an additional Review-validity proof before a reviewed Candidate/evidence may be reused across the HEAD advance.
+Candidate 7 therefore requires a separate Review-validity closure.
 
 ## 2. Frozen closure object
 
-Every frozen Review Candidate carries a versioned `ReviewValidityClosure` identity with at least these sections:
+Every frozen Review Candidate carries a versioned `ReviewValidityClosure` identity with at least:
 
 ```yaml
 version: 1
@@ -34,176 +30,126 @@ completeness_basis: ...
 digest: ...
 ```
 
-The closure is not just a list of changed paths. It is the positively justified set of material dependencies whose invariance is required to reuse Review/Evidence after HEAD moves.
-
-If any required section cannot prove completeness, the whole HEAD-advance fast path is `unknown` and a new Candidate is required.
+If any required section cannot prove completeness, HEAD-advance reuse is `unknown` and a new Candidate is required.
 
 ## 3. Repository dependency entries
 
-A repo-backed dependency records exact identity from the verified base tree, not merely worktree filename existence.
-
-For each material path, capture enough Git tree identity to distinguish at least:
-
-```text
-normalized repo-relative path
-Git entry mode
-git object type
-object ID / canonical tree entry identity
-absence/deletion
-```
-
-This covers regular executable/non-executable files, symlinks, gitlinks/submodules, and deletion. Case/path collision handling follows the Candidate Builder's normalized-path contract; inability to establish an unambiguous path identity makes completeness unknown.
-
-Actual implementation may use `git ls-tree`/plumbing helpers added to `gitcmd.py`; the proof source must be the commit tree, not mtime or a best-effort working-tree scan.
+Repo-backed material identities come from the verified Git tree and distinguish path, mode, object type/object ID and absence/deletion. Symlink, executable mode and gitlink semantics are preserved. Ambiguous path/case identity makes completeness unknown.
 
 ## 4. Closure classes
 
-At minimum, the Review-validity closure distinguishes:
+At minimum:
 
 ### A. ReviewedArtifact semantic dependencies
-
-Files/configuration whose semantics affect the reviewed artifact even when they are not Work-owned output paths.
+Material files/configuration affecting reviewed artifact meaning.
 
 ### B. Review Context provenance
-
-Canonical Requirement/Work/Phase/Roadmap/registry/Skill/spec inputs and any source used to build the Review Context.
+Requirement/Work/Phase/Roadmap/registry/Skill/spec and other Context sources.
 
 ### C. Evidence dependencies
-
-Tests, fixtures, helper code, build scripts, generated-input definitions, dependency manifests/lockfiles and other inputs declared by the Evidence adapter.
+Tests, fixtures, helpers, build/generated-input definitions, manifests and adapter-declared inputs.
 
 ### D. Effective Policy / verifier inputs
+Policy/profile/reviewer/check configuration and version identities.
 
-Policy/profile/check/reviewer configuration and version identities that determine which obligations were run or how they were judged.
-
-### E. Git persistence semantics
-
-Material Git settings/files that can transform or reinterpret persisted content.
+### E. Git persistence / commit execution semantics
+Material Git settings/files/process modes that can transform persisted content, change commit behavior, or cause pre-proof external side effects.
 
 ### F. Tool/runtime/dependency identities
+Interpreter/compiler/runtime/library/external identities.
 
-Interpreter/tool/compiler/runtime/library/external identities whose change can invalidate Evidence or Candidate semantics.
+R11 dependency completeness is reused here.
 
-R11 defines dependency-class completeness for Evidence; the same completeness discipline is reused here.
+## 5. Git semantics surface
 
-## 5. Git persistence semantics that must be considered
-
-The live repository currently exposes no first-class helper for all Git attribute/filter/hook identity, so P1 implementation must add positive inspection where supported and use `unknown` otherwise.
+P1 implementation must positively inspect applicable Git semantics and use `unknown` where completeness cannot be established.
 
 Material surface includes, when applicable:
 
-- tracked `.gitattributes` affecting Candidate/metadata paths;
-- repository-local `.git/info/attributes`;
-- configured global/system attributes source if it affects the repository;
-- `filter.*` clean/smudge/process definitions for applicable attributes;
-- line-ending/text settings materially affecting index/tree conversion (`core.autocrlf`, `core.eol`, related effective attributes);
-- symlink/filemode behavior where relevant;
-- `core.hooksPath` and the effective hooks that can mutate/refuse commit behavior;
-- repository-local hooks under the effective hook path when relevant;
-- submodule/gitlink identity for dependencies represented as gitlinks.
+- tracked `.gitattributes` affecting Candidate/Review paths;
+- `.git/info/attributes` and effective global/system attributes sources;
+- applicable `filter.*` clean/process definitions and LFS clean/process identity;
+- line-ending/text conversion settings (`core.autocrlf`, `core.eol`, effective attributes);
+- symlink/filemode behavior;
+- `core.hooksPath` and effective commit hooks;
+- hook suppression/containment mode used by Review-v1 commit execution;
+- commit signing configuration/program surfaces that the normal Git invocation could otherwise reach;
+- **Review-v1 commit-local signing mode = explicitly disabled (`--no-gpg-sign` equivalent) for contract version commit-local-v1**;
+- submodule/gitlink identity;
+- any other effective Git-configured external executable reachable by the exact staging/local-commit path.
 
-The implementation must not pretend completeness merely because these files/settings were not found by one path scan. It either establishes their effective identity or marks the relevant closure class unknown.
+Signing-disabled mode is not an incidental command-line detail. It is part of the Review-v1 Git persistence/commit-execution identity. A future signed Review-v1 contract is a different semantic version and does not reuse evidence/proof merely because tree bytes match.
 
-## 6. Uncommitted ambient state
+Surfaces that Git supports but the exact path cannot invoke (for example smudge-only filters or textconv under a plain add/commit path) need not be declared material unless configuration makes them reachable.
 
-HEAD advancement compatibility concerns intervening commits, but Evidence/Review may also depend on uncommitted ambient state. Candidate 7's isolated verification rule remains:
+## 6. External-process completeness
+
+For the Review-v1 staging/local-commit boundary, a complete closure must establish either:
 
 ```text
-final Evidence runs against Frozen Candidate in an isolated verification workspace
-+ declared Context inputs
+external executable/process is not reachable
+OR
+it is mechanically suppressed by the frozen commit contract
+OR
+it is mechanically contained/denied and its identity/containment basis is bound
 ```
 
-Therefore final Evidence must not silently inherit arbitrary dirty worktree/index/env inputs.
+An unclassified reachable external process makes Git semantics completeness unknown/fail-closed for commit execution.
 
-If an adapter intentionally declares a non-commit Context input, that input receives its own stable identity in the closure. Hidden ambient dependency makes completeness unknown.
+This applies before proof; no later tree equality can erase an uncontrolled pre-proof side effect.
 
-## 7. Positive fast-path decision
+## 7. Uncommitted ambient state
 
-Given verified base B and current HEAD H, Review/Evidence may be reused only if **both** layers pass:
+Final Evidence runs against the Frozen Candidate in isolated verification workspace + declared Context. Hidden ambient worktree/index/env dependency makes completeness unknown unless explicitly bound.
+
+## 8. Positive fast-path decision
+
+Review/Evidence reuse across B->H requires both:
 
 ### Layer 1 — Git-write compatibility
-
-Existing rules prove branch/lineage and operation-owned commit paths remain safely committable.
+Branch/lineage and operation-owned write safety pass.
 
 ### Layer 2 — Review-validity compatibility
 
 ```text
 closure.completeness == complete
-AND
-B is ancestor of H
-AND
-for every intervening changed dependency surface:
-    it is proven outside the complete material closure
-AND
-non-repo material identities bound by the closure are unchanged
+AND B ancestor of H
+AND intervening changed material surfaces are proven outside the complete closure
+AND non-repo bound identities unchanged
 ```
 
-Equivalent shorthand:
+Non-path identities are compared directly; they are not coerced into fake paths.
 
-```text
-intervening changed surfaces
-INTERSECT
-complete proven material closure
-=
-empty
-```
-
-The set operation is conceptual: non-path identities (runtime/policy/external/tool identities) are compared by their own identity proof, not coerced into fake paths.
-
-## 8. Unknown is not false
-
-Frozen fail-closed rule:
+## 9. Unknown is not false
 
 ```text
 cannot enumerate changed surface
 OR closure completeness unknown
-OR dependency identity cannot be compared
-OR Git semantic source cannot be resolved
+OR dependency identity uncomparable
+OR Git semantic/external-process source unresolved
 OR tool/external identity unavailable
 => Review-validity unknown
-=> new Candidate generation
+=> new Candidate / fresh proof as required
 ```
 
-No fallback of the form:
+Absence of discovered change is never proof of invariance.
 
-```text
-"we did not find a changed dependency, therefore unchanged"
-```
+## 10. New Candidate behavior
 
-is permitted.
+If semantic Review validity is unknown/invalid after HEAD advancement, freeze a new Candidate against H and reuse only Evidence whose own R11 completeness/invariance proof succeeds. Git conflicts remain reconcile territory; semantic drift alone normally creates a new Candidate.
 
-## 9. New Candidate behavior
+## 11. Merge/result commit boundary
 
-When Review-validity is unknown/invalid after HEAD advancement:
+Intervening merges may be handled only with complete changed-surface traversal. Review-v1 result/terminal commits themselves remain one-parent unless a future explicit contract changes that.
 
-```text
-new HEAD H
--> freeze new Candidate generation against H
--> recompute Candidate/Context identities
--> reuse only Evidence whose own R11 completeness/invariance proof succeeds
--> reacquire everything else
-```
+## 12. Closure digest and Review binding
 
-This is normal conservative behavior, not HUMAN and not reconcile by itself.
+Canonical closure digest is bound into Candidate/Review Context evidence identity and Gate/Receipt proof material. Definition/version changes invalidate prior automatic reuse.
 
-Reconcile is reserved for Git/ref/mutation facts that conflict or cannot safely resume; a semantically changed but otherwise valid HEAD simply creates a new Review Candidate.
+## 13. Round-3 repair disposition
 
-## 10. Merge/multiple-parent result commit boundary
-
-Intervening history may contain merges if the closure traversal can positively establish changed surfaces through all parents; current `commits_touching --full-history` already follows all parents for path checks.
-
-The **Review-v1 result commit itself** remains one-parent unless a future explicit contract adds merge-result semantics. If commit proof sees multiple parents for K1/K2 where one-parent is required, reconcile/stop; do not infer equivalence from tree equality.
-
-## 11. Closure digest and Review binding
-
-The closure's canonical serialization/digest is part of the Candidate/Review Context evidence identity and is bound into the Gate Generation/Receipt proof material.
-
-Changing the closure definition/version or discovering a previously unknown required dependency invalidates prior fast-path reuse; it does not retroactively rewrite historical completed operations.
-
-## 12. Architecture blocker / HUMAN
+P1R2-NF-02 is reflected here by making commit signing mode and the complete reachable external-process execution surface explicit Git-semantics dependencies. Review-v1 commit-local-v1 is unsigned by construction; a different signing contract is a new bound semantic version.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-The live Git layer needs additional inspection primitives, but Candidate 7 already defines the safe fallback: if completeness cannot be mechanically proven, create a new Candidate rather than weakening the gate.
