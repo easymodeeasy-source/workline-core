@@ -1,70 +1,115 @@
 # Review System P1 — R3 Gate Generation Mutation Contract Freeze
 
-Status: CONTRACT FROZEN / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / REPAIRED AFTER EXTERNAL REVIEW / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes how Candidate 7's minimum durable Review Gate generations enter canonical Project state. It is non-normative until implemented and routed through canonical authority.
 
 ## 1. Live facts inspected
 
-The live mutation model already gives every established-Project writer one top-level operation owner, one Project execution lock, and one durable mutation intent. Child registration cores join that mutation; they do not open another top-level controller.
+The live mutation model gives every established-Project writer one top-level operation owner, one Project execution lock, and one durable mutation intent. Child registration cores join that mutation; they do not open another progression controller.
 
-The lock serializes Project writers from the point state-changing operations read decisive Project state through mutation effects, validation, commit and push. `MutationController` decides no domain meaning; it records/replays the physical effects the operation owner decided.
+The lock serializes active Project writers while the process lives. Crash releases it. Therefore pending mutation scope, not the OS lock alone, must preserve cross-crash generation exclusivity.
 
-Candidate 7 requires Review to remain an authorization gate, not a second progression/lifecycle owner. Therefore P1 must not introduce a parallel Review lifecycle controller just to persist Review state.
+Candidate 7 requires Review to remain an authorization gate, not a second progression/lifecycle owner.
 
 ## 2. Frozen ownership rule
 
-**Canonical Review gate state is written by the top-level operation that is currently using the gate.**
+Canonical Review gate state is written by the top-level operation currently using the gate.
 
 Examples:
 
 ```text
-Roadmap planning Review -> Roadmap operation owns the mutation
-Phase-entry Review      -> Roadmap operation owns the mutation
-Work Formal Review      -> START owns the mutation
+Roadmap planning Review -> Roadmap mutation owner
+Phase-entry Review      -> Roadmap mutation owner
+Work Formal Review      -> START mutation owner
 Project Policy Review   -> future Project Policy Change owner
 Global Policy Review    -> future Global Policy Change owner
 ```
 
-There is no general `ReviewController` that may advance Roadmap/Phase/Work state.
+There is no standalone Review progression controller.
 
-P1 does not add a standalone `review-gate` progression operation.
+## 3. Crash-safe generation allocation / pending-mutation conflict
 
-## 3. Async reviewer/callback rule
-
-External reviewer/shadow callbacks do **not** directly write the Project while another operation owns the Project lock.
-
-The durable contract is:
+For every new Gate generation N+1, freeze this order:
 
 ```text
-1. parent operation durably records task acceptance in a new Gate generation
-2. external execution happens
-3. result is returned/retrieved by a Project operation holding the lock
-4. that operation validates task identity/result identity
-5. it durably records settlement/adjudication in a new Gate generation
-6. only then may authorization sealing/consumption proceed
+hold Project execution lock
+-> load/validate full immutable Gate chain
+-> determine exact N+1 canonical path
+-> open/resume the owning Mutation with that exact path already in initial WriteScope.files
+-> only then reserve IDs / record generation effects
 ```
 
-If the process exits after acceptance but before settlement, the canonical generation still says the task is accepted and unsettled. A later invocation must retrieve/re-run/reconcile the task; it cannot seal the generation by assuming the missing result was harmless.
+The N+1 path may not be added only later through `extend_scope()`.
 
-This is deliberately fail-closed and means a callback service does not need independent Project write authority.
+If implementation later needs a Review conflict resource that cannot be expressed as an exact path before mutation open, it must introduce a logical conflict-resource primitive whose pending-mutation overlap semantics are equivalent or stricter. It may not rely on Project lock lifetime alone.
 
-## 4. Immutable generation transition
-
-A gate transition never updates an existing generation file. It creates the next immutable generation file.
-
-Conceptual state transitions:
+This is the cross-process invariant:
 
 ```text
-G1 open: task T accepted
-G2 open: T settled, raw-report-set digest changed
+pending intent for G(N+1) durable
++ process crash / lock released
+-> later invocation sees/resumes/refuses against that pending conflict
+-> no second N+1/fork may be created
+```
+
+## 4. Async reviewer/callback rule
+
+External reviewer/shadow callbacks do not directly mutate canonical Project state.
+
+Durable sequence:
+
+```text
+1. parent operation writes accepted task identity/descriptor in a new Gate generation
+2. that generation reaches the required canonical Git persistence boundary
+3. external execution happens
+4. result is returned/retrieved by a Project operation holding the lock
+5. task identity/result identity are validated
+6. settlement/adjudication are written in a new Gate generation
+7. only then may sealing/consumption proceed
+```
+
+A process exiting after acceptance but before settlement leaves canonical task state accepted/unsettled. Authorization cannot infer success from missing runtime data.
+
+## 5. Clone-safe accepted task descriptor
+
+A Gate generation that records a task as accepted must carry, directly or through an immutable canonical task descriptor referenced by the generation, at least:
+
+```text
+task_id
+task_slot
+task_kind
+reviewer_or_adapter_identity
+reviewer_or_adapter_version
+request_digest
+candidate_hash
+review_context_hash
+effective_policy_hash
+accepted_generation
+```
+
+Provider/job handles may remain runtime-only. Losing `.workline/runtime/**` must not erase the task's identity or request binding. Canonical descriptor data must be sufficient to retrieve or rerun the task safely according to Effective Policy.
+
+A bare `rtk_*` ID is not clone-safe task evidence.
+
+Settlement must bind the same canonical task identity plus terminal disposition/result/adjudication digests.
+
+## 6. Immutable generation transition
+
+A gate transition never edits an existing generation file. It creates the next immutable generation file.
+
+Conceptual sequence:
+
+```text
+G1 open: T accepted
+G2 open: T settled / report-set changed
 G3 open: adjudication/repair obligation changed
-G4 sealed_authorized: all authorization obligations resolved
+G4 sealed_authorized: authorization obligations resolved
 ```
 
-Each generation contains the full minimum gate snapshot needed to decide authorization, not merely an event delta. This lets the latest valid generation stand on its own after validating its predecessor chain.
+Each generation is a full minimum snapshot, not merely an event delta.
 
-The exact record includes at least:
+Minimum record includes at least:
 
 ```yaml
 workline: workline-review-gate
@@ -84,60 +129,55 @@ coverage_digest: ...
 raw_report_set_digest: ...
 adjudication_digest: ...
 obligation_digest: ...
-accepted_task_ids: [...]
-settled_task_ids: [...]
+accepted_tasks: [...canonical descriptors/refs...]
+settled_tasks: [...terminal bindings...]
 status: open | sealed_authorized
 receipt_id: rcp_... | null
 ```
 
-Fields not yet meaningful for an early open generation use explicit null/empty canonical values rather than being silently omitted where omission would make two semantic states ambiguous.
+Generation predecessor digest follows R1's exact canonical-byte SHA-256 contract.
 
-## 5. Generation write stage
+## 7. Generation/Receipt write stage
 
-Within the owning mutation, a generation is persisted as an ordinary canonical `Effect.write_file()` to the exact R1 path:
+Within the owning mutation, each generation is persisted at:
 
 ```text
 .workline/review/gates/<review_run_id>/<generation:06d>.yaml
 ```
 
-The generation stage must be recorded before any later effect whose authority depends on that generation.
+using R1's immutable create-only Review writer.
 
-Example:
+A seal that first issues Receipt R1 records both immutable creates in one mutation stage:
 
 ```text
 stage review-gate-G4
-  write G4 sealed_authorized
-  write Receipt R1 (if this seal issues R1)
-
-apply stage
--> exact ReviewStore reread/validation
--> then later authorized operation stages
+  create immutable G4 sealed_authorized
+  create immutable Receipt R1
 ```
 
-Seal + newly issued Receipt are one mutation decision/stage where both are first created, so a crash cannot durably present a sealed generation that points to an unrecorded Receipt intent without the same mutation knowing the missing Receipt effect.
+All effects are durable intent before any is applied. Physical application may still be partial; resume completes only the missing exact effect.
 
-Physical writes can still be partial; Mutation recovery resumes the exact remaining effect.
+No consuming stage may rely on the seal until exact ReviewStore reread validates both facts.
 
-## 6. Open generation creation
+## 8. Open generation creation and task launch cutoff
 
-The first Review generation is written before any accepted async/mandatory task is launched if that task's existence matters to terminal authorization.
-
-Therefore:
+If task existence matters to terminal authorization:
 
 ```text
-reserve rr_X / task IDs
--> write G1 containing accepted task IDs
--> apply/commit canonical G1 as required by the operation's persistence boundary
--> launch/continue tasks
+reserve run/task IDs
+-> determine G1 path and open mutation with path in initial WriteScope
+-> write G1 with clone-safe accepted task descriptor
+-> persist/commit canonical G1 as required
+-> only then launch/continue external task
 ```
 
-An external task that was launched but never durably accepted does not count as a required pre-cutoff task. The orchestration must launch only after acceptance persistence succeeds when terminal-cutoff semantics depend on it.
+A task launched before durable canonical acceptance does not count as an accepted pre-cutoff task and must not silently enter the authorization set later.
 
-## 7. Settlement rule
+## 9. Settlement rule
 
-A task is `settled` only when the latest canonical Gate generation records its terminal disposition and the result/adjudication digests needed by that disposition.
+A task is settled only when the latest canonical generation records its terminal disposition and the report/adjudication/obligation digests required by that disposition.
 
-Terminal dispositions are versioned values, conceptually:
+Conceptual dispositions:
 
 ```text
 completed
@@ -146,51 +186,25 @@ cancelled
 timed_out
 ```
 
-Whether `failed/cancelled/timed_out` satisfies an authorization obligation is determined by Effective Policy; the status itself does not imply permission to seal.
+Effective Policy decides whether a non-completed disposition satisfies an obligation. Runtime result arrival alone does not settle anything.
 
-A raw report that may affect adjudication cannot be represented as settled merely because bytes arrived. The generation that counts the task settled must also bind the report-set/adjudication/obligation digests that reflect its disposition.
+## 10. Seal rule
 
-## 8. Seal rule
+A generation may be `sealed_authorized` only if canonical inputs prove all required tasks/coverage/adjudication/repair/reverification/HUMAN/Candidate/Context/Policy obligations resolved.
 
-A generation may become `sealed_authorized` only if all of the following hold from canonical inputs:
+The seal stage reserves/writes the Receipt ID defined by R2. No mutable `authorized=true` flag elsewhere exists.
 
-```text
-accepted required tasks == settled required tasks
-required reviewers complete
-coverage obligations resolved
-unadjudicated raw reports = 0
-unresolved HIGH/MID = 0
-required LOW handling complete
-required reverification complete
-no unresolved supported repair-induced blocker
-HUMAN pending = 0
-Candidate/Context/Policy identities current
-```
+## 11. Invalidation / supersession
 
-The seal stage reserves/writes the Receipt ID defined by R2. ReviewStore rereads both exact files before any consuming stage relies on them.
+A supported fact invalidating a seal before consumption creates a later `open` generation and supersession record before the old Receipt can proceed.
 
-No mutable `authorized=true` flag elsewhere exists.
+The repaired cross-crash generation serialization rule applies equally to invalidation generations.
 
-## 9. Invalidation / supersession
+Consumer always rechecks latest validated Gate chain and supersession immediately before consumption.
 
-If a new supported fact invalidates a previously sealed generation before its Receipt is consumed:
+## 12. Mutation invocation binding
 
-```text
-sealed G4 / Receipt R1
--> owning operation opens G5 (open) with new obligations
--> same mutation writes supersession record for R1
--> only after both are canonical may work continue toward a future seal
-```
-
-A consumer always rechecks latest Gate chain and supersession immediately before consumption. It never trusts a mutation note saying a Receipt used to be valid.
-
-If a later generation exists, the older generation is derived-superseded even if a separate Receipt supersession file is absent because no Receipt was issued for that older generation.
-
-## 10. Mutation invocation binding
-
-The owning mutation's invocation must bind the Review gate identity sufficiently to prevent a retry of a different Candidate/target from taking over a pending Review mutation.
-
-At minimum the Review-aware operation mutation/checkpoint binds:
+The owning mutation binds at least:
 
 ```text
 review_run_id
@@ -203,46 +217,46 @@ receipt_id when issued
 proof_phase
 ```
 
-Where the existing operation already has a durable request/design identity, Review binding augments it; it does not replace Roadmap/Phase/Work operation identity.
+Existing Roadmap/Phase/Work request identity remains authoritative and is augmented, not replaced.
 
-A mismatch on resume is reconcile or new Candidate/Review according to the owning operation's contract; never silently overwrite the pending record.
+Mismatch on resume is reconcile/new Candidate according to the owning operation contract; never silently overwrite pending Review intent.
 
-## 11. Git persistence boundary
+## 13. Git persistence boundary
 
-Open generations that must survive clone/process loss are canonical and therefore committed through the owning operation's exact Git path set. A Review gate must never claim clone-safe accepted/settled/sealed state while its only durable copy is an uncommitted runtime file.
+Any gate fact relied on after clone/process loss is canonical and must reach tracked local Git state before the dependent external/terminal boundary.
 
-The exact commit/push sequencing differs by operation kind and is frozen further in R5/P2/P6/P7. P1 common rule is:
+Remote-less Projects remain valid; clone-safe means canonical/tracked local state, not mandatory remote publication.
 
-```text
-canonical gate fact relied on after clone
-=> included in a proven local commit before the dependent external/terminal boundary
-```
+R1 committability preflight applies before first Review effect so canonical state is not created only to discover later that Git ignores it.
 
-Remote-less Projects remain valid; clone-safe means canonical/tracked local Git state, not mandatory existence of a remote.
+## 14. No second state machine authority
 
-## 12. No second state machine authority
-
-Review Gate generations form an authorization-state chain, but they do not derive Work/Phase/Roadmap lifecycle.
+Gate generations are authorization state only.
 
 Forbidden:
 
 ```text
-state.py sees sealed_authorized -> marks Work completed
-Review gate decides next Phase -> advances Roadmap
-callback writes work_completed directly
+state.py reads sealed_authorized -> Work complete
+Review chooses next Phase as lifecycle truth
+callback appends work_completed
 ```
 
 Allowed:
 
 ```text
-START asks ReviewStore whether exact Receipt is currently consumable
--> START, as lifecycle owner, decides/records its canonical terminal transition
+START/Roadmap queries exact current Review authorization
+-> operation owner records its own canonical transition
 ```
 
-## 13. Architecture blocker / HUMAN
+## 15. External-review repair disposition
+
+Accepted and repaired here:
+
+- Project lock alone is not generation serialization;
+- exact N+1 path belongs in initial pending `WriteScope`;
+- accepted async task descriptors are clone-safe canonical facts;
+- every generation transition uses the same repaired serialization discipline.
 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
-
-The existing Project lock + parent operation + Mutation recovery model is sufficient. P1 needs a Review orchestration layer and ReviewStore, not a competing progression controller.
