@@ -1,232 +1,113 @@
 # Review System P1 — Integration Contract Reconnaissance Checkpoint
 
-Status: R1-R12 CONTRACTS REPAIRED AFTER INDEPENDENT REVIEW / IMPLEMENTATION NOT STARTED / RE-REVIEW REQUIRED
+Status: ROUND 2 CONTRACT REPAIRS FROZEN / IMPLEMENTATION NOT STARTED / RE-REVIEW REQUIRED
 
-This checkpoint records the Candidate 7 P1 Integration Contract Reconnaissance and the accepted independent-review repairs.
+This checkpoint records Candidate 7 P1 Integration Contract Reconnaissance, first independent-review repair, and second independent-readiness repair.
 
-It is non-normative design/implementation-contract history until corresponding implementation and canonical authority updates are activated. Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code.
+Runtime authority remains `registry.md`, registry-routed canonical Skills and live code until implementation/activation.
 
-## 1. Baseline
-
-Candidate 7 readiness established:
-
-```text
-Architecture blockers: 0
-HUMAN decisions: 0
-Verdict: READY_FOR_P1
-```
-
-P1 reconnaissance then froze R1-R12 against live store/layout, Project Start/bootstrap, Mutation Controller, Project lock, Git helpers/finalization, IDs, validation, Roadmap/Phase planning identities, `ProjectView/state.py`, START completion/finalization and tests.
-
-An independent review then found no Candidate 7 architecture blocker and no HUMAN decision, but identified nine implementation-contract seams. Those findings were accepted.
-
-## 2. Independent review disposition
+## 1. Architecture baseline
 
 ```text
 Candidate 7 architecture: RETAIN
 Architecture blockers: 0
 HUMAN decisions: 0
 Candidate 8 required: No
-P1 contract before repair: REPAIR REQUIRED
-Implementation during repair: DO NOT START
 ```
 
-Accepted repair themes:
+Review remains a subordinate authorization/quality gate. `ProjectView/state.py` remains lifecycle/progression authority only from canonical entities/relations/events. Review metadata never becomes lifecycle truth.
 
-1. exact K1 recovery after commit succeeds but mutation `commit_id` save is interrupted;
-2. generation serialization must survive process-lock loss through pending mutation conflict scope;
-3. Review canonical writes need write-time no-follow/reparse/TOCTOU safety;
-4. accepted async task descriptors must be clone-safe;
-5. immutable Review records need create-only semantics;
-6. P3 review-v1 terminal event requires exactly one Consumption;
-7. PhaseEntry canonical self-selection must be Roadmap-owned, not adapter-owned;
-8. first Review write needs Git committability preflight;
-9. predecessor digest/test matrix needed exact byte/crash contracts.
+## 2. First independent review
 
-The umbrella repair is recorded in:
+Nine contract seams were accepted and repaired: K1 commit-ID crash recovery, generation serialization, no-follow writer safety, clone-safe task descriptor, immutable create-only records, terminal Consumption totality, Roadmap ownership of Phase-entry self-selection, Git committability preflight and canonical predecessor digest/test coverage.
+
+Umbrella checkpoint:
 
 `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_AFTER_EXTERNAL_REVIEW.md`
 
-## 3. Current R1-R12 status
+## 3. Second independent readiness review
 
-### R1 — Durable layout / loader / bootstrap
-
-`REVIEW_SYSTEM_P1_R1_DURABLE_LAYOUT_CONTRACT.md`
-
-Repaired/frozen:
-
-- lazy canonical `.workline/review/` layout retained;
-- runtime Review area remains non-authoritative;
-- immutable Review records use create-only semantics;
-- write-time lstat/no-follow containment and parent identity recheck required;
-- symlink/junction/reparse/TOCTOU redirection outside Project is refused;
-- first Review write requires Git committability preflight;
-- predecessor digest = SHA-256 of versioned canonical UTF-8/LF bytes;
-- `ReviewStore` remains separate from `ProjectView/state.py`.
-
-### R2 — IDs / reservation
-
-`REVIEW_SYSTEM_P1_R2_ID_RESERVATION_CONTRACT.md`
-
-Stable kinds remain:
+Second review result:
 
 ```text
-review_run         -> rr
-review_receipt     -> rcp
-review_consumption -> rcs
-review_task        -> rtk
+F1 K1 identity crash recovery       RESOLVED
+F2 generation serialization         PARTIAL -> P1R-01
+F3 write-time no-follow safety      RESOLVED
+F4 clone-safe async task            PARTIAL -> P1R-02
+F5 immutable create-only            RESOLVED
+F6 Consumption totality             PARTIAL -> P1R-03
+F7 Roadmap authority ownership      RESOLVED
+F8 Git committability preflight     RESOLVED
+F9 predecessor digest exactness     RESOLVED
+
+P1R-04 LOW improvement: accepted
+Verdict: REPAIR
 ```
 
-Repair:
+Round-2 umbrella checkpoint:
 
-- Project execution lock alone is not generation serialization;
-- exact next-generation path must be present in the mutation's initial `WriteScope.files` before effects/reservations;
-- late `extend_scope()` is not accepted as the cross-crash generation lock;
-- clone-safe task identity is completed by R3 canonical descriptors.
+`REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND2.md`
 
-### R3 — Gate Generation mutation contract
+## 4. Round-2 frozen repairs
 
-`REVIEW_SYSTEM_P1_R3_GATE_GENERATION_MUTATION_CONTRACT.md`
+### P1R-01 — same-run generation recovery
 
-Repaired/frozen:
-
-- top-level owner remains Roadmap/START/future Policy owner;
-- no Review progression controller;
-- every N+1 generation is allocated only after validating chain and opening/resuming a pending mutation whose initial WriteScope already contains exact N+1 path;
-- pending mutation provides cross-crash serialization after OS lock disappears;
-- accepted tasks carry clone-safe canonical descriptors: task ID/slot/kind, reviewer-or-adapter identity/version, request digest, Candidate/Context/Policy binding, accepted generation;
-- seal+Receipt remains one mutation decision/stage;
-- invalidation uses later open generation + supersession;
-- clone-safe gate facts reach tracked local Git state before dependent external/terminal boundaries.
-
-### R4 — Consumption logical uniqueness / totality
-
-`REVIEW_SYSTEM_P1_R4_CONSUMPTION_UNIQUENESS_CONTRACT.md`
-
-P1 common foundation:
+Every generation mutation declares in initial `WriteScope.files`:
 
 ```text
-Receipt -> 0 or 1 valid Consumption
-terminal_event_id -> 0 or 1 valid Consumption
+exact generation file path
++ .workline/review/gates/<review_run_id>/.generation-serialization
 ```
 
-P3 review-v1 activation additionally requires:
+The latter is scope-only, never a physical/canonical file. Before calculating a new generation, pending same-run generation mutations must be discovered and resumed/reconciled. Thus physical G(N+1) creation followed by crash before `applied` save cannot let a second invocation open G(N+2).
+
+Affected contracts: R2, R3, R12.
+
+### P1R-02 — exact clone-safe task reconstruction
+
+P1 adds immutable provenance:
 
 ```text
-review-v1 terminal event -> exactly one matching valid Consumption
+.workline/review/candidate-snapshots/<candidate_hash>.yaml
+.workline/review/task-inputs/<review_task_id>.yaml
 ```
 
-Only a matching pending terminal mutation may justify the transient state where E1 exists but C1 is not yet applied. Without matching pending recovery, the state is invalid/reconcile. `state.py` still derives lifecycle only from events.
+Accepted task launch requires exact Candidate/request reconstruction material, not merely IDs/digests. Fresh clone must reconstruct exact Candidate/request, recompute matching digests and reuse the same task ID. Missing/incomplete material fails closed.
 
-### R5 — START result commit / proof / push split
+Affected contracts: R1, R3, R12.
 
-`REVIEW_SYSTEM_P1_R5_START_COMMIT_PROOF_PUSH_CONTRACT.md`
+### P1R-03 — durable legacy/review-v1 terminal classification
 
-Topology retained:
+P3 adds immutable activation:
 
 ```text
-local K1
--> exact K1 identity
--> post-commit proof
--> authorized push K1
--> terminal event + Consumption
--> local K2
--> exact K2 proof
--> authorized push K2
+.workline/review/activation/work-terminal-v1.yaml
 ```
 
-Critical repair:
+It binds the exact pre-activation legacy event prefix using count + SHA-256 and activation base. Post-activation review-v1 `work_completed` events carry explicit non-lifecycle operation-contract metadata. Missing/unknown/contradictory marker after activation reconciles; never legacy fallback. `state.py` ignores Review event metadata.
 
-```text
-git commit succeeds
--> process crashes before commit_id/applied save
-```
+Affected contracts: R1, R4, R5, R12.
 
-Resume may backfill K only after positive proof of exact branch, one-parent/base relation, complete expected parent->tree delta, no extra post-commit commit, complete Git inspection and current Review identities. Only then is K durably backfilled and allowed to enter Review proof/push. Commit message never identifies K.
+### P1R-04 — hook/filter external side-effect guard
 
-R7 Class A depends on this exact commit-identity primitive.
+Review-v1 `commit_local()` must make no uncontrolled external/network side effect before proof. Applicable hooks/filters capable of external side effects must be mechanically denied/contained or commit fails closed. Content-defining filters cannot simply be disabled if doing so changes Git persistence semantics.
 
-### R6 — HEAD advancement closure
+Affected contracts: R5, R12; R6/R11 continue to bind Git/tool dependency identity.
 
-`REVIEW_SYSTEM_P1_R6_HEAD_ADVANCEMENT_CLOSURE_CONTRACT.md`
+## 5. Current contract documents
 
-No repair required. Positive-proof Review-validity closure remains frozen; unknown completeness means new Candidate rather than negative-search reuse.
+Round-2 changes are directly reflected in:
 
-### R7 — Class A `adopt_existing_local_commit`
+- `REVIEW_SYSTEM_P1_R1_DURABLE_LAYOUT_CONTRACT.md`
+- `REVIEW_SYSTEM_P1_R2_ID_RESERVATION_CONTRACT.md`
+- `REVIEW_SYSTEM_P1_R3_GATE_GENERATION_MUTATION_CONTRACT.md`
+- `REVIEW_SYSTEM_P1_R4_CONSUMPTION_UNIQUENESS_CONTRACT.md`
+- `REVIEW_SYSTEM_P1_R5_START_COMMIT_PROOF_PUSH_CONTRACT.md`
+- `REVIEW_SYSTEM_P1_R12_RECOVERY_INVARIANT_TEST_CONTRACT.md`
 
-`REVIEW_SYSTEM_P1_R7_CLASS_A_ADOPTION_CONTRACT.md`
+R6/R7/R8/R9/R10/R11 retain their previous repaired/frozen meaning unless explicitly referenced by the Round-2 checkpoint.
 
-Architecture retained. Implementation readiness is conditional on repaired R5 exact K1 identity reconstruction/backfill. Class A cannot adopt a merely plausible unrecorded commit identity.
-
-### R8 — Roadmap `PersistedProjectionAdapter`
-
-`REVIEW_SYSTEM_P1_R8_ROADMAP_PROJECTION_ADAPTER_CONTRACT.md`
-
-No repair required. Live `RoadmapPlan`, request identity, stable reservations, registration helpers, projection and canonical reload remain sufficient for semantic round-trip.
-
-### R9 — Phase Entry `PersistedProjectionAdapter`
-
-`REVIEW_SYSTEM_P1_R9_PHASE_ENTRY_PROJECTION_ADAPTER_CONTRACT.md`
-
-Repair:
-
-- canonical self-selection remains required for review-v1 planning;
-- the rule is owned by canonical Roadmap authority at P2 activation;
-- the adapter only verifies Roadmap-owned semantics and persisted round-trip;
-- legacy explicit-entry behavior remains unchanged before review-v1 activation;
-- Review metadata never becomes progression truth.
-
-### R10 — Project / Global Policy adapter hook
-
-`REVIEW_SYSTEM_P1_R10_POLICY_ADAPTER_HOOK_CONTRACT.md`
-
-No repair required. P1 freezes only common adapter/loader/version hooks; final Project/Global policy schemas and physical ownership remain P6/P7 reconnaissance work.
-
-### R11 — Evidence dependency-class adapter contract
-
-`REVIEW_SYSTEM_P1_R11_EVIDENCE_DEPENDENCY_CLASS_CONTRACT.md`
-
-No repair required. Unknown/uncovered dependencies remain non-reusable; same completeness discipline feeds R6.
-
-### R12 — Recovery / invariant tests
-
-`REVIEW_SYSTEM_P1_R12_RECOVERY_INVARIANT_TEST_CONTRACT.md`
-
-Expanded to require explicit tests for:
-
-- K1 commit success / commit-ID save interruption and positive reconstruction;
-- generation fork attempt after crash/lock release;
-- Review-path symlink/junction/reparse TOCTOU;
-- immutable create-only overwrite refusal;
-- clone-safe async task descriptor after runtime removal/fresh clone;
-- review-v1 terminal E1/C1 totality states;
-- first-write Git committability STOP-before-effect;
-- exact predecessor canonical-byte SHA-256 behavior;
-- R9 Roadmap-owned self-selection authority boundary.
-
-## 4. Cross-contract implementation shape after repair
-
-The implementation decomposition remains:
-
-```text
-A. ReviewStore + safe immutable canonical Review writer
-B. central Review ID extensions/reservation helpers
-C. crash-safe Gate generation + clone-safe task descriptors + Receipt orchestration
-D. common Consumption uniqueness foundation / P3 terminal totality hook
-E. commit-only / exact commit identity reconstruction / proof / push-only Git primitives
-F. complete Git tree-delta and Review-validity closure plumbing
-G. Class A adoption flow using proven K1 identity
-H. PersistedProjectionAdapter protocol
-I. Roadmap adapter
-J. Phase-entry adapter + Roadmap-owned review-v1 self-selection rule
-K. Policy adapter hook
-L. Evidence dependency completeness engine
-M. expanded interruption/recovery/invariant suite
-```
-
-P1 does not yet activate Work terminal Review gating; that remains P3.
-
-## 5. Current checkpoint
+## 6. Current state
 
 ```text
 Candidate 7 architecture: RETAIN
@@ -234,18 +115,20 @@ Architecture blockers: 0
 HUMAN decisions: 0
 Candidate 8 required: No
 
-Independent review findings: ACCEPTED
-P1 contract repairs: FROZEN
-R1-R12: REPAIRED/FROZEN where affected
+P1R-01: REPAIRED/FROZEN
+P1R-02: REPAIRED/FROZEN
+P1R-03: REPAIRED/FROZEN
+P1R-04: ACCEPTED/FROZEN
+
 P1 implementation: NOT STARTED
 Implementation activation: BLOCKED pending independent re-review
 ```
 
-## 6. Next stage
+## 7. Next stage
 
-Run a focused independent implementation-readiness re-review against the repaired contracts and live repo.
+Run another focused independent Implementation Readiness re-review against live `main` and the Round-2 repaired contracts.
 
-Final verdict must be one of:
+Allowed final verdicts:
 
 ```text
 REPAIR
@@ -253,4 +136,4 @@ HUMAN
 READY_FOR_P1_IMPLEMENTATION
 ```
 
-Only `READY_FOR_P1_IMPLEMENTATION` permits implementation to start.
+Only `READY_FOR_P1_IMPLEMENTATION` permits P1 implementation to start.
