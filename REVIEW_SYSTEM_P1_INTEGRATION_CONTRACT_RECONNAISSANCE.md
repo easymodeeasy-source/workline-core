@@ -1,14 +1,14 @@
 # Review System P1 — Integration Contract Reconnaissance Checkpoint
 
-Status: R1-R12 CONTRACTS FROZEN / IMPLEMENTATION NOT STARTED
+Status: R1-R12 CONTRACTS REPAIRED AFTER INDEPENDENT REVIEW / IMPLEMENTATION NOT STARTED / RE-REVIEW REQUIRED
 
-This checkpoint closes the Candidate 7 P1 Integration Contract Reconnaissance requested after `READY_FOR_P1`.
+This checkpoint records the Candidate 7 P1 Integration Contract Reconnaissance and the accepted independent-review repairs.
 
-It is non-normative design/implementation-contract history until the corresponding implementation and canonical authority updates are activated. Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code.
+It is non-normative design/implementation-contract history until corresponding implementation and canonical authority updates are activated. Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code.
 
 ## 1. Baseline
 
-Candidate 7 readiness checkpoint established:
+Candidate 7 readiness established:
 
 ```text
 Architecture blockers: 0
@@ -16,39 +16,59 @@ HUMAN decisions: 0
 Verdict: READY_FOR_P1
 ```
 
-P1 reconnaissance then inspected the live store/layout, Project Start/bootstrap, Mutation Controller, Project execution lock, Git helpers/finalization, IDs, validation, Roadmap/Phase planning identities, `ProjectView/state.py`, START completion/finalization, and current tests.
+P1 reconnaissance then froze R1-R12 against live store/layout, Project Start/bootstrap, Mutation Controller, Project lock, Git helpers/finalization, IDs, validation, Roadmap/Phase planning identities, `ProjectView/state.py`, START completion/finalization and tests.
 
-The purpose was not to create Candidate 8, but to freeze exact implementation contracts where live code determines the safe shape.
+An independent review then found no Candidate 7 architecture blocker and no HUMAN decision, but identified nine implementation-contract seams. Those findings were accepted.
 
-## 2. Frozen contract documents
+## 2. Independent review disposition
+
+```text
+Candidate 7 architecture: RETAIN
+Architecture blockers: 0
+HUMAN decisions: 0
+Candidate 8 required: No
+P1 contract before repair: REPAIR REQUIRED
+Implementation during repair: DO NOT START
+```
+
+Accepted repair themes:
+
+1. exact K1 recovery after commit succeeds but mutation `commit_id` save is interrupted;
+2. generation serialization must survive process-lock loss through pending mutation conflict scope;
+3. Review canonical writes need write-time no-follow/reparse/TOCTOU safety;
+4. accepted async task descriptors must be clone-safe;
+5. immutable Review records need create-only semantics;
+6. P3 review-v1 terminal event requires exactly one Consumption;
+7. PhaseEntry canonical self-selection must be Roadmap-owned, not adapter-owned;
+8. first Review write needs Git committability preflight;
+9. predecessor digest/test matrix needed exact byte/crash contracts.
+
+The umbrella repair is recorded in:
+
+`REVIEW_SYSTEM_P1_CONTRACT_REPAIR_AFTER_EXTERNAL_REVIEW.md`
+
+## 3. Current R1-R12 status
 
 ### R1 — Durable layout / loader / bootstrap
 
 `REVIEW_SYSTEM_P1_R1_DURABLE_LAYOUT_CONTRACT.md`
 
-Frozen:
+Repaired/frozen:
 
-```text
-.workline/review/
-  gates/<review_run_id>/<generation:06d>.yaml
-  receipts/<receipt_id>.yaml
-  consumptions/<consumption_id>.yaml
-  supersessions/<superseded_receipt_id>.yaml
-```
-
-- canonical Review layout is lazy; Project Start does not create empty directories/manifests;
-- `.workline/runtime/review/` may hold scratch only and is never gate truth/evidence/authorization by itself;
-- Gate generations are immutable chain files;
-- stored generation state is `open | sealed_authorized`; superseded status is derived from a later valid generation rather than rewriting immutable old files;
-- dedicated `ReviewStore`, separate from `ProjectView/state.py`;
-- `validate_project()` gains separate Review structural validation;
-- existing Projects without Review namespace remain valid and become Review-capable lazily.
+- lazy canonical `.workline/review/` layout retained;
+- runtime Review area remains non-authoritative;
+- immutable Review records use create-only semantics;
+- write-time lstat/no-follow containment and parent identity recheck required;
+- symlink/junction/reparse/TOCTOU redirection outside Project is refused;
+- first Review write requires Git committability preflight;
+- predecessor digest = SHA-256 of versioned canonical UTF-8/LF bytes;
+- `ReviewStore` remains separate from `ProjectView/state.py`.
 
 ### R2 — IDs / reservation
 
 `REVIEW_SYSTEM_P1_R2_ID_RESERVATION_CONTRACT.md`
 
-Frozen stable kinds:
+Stable kinds remain:
 
 ```text
 review_run         -> rr
@@ -57,278 +77,180 @@ review_consumption -> rcs
 review_task        -> rtk
 ```
 
-- use central `ids.py` and existing `Mutation.reserve_id()`;
-- generation is integer chain state, not ULID;
-- Candidate/Context/Policy/etc identities are digests, not allocated IDs;
-- Receipt/task/Consumption reservation keys are deterministic and retry-stable;
-- no callback-side/random stable ID later adopted by canonical state.
+Repair:
+
+- Project execution lock alone is not generation serialization;
+- exact next-generation path must be present in the mutation's initial `WriteScope.files` before effects/reservations;
+- late `extend_scope()` is not accepted as the cross-crash generation lock;
+- clone-safe task identity is completed by R3 canonical descriptors.
 
 ### R3 — Gate Generation mutation contract
 
 `REVIEW_SYSTEM_P1_R3_GATE_GENERATION_MUTATION_CONTRACT.md`
 
-Frozen:
+Repaired/frozen:
 
-- Review gate writes are owned by the top-level operation using Review (Roadmap, START, future Policy owner), not a second progression controller;
-- async callbacks do not directly mutate Project state;
-- accepted task is canonical before launch when cutoff semantics depend on it;
-- result is ingested under the Project lock and becomes settled only through a new immutable Gate generation;
-- seal + newly issued Receipt are one mutation decision/stage;
-- a new invalidating fact creates a later open generation and supersedes old Receipt before consumption;
-- only `sealed_authorized` generation may issue/retain consumable authorization;
-- canonical gate fact relied on after clone must reach canonical/tracked local Git state before the dependent boundary.
+- top-level owner remains Roadmap/START/future Policy owner;
+- no Review progression controller;
+- every N+1 generation is allocated only after validating chain and opening/resuming a pending mutation whose initial WriteScope already contains exact N+1 path;
+- pending mutation provides cross-crash serialization after OS lock disappears;
+- accepted tasks carry clone-safe canonical descriptors: task ID/slot/kind, reviewer-or-adapter identity/version, request digest, Candidate/Context/Policy binding, accepted generation;
+- seal+Receipt remains one mutation decision/stage;
+- invalidation uses later open generation + supersession;
+- clone-safe gate facts reach tracked local Git state before dependent external/terminal boundaries.
 
-### R4 — Consumption uniqueness
+### R4 — Consumption logical uniqueness / totality
 
 `REVIEW_SYSTEM_P1_R4_CONSUMPTION_UNIQUENESS_CONTRACT.md`
 
-Frozen:
+P1 common foundation:
 
 ```text
-one Receipt -> at most one valid Consumption
-Work terminal event ID -> at most one valid Consumption
+Receipt -> 0 or 1 valid Consumption
+terminal_event_id -> 0 or 1 valid Consumption
 ```
 
-- stable physical Consumption ID + ReviewStore logical indexes/cardinality;
-- exact tuple replay idempotent; conflicts reconcile;
-- superseded Receipt cannot be newly consumed;
-- Work terminal stage orders AuthorizedTransition effects before Consumption metadata effect;
-- physical partial application is recovered through existing Mutation intent;
-- Planning/Policy use kind-specific binding, no fake Work terminal event.
+P3 review-v1 activation additionally requires:
+
+```text
+review-v1 terminal event -> exactly one matching valid Consumption
+```
+
+Only a matching pending terminal mutation may justify the transient state where E1 exists but C1 is not yet applied. Without matching pending recovery, the state is invalid/reconcile. `state.py` still derives lifecycle only from events.
 
 ### R5 — START result commit / proof / push split
 
 `REVIEW_SYSTEM_P1_R5_START_COMMIT_PROOF_PUSH_CONTRACT.md`
 
-Live finding: current `gitops.finalize()` couples local commit and optional push in one stage; START therefore cannot currently insert Review proof between them.
-
-Frozen Review-v1 topology:
+Topology retained:
 
 ```text
 local K1
--> post-commit artifact/metadata/scope/Review-validity proof
+-> exact K1 identity
+-> post-commit proof
 -> authorized push K1
--> terminal event + Consumption stage
--> local K2 terminal commit
--> exact transition/metadata/scope proof
+-> terminal event + Consumption
+-> local K2
+-> exact K2 proof
 -> authorized push K2
--> postcheck / mutation complete
 ```
 
-- normal K1 contains ReviewedArtifact + sealed Gate/Receipt metadata;
-- no-result Work still gets metadata-only authorization K1;
-- Receipt does not contain containing commit SHA; Consumption later binds K1;
-- K2 deterministic terminal transition/metadata commit needs proof but no new Receipt;
-- add commit-only and push-only recoverable Git helper boundaries;
-- explicit legacy vs review-v1 activation remains required.
+Critical repair:
+
+```text
+git commit succeeds
+-> process crashes before commit_id/applied save
+```
+
+Resume may backfill K only after positive proof of exact branch, one-parent/base relation, complete expected parent->tree delta, no extra post-commit commit, complete Git inspection and current Review identities. Only then is K durably backfilled and allowed to enter Review proof/push. Commit message never identifies K.
+
+R7 Class A depends on this exact commit-identity primitive.
 
 ### R6 — HEAD advancement closure
 
 `REVIEW_SYSTEM_P1_R6_HEAD_ADVANCEMENT_CLOSURE_CONTRACT.md`
 
-Frozen `ReviewValidityClosure` covers:
-
-- ReviewedArtifact semantic dependencies;
-- Review Context provenance;
-- Evidence dependencies;
-- Effective Policy/verifier inputs;
-- Git persistence semantics (`.gitattributes`, filters/config, hooks, line-ending/mode/symlink/gitlink semantics as applicable);
-- tool/runtime/dependency identities.
-
-Positive reuse requires:
-
-```text
-Git-write compatibility PASS
-AND complete Review-validity closure
-AND intervening changed material surfaces proven disjoint
-AND non-repo material identities unchanged
-```
-
-Any unprovable completeness/identity -> new Candidate, never negative-search inference.
+No repair required. Positive-proof Review-validity closure remains frozen; unknown completeness means new Candidate rather than negative-search reuse.
 
 ### R7 — Class A `adopt_existing_local_commit`
 
 `REVIEW_SYSTEM_P1_R7_CLASS_A_ADOPTION_CONTRACT.md`
 
-Frozen:
-
-- K1 exact operation-made one-parent object;
-- complete parent->K1 delta operation-owned;
-- branch/lineage exact;
-- while HEAD exactly K1, configured destination `push_dry_run` is used conservatively:
-  - `=` => already published; not normal Class A;
-  - new/fast-forward => may continue;
-  - rejection/unknown => reconcile;
-- exact K1 becomes Candidate C2 and is independently authorized by R2;
-- R2/supersession stored in deterministic metadata-only child K2;
-- K2 no domain/transition delta, no recursive Receipt; mismatch -> reconcile;
-- only after exact K2 proof is branch pushed.
+Architecture retained. Implementation readiness is conditional on repaired R5 exact K1 identity reconstruction/backfill. Class A cannot adopt a merely plausible unrecorded commit identity.
 
 ### R8 — Roadmap `PersistedProjectionAdapter`
 
 `REVIEW_SYSTEM_P1_R8_ROADMAP_PROJECTION_ADAPTER_CONTRACT.md`
 
-Frozen semantic round-trip reuses live `RoadmapPlan`, `roadmap_request_identity()`, stable reservations, registration helpers, `ProjectView.with_effects()` and fresh `ProjectView.load()`.
-
-PASS requires reviewed normalized Roadmap/Phase/relation semantics to equal reconstructed canonical semantics using exact created IDs, plus exact physical commit-delta proof and structure validation.
-
-Request identity alone is not semantic proof.
+No repair required. Live `RoadmapPlan`, request identity, stable reservations, registration helpers, projection and canonical reload remain sufficient for semantic round-trip.
 
 ### R9 — Phase Entry `PersistedProjectionAdapter`
 
 `REVIEW_SYSTEM_P1_R9_PHASE_ENTRY_PROJECTION_ADAPTER_CONTRACT.md`
 
-Frozen round-trip covers normal Works, integration, optional confirmation, Related, planned/requires edges and affiliation using exact reservations and canonical reload.
+Repair:
 
-Important live seam discovered:
-
-```text
-PhaseEntryDesign.entry
-```
-
-currently affects immediate selection/return but is not persisted as canonical plan state. Review metadata is forbidden from becoming progression truth.
-
-Therefore review-v1 Phase design is frozen to be **canonically self-selecting**:
-
-- the persisted graph itself must leave zero/one unique first Work as appropriate;
-- explicit `entry` cannot be the sole mechanism resolving a canonical ambiguity;
-- when supplied, `entry` must equal the unique Work the canonical graph selects;
-- legacy behavior remains until P2 activation.
-
-This closes the seam without adding a second state source or Candidate 8 architecture change.
+- canonical self-selection remains required for review-v1 planning;
+- the rule is owned by canonical Roadmap authority at P2 activation;
+- the adapter only verifies Roadmap-owned semantics and persisted round-trip;
+- legacy explicit-entry behavior remains unchanged before review-v1 activation;
+- Review metadata never becomes progression truth.
 
 ### R10 — Project / Global Policy adapter hook
 
 `REVIEW_SYSTEM_P1_R10_POLICY_ADAPTER_HOOK_CONTRACT.md`
 
-Frozen common protocol responsibilities only:
-
-```text
-scope identity
-loader/schema/default identity
-normalize reviewed before/after
-expected persisted projection
-canonical reload
-normalized semantic equality
-```
-
-P1 deliberately does not invent Project Policy path/schema, Global root Policy path/schema, physical owners or root maintenance primitives. Those are P6/P7 live-contract decisions. Unimplemented Policy Review kind fails explicitly; no fallback to `project.yaml` or generic dictionary persistence.
+No repair required. P1 freezes only common adapter/loader/version hooks; final Project/Global policy schemas and physical ownership remain P6/P7 reconnaissance work.
 
 ### R11 — Evidence dependency-class adapter contract
 
 `REVIEW_SYSTEM_P1_R11_EVIDENCE_DEPENDENCY_CLASS_CONTRACT.md`
 
-Frozen vocabulary v1 minimum classes:
-
-```text
-repository_files
-filesystem_external
-environment
-subprocess
-network
-clock
-randomness
-locale
-dynamic_libraries
-runtime_toolchain
-hardware
-external_service
-cache_state
-git_state
-```
-
-Coverage mode per required class:
-
-```text
-observed | pinned | denied | unknown
-```
-
-Complete only where the required-class declaration itself is closed and every required class is mechanically accounted for. Unknown -> no cross-Candidate reuse. Same manifest feeds R6 Review-validity proof.
+No repair required. Unknown/uncovered dependencies remain non-reusable; same completeness discipline feeds R6.
 
 ### R12 — Recovery / invariant tests
 
 `REVIEW_SYSTEM_P1_R12_RECOVERY_INVARIANT_TEST_CONTRACT.md`
 
-Frozen activation test matrix covers:
+Expanded to require explicit tests for:
 
-- lazy canonical layout / malformed chains / ID reservation;
-- accepted/settled/sealed Gate interruption windows;
-- seal + Receipt partial stage;
-- terminal event + Consumption partial stage/cardinality;
-- K1 local commit / proof / push windows;
-- R6 closure reuse/invalidation;
-- Class A K1 already-remote / K2 mismatch / no recursion;
-- Roadmap semantic round-trip fault injection;
-- Phase semantic round-trip including ephemeral-entry ambiguity rejection;
-- generic Policy adapter harness;
-- Evidence dependency coverage;
-- clone/runtime cleanup;
-- authority boundary: Review metadata never changes `state.py` lifecycle.
+- K1 commit success / commit-ID save interruption and positive reconstruction;
+- generation fork attempt after crash/lock release;
+- Review-path symlink/junction/reparse TOCTOU;
+- immutable create-only overwrite refusal;
+- clone-safe async task descriptor after runtime removal/fresh clone;
+- review-v1 terminal E1/C1 totality states;
+- first-write Git committability STOP-before-effect;
+- exact predecessor canonical-byte SHA-256 behavior;
+- R9 Roadmap-owned self-selection authority boundary.
 
-P1/P2/P3 activation gates require the corresponding interruption/fault-injection tests, not happy path alone.
+## 4. Cross-contract implementation shape after repair
 
-## 3. Cross-contract implementation shape now frozen
-
-The P1 implementation can now be decomposed without another architecture-review cycle:
+The implementation decomposition remains:
 
 ```text
-A. ReviewStore + canonical record render/load/validation
+A. ReviewStore + safe immutable canonical Review writer
 B. central Review ID extensions/reservation helpers
-C. Gate Generation + Receipt orchestration under parent operation owner
-D. common Consumption model/cardinality loader
-E. Git commit-only / proof / push-only primitives
-F. complete commit-delta/tree-entry and Review-validity closure plumbing
-G. Class A adoption flow
+C. crash-safe Gate generation + clone-safe task descriptors + Receipt orchestration
+D. common Consumption uniqueness foundation / P3 terminal totality hook
+E. commit-only / exact commit identity reconstruction / proof / push-only Git primitives
+F. complete Git tree-delta and Review-validity closure plumbing
+G. Class A adoption flow using proven K1 identity
 H. PersistedProjectionAdapter protocol
 I. Roadmap adapter
-J. Phase-entry adapter with review-v1 canonical self-selection guard
-K. Policy adapter hook (no concrete policy store yet)
-L. Evidence dependency manifest/completeness engine
-M. synthetic/recovery/invariant test suite
+J. Phase-entry adapter + Roadmap-owned review-v1 self-selection rule
+K. Policy adapter hook
+L. Evidence dependency completeness engine
+M. expanded interruption/recovery/invariant suite
 ```
 
-P1 itself still does **not** activate Work terminal Review gating; that remains P3 after common infrastructure and tests exist.
+P1 does not yet activate Work terminal Review gating; that remains P3.
 
-## 4. Live code changes required later (not performed in reconnaissance)
-
-Likely implementation surfaces now identified:
+## 5. Current checkpoint
 
 ```text
-src/workline/store.py          ReviewStore/path integration or adjacent review_store module
-src/workline/validate.py       separate Review structural validation
-src/workline/ids.py            rr/rcp/rcs/rtk kinds
-src/workline/mutation.py       sanctioned stage commit ID/proof checkpoint access as needed
-src/workline/gitops.py         commit-only / push-only Review-v1 primitives
-src/workline/gitcmd.py         complete tree/delta/attributes/config/hook inspection primitives
-src/workline/roadmap.py        adapter hooks + review-v1 self-selecting Phase guard at P2
-src/workline/start.py          Review-v1 commit/proof/push + terminal Consumption at P3
-registry/canonical Skills      activation/authority text only when implementation is ready
-new Review modules/tests       common Review domain/store/orchestration/adapters
-```
-
-This list is implementation targeting, not permission to update canonical authority before behavior exists.
-
-## 5. Architecture/HUMAN result
-
-After R1-R12 live reconnaissance:
-
-```text
-Architecture blockers: None
-HUMAN decisions required: None
+Candidate 7 architecture: RETAIN
+Architecture blockers: 0
+HUMAN decisions: 0
 Candidate 8 required: No
+
+Independent review findings: ACCEPTED
+P1 contract repairs: FROZEN
+R1-R12: REPAIRED/FROZEN where affected
+P1 implementation: NOT STARTED
+Implementation activation: BLOCKED pending independent re-review
 ```
-
-The only notable newly exposed live seam was PhaseEntryDesign `entry` not being canonical persisted state. It is resolved as an implementation-contract restriction for `review-v1`: canonical relations/state must independently determine the same first Work, so Review metadata never becomes progression authority.
-
-No finding requires changing Candidate 7's core authority/lifecycle architecture.
 
 ## 6. Next stage
 
+Run a focused independent implementation-readiness re-review against the repaired contracts and live repo.
+
+Final verdict must be one of:
+
 ```text
-Candidate 7 architecture: frozen for implementation
-P1 Integration Contract Reconnaissance: COMPLETE
-R1-R12 contracts: FROZEN
-P1 implementation: NOT STARTED
+REPAIR
+HUMAN
+READY_FOR_P1_IMPLEMENTATION
 ```
 
-Next work is P1 implementation against these frozen contracts, beginning with common storage/ID/Gate/ReviewStore foundations and their invariant tests before any Review-v1 planning or START gate activation.
+Only `READY_FOR_P1_IMPLEMENTATION` permits implementation to start.
