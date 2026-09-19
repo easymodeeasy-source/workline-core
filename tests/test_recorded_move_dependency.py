@@ -23,10 +23,15 @@ shows that move: this mutation resumed, its derivations proven, the Work still
 carrying its target, the move the last derivation of the cycle, its
 registration the last stage recorded and exactly the one the move decides, each
 relation under the ID reserved for it and held by the Project exactly so. A
-dependency the Project held before, one another decision or another subject
-added, a record that cannot show the move, and a cycle that does not end in one
-are checked exactly as before; a stage that is not the move's registration is
-``reconcile required`` and nothing of the cycle runs.
+dependency the Project held before, one another subject added, and a record that
+cannot show the move are checked exactly as before; a stage that is not the
+move's registration is ``reconcile required`` and nothing of the cycle runs.
+
+BL-051 made the same rule the cycle's, not only the move's: every proven
+registration of the continued cycle - one that kept the target as much as the
+move - is its own, so the two tests at the end of ``MoveTests`` that pinned the
+BL-049 boundary now pin the cycle's (``tests/test_current_cycle_dependency_resume.py``
+holds the rest).
 """
 
 from __future__ import annotations
@@ -677,17 +682,27 @@ class MoveTests(MoveCase):
                 pending = self.interrupt(make, self.moving(waits=False))
                 self.assertMovedOnce(self.moving(waits=False)(), pending, relations)
 
-    def test_a_dependency_another_decision_registered_is_not_the_move_s(self) -> None:
-        """W1 first derived Fix1 and decided to wait for it, then moved to Fix2: only Fix2's is the move's own."""
+    def test_a_dependency_an_earlier_derivation_of_the_cycle_registered_is_its_own_too(self) -> None:
+        """W1 first derived Fix1 and decided to wait for it, then moved to Fix2. BL-049 counted Fix1's dependency as
+        another decision's and stopped; since BL-051 both are the cycle's own, and the move finishes from its record."""
         fix1 = st.DerivedWork("Fix1", "Fix1 done", derivation_detail="why Fix1")
         fix2 = st.DerivedWork("Fix2", "Fix2 done", derivation_detail="why Fix2")
         script = {("W1", 1): st.Derive({"fix1": fix1}, relations=(RelationSpec("requires_completion", "fix1", self.w1),)),
                   ("W1", 2): st.Derive({"fix2": fix2}, relations=(RelationSpec("requires_completion", "fix2", self.w1),), move=True)}
         call = lambda: st.start(self.store, self.w1, "single-work", by_attempt(self.ran, dict(script), default=completing_executor(self.store)))  # noqa: E731
-        self.interrupt(lambda: after_applying(rf"^{self.w1}:derive:1$"), call)
-        refused = self.assertStoppedUntouched(call, "dependency_unsatisfied")
-        self.assertIn(self.named("Fix1")[0], str(refused))
-        self.assertNotIn(self.named("Fix2")[0], str(refused))
+        pending = self.interrupt(lambda: after_applying(rf"^{self.w1}:derive:1$"), call)
+        decided = self.display(self.w1)
+        result, _, stages = self.watching(call)
+        self.assertEqual((result.status, result.mutation_id), ("moved", pending["mutation_id"]))
+        # nothing is registered again: only the removal and Git stages (the replay of Fix1's derivation commits the
+        # move's registration it finds uncommitted, the replay's own way), the move's commit last
+        self.assertEqual([stage for stage in stages if not stage.startswith("commit:")], [f"{self.w1}:lifecycle:1"])
+        self.assertEqual(self.subjects()[0], f"chore(workline): branch from {decided}")
+        self.assertEqual(self.ran, ["W1#1", "W1#2"])  # neither derivation is decided again
+        self.assertEqual((len(self.named("Fix1")), len(self.named("Fix2")), self.derivation_files()), (1, 1, 2))
+        self.assertTrue({("requires_completion", "Fix1", "W1"), ("requires_completion", "Fix2", "W1")} <= set(self.relations()))
+        self.assertEqual(self.events(self.w1), MOVED)
+        self.assertEqual((self.pending(), self.dirty(), self.head()), ([], [], self.remote_head()))
 
     def test_a_dependency_a_work_is_opened_with_still_stops_it(self) -> None:
         """The precheck of a cycle opened here is the one it always was."""
@@ -696,18 +711,23 @@ class MoveTests(MoveCase):
         self.assertEqual(refused.exception.code, "dependency_unsatisfied")
         self.assertEqual((self.ran, self.pending()), ([], []))
 
-    def test_a_derivation_that_does_not_move_is_not_left_out(self) -> None:
-        """Not covered by this change, and pinned so the boundary stays visible: a derivation that keeps the target
-        and makes its Work wait for its fix, then a question wait - the answer's resume stops as it always did."""
+    def test_a_derivation_that_does_not_move_is_its_cycle_s_own_too(self) -> None:
+        """A derivation that keeps the target and makes its Work wait for its fix, then a question wait. BL-049 left
+        this boundary out and the answer's resume stopped on that dependency with nothing interrupted; since BL-051
+        the resume continues the same cycle at its next attempt, and the answer's move ends it as it would have."""
         fix = st.DerivedWork("Fix", "Fix done", derivation_detail="why Fix")
         script = {("W1", 1): st.Derive({"fix": fix}, relations=(RelationSpec("requires_completion", "fix", self.w1),)),
                   ("W1", 2): st.QuestionWait("which way?")}
         asked = st.start(self.store, self.w1, "single-work", by_attempt(self.ran, dict(script), default=completing_executor(self.store)))
         self.assertEqual(asked.status, "question_wait")
         answer = {("W1", 2): st.Derive({"other": st.DerivedWork("Other", "o done", derivation_detail="why")}, move=True)}
-        call = lambda: st.start(self.store, self.w1, "single-work", by_attempt(self.ran, answer, default=completing_executor(self.store)))  # noqa: E731
-        refused = self.assertStoppedUntouched(call, "dependency_unsatisfied")
-        self.assertIn(self.named("Fix")[0], str(refused))
+        result = st.start(self.store, self.w1, "single-work", by_attempt(self.ran, answer, default=completing_executor(self.store)))
+        self.assertEqual((result.status, result.mutation_id), ("moved", asked.mutation_id))
+        self.assertEqual(self.ran, ["W1#1", "W1#2", "W1#2"])  # the answer is asked of attempt 2, Fix is not derived again
+        self.assertEqual((len(self.named("Fix")), len(self.named("Other")), self.derivation_files()), (1, 1, 2))
+        self.assertIn(("requires_completion", "Fix", "W1"), self.relations())  # the dependency itself stays
+        self.assertEqual(self.events(self.w1), MOVED)
+        self.assertEqual((self.pending(), self.dirty(), self.head()), ([], [], self.remote_head()))
 
 
 if __name__ == "__main__":

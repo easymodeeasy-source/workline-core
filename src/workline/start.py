@@ -481,10 +481,12 @@ class _Session:
                 raise StopError(f"Phase {phase.id} is {view.phase_lifecycle(phase.id)}", code="phase_inactive")
             if view.roadmap_lifecycle(phase.roadmap_id or "") != ACTIVE:
                 raise StopError(f"Roadmap {phase.roadmap_id} is {view.roadmap_lifecycle(phase.roadmap_id or '')}", code="roadmap_inactive")
-        # A move this cycle decided may have made the Work wait for the Works it moves to; that
-        # is checked before the Work is run again, not before the move's own removal of the
-        # target. Only those relations, shown to be that move's, are left out (BL-049).
-        own = _own_move_dependencies(self.mutation, view, work, cycle)
+        # A derivation this cycle decided may have made the Work wait for the Works it derived;
+        # that is checked where the Work is next entered or completes, not between the attempts
+        # of the cycle that decided it - nor before a move's own removal of the target (BL-049).
+        # Continuing that same cycle, only those relations, shown to be its own, are left out
+        # (BL-051).
+        own = _own_cycle_dependencies(self.mutation, view, work, cycle)
         unsatisfied = [
             (relation, label) for relation, label in view.unsatisfied_dependencies(work_id)
             if own.get(relation.id) != relation.to_record()
@@ -1469,7 +1471,7 @@ def _derivation_registration(
     Project without the effects its own recorded stage applied
     (:meth:`_Session._derive`). Registering a derivation and showing that a
     recorded stage is the registration it decides both build it here
-    (:func:`_own_move_dependencies`), so the two cannot come apart.
+    (:func:`_own_cycle_dependencies`), so the two cannot come apart.
     """
     phase_id = work.phase_id
     roadmap_id = view.phases[phase_id].roadmap_id if phase_id else None
@@ -2661,10 +2663,11 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
       is.
 
     Whether each recorded stage is the registration its derivation decides is
-    shown where it is registered again (:func:`_refuse_unmatched_registration`),
-    against the specs and relations that derivation makes. Where it may be
-    replayed at all is the Mutation Controller's to say (``rules/git``: Commit /
-    push).
+    shown against the specs and relations that derivation makes
+    (:func:`_recorded_registration`): where it is registered again, and - for
+    the cycle a resume continues - already before that cycle's dependency
+    precheck (:func:`_own_cycle_dependencies`). Where it may be replayed at all
+    is the Mutation Controller's to say (``rules/git``: Commit / push).
     """
     note = mutation.note(_DERIVATIONS)
     if note is None:
@@ -2809,67 +2812,121 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
     return _ProvenMove(last.work_id, last.moved_by, committed, last.display)
 
 
-def _own_move_dependencies(
+def _own_cycle_dependencies(
     mutation: Mutation, view: ProjectView, work: Entity, cycle: tuple[_ProvenDerivation, ...]
 ) -> dict[str, dict[str, Any]]:
-    """The ``requires_completion`` into ``work`` that the move its continued cycle decided registered itself, by ID.
+    """The ``requires_completion`` into ``work`` that the derivations of the cycle it continues registered, by ID.
 
-    A derivation that removes its Work's target - a temporary move, a human
-    confirmation judged NG - may register, with the Works it moves to, a
-    ``requires_completion`` from one of them into the moving Work: the NG
-    always does, from the re-integration it plans, and a move does whenever its
-    executor decides that the Work waits for its fix. That dependency is what
-    the Work waits for before it is run again (``skills/start``: Temporary move,
-    Human confirmation NG). Uninterrupted, the cycle goes from the registration
-    straight to the removal of the target with no dependency checked in
-    between, since the Work is not run again there. A resume stopped in that gap
-    continues the same cycle and replays the same move from the record
-    (BL-046), but it enters the cycle through the precheck that guards running a
-    Work - which met the move's own new dependency first and stopped, on every
-    retry, while the record left pending held off every other operation that
-    could satisfy it (BL-049).
+    A derivation may register, with the Works it decides, a
+    ``requires_completion`` from one of them into the deriving Work itself: a
+    human confirmation judged NG always does, from the re-integration it plans,
+    and any other derivation does whenever its executor decides that the Work
+    waits for what it derived - whether it keeps the target or removes it
+    (``skills/start``: Derived / fix Work). That dependency is checked where the
+    Work is next entered and where it completes, never between the attempts of
+    the cycle that registered it: uninterrupted, a derivation that keeps the
+    target goes straight on to the next attempt of that same cycle, and one that
+    removes it goes straight on to that removal. A resume of the cycle - after a
+    question wait as much as after an interruption - continues it from the
+    record (BL-046), but it enters the cycle through the precheck that guards
+    running a Work, which met the cycle's own dependency first and stopped, on
+    every retry, while the record left pending held off every other operation
+    that could satisfy it: a move stopped before its removal of the target
+    (BL-049), and a derivation that kept the target, or any earlier derivation of
+    the cycle, with nothing interrupted at all (BL-051).
 
-    So that precheck leaves out exactly these relations, and only when all of
-    it is shown: the run resumes this mutation; the derivations it replays were
-    proven from its record (:func:`_derivations_to_reuse`, which also holds the
-    branch each was decided on); the Work still carries the target of the cycle
-    they belong to (:meth:`_Session._cycle_derivations`); the last of them
-    removed the target; its registration stage is recorded and is the last
-    stage the record holds, so the removal is not recorded yet; and that stage
-    is the registration this move decides, compared exactly, with every relation
-    under the ID reserved for it (:func:`_recorded_registration`). What is left
-    out is a ``requires_completion`` into this Work that the stage registered,
-    and only while the Project holds it exactly so (:meth:`_Session.run_work`).
-    A dependency the Project held before, one another decision or another
-    subject added, and every dependency of a cycle that is opened here or does
-    not end in such a move are checked exactly as before.
+    So that precheck leaves out exactly these relations, and only when all of it
+    is shown:
 
-    A stage that is not the registration its move decides is refused here, as
-    the replay would refuse it, before anything of the cycle runs. A move whose
-    registration cannot be rebuilt on this Project at all proves nothing, and
-    the precheck stands.
+    * the run resumes this mutation, and the Work still carries the target of
+      the cycle it continues;
+    * the derivations it replays were proven from its record
+      (:func:`_derivations_to_reuse`, which also holds the branch each was
+      decided on) and are that cycle's (:meth:`_Session._cycle_derivations`);
+    * after the lifecycle stage that opened the cycle, the record holds nothing
+      but the cycle's registrations, in order, and Git stages
+      (:func:`_continues_cycle`);
+    * each registration stage of the cycle is the registration its derivation
+      decides, compared exactly, with every relation under the ID reserved for it
+      (:func:`_recorded_registration`), proven in the order the replay proves
+      them.
+
+    What is left out is a ``requires_completion`` into this Work that one of
+    those registrations added, and only while the Project holds it exactly so
+    (:meth:`_Session.run_work`). Nothing is done to the relation itself: the
+    Work completes only once it is satisfied (:func:`completion_precheck`), and
+    once the cycle has ended - its target removed - every later entry into the
+    Work checks it as before. A dependency the Project held before, one a
+    person, another decision or another subject added, every dependency of a
+    cycle opened here, and every dependency of a record that cannot show its
+    cycle are checked exactly as before.
+
+    A stage that is not the registration its derivation decides is refused
+    here, as the replay would refuse it, before anything of the cycle runs. A
+    registration that cannot be rebuilt on this Project at all proves nothing,
+    and the precheck stands.
     """
     if not cycle or not mutation.resumed:
-        return {}
-    move = cycle[-1]
-    effects = mutation.effects
-    if not (move.outcome.move and move.recorded and move.work_id == work.id and effects and effects[-1]["stage"] == move.stage):
         return {}
     state = view.work_state(work.id)
     if state.state != IN_PROGRESS or not state.has_target:
         return {}
-    applied = [effect for effect in mutation.stage_effects(move.stage) if effect.get("applied")]
-    try:
-        _require_registrable(move.outcome)
-        specs, relations = _derivation_registration(view, _own_effects_free_view(view, applied), work, move.outcome)
-    except StopError:
+    recorded = [derivation for derivation in cycle if derivation.recorded]
+    if not recorded or any(derivation.work_id != work.id for derivation in recorded):
         return {}
-    _, registered = _recorded_registration(mutation, move.stage, specs, relations)
-    return {
-        relation.id: relation.to_record()
-        for relation in registered
-        if relation.type == "requires_completion" and relation.to == work.id
-    }
+    if not _continues_cycle(mutation, work.id, recorded):
+        return {}
+    own: dict[str, dict[str, Any]] = {}
+    for derivation in recorded:
+        applied = [effect for effect in mutation.stage_effects(derivation.stage) if effect.get("applied")]
+        try:
+            _require_registrable(derivation.outcome)
+            specs, relations = _derivation_registration(
+                view, _own_effects_free_view(view, applied), work, derivation.outcome
+            )
+        except StopError:
+            return {}
+        _, registered = _recorded_registration(mutation, derivation.stage, specs, relations)
+        for relation in registered:
+            if relation.type == "requires_completion" and relation.to == work.id:
+                own[relation.id] = relation.to_record()
+    return own
+
+
+def _continues_cycle(mutation: Mutation, work_id: str, recorded: list[_ProvenDerivation]) -> bool:
+    """Whether the record shows the cycle ``recorded`` belong to still going on, holding nothing but what it decided.
+
+    Right after the lifecycle stage that opened that cycle - one that only
+    opens the Work's execution (``mutation._decides``) - the record holds the
+    cycle's registrations in the order its derivations were decided, and
+    otherwise only Git stages: the commits that carry them, the last one's not
+    recorded yet, or recorded by a replay - over a change it then refused
+    (``rules/git``: Commit / push), or carrying a later registration of the
+    same cycle. A Git stage decides nothing. Anything else - a lifecycle stage
+    that removed the target, held, cancelled or completed the Work, a result, a
+    registration no kept decision names, a stage between the opening and the
+    first registration - is not that cycle going on, and shows nothing.
+    """
+    effects = mutation.effects
+    stages: list[str] = []
+    for effect in effects:
+        if effect["stage"] not in stages:
+            stages.append(effect["stage"])
+    first = stages.index(recorded[0].stage)
+    opening = stages[first - 1] if first else None
+    if (
+        opening is None
+        or not opening.startswith(f"{work_id}:lifecycle:")
+        or _decides([effect for effect in effects if effect["stage"] == opening])
+    ):
+        return False
+
+    def git_stage(name: str) -> bool:
+        return name.startswith("commit:") and all(
+            effect["kind"] in ("git_commit", "git_push") for effect in effects if effect["stage"] == name
+        )
+
+    return [name for name in stages[first:] if not git_stage(name)] == [derivation.stage for derivation in recorded]
 
 
 def _recorded_registration(
