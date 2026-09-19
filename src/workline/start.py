@@ -474,13 +474,21 @@ class _Session:
         # A derivation belongs to the cycle that decided it, and a cycle runs with the Work
         # carrying its target. One opened here is a new cycle, which decides its own.
         opening = not (state.state == IN_PROGRESS and state.has_target)
+        cycle = () if opening else self._cycle_derivations(work_id)
         phase = view.phases.get(work.phase_id) if work.phase_id else None
         if phase is not None:
             if view.phase_lifecycle(phase.id) != ACTIVE:
                 raise StopError(f"Phase {phase.id} is {view.phase_lifecycle(phase.id)}", code="phase_inactive")
             if view.roadmap_lifecycle(phase.roadmap_id or "") != ACTIVE:
                 raise StopError(f"Roadmap {phase.roadmap_id} is {view.roadmap_lifecycle(phase.roadmap_id or '')}", code="roadmap_inactive")
-        unsatisfied = view.unsatisfied_dependencies(work_id)
+        # A move this cycle decided may have made the Work wait for the Works it moves to; that
+        # is checked before the Work is run again, not before the move's own removal of the
+        # target. Only those relations, shown to be that move's, are left out (BL-049).
+        own = _own_move_dependencies(self.mutation, view, work, cycle)
+        unsatisfied = [
+            (relation, label) for relation, label in view.unsatisfied_dependencies(work_id)
+            if own.get(relation.id) != relation.to_record()
+        ]
         if unsatisfied:
             raise StopError(
                 f"Work {work_id} has unresolved requires_completion: " + ", ".join(f"{r.from_id} ({label})" for r, label in unsatisfied),
@@ -511,7 +519,6 @@ class _Session:
         elif state.state == IN_PROGRESS and not state.has_target:
             self._lifecycle(work, ["work_target_added"])
 
-        cycle = () if opening else self._cycle_derivations(work_id)
         attempt = 0
         while True:
             attempt += 1
@@ -1060,13 +1067,7 @@ class _Session:
         *,
         moved_by: str = "derive",
     ) -> dict[str, str]:
-        if not outcome.works and outcome.integration is None:
-            raise ValidationError("Derive without Works")
-        for key in outcome.works:
-            if key == "integration":
-                raise ValidationError("reserved Work key: integration")
-        phase_id = work.phase_id
-        roadmap_id = view.phases[phase_id].roadmap_id if phase_id else None
+        _require_registrable(outcome)
         # A derivation replayed from the record is decided again on the Project it was
         # decided on: the resume applied this very stage before the cycle ran, so an
         # integration it registered must not be counted as one that was already there.
@@ -1074,56 +1075,7 @@ class _Session:
         judged = view if recorded is None else _own_effects_free_view(
             view, [effect for effect in self.mutation.stage_effects(recorded) if effect.get("applied")]
         )
-        specs: dict[str, WorkSpec] = {}
-        relations: list[RelationSpec] = []
-        for key, derived in outcome.works.items():
-            specs[key] = WorkSpec(
-                derived.name,
-                derived.desired_state,
-                phase_id=phase_id,
-                roadmap_id=roadmap_id,
-                work_kind=derived.work_kind,
-                confirmation_target=derived.confirmation_target,
-                related=tuple(derived.related),
-                derivation_detail=derived.derivation_detail,
-            )
-            relations.append(RelationSpec("derived", work.id, key))
-            if derived.return_to:
-                relations.append(RelationSpec("return_to", key, work.id))
-        normal_keys = [k for k, d in outcome.works.items() if d.work_kind is None]
-        if phase_id is not None:
-            unfinished = judged.unfinished_integrations(phase_id)
-            if len(unfinished) >= 2:
-                raise SpecViolation(f"Phase {phase_id} has {len(unfinished)} unfinished integrations: structural anomaly, STOP")
-            if outcome.integration is not None:
-                if unfinished:
-                    raise SpecViolation("an unfinished integration already exists; START must not create another")
-                specs["integration"] = WorkSpec(
-                    outcome.integration.name,
-                    outcome.integration.desired_state,
-                    phase_id=phase_id,
-                    roadmap_id=roadmap_id,
-                    work_kind="phase_integration_check",
-                    related=tuple(outcome.integration.related),
-                    derivation_detail=outcome.integration.derivation_detail,
-                )
-                relations.append(RelationSpec("derived", work.id, "integration"))
-                for key in normal_keys:
-                    if outcome.works[key].before_integration:
-                        relations.append(RelationSpec("requires_completion", key, "integration"))
-            elif normal_keys:
-                if len(unfinished) == 1:
-                    for key in normal_keys:
-                        if outcome.works[key].before_integration:
-                            relations.append(RelationSpec("requires_completion", key, unfinished[0].id))
-                else:
-                    raise StopError(
-                        f"Phase {phase_id} has no unfinished integration; START must design a re-integration for the new Work(s)",
-                        code="reintegration_required",
-                    )
-        elif outcome.integration is not None:
-            raise SpecViolation("standalone Works have no phase integration")
-        relations += list(outcome.relations)
+        specs, relations = _derivation_registration(view, judged, work, outcome)
         # The registration writes relation files, and which ones is known only now,
         # from what the executor returned. A change that was there before this
         # operation in one of them is refused here, before a Work, a derivation
@@ -1162,7 +1114,7 @@ class _Session:
         # replan's registration is (:func:`ops.apply_replan`): it is shown to be the
         # registration this derivation decides, its reservations give the Work IDs, and the
         # resume has already applied its effects.
-        work_ids = _recorded_registration(self.mutation, recorded, specs, relations)
+        work_ids, _ = _recorded_registration(self.mutation, recorded, specs, relations)
         after = _structure_or_stop(self.store, "derivation replay postcheck")
         for work_id in work_ids.values():
             if after.works.get(work_id) is None:
@@ -1495,6 +1447,83 @@ _DERIVED_FIELDS = {
 }
 _CONTESTED_FIELDS = {"path", "content", "mode"}
 _REFUSED_FIELDS = {"version", "work_id", "overlap", "outcome", "contested"}
+
+
+def _require_registrable(outcome: Derive) -> None:
+    """Refuse a derivation that names no Work, or names one under the key its re-integration is registered as."""
+    if not outcome.works and outcome.integration is None:
+        raise ValidationError("Derive without Works")
+    for key in outcome.works:
+        if key == "integration":
+            raise ValidationError("reserved Work key: integration")
+
+
+def _derivation_registration(
+    view: ProjectView, judged: ProjectView, work: Entity, outcome: Derive
+) -> tuple[dict[str, WorkSpec], list[RelationSpec]]:
+    """The Works and relations ``outcome`` registers for ``work``: the registration that derivation decides.
+
+    ``judged`` is the Project the derivation's own rules - the integration
+    invariant and the re-integration - are judged on: the Project as it is for
+    a derivation being decided, and for one replayed from the record the
+    Project without the effects its own recorded stage applied
+    (:meth:`_Session._derive`). Registering a derivation and showing that a
+    recorded stage is the registration it decides both build it here
+    (:func:`_own_move_dependencies`), so the two cannot come apart.
+    """
+    phase_id = work.phase_id
+    roadmap_id = view.phases[phase_id].roadmap_id if phase_id else None
+    specs: dict[str, WorkSpec] = {}
+    relations: list[RelationSpec] = []
+    for key, derived in outcome.works.items():
+        specs[key] = WorkSpec(
+            derived.name,
+            derived.desired_state,
+            phase_id=phase_id,
+            roadmap_id=roadmap_id,
+            work_kind=derived.work_kind,
+            confirmation_target=derived.confirmation_target,
+            related=tuple(derived.related),
+            derivation_detail=derived.derivation_detail,
+        )
+        relations.append(RelationSpec("derived", work.id, key))
+        if derived.return_to:
+            relations.append(RelationSpec("return_to", key, work.id))
+    normal_keys = [k for k, d in outcome.works.items() if d.work_kind is None]
+    if phase_id is not None:
+        unfinished = judged.unfinished_integrations(phase_id)
+        if len(unfinished) >= 2:
+            raise SpecViolation(f"Phase {phase_id} has {len(unfinished)} unfinished integrations: structural anomaly, STOP")
+        if outcome.integration is not None:
+            if unfinished:
+                raise SpecViolation("an unfinished integration already exists; START must not create another")
+            specs["integration"] = WorkSpec(
+                outcome.integration.name,
+                outcome.integration.desired_state,
+                phase_id=phase_id,
+                roadmap_id=roadmap_id,
+                work_kind="phase_integration_check",
+                related=tuple(outcome.integration.related),
+                derivation_detail=outcome.integration.derivation_detail,
+            )
+            relations.append(RelationSpec("derived", work.id, "integration"))
+            for key in normal_keys:
+                if outcome.works[key].before_integration:
+                    relations.append(RelationSpec("requires_completion", key, "integration"))
+        elif normal_keys:
+            if len(unfinished) == 1:
+                for key in normal_keys:
+                    if outcome.works[key].before_integration:
+                        relations.append(RelationSpec("requires_completion", key, unfinished[0].id))
+            else:
+                raise StopError(
+                    f"Phase {phase_id} has no unfinished integration; START must design a re-integration for the new Work(s)",
+                    code="reintegration_required",
+                )
+    elif outcome.integration is not None:
+        raise SpecViolation("standalone Works have no phase integration")
+    relations += list(outcome.relations)
+    return specs, relations
 
 
 def _derive_ledgers(specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> list[str]:
@@ -2780,10 +2809,74 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
     return _ProvenMove(last.work_id, last.moved_by, committed, last.display)
 
 
+def _own_move_dependencies(
+    mutation: Mutation, view: ProjectView, work: Entity, cycle: tuple[_ProvenDerivation, ...]
+) -> dict[str, dict[str, Any]]:
+    """The ``requires_completion`` into ``work`` that the move its continued cycle decided registered itself, by ID.
+
+    A derivation that removes its Work's target - a temporary move, a human
+    confirmation judged NG - may register, with the Works it moves to, a
+    ``requires_completion`` from one of them into the moving Work: the NG
+    always does, from the re-integration it plans, and a move does whenever its
+    executor decides that the Work waits for its fix. That dependency is what
+    the Work waits for before it is run again (``skills/start``: Temporary move,
+    Human confirmation NG). Uninterrupted, the cycle goes from the registration
+    straight to the removal of the target with no dependency checked in
+    between, since the Work is not run again there. A resume stopped in that gap
+    continues the same cycle and replays the same move from the record
+    (BL-046), but it enters the cycle through the precheck that guards running a
+    Work - which met the move's own new dependency first and stopped, on every
+    retry, while the record left pending held off every other operation that
+    could satisfy it (BL-049).
+
+    So that precheck leaves out exactly these relations, and only when all of
+    it is shown: the run resumes this mutation; the derivations it replays were
+    proven from its record (:func:`_derivations_to_reuse`, which also holds the
+    branch each was decided on); the Work still carries the target of the cycle
+    they belong to (:meth:`_Session._cycle_derivations`); the last of them
+    removed the target; its registration stage is recorded and is the last
+    stage the record holds, so the removal is not recorded yet; and that stage
+    is the registration this move decides, compared exactly, with every relation
+    under the ID reserved for it (:func:`_recorded_registration`). What is left
+    out is a ``requires_completion`` into this Work that the stage registered,
+    and only while the Project holds it exactly so (:meth:`_Session.run_work`).
+    A dependency the Project held before, one another decision or another
+    subject added, and every dependency of a cycle that is opened here or does
+    not end in such a move are checked exactly as before.
+
+    A stage that is not the registration its move decides is refused here, as
+    the replay would refuse it, before anything of the cycle runs. A move whose
+    registration cannot be rebuilt on this Project at all proves nothing, and
+    the precheck stands.
+    """
+    if not cycle or not mutation.resumed:
+        return {}
+    move = cycle[-1]
+    effects = mutation.effects
+    if not (move.outcome.move and move.recorded and move.work_id == work.id and effects and effects[-1]["stage"] == move.stage):
+        return {}
+    state = view.work_state(work.id)
+    if state.state != IN_PROGRESS or not state.has_target:
+        return {}
+    applied = [effect for effect in mutation.stage_effects(move.stage) if effect.get("applied")]
+    try:
+        _require_registrable(move.outcome)
+        specs, relations = _derivation_registration(view, _own_effects_free_view(view, applied), work, move.outcome)
+    except StopError:
+        return {}
+    _, registered = _recorded_registration(mutation, move.stage, specs, relations)
+    return {
+        relation.id: relation.to_record()
+        for relation in registered
+        if relation.type == "requires_completion" and relation.to == work.id
+    }
+
+
 def _recorded_registration(
     mutation: Mutation, stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]
-) -> dict[str, str]:
-    """The Work IDs a recorded registration stage reserved, once it is shown to be the one this derivation decides.
+) -> tuple[dict[str, str], list[Relation]]:
+    """The Work IDs a recorded registration stage reserved, and its relations under theirs, once it is shown to be
+    the one this derivation decides.
 
     A derivation replayed from the record is not registered again - that would
     validate Works that now exist and count a recorded integration twice - so
@@ -2792,7 +2885,9 @@ def _recorded_registration(
     each Work's frontmatter and whole body, the derivation details and the
     relation payloads are compared exactly, in the order the stage records them,
     with each Work's display taken from the stage that recorded it rather than
-    renumbered from the Works a Project holds now (BL-045).
+    renumbered from the Works a Project holds now (BL-045). The relations come
+    back exactly as that comparison proved them: the ones the decision makes,
+    under the IDs reserved for them.
     """
     recorded = mutation.stage_effects(stage)
 
@@ -2827,7 +2922,7 @@ def _recorded_registration(
             f"START mutation {mutation.id} holds a {stage!r} stage other than the registration the derivation it "
             "decided makes; nothing is replayed and the record is left as it is: reconcile required"
         )
-    return work_ids
+    return work_ids, resolved
 
 
 def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:

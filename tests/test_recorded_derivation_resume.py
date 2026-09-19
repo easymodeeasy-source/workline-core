@@ -553,8 +553,8 @@ class HumanConfirmationTests(WorklineTestCase):
         return [w.id for w in ProjectView.load(self.store).works.values() if w.name == name]
 
     def ng_windows(self) -> dict:
-        """Every window from the NG's target removal on; before it, the resume is blocked by the
-        confirmation's own new dependency on the re-integration, exactly as it is without this change."""
+        """Every window from the NG's target removal on. The windows before it - where the confirmation
+        already depends on its own new re-integration - are BL-049's (``test_recorded_move_dependency.py``)."""
         return {
             "removal recorded": lambda: before_recording(r"^commit:0$"),
             "commit recorded": lambda: after_recording(r"^commit:0$"),
