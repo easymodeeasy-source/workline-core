@@ -221,12 +221,18 @@ class UnchangedTests(FinalizedCase):
             with self.subTest(move=label, owner=owner):
                 self.world(f"same-{index}", owner)
                 call, pending = self.committed(owner)
+                made = self.head()
                 move()
                 executed: list[str] = []
 
                 self.counting(call, executed)
 
                 self.assertEqual(executed, ["git_push"])
+                if label == "grew by an independent commit":
+                    # the push publishes the commit this mutation made, not the person's commit on top of it (BL-050)
+                    self.assertEqual(git(self.remote_path(self.name), "rev-parse", "main").strip(), made)
+                    self.assertEqual(self.parent(self.head()), made)
+                    git(self.root, "push", "-q", "origin", "main:main")  # the person publishes their own commit
                 self.assertFinalizedHere(pending)
 
     def test_a_branch_that_holds_the_commit_goes_on_as_before(self) -> None:
@@ -300,7 +306,8 @@ class KnownResidualTests(FinalizedCase):
         path.write_text(yamlish.dump(record), encoding="utf-8")
 
     def test_a_commit_recorded_without_a_branch_is_left_to_the_rules_it_always_had(self) -> None:
-        """L-1: no branch is inferred and no new stop is added; on another branch the old write-then-stop remains."""
+        """L-1: no branch is inferred; on another branch the old write-then-stop remains. On its own branch the commit is
+        recognized as it always was, and its push, which cannot name that commit, stops before pushing (BL-050)."""
         with self.subTest(retried_on="another branch"):
             self.world("legacy-other", "phase hold")
             call, pending = self.committed("phase hold")
@@ -313,11 +320,17 @@ class KnownResidualTests(FinalizedCase):
             self.assertNotIn(WRITTEN_AGAIN, stopped.exception.message)
             self.assertEqual(self.dirty(), [f" M {EVENT_LOG}"])
         with self.subTest(retried_on="its own branch"):
+            # the commit is still recognized as it always was; its push cannot name it, and pushes nothing (BL-050 L1)
             self.world("legacy-same", "phase hold")
             call, pending = self.committed("phase hold")
             self.strip_commit_branch(pending)
-            self.assertEqual(call().status, "phase_held")
-            self.assertFinalizedHere(pending)
+            remote = git(self.remote_path(self.name), "rev-parse", "main").strip()
+            with self.assertRaises(StopError) as stopped:
+                call()
+            self.assertEqual(stopped.exception.code, "reconcile_required")
+            self.assertIn("cannot show which commit it publishes", stopped.exception.message)
+            self.assertEqual(git(self.remote_path(self.name), "rev-parse", "main").strip(), remote)
+            self.assertEqual([p["mutation_id"] for p in MutationController(self.store).list_pending()], [pending["mutation_id"]])
 
     def test_a_rewritten_recorded_branch_is_left_to_the_commit_id(self) -> None:
         """The recorded branch itself no longer holds the commit: BL-037's unreachable ID decides, not this rule."""

@@ -369,6 +369,8 @@ STARTが記録したcommit（成果commit、finalization commit等）を作る�
 
 remoteあり通常Projectでは最終Work結果をremoteへ反映する。remoteなしはlocal commitでよい。
 
+記録したpushが公開するのは、そのGit段階のcommitとその土台の履歴だけで、question waitや中断の間に人などが同じbranchへ積んだcommitは、そのpushでは公開しない。後のWorkやstageがその上に自分のcommitを作った場合だけ、そのcommitの履歴として公開される（`rules/git` のPush destination）。
+
 pushする場合の宛先は `rules/git` のpush destinationに従う。START開始前、mutationを開くより前、networkへ触れるより前に承認先一致を検査し、承認先なし / 不一致 / 解決不能はdomain writeの前にSTOPする。承認先をSTART側で変更しない。
 
 ### 成果commit message

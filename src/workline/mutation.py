@@ -22,6 +22,11 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   the same durable save that records it applied, and on the branch it was
   recorded on it is recognized by that ID alone, never by its message
   (:func:`_made_commit_held`);
+* a recorded push publishes the commit its own Git stage made, by that ID, and
+  nothing a later commit put on the branch: it is classified by where that
+  commit stands at the destination and pushed as that commit alone, and a push
+  whose commit cannot be shown that way is not made
+  (:func:`_recorded_publication`);
 * every write to a Project file records what the path held before it and what it
   wrote there, and a path is written again, and committed, only while it still
   holds exactly that: owning the path is not owning the bytes, so a change
@@ -261,6 +266,11 @@ class Effect:
         the destination instead of following the remote name to wherever it
         points by then — and, because it is compared as text, a differently
         spelled locator is a change, not a match.
+
+        What it publishes is not in the payload: it is the commit recorded right
+        before it in the same Git stage, by the ID the Mutation Controller
+        recorded making it (:func:`_recorded_publication`) - never ``branch`` as
+        it is when the push runs.
         """
         return Effect("git_push", {"remote": remote, "branch": branch, "locator": locator})
 
@@ -432,7 +442,9 @@ class Mutation:
         and an effect already applied that a recorded commit finalizes is not
         written again off that commit's branch (:func:`_require_finalized_branch`).
         A commit made here is recorded with its ID in the same save that records
-        it applied (:func:`_make_commit`).
+        it applied (:func:`_make_commit`). A push made here publishes exactly the
+        commit its Git stage made, whatever the branch holds by then
+        (:func:`_publish`).
 
         A write happens only while its file still holds what this mutation left
         there, or what it recorded finding there before its first write
@@ -460,6 +472,8 @@ class Mutation:
                 if record["kind"] == "git_commit":
                     _require_own_bytes_committed(self, effects, position, record)
                     identified = _make_commit(self, record)
+                elif record["kind"] == "git_push":
+                    _publish(self, effects, position, record)
                 else:
                     _require_own_bytes_before_write(self, effects, position, record)
                     planned = self.controller._planned_write(record)
@@ -573,8 +587,14 @@ def _classify_recorded(controller: "MutationController", effects: list[dict[str,
     same type and endpoints included, a removal recorded with another snapshot,
     an add the record does not hold as applied, and a removal recorded before the
     add or in the add's own stage leave the add classified as it always was.
+
+    A push is classified by where the commit its own Git stage made stands at
+    its destination, and only the record can name that commit
+    (:func:`_recorded_publication`).
     """
     record = effects[position]
+    if record.get("kind") == "git_push":
+        return controller._classify_push(record["payload"], _recorded_publication(controller.store.root, effects, position))
     classification = controller.classify(record)
     if classification != UNAPPLIED or record["kind"] != "add_relation" or record.get("applied") is not True:
         return classification
@@ -1266,11 +1286,165 @@ def _made_commit_held(repo: Path, made: object, head: str | None) -> bool:
     )
 
 
+# --------------------------------------------------------------------------- what a recorded push publishes
+
+@dataclass(frozen=True)
+class _Publication:
+    """The one commit a recorded push publishes, and the full name of the branch it publishes it to."""
+
+    commit: str
+    ref: str
+
+    @property
+    def refspec(self) -> str:
+        return f"{self.commit}:{self.ref}"
+
+
+def _recorded_publication(repo: Path, effects: list[dict[str, Any]], position: int) -> "_Publication | str":
+    """What the push recorded at ``position`` of ``effects`` publishes; why that cannot be shown, when it cannot.
+
+    A Git stage is recorded as one commit and, with a remote, the push of it
+    right after (:func:`workline.gitops.finalize_effects`). The push publishes
+    that commit - the one this mutation made, by the ID it recorded making it
+    (:func:`_make_commit`) - and the history it was made on, never the branch as
+    it is when the push runs: a person, another tool or another operation can
+    have committed on top of that commit since, whatever paths they touched, and
+    nothing this mutation decided approved publishing it. The approved
+    destination says where the push may write, not what it may publish.
+
+    All of the following must be shown, and anything short of it names no commit:
+
+    * the push is the second and last effect of its stage, recorded right after
+      that stage's only other effect, a git_commit - next to it in the record and
+      by ``seq``;
+    * the record holds that commit as applied with the full ID of the commit this
+      mutation made. A commit recorded before IDs were, one made just before an
+      interruption kept its ID from being saved, one someone else made and one
+      Git could not show to be the commit made name none, and nothing stands in
+      for the ID - the branch tip least of all;
+    * the commit names its branch in full, and the push names that same branch;
+    * Git shows the ID is a commit with exactly one parent, a parent descending
+      from the recorded base, a change to nothing but the recorded paths - the
+      commit ``git commit --only`` makes of them - and that the recorded branch
+      still holds it.
+    """
+    push = effects[position]
+    stage = push.get("stage")
+    commit = effects[position - 1] if position > 0 else {}
+    if (
+        [index for index, effect in enumerate(effects) if effect.get("stage") == stage] != [position - 1, position]
+        or commit.get("kind") != "git_commit"
+        or type(commit.get("seq")) is not int
+        or type(push.get("seq")) is not int
+        or commit["seq"] + 1 != push["seq"]
+    ):
+        return "it is not recorded right after the one commit of its Git stage"
+    made = commit.get(_MADE_COMMIT)
+    if commit.get("applied") is not True or not isinstance(made, str) or _COMMIT_ID.fullmatch(made) is None:
+        return "the commit of its Git stage is not recorded with the ID of a commit this mutation made"
+    payload, pushed = commit.get("payload"), push.get("payload")
+    ref = payload.get("branch") if isinstance(payload, dict) else None
+    if (
+        not isinstance(ref, str)
+        or _BRANCH_REF.fullmatch(ref) is None
+        or not isinstance(pushed, dict)
+        or pushed.get("branch") != ref.removeprefix("refs/heads/")
+    ):
+        return "the commit of its Git stage and the push do not name the same branch in full"
+    base, paths = payload.get("base_head"), payload.get("paths")
+    parents = gitcmd.commit_parents(repo, made)
+    if (
+        parents is None
+        or len(parents) != 1
+        or not isinstance(base, str)
+        or _COMMIT_ID.fullmatch(base) is None
+        or gitcmd.descends_from(repo, parents[0], base) is not True
+    ):
+        return f"Git does not show {made} as the commit made on top of the recorded base"
+    changed = gitcmd.commit_changes(repo, made)
+    if changed is None or not isinstance(paths, list) or not set(changed) <= set(paths):
+        return f"Git does not show {made} as a commit of the recorded paths alone"
+    tip = gitcmd.branch_commit(repo, ref)
+    if tip is None or gitcmd.descends_from(repo, tip, made) is not True:
+        return f"{ref} does not hold {made}"
+    return _Publication(made, ref)
+
+
+def _published_under(repo: Path, locator: str, publication: _Publication, preview: gitcmd.PushPreview) -> str:
+    """Whether a destination branch Git will not fast-forward to the recorded commit already holds it.
+
+    Git refuses (``!``) when the branch at the destination is not an ancestor of
+    the commit. That branch has either moved on past it - the push of a later
+    stage of this mutation, a person, another clone - and the commit is already
+    published, or it holds another history. The push path cannot tell which, so
+    the destination is read: where its branch points
+    (:func:`workline.gitcmd.destination_branch`) and, when this repository does
+    not have that commit yet, the history behind it
+    (:func:`workline.gitcmd.fetch_destination_branch` - objects only, no ref,
+    no ``FETCH_HEAD``). Only a locator Git reads as itself is read: one
+    ``url.<base>.insteadOf`` would turn into another repository's is not.
+
+    Holding the commit is applied, matching: nothing is pushed and the branch is
+    left where it is. Not holding it is reconcile required, and nothing is
+    forced. What cannot be read or shown is a STOP, never taken for published.
+    """
+    readable = gitcmd.reads_itself(repo, locator)
+    if readable is False:
+        raise ReconcileRequired(
+            f"the destination would reject this push of {publication.commit} to {publication.ref} ({preview.summary}), "
+            f"and whether it already holds that commit could only be read through the URL Git rewrites {locator} to - "
+            "another repository - so it is not read and nothing is pushed: reconcile required"
+        )
+    if readable is None:
+        raise GitError(f"cannot tell what a read of {locator} would reach; nothing is pushed")
+    tip = gitcmd.destination_branch(repo, locator, publication.ref)
+    if tip == publication.commit:
+        return MATCHING
+    held = None if tip is None else gitcmd.descends_from(repo, tip, publication.commit)
+    if tip is not None and held is None:
+        gitcmd.fetch_destination_branch(repo, locator, publication.ref)
+        held = gitcmd.descends_from(repo, tip, publication.commit)
+    if held is True:
+        return MATCHING  # the destination's branch has moved on past the commit: it is published, and stays as it is
+    if held is False:
+        raise ReconcileRequired(
+            f"the destination would reject this push ({preview.summary}): its {publication.ref} is at {tip}, a history "
+            f"that does not hold {publication.commit}; nothing is pushed or forced: reconcile required"
+        )
+    raise GitError(
+        f"cannot show whether {publication.ref} at {locator} holds {publication.commit} (it changed while it was read, "
+        "or could not be read); nothing is pushed"
+    )
+
+
+def _publish(mutation: Mutation, effects: list[dict[str, Any]], position: int, record: dict[str, Any]) -> None:
+    """Make the recorded push at ``position`` publish exactly the commit its Git stage made.
+
+    The commit is shown again right before the push (:func:`_recorded_publication`)
+    and handed to :meth:`MutationController.apply_effect` for this one call, which
+    pushes that commit alone to its branch - whatever the branch holds by then.
+    """
+    publication = _recorded_publication(mutation.store.root, effects, position)
+    if isinstance(publication, str):
+        raise ReconcileRequired(
+            f"mutation {mutation.id} effect {record['seq']} (git_push) cannot show which commit it publishes: "
+            f"{publication}; the branch as it is now is never pushed in its place, so nothing is pushed: reconcile required"
+        )
+    controller = mutation.controller
+    controller._publishing = (record, publication)
+    try:
+        controller.apply_effect(record)
+    finally:
+        controller._publishing = None
+
+
 class MutationController:
     """Physical writer for a Project's canonical files."""
 
     def __init__(self, store: ProjectStore) -> None:
         self.store = store
+        # the recorded push being made and the one commit it publishes (:func:`_publish`), for one apply_effect call
+        self._publishing: tuple[dict[str, Any], _Publication] | None = None
 
     # intent files -----------------------------------------------------------
     def intent_path(self, mutation_id: str) -> Path:
@@ -1615,7 +1789,8 @@ class MutationController:
         if kind == "git_commit":
             return self._classify_commit(payload, record.get("applied") is True, record.get(_MADE_COMMIT, _NO_MADE_COMMIT))
         if kind == "git_push":
-            return self._classify_push(payload)
+            # what a push publishes is named only by the record it was recorded in (:func:`_classify_recorded`)
+            return self._classify_push(payload, "it is classified without the record of the mutation that recorded it")
         raise ValidationError(f"unknown effect kind: {kind}")
 
     def _classify_commit(self, payload: dict[str, Any], applied: bool, made: object = _NO_MADE_COMMIT) -> str:
@@ -1687,38 +1862,42 @@ class MutationController:
             return UNAPPLIED
         return MISMATCH
 
-    def _classify_push(self, payload: dict[str, Any]) -> str:
-        """Classify a recorded push — destination first, network second.
+    def _classify_push(self, payload: dict[str, Any], publication: "_Publication | str") -> str:
+        """Classify a recorded push by where the commit it publishes stands at its destination.
 
-        The destination the effect was recorded against is confirmed against
-        the Project pin and the current Git configuration *before* anything is
-        contacted, so a mutation never follows a remote name to a destination
-        it was not recorded for.
+        Destination first: the destination the effect was recorded against is
+        confirmed against the Project pin and the current Git configuration
+        *before* anything is contacted, so a mutation never follows a remote name
+        to a destination it was not recorded for. Then the commit it publishes -
+        ``publication``, the commit its Git stage made (:func:`_recorded_publication`)
+        - must have been shown; a push that cannot name it is not classified at
+        all, and the branch as it is now never stands in for it.
 
-        The evidence then comes from the push itself: ``git push --dry-run``
-        over the same remote name and the same refspec the real push uses, so
-        Git applies its own rewriting once and answers about the repository the
-        push would write to. A resolved locator is never handed back to another
-        Git command — ``url.<base>.insteadOf`` can rewrite the very locator
-        ``pushInsteadOf`` produced, which would inspect a different repository
-        — and a remote-tracking ref is never consulted, since it survives a
-        failed fetch and would make a stale answer look confirmed.
+        The evidence comes from the push itself: ``git push --dry-run`` of the
+        exact refspec the real push uses - that commit to that branch - so Git
+        applies its own rewriting once and answers about the repository the push
+        would write to. ``=``: the branch is that commit, published. ``*`` /
+        `` ``: the branch is missing or behind it, unapplied, and only that
+        commit is pushed. ``!``: the branch has moved on past it or away from it,
+        which the destination itself is asked (:func:`_published_under`). A
+        remote-tracking ref is never consulted, since it survives a failed fetch
+        and would make a stale answer look confirmed.
         """
         repo = self.store.root
         remote, branch, locator = payload["remote"], payload["branch"], payload["locator"]
         verify_recorded_destination(self.store, remote, locator)
-        if gitcmd.head_commit(repo) is None:
-            return MISMATCH
-        preview = gitcmd.push_dry_run(repo, remote, branch)
-        if preview.flag == "=":
-            return MATCHING  # up to date
-        if preview.flag in ("*", " "):
-            return UNAPPLIED  # new branch / fast-forward update
-        if preview.flag == "!":
+        if isinstance(publication, str):
             raise ReconcileRequired(
-                f"the destination would reject this push ({preview.summary}); the branch at "
-                f"{preview.destination or locator} is not what this mutation left behind: reconcile required"
+                f"the recorded push to {branch} cannot show which commit it publishes: {publication}; the branch as it "
+                "is now is never pushed in its place, so nothing is pushed: reconcile required"
             )
+        preview = gitcmd.push_dry_run(repo, remote, publication.refspec)
+        if preview.flag == "=":
+            return MATCHING  # the branch is that commit
+        if preview.flag in ("*", " "):
+            return UNAPPLIED  # new branch / fast-forward to that commit, and no further
+        if preview.flag == "!":
+            return _published_under(repo, locator, publication, preview)
         raise StopError(
             f"git push --dry-run reported {preview.flag!r} ({preview.summary}), which Workline does not "
             "act on; STOP rather than guess",
@@ -1772,6 +1951,14 @@ class MutationController:
         if kind == "git_push":
             repo = self.store.root
             remote, locator = payload["remote"], payload["locator"]
+            # The one commit this push publishes, shown by its record right before this call (:func:`_publish`);
+            # without it nothing is pushed - the branch as it is now never stands in for it.
+            staged = self._publishing
+            if staged is None or staged[0] is not record:
+                raise ReconcileRequired(
+                    f"a recorded push to {payload['branch']} is made only for the commit its Git stage made, and none "
+                    "was shown for this one; nothing is pushed: reconcile required"
+                )
             # Re-resolved immediately before the push: the window between the
             # check and the push cannot be closed entirely (Git reads its own
             # configuration when it runs), but it is narrowed to this call.
@@ -1782,7 +1969,7 @@ class MutationController:
                     f"now resolves to {current}): STOP",
                     code="push_destination_changed",
                 )
-            result = gitcmd.push(repo, remote, payload["branch"])
+            result = gitcmd.push(repo, remote, staged[1].refspec)
             if not result.ok:
                 raise GitError(f"push to {locator} failed: {result.stderr.strip() or result.stdout.strip()}")
             return

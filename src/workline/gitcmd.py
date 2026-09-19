@@ -9,9 +9,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import subprocess
 
 from .errors import GitError
+
+#: A commit named by its full object ID (SHA-1 or SHA-256), never by an expression Git would resolve.
+_FULL_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 
 
 @dataclass(frozen=True)
@@ -251,23 +255,37 @@ def push_locators(repo: Path, remote: str) -> list[str]:
 
 @dataclass(frozen=True)
 class PushPreview:
-    """What Git says ``git push <remote> <branch>:<branch>`` would do."""
+    """What Git says ``git push <remote> <refspec>`` would do."""
 
     flag: str  # porcelain status: "=", "*", " ", "!", ...
     summary: str
     destination: str  # the ``To <...>`` line, for reporting only
 
 
-def push_dry_run(repo: Path, remote: str, branch: str) -> PushPreview:
-    """Ask Git what the real push would do, over the real push path.
+def _exact_refspec(refspec: str) -> str:
+    """The full branch ref ``refspec`` pushes to; GitError unless it is ``<commit ID>:refs/heads/<name>``.
 
-    The remote is named, never a resolved locator: handing a locator back to
-    another Git command re-enters URL rewriting (``url.<base>.insteadOf`` can
-    rewrite the very locator ``pushInsteadOf`` produced), which would inspect a
-    different repository from the one the push writes to. The refspec is
-    identical to the real push, so the answer describes exactly that push.
+    A recorded push publishes one commit, named by its full object ID, to one
+    branch named in full, and it is never forced: no ``+``, no pattern, no other
+    kind of source (the branch as it is when the push runs is exactly what it
+    must not publish).
     """
-    result = run_git(repo, "push", "--dry-run", "--porcelain", remote, f"{branch}:{branch}", check=False)
+    source, separator, destination = refspec.partition(":")
+    if not separator or not _FULL_ID.fullmatch(source) or not destination.startswith("refs/heads/") or "*" in destination:
+        raise GitError(f"not the exact refspec of a recorded push: {refspec!r}")
+    return destination
+
+
+def push_dry_run(repo: Path, remote: str, refspec: str) -> PushPreview:
+    """Ask Git what the real push of ``refspec`` would do, over the real push path.
+
+    The remote is named, never a resolved locator, and ``refspec`` is the exact
+    refspec the real push (:func:`push`) is given, so Git applies its own URL
+    rewriting once and answers about exactly that push to the repository it
+    writes to. It writes nothing.
+    """
+    destination_ref = _exact_refspec(refspec)
+    result = run_git(repo, "push", "--dry-run", "--porcelain", remote, refspec, check=False)
     destination = ""
     preview: PushPreview | None = None
     for line in result.stdout.splitlines():
@@ -275,18 +293,82 @@ def push_dry_run(repo: Path, remote: str, branch: str) -> PushPreview:
             destination = line[3:].strip()
             continue
         fields = line.split("\t")
-        if len(fields) >= 3 and fields[1].endswith(f":refs/heads/{branch}"):
+        if len(fields) >= 3 and fields[1].endswith(f":{destination_ref}"):
             preview = PushPreview(fields[0], fields[2].strip(), destination)
     if preview is not None:
         return preview
     detail = result.stderr.strip() or result.stdout.strip()
     if not result.ok:
         raise GitError(f"cannot preview the push to {remote}: {detail}")
-    raise GitError(f"git push --dry-run said nothing about {branch}: {detail}")
+    raise GitError(f"git push --dry-run said nothing about {destination_ref}: {detail}")
 
 
-def push(repo: Path, remote: str, branch: str) -> GitResult:
-    return run_git(repo, "push", remote, f"{branch}:{branch}", check=False)
+def push(repo: Path, remote: str, refspec: str) -> GitResult:
+    """Push exactly ``refspec`` - one commit by its ID to one full branch ref - to ``remote``, never forced."""
+    _exact_refspec(refspec)
+    return run_git(repo, "push", remote, refspec, check=False)
+
+
+def reads_itself(repo: Path, locator: str) -> bool | None:
+    """Whether a read of ``locator`` reaches ``locator`` itself; None when Git cannot say.
+
+    A read (``ls-remote``, ``fetch``) of a URL passes it through
+    ``url.<base>.insteadOf`` again, which can turn the very locator
+    ``pushInsteadOf`` produced into another repository's. ``git ls-remote
+    --get-url`` answers with the URL such a read would contact, without
+    contacting anything; only when that is the locator unchanged does reading it
+    read the repository the push writes to.
+    """
+    result = run_git(repo, "ls-remote", "--get-url", locator, check=False)
+    if not result.ok:
+        return None
+    return result.stdout.strip() == locator
+
+
+def _require_reads_itself(repo: Path, locator: str) -> None:
+    if reads_itself(repo, locator) is not True:
+        raise GitError(f"Git does not read {locator} as itself, so it is not read")
+
+
+def destination_branch(repo: Path, locator: str, ref: str) -> str | None:
+    """The commit branch ``ref`` points at in the repository at ``locator``; None when it has no such branch.
+
+    A read-only network question (``ls-remote``), put only to a locator Git
+    reads as itself (:func:`reads_itself`). Nothing local or remote is written.
+    Any failure raises: a destination that cannot be read shows nothing.
+    """
+    if not ref.startswith("refs/heads/"):
+        raise GitError(f"not a full branch ref: {ref!r}")
+    _require_reads_itself(repo, locator)
+    result = run_git(repo, "ls-remote", "--refs", locator, ref, check=False)
+    if not result.ok:
+        raise GitError(f"cannot read {ref} at {locator}: {result.stderr.strip() or result.stdout.strip()}")
+    found = [line.split("\t", 1)[0] for line in result.stdout.splitlines() if line.split("\t", 1)[-1] == ref]
+    if len(found) > 1 or found and not _FULL_ID.fullmatch(found[0]):
+        raise GitError(f"cannot read {ref} at {locator}: {result.stdout.strip()!r}")
+    return found[0] if found else None
+
+
+def fetch_destination_branch(repo: Path, locator: str, ref: str) -> None:
+    """Bring the history branch ``ref`` has at ``locator`` into this repository's object database, and nothing else.
+
+    Put only to a locator Git reads as itself (:func:`reads_itself`), and to
+    nothing else. No ref is created or moved (the refspec names no destination,
+    and ``--refmap=`` keeps Git from mapping it through the fetch refspecs of a
+    remote whose name the locator also is), no bundle is fetched from a
+    ``fetch.bundleURI`` first (into ``refs/bundles``), ``FETCH_HEAD`` is not
+    written, no tag is followed, no submodule is fetched and no automatic
+    maintenance runs: the working tree, the index, HEAD and every branch stay as
+    they are, and only objects nothing refers to are added.
+    """
+    if not ref.startswith("refs/heads/"):
+        raise GitError(f"not a full branch ref: {ref!r}")
+    _require_reads_itself(repo, locator)
+    run_git(
+        repo, "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "fetch.writeCommitGraph=false",
+        "-c", "fetch.bundleURI=", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+        "--refmap=", locator, ref,
+    )
 
 
 def commit_touches(repo: Path, rev: str, paths: list[str]) -> set[str]:
@@ -295,6 +377,21 @@ def commit_touches(repo: Path, rev: str, paths: list[str]) -> set[str]:
         return set()
     result = run_git(repo, "show", "--name-only", "--format=", "-z", rev, "--", *paths)
     return {p.replace("\\", "/") for p in result.stdout.split("\0") if p}
+
+
+def commit_changes(repo: Path, commit: str) -> list[str] | None:
+    """The paths local commit ``commit`` changes against its first parent, without rename detection; None when undeterminable."""
+    result = run_git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--no-renames", commit, check=False)
+    if not result.ok:
+        return None
+    return sorted(p.replace("\\", "/") for p in result.stdout.split("\0") if p)
+
+
+def branch_commit(repo: Path, ref: str) -> str | None:
+    """The commit local branch ``ref`` (full name) points at; None when there is none or Git cannot say."""
+    result = run_git(repo, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
+    commit = result.stdout.strip()
+    return commit if result.ok and _FULL_ID.fullmatch(commit) else None
 
 
 def commit_parents(repo: Path, commit: str) -> list[str] | None:
@@ -314,8 +411,9 @@ def descends_from(repo: Path, commit: str, ancestor: str) -> bool | None:
     """Whether local commit ``commit`` is ``ancestor`` itself or descends from it; None when undeterminable.
 
     Both are commits of this repository, named by object ID. It says nothing
-    about what a remote holds: push evidence comes only from the push path
-    (:func:`push_dry_run`).
+    about what a remote holds by itself: that comes from the push path
+    (:func:`push_dry_run`) and from what the destination itself reports
+    (:func:`destination_branch`).
     """
     result = run_git(repo, "merge-base", "--is-ancestor", ancestor, commit, check=False)
     if result.returncode == 0:

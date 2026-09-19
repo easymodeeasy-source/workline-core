@@ -422,7 +422,7 @@ recordがbranchを持つ:     現在HEADが指すbranchの完全なref名が、r
 recordがbranchを持たない: HEADがdetachedであることをGitが示す
 ```
 
-HEADがbaseのままでも、同じcommitを指す別branchへのcheckout、branch名の変更、branchを持つrecordでのdetached HEAD（branchを必要とするoperationは従来どおり入口の `detached_head` で先に停止する）、branchを持たないrecordでのbranchの上での再実行、recordのbranchが完全なbranch名でない場合、Gitが判定できない場合は、期待値不一致として `reconcile required` で停止し、commitを作らない。別branchに作ったcommitは記録したbranchにもremoteにも届かないのに、recordのpush（記録時のbranch同士のrefspec）はdry-runで `=` を返して反映済みとなり、operationが成功扱いになるためである。記録したbranchへ戻れば、同じ再実行がGit段階から進む。branchを持たないrecordにはbranchを記録する前のimplementationのrecordも含まれるが、どのbranchで記録したかを推測しない。
+HEADがbaseのままでも、同じcommitを指す別branchへのcheckout、branch名の変更、branchを持つrecordでのdetached HEAD（branchを必要とするoperationは従来どおり入口の `detached_head` で先に停止する）、branchを持たないrecordでのbranchの上での再実行、recordのbranchが完全なbranch名でない場合、Gitが判定できない場合は、期待値不一致として `reconcile required` で停止し、commitを作らない。別branchに作ったcommitは記録したbranchにもremoteにも届かないためである。記録したbranchへ戻れば、同じ再実行がGit段階から進む。branchを持たないrecordにはbranchを記録する前のimplementationのrecordも含まれるが、どのbranchで記録したかを推測しない。
 
 commitを記録した後・作る前に中断したmutation（commit自体の失敗を含む）のresumeでは、その間に独立なoperationや人のcommitでHEADがbaseから進んだことだけを期待値不一致としない。記録したcommitが作られておらず（上記の一致に当たらず、pathsにcommitする変更が残っている）、次をすべて示せる場合だけ未適用として扱い、現在のHEADの上に記録どおりのcommitを作る。
 
@@ -479,20 +479,24 @@ active push destinationはGit自身の解決結果（`pushurl` / `pushInsteadOf`
 
 `git_push` effectは承認済みlocatorをそのままdurableに保持する。resume時もnetworkより前に、記録済みlocatorとcurrent解決結果の文字列一致を確認する。remote名だけを見て現在の指し先へfetch / pushしない。不一致は `reconcile required`。
 
-push反映の確認は、実pushと同じremote名・同じrefspecの `git push --dry-run` で行い、Git自身に同じrewrite解決を1回だけ通させる。
+承認先はどのrepositoryへpushしてよいかの承認であり、何を公開してよいかの承認ではない。記録したpushが公開するのは、同じGit段階でそのpushの直前に記録したcommitと、そのcommitが作られた土台の履歴だけであり、pushを実行・再実行する時点のlocal branchの先端ではない。pushは、mutationがそのcommitを作った時に記録したcommit IDを `<commit ID>:refs/heads/<branch>` としてpushし、forceしない。そのcommitの後に同じbranchへ積まれたcommitは、人・別tool・別operationのどれのものでも、どのpathを変更していても、中断やquestion waitの間のものでも、そのpushでは公開しない。同じmutationの後のstageがその上に自分のcommitを作れば、そのstageのpushが自分のcommitの履歴として公開する（記録したcommitを独立なcommitの上に作る場合と同じ）。
 
-resolved locatorを別のGit commandへ引数として再投入しない。`url.<base>.insteadOf` が `pushInsteadOf` の生成したlocatorをさらに書き換え、実push先とは別のrepositoryを読み得るためである。fetch URL側のstateやremote-tracking refも反映済みの根拠にしない。
+pushとcommitの対応はGit段階の記録だけで示す。pushはGit段階の唯一のcommitの直後（recordの並びでも `seq` でも隣）に記録された、そのGit段階の最後のeffectである。そのcommitは、mutationが作ったcommitのIDとともに適用済みとして記録され、branchを完全な名前で持ち、pushのbranchはそれと同じである。そのIDのcommitは、parentをちょうど1つ持ち、parentが記録したbaseの子孫であり、記録したpaths以外を変更していないことをGitが示し、記録したbranchがそれを含む。1つでも示せないpush（commit IDを記録する前のimplementationのrecord、commitを作った直後・IDを保存する前に中断したrecord、hookが続けてcommitを作った等でIDを記録できなかったcommit、他者が同じ内容をcommitしたため作らなかったcommit、書き換えたrecord）は、何もpushせずに `reconcile required` で停止する。branchの先端をpushせず、commitを推測で特定しない。公開は取り消せないためである。
 
-dry-run結果の解釈:
+resumeは記録したpushを、そのcommitが承認先のbranchでどうなっているかで分類する。確認は、実pushと同じremote名・同じrefspecの `git push --dry-run` で行い、Git自身に同じrewrite解決を1回だけ通させる。
 
 ```text
-=   up to date          → 反映済み
-*   new branch          → 未反映
-    fast-forward update → 未反映
-!   rejected            → reconcile required
+=   up to date          → 公開済み（pushしない）
+*   new branch          → 未公開（そのcommitでbranchを作る）
+    fast-forward update → 未公開（そのcommitまでだけ進める）
+!   rejected            → 承認先を読んで判定する（次の段落）
 その他 / 解釈不能        → STOP（推測しない）
 transport / auth失敗    → STOP
 ```
+
+`!` は、承認先のbranchがそのcommitの先へ進んでいる（後のstageのpush、人のpush等で既に公開済み）か、別の履歴を持つかのどちらかである。その区別のためだけに承認先を読み取り専用で読む。Gitが記録済みlocatorを書き換えずにそのまま読むことを `git ls-remote --get-url` で確かめてから、そのlocatorでbranchが指すcommitを読み、このrepositoryに無ければそのbranchの履歴を取得する（refもFETCH_HEADも作らず、working tree・index・HEAD・branchを変えない。どこからも参照されないobjectがobject databaseに増えるだけ）。そのcommitを含めば公開済みとしてbranchをそのまま残し、含まなければ何もpush・forceせずに `reconcile required`。Gitがlocatorを別のURLへ書き換える場合は別のrepositoryを読むことになるので読まずに `reconcile required`。読めない、読んでいる間にbranchが変わった場合はSTOPし、公開済みと推測しない。分類がremoteを書き換えることはなく、remoteを書き換えるのは未公開と分類したcommitの最終的なpushだけである。
+
+resolved locatorを別のGit commandへ引数として渡すのは、この読み取りでGitがそのlocatorを書き換えずにそのまま読むと示した時だけである。`url.<base>.insteadOf` が `pushInsteadOf` の生成したlocatorをさらに書き換え、実push先とは別のrepositoryを読み得るためである。fetch URL側のstateやremote-tracking refも公開済みの根拠にしない。
 
 credentialを含むURLは承認先・回復記録・エラーメッセージのいずれにも残さない。検出時はredactしてSTOPする。
 

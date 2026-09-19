@@ -22,8 +22,8 @@ from workline import roadmap as rm
 from workline import start as st
 from workline.create import WorkSpec, create_standalone_work
 from workline.destination import ensure_push_destination, resolve_active_push_locator
-from workline.errors import ReconcileRequired, StopError, ValidationError
-from workline.mutation import Effect, MutationController, WriteScope
+from workline.errors import GitError, ReconcileRequired, StopError, ValidationError
+from workline.mutation import Effect, MutationController, WriteScope, _classify_recorded
 from workline.oplock import project_operation
 from workline.project_start import project_start
 from workline.push_pin import pin_push_destination
@@ -687,12 +687,14 @@ class LocatorIdentityTests(DestinationBase):
 
 
 class ChainedRewriteTests(DestinationBase):
-    """Push evidence must travel the push path, not a locator handed back to Git.
+    """Push evidence must reach the repository the push writes to, never another one.
 
     ``remote.origin.url = A`` with ``url.B.pushInsteadOf = A`` sends the push to
-    B — but B handed to another Git command is rewritten again by
-    ``url.C.insteadOf = B``. Verification by locator would therefore inspect C
-    while the push writes to B.
+    B — but B handed to a read (``ls-remote``, ``fetch``) is rewritten again by
+    ``url.C.insteadOf = B``. Verification by reading the locator would therefore
+    inspect C while the push writes to B. The push path (``git push --dry-run``
+    of the push's own refspec) answers about B; a read of B is made only where
+    Git reads B as itself (BL-050), and here it would not, so it is not made.
     """
 
     def _chain(self) -> tuple[ProjectStore, Path, Path, Path]:
@@ -710,16 +712,29 @@ class ChainedRewriteTests(DestinationBase):
         return ProjectStore(root), configured, destination, decoy
 
     def _classification(self, store: ProjectStore, locator: str) -> str:
-        record = {
-            "kind": "git_push",
-            "payload": {"remote": "origin", "branch": "main", "locator": locator},
-        }
-        return MutationController(store).classify(record)
+        """Classify the push of the commit HEAD is, in the Git stage a mutation records for it (BL-050)."""
+        head = git(store.root, "rev-parse", "HEAD").strip()
+        effects = [
+            {"seq": 1, "stage": "finalize", "kind": "git_commit", "applied": True, "commit_id": head,
+             "payload": {"message": "the commit under test", "branch": "refs/heads/main",
+                         "base_head": git(store.root, "rev-parse", "HEAD~1").strip(),
+                         "paths": git(store.root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").split()}},
+            {"seq": 2, "stage": "finalize", "kind": "git_push", "applied": True,
+             "payload": {"remote": "origin", "branch": "main", "locator": locator}},
+        ]
+        return _classify_recorded(MutationController(store), effects, 1)
 
-    def test_no_direct_locator_command_remains(self) -> None:
-        """The locator is never handed back to Git as an argument."""
+    def test_a_locator_is_read_only_where_git_reads_it_as_itself(self) -> None:
+        """No helper reads a remote by its name or by a locator Git would rewrite into another repository."""
         for removed in ("ls_remote_head", "fetch_locator", "has_commit", "is_ancestor"):
             self.assertFalse(hasattr(gitcmd, removed), removed)
+        store, _configured, destination, decoy = self._chain()
+        self.assertFalse(gitcmd.reads_itself(store.root, str(destination)))  # Git would read the decoy
+        self.assertTrue(gitcmd.reads_itself(store.root, str(decoy)))
+        for read in (gitcmd.destination_branch, gitcmd.fetch_destination_branch):
+            with self.subTest(read=read.__name__), self.assertRaises(GitError):
+                read(store.root, str(destination), "refs/heads/main")
+        self.assertIsNone(git(store.root, "cat-file", "-t", self.head_of(decoy), check=False).strip() or None)
 
     def test_the_push_and_its_evidence_reach_the_same_repository(self) -> None:
         store, configured, destination, decoy = self._chain()
@@ -731,7 +746,8 @@ class ChainedRewriteTests(DestinationBase):
             decoy_head,
         )
 
-        preview = gitcmd.push_dry_run(store.root, "origin", "main")
+        head = git(store.root, "rev-parse", "HEAD").strip()
+        preview = gitcmd.push_dry_run(store.root, "origin", f"{head}:refs/heads/main")
         self.assertEqual(preview.destination, str(destination))
 
         create_standalone_work(store, WorkSpec("Chained", "done"))
@@ -768,7 +784,29 @@ class ChainedRewriteTests(DestinationBase):
         with self.assertRaises(ReconcileRequired):
             self._classification(store, str(destination))
 
+    def test_a_commit_published_under_a_later_one_is_not_read_through_a_rewritten_locator(self) -> None:
+        """The destination moved on past the commit; the push path cannot say so, and B cannot be read as itself."""
+        store, _configured, destination, decoy = self._chain()
+        create_standalone_work(store, WorkSpec("Chained", "done"))
+        (store.root / "later.md").write_text("later\n", encoding="utf-8")
+        git(store.root, "add", "later.md")
+        git(store.root, "commit", "-q", "-m", "docs: a later commit, published by a person")
+        git(store.root, "push", "-q", "origin", "main:main")  # the person's push goes to B too
+        git(store.root, "reset", "-q", "--hard", "HEAD~1")
+        later = self.head_of(destination)
+        decoy_head = self.head_of(decoy)
+
+        with self.assertRaises(ReconcileRequired) as refused:
+            self._classification(store, str(destination))
+
+        self.assertIn("Git rewrites", str(refused.exception))
+        self.assertEqual((self.head_of(destination), self.head_of(decoy)), (later, decoy_head))
+        self.assertIsNone(git(store.root, "cat-file", "-t", decoy_head, check=False).strip() or None)  # nothing fetched
+
     def test_a_new_branch_at_the_destination_is_unapplied(self) -> None:
         store, _configured, destination, _decoy = self._chain()
+        (store.root / "first.md").write_text("first\n", encoding="utf-8")
+        git(store.root, "add", "first.md")
+        git(store.root, "commit", "-q", "-m", "docs: a first commit on top of Project開始")
         self.assertIsNone(self.head_of(destination))
         self.assertEqual(self._classification(store, str(destination)), "unapplied")

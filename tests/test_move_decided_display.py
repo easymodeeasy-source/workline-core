@@ -301,8 +301,12 @@ class MoveCase(MoveDisplayCase):
         (pending,) = self.pending()
         return pending["reserved_ids"][f"{self.w1}:derive:0:work:fix"]
 
-    def assertMovedOnce(self, result, decided: str) -> None:
-        """What one uninterrupted move leaves: one fix Work, one move commit with the decided display, pushed, closed."""
+    def assertMovedOnce(self, result, decided: str, *, published: str | None = None) -> None:
+        """What one uninterrupted move leaves: one fix Work, one move commit with the decided display, pushed, closed.
+
+        ``published`` is the move commit when someone committed on top of it before the move was finished: its
+        push publishes the move commit and nothing of theirs (BL-050).
+        """
         self.assertEqual((result.status, result.work_id), ("moved", self.w1))
         self.assertEqual(self.ran, ["W1#1"])  # the executor was asked once, by the run that decided the move
         (fix,) = self.named("Fix")
@@ -316,7 +320,7 @@ class MoveCase(MoveDisplayCase):
         self.assertEqual(self.subjects().count(branch_message(decided)), 1)
         self.assertEqual(sum(1 for s in self.subjects() if s.startswith("chore(workline): branch from ")), 1)
         self.assertEqual(self.pending(), [])
-        self.assertEqual(self.head(), self.remote_head())
+        self.assertEqual(self.remote_head(), published or self.head())
         self.assertEqual(validate_project(self.store), [])
         (record,) = [r for r in MutationController(self.store).list_records() if r["owner"] == "start"]
         stages: list[str] = []
@@ -363,9 +367,10 @@ class MoveDisplayTests(MoveCase):
                 self.setUp()
                 self.interrupt(window, self.moving)
                 decided = self.display(self.w1)
+                made = None if window == "commit recorded" else self.head()  # the move commit, when it is made already
                 self.set_meta(self.w1, "display", "W-99")
                 self.commit_work_file(self.w1, "docs: renumber")
-                self.assertMovedOnce(self.moving(), decided)
+                self.assertMovedOnce(self.moving(), decided, published=made)
                 self.assertEqual(self.subjects().count("docs: renumber"), 1)
 
     def test_d_a_stable_work_id_replacement_still_stops(self) -> None:

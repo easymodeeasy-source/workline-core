@@ -108,6 +108,16 @@ class MessageCase(BranchCase):
         self.assertTrue(commits, f"{event_id} is in no commit")
         return commits[0]
 
+    def assertPushNamesNoCommit(self, call) -> None:
+        """Refused at the push: the record names no commit this mutation made for it, and nothing is pushed (BL-050)."""
+        remote, pending = self.remote_head(), self.pending_ids()
+        executed: list[str] = []
+        with self.assertRaises(StopError) as stopped:
+            self.counting(call, executed)
+        self.assertEqual(stopped.exception.code, "reconcile_required")
+        self.assertIn("cannot show which commit it publishes", stopped.exception.message)
+        self.assertEqual((executed, self.remote_head(), self.pending_ids()), ([], remote, pending))
+
     def assertMadeOverSameMessage(self, call, pattern: str, pending: dict, moved_to: str, decided: dict) -> object:
         """The retry makes the recorded commit itself, once, on top of the commit that only shared its message."""
         stage = self.stage_of(pending, pattern)
@@ -230,13 +240,10 @@ class ProvenCommitTests(MessageCase):
                 git(self.root, "add", "--", *recorded["paths"])
                 text = recorded["message"] if message == "the recorded message" else "chore: a person committed it"
                 git(self.root, "commit", "-q", "-m", text, "--", *recorded["paths"])
-                executed: list[str] = []
 
-                result = self.counting(call, executed)
-
-                self.assertEqual((result.mutation_id, executed), (pending["mutation_id"], ["git_push"]))
-                self.assertEqual(self.head(), self.remote_head())
-                self.assertNothingLeftOver()
+                # the commit is taken for made as it always was; this mutation made none it can name, so its push -
+                # which would publish someone else's commit - is not made (BL-050)
+                self.assertPushNamesNoCommit(call)
 
     def test_a_commit_made_just_before_its_flag_was_saved(self) -> None:
         """The commit exists but the record does not hold it as applied, so only its committed paths can show it."""
@@ -245,13 +252,10 @@ class ProvenCommitTests(MessageCase):
             call, pattern = self.operation("phase hold")
             pending = self.interrupt_with(call, committed_before_its_flag(pattern))
             self.assertEqual([e["applied"] for e in pending["effects"] if e["kind"] == "git_commit"], [False])
-            executed: list[str] = []
 
-            self.assertEqual(self.counting(call, executed).status, "phase_held")
+            self.assertPushNamesNoCommit(call)  # its ID was never saved: nothing names it for the push (BL-050)
 
-            self.assertEqual(executed, ["git_push"])
             self.assertEqual(len(self.carrying(self.recorded_commit(pending)["message"], self.recorded_commit(pending)["base_head"])), 1)
-            self.assertNothingLeftOver()
         with self.subTest(after="a commit sharing the message"):
             self.build("flag-same")
             call, pattern = self.operation("phase hold")
@@ -259,13 +263,10 @@ class ProvenCommitTests(MessageCase):
             recorded = self.recorded_commit(pending)
             (made,) = self.carrying(recorded["message"], recorded["base_head"])
             self.same_message_commit(recorded["message"])
-            executed = []
 
-            self.assertEqual(self.counting(call, executed).status, "phase_held")
+            self.assertPushNamesNoCommit(call)
 
-            self.assertEqual(executed, ["git_push"])
             self.assertEqual(self.carrying(recorded["message"], recorded["base_head"])[0], made)
-            self.assertNothingLeftOver()
         with self.subTest(after="its paths changed again by someone else"):
             # D-1, accepted: the commit is there, but nothing durable shows it is this mutation's own
             self.build("flag-dirty")
@@ -299,15 +300,15 @@ class ProvenCommitTests(MessageCase):
             call, pattern = self.operation("phase hold")
             pending = self.interrupt_with(call, pushed_before_completion())
             recorded = self.recorded_commit(pending)
-            moved_to = self.same_message_commit(recorded["message"])
+            made = self.parent(self.same_message_commit(recorded["message"]))
+            moved_to = self.head()
             executed = []
 
             self.assertEqual(self.counting(call, executed).status, "phase_held")
 
-            self.assertEqual(executed, ["git_push"])
+            self.assertEqual(executed, [])  # published already; the commit on top is not this push's (BL-050)
             self.assertEqual(len(self.carrying(recorded["message"], recorded["base_head"])), 2)
-            self.assertEqual(self.head(), moved_to)
-            self.assertEqual(self.head(), self.remote_head())
+            self.assertEqual((self.head(), self.remote_head()), (moved_to, made))
             self.assertNothingLeftOver()
         with self.subTest(window="a question the next Work asks, in outer mode"):
             # the second Work's events make the first Work's finalization paths dirty again before it asks
@@ -367,12 +368,8 @@ class WindowTests(MessageCase):
             call, pattern = self.operation("phase hold")
             pending = self.interrupt_with(call, committed_before_its_flag(pattern))
             self.same_message_commit(self.recorded_commit(pending)["message"])
-            executed = []
 
-            self.assertEqual(self.counting(call, executed).status, "phase_held")
-
-            self.assertEqual(executed, ["git_push"])
-            self.assertNothingLeftOver()
+            self.assertPushNamesNoCommit(call)  # its ID was never saved: nothing names it for the push (BL-050)
         for label, window in (("committed, not pushed", "committed"), ("pushed, not completed", None)):
             with self.subTest(window=label):
                 self.build(f"w-{label.split(',')[0]}")
@@ -385,8 +382,10 @@ class WindowTests(MessageCase):
 
                 self.assertEqual(self.counting(call, executed).status, "phase_held")
 
-                self.assertEqual(executed, ["git_push"])
+                # the push publishes the commit it made - once, if it had not yet - and not the one on top (BL-050)
+                self.assertEqual(executed, ["git_push"] if window else [])
                 self.assertEqual(len(self.carrying(recorded["message"], recorded["base_head"])), 2)
+                self.assertEqual(self.remote_head(), self.parent(self.head()))
                 self.assertNothingLeftOver()
 
 

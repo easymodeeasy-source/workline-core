@@ -20,6 +20,7 @@ made on top of the HEAD it started from does.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import os
 import re
 import subprocess
@@ -246,12 +247,13 @@ class RecordTests(IdentityCase):
         effect = self.recorded_effect(pending, pattern)
         self.assertEqual((effect["applied"], MADE in effect), (False, False))
 
-        again = self.retry_until_pushing(call, pattern, pending["mutation_id"])
+        remote = self.remote_head()
 
-        effect = self.recorded_effect(again, pattern)
+        self.assertPushNamesNoCommit(call)
+
+        effect = self.recorded_effect(self.pending_record(pending["mutation_id"]), pattern)
         self.assertEqual((effect["applied"], MADE in effect), (True, False))
-        self.assertEqual(call().status, "phase_held")
-        self.assertNothingLeftOver()
+        self.assertEqual(self.remote_head(), remote)
 
     def test_a_commit_git_does_not_show_as_the_one_made_gets_no_id(self) -> None:
         cases = {
@@ -262,17 +264,24 @@ class RecordTests(IdentityCase):
             with self.subTest(case=label):
                 self.build(f"unshown-{index}")
                 call, pattern = self.operation("phase hold")
+                remote = self.remote_head()
                 if arm is not None:
                     self.hook("post-commit", EXTRA_COMMIT_HOOK)
                     arm()
-                    pending = self.interrupt(call, pattern, "committed")
+                    unshown = nullcontext()
                 else:
-                    with mock.patch.object(gitcmd, "commit_parents", return_value=None):
-                        pending = self.interrupt(call, pattern, "committed")
+                    unshown = mock.patch.object(gitcmd, "commit_parents", return_value=None)
 
+                # the commit is made and gets no ID, so its push cannot name it: even this first run stops there (BL-050)
+                with unshown, self.assertRaises(StopError) as stopped:
+                    call()
+
+                self.assertIn("cannot show which commit it publishes", stopped.exception.message)
+                (pending,) = MutationController(self.store).list_pending()
                 effect = self.recorded_effect(pending, pattern)
                 self.assertEqual((effect["applied"], MADE in effect), (True, False))
-                self.assertEqual(call().status, "phase_held")
+                self.assertEqual(self.remote_head(), remote)
+                self.assertPushNamesNoCommit(call)  # and so does every retry
 
 
 # --------------------------------------------------------------------------- the ID is the identity: no way back to the message
@@ -370,6 +379,7 @@ class SameMessageTests(IdentityCase):
 
 
 # --------------------------------------------------------------------------- records without an ID keep today's contract
+# for their commit; their push cannot name that commit and pushes nothing (BL-050)
 class LegacyTests(IdentityCase):
     def test_a_record_without_an_id_is_classified_as_before(self) -> None:
         drop = lambda record: [effect.pop(MADE, None) for effect in record["effects"]]  # noqa: E731
@@ -380,8 +390,7 @@ class LegacyTests(IdentityCase):
             self.edit_record(pending, drop)
             self.append(EVENT_LOG, "\n")
 
-            self.assertEqual(call().status, "phase_held")
-            self.assertOnlyLeftOver([f" M {EVENT_LOG}"])
+            self.assertPushNamesNoCommit(call)
         with self.subTest(case="a message a hook rewrote, its paths edited again"):
             self.build("legacy-hook")
             self.hook("commit-msg", CHANGE_ID_HOOK)
@@ -398,8 +407,7 @@ class LegacyTests(IdentityCase):
             self.edit_record(pending, drop)
             git(self.root, "commit", "-q", "--amend", "--only", "--no-edit", "--date", "2001-01-01T00:00:00")
 
-            self.assertEqual(call().status, "phase_held")
-            self.assertNothingLeftOver()
+            self.assertPushNamesNoCommit(call)
 
 
 # --------------------------------------------------------------------------- the windows before the commit is made
