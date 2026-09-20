@@ -753,18 +753,26 @@ class ContractTests(CycleCase):
 class RemotelessTests(CycleCase):
     remote = False
 
-    def test_a_git_stage_its_replay_recorded_over_a_refused_change_does_not_end_the_cycle(self) -> None:
-        """The replay's commit recorded over a person's ledger change, refused; once they undo it the cycle goes on."""
+    def test_a_commit_its_replay_refused_over_a_persons_change_does_not_end_the_cycle(self) -> None:
+        """The replay's commit refused over a person's ledger change; once they undo it the cycle goes on.
+
+        The commit is refused before its Git stage is written into the record
+        (BL-053), so what the cycle holds is exactly what it held before the
+        refusal. This once pinned that stage as recorded, which is the state
+        that then poisoned every later resume.
+        """
         expected = self.twin(lambda: {("W1", 1): self.waits("fix"), ("W1", 2): st.Hold("later")})
         self.setUp()
         self.ask()
         path = self.root / ROADMAP_YAML
         original = path.read_bytes()
+        stages = self.stage_names()
         path.write_bytes(original + b"# person's note\n")
         with self.assertRaises(ReconcileRequired) as refused:
             self.starting({("W1", 2): st.Hold("later")})()
         self.assertIn("cannot show the change it would commit is its own", str(refused.exception))
-        self.assertEqual(self.stage_names()[-2:], ["commit:0", "commit:1"])
+        self.assertEqual(path.read_bytes(), original + b"# person's note\n")
+        self.assertEqual(self.stage_names(), stages)  # the refused commit is not recorded as a Git stage
         path.write_bytes(original)
         self.assertEqual(self.starting({("W1", 2): st.Hold("later")})().status, "held")
         self.assertEqual(self.ran, ["W1#1", "W1#2", "W1#2"])

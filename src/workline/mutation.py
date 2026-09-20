@@ -32,7 +32,10 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   holds exactly that: owning the path is not owning the bytes, so a change
   another subject made to it after the operation began is never written over,
   taken into the mutation's own state, or committed as its own
-  (:func:`_require_own_bytes_before_write`, :func:`_require_own_bytes_committed`);
+  (:func:`_require_own_bytes_before_write`, :func:`_require_own_bytes_committed`).
+  A commit is held to that proof before its Git stage is written into the record
+  as well as before the commit is made, so a commit refused leaves no stage
+  behind for a later resume to read as one this mutation made;
 * an effect the mutation applied and a recorded commit finalizes is written
   again only on the branch that commit names: a resume that would write it
   anywhere else stops before anything is replayed or recorded
@@ -410,6 +413,28 @@ class Mutation:
         instead, so a snapshot taken after such a change can never stand in for
         it. A file that cannot be read now carries nothing: a write that then
         happens anyway is classified as it always was.
+
+        A stage that commits Project files is held to the proof its commit is
+        held to right before it is staged (:func:`_require_own_bytes_committed`)
+        here as well, before the stage is written down: every path it would
+        carry holds exactly what this mutation put there. The two are one
+        proof made at two moments, and neither stands in for the other. A
+        commit is recorded and applied with nothing touching the working tree
+        in between, so a commit recorded here is classified ``UNAPPLIED`` at
+        once and proved again there: the same comparison, on the same record,
+        against the same tree, refusing exactly what applying it refuses. What
+        this moment adds is that a commit refused is refused before the record
+        holds it. A Git stage left behind by a refusal is a commit this
+        mutation never made and never can: its paths holding nothing left to
+        commit classify it applied without the ID of any commit
+        (:meth:`MutationController._classify_commit`), which no recorded push
+        can publish (:func:`_recorded_publication`), which the paths being
+        written again turns back into a commit refused once more, and which
+        a replay reading what this operation decided counts among the stages
+        between its decisions (BL-053). What the later moment adds is the
+        window this one cannot see: another subject changing a path after the
+        stage is recorded and before its commit is made is refused there, as
+        it always was.
         """
         self._writable()
         if self.status != "pending":
@@ -431,6 +456,9 @@ class Mutation:
             pending_records.append(record)
         _bind_decision(self, stage, pending_records)
         _require_finalized_branch(self, f"recording stage {stage!r}")
+        for index, record in enumerate(pending_records):
+            if record["kind"] == "git_commit":
+                _require_own_bytes_committed(self, recorded + pending_records, len(recorded) + index, record)
         self.record["effects"] = recorded + pending_records
         self._save()
 
@@ -1194,6 +1222,15 @@ def _require_own_bytes_committed(
     comparison sound: a difference from HEAD that is not this mutation's own was
     made after it began. A record from before a mutation recorded any of this,
     and a path whose writer was recorded then, keep the behaviour they had.
+
+    Made at two moments, for two windows (BL-053): once before the commit is
+    written into the record (:meth:`Mutation.add_effects`), so that a commit
+    that cannot be shown to be this mutation's own leaves no Git stage behind
+    to poison what comes after it, and once right before the commit is made
+    (:meth:`Mutation.apply`), which is the only one that sees a change another
+    subject wrote after the stage was recorded. ``effects`` and ``position``
+    say which effects come before this commit at the moment it is being made
+    or recorded; both ask the same question of the same working tree.
     """
     paths = [path for path in record["payload"]["paths"] if isinstance(path, str)]
     changed = gitcmd.changed_against_head(mutation.store.root, paths)
