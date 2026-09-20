@@ -415,6 +415,20 @@ commit IDを記録した適用済みのcommitは、HEADが記録したbranchの�
 
 commit IDを持たないcommit（commitを作った直後・適用済みとIDを記録する前の中断、IDを記録する前のimplementationのrecord）は従来どおり扱い、保存されたmessageと記録の違い（空白・改行・hookによる追記等）を正規化して一致とはしない。
 
+記録したcommitをmutationが作る前に、そのcommitが運ぶ変更を別主体のcommitが取り込んだ場合（人が散らかったworking treeをまとめてcommitした場合等）、記録したpathsにcommitする変更は残らないので上の「適用済みと記録していないcommit」の規定で一致となるが、mutationはそのcommitを作っていないのでcommit IDを持たない。このとき、mutationはそのcommitを自分のcommitとして採用しない。branchの先端へfallbackせず、messageの一致へfallbackせず、内容の一致だけからcommitの同一性を推測せず、記録したpushを実行せず、`reconcile required` で停止する（Push destination）。これはerrorではなく公開の安全境界である。公開は取り消せないので、自分が作ったと示せないcommitは公開しない。
+
+この停止からの回復は人が行う。別主体のcommitがまだ公開されておらず、かつそれを安全に取り消せる場合は、そのcommitが取り込んだ変更をworking treeへ戻した状態にしてから、同じoperationを再実行する。記録どおりのcommitはWorkline自身に作らせ、pending mutation recordを手で書き換えず、Project正本fileを手で作り直さない。安全なGit操作は履歴の形によって異なるので、特定のcommandを唯一の手順としない（直前の未公開commitだけを戻す単純な場合は `git reset --mixed HEAD~1` がその一例である）。
+
+次のいずれかに当たる場合、Worklineは自動修復しない。人がGitで調整する必要があることを示して停止する。force pushは回復手順にしない。
+
+```text
+別主体のcommitが既にremoteへ公開されている
+そのcommitの後に別のcommitが積まれている
+共有履歴の書き換えが必要になる
+どのcommitを戻せばよいかを積極的に示せない
+戻すことで他者の変更を失わせる可能性がある
+```
+
 記録したcommitを未適用として扱うには、HEADとbaseの関係だけでなく、recordのbranchと現在HEADが指すbranchの整合も示す必要がある。commitを記録した後・作る前に中断したmutation（commit自体の失敗を含む）のresumeで、HEADがまだbaseであることだけでは未適用としない。次を示せる時だけ未適用として、記録どおりのcommitを作る。
 
 ```text

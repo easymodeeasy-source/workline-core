@@ -371,6 +371,8 @@ remoteあり通常Projectでは最終Work結果をremoteへ反映する。remote
 
 記録したpushが公開するのは、そのGit段階のcommitとその土台の履歴だけで、question waitや中断の間に人などが同じbranchへ積んだcommitは、そのpushでは公開しない。後のWorkやstageがその上に自分のcommitを作った場合だけ、そのcommitの履歴として公開される（`rules/git` のPush destination）。
 
+STARTがGit段階を記録した後・そのcommitを作る前に中断し、その間に人などが同じ変更を自分のcommitへ取り込んだ場合、STARTはそのcommitを自分のcommitとして採用せず、記録したpushも実行せずに `reconcile_required` で停止する。これはerrorではなく公開の安全境界である。回復は人が行い、その別主体のcommitが未公開で安全に取り消せる場合だけ、取り込まれた変更をworking treeへ戻してから同じpending mutationを再実行し、記録どおりのcommitはSTART自身に作らせる（recordやProject正本を手で直さない）。公開済み・後続commitあり・安全に戻せることを示せない場合は自動修復せず、人のGit調整が必要である（`rules/git` のCommit / push）。
+
 pushする場合の宛先は `rules/git` のpush destinationに従う。START開始前、mutationを開くより前、networkへ触れるより前に承認先一致を検査し、承認先なし / 不一致 / 解決不能はdomain writeの前にSTOPする。承認先をSTART側で変更しない。
 
 ### 成果commit message
