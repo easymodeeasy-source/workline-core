@@ -1264,6 +1264,64 @@ def _require_own_bytes_committed(
     )
 
 
+def stage_writes_already_committed(mutation: Mutation, effects: list[dict[str, Any]]) -> bool:
+    """Whether every whole file a stage wrote is in the committed state of the branch it was decided on, as written.
+
+    A stage that writes Project files is normally finalized by a Git stage of
+    this mutation's own. It gets none at all when another subject commits the
+    working tree while this mutation is interrupted between applying that stage
+    and recording its Git stage: the stage's paths no longer differ from HEAD,
+    so the owner finds nothing to commit and records no stage
+    (:meth:`workline.start._Session._commit`). A mutation never adopts a commit
+    it did not make (``rules/git``: Commit / push), so there is nothing to
+    identify and nothing to publish - but what that Git stage was there to
+    establish can still be shown without naming any commit: the state those
+    writes were meant to reach has been reached.
+
+    That is what this says, and only that: every ``write_file`` of the stage
+    holds exactly the bytes this mutation recorded writing there (``wrote``),
+    none of them differs from HEAD, and HEAD is on the branch the stage was
+    decided on over a history that still holds the commit it was decided at
+    (:func:`_still_where_decided`). No commit is named, none is taken for this
+    mutation's own, no commit ID is written, and no push can publish anything by
+    it (:func:`_recorded_publication` is untouched).
+
+    A stage also re-renders shared ledgers, which later stages of the same
+    mutation legitimately write again, so what one holds now says nothing about
+    this stage either way and is not compared here; the caller shows those
+    separately, by the records they added
+    (:func:`workline.start._added_relations_in_head`).
+
+    ``False`` - never an exception - for anything short of that: no effects at
+    all, no whole file written, an effect writing no Project file (a
+    ``git_commit`` or ``git_push`` among them), one not recorded applied, one
+    recorded before a mutation recorded what it writes, a path that no longer
+    holds what was written there, a path still differing from HEAD, effects
+    carrying different bindings, a binding this record does not carry or cannot
+    be read, and a HEAD that is not where the stage was decided.
+    """
+    if not effects:
+        return False
+    binding = effects[0].get(_DECIDED_ON)
+    written: list[str] = []
+    for effect in effects:
+        path = effect_path(effect)
+        if path is None or effect.get("applied") is not True or not isinstance(effect.get(_WROTE), str):
+            return False
+        if effect.get(_DECIDED_ON) != binding:
+            return False
+        if effect["kind"] == "write_file" and path not in written:
+            written.append(path)
+    if not written:
+        return False
+    if not _binding_readable(binding) or not _still_where_decided(mutation.store.root, binding):
+        return False
+    for path in written:
+        if _content_digest(mutation.store.abs(path)) != _last_wrote(effects, path):
+            return False
+    return not gitcmd.changed_against_head(mutation.store.root, sorted(written))
+
+
 # --------------------------------------------------------------------------- the commit a mutation made
 
 def _make_commit(mutation: Mutation, record: dict[str, Any]) -> bool:

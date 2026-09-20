@@ -36,6 +36,8 @@ from .mutation import (
     _decides,
     abandon_on_stop,
     declare_own_content,
+    effect_path,
+    stage_writes_already_committed,
 )
 from .oplock import project_operation
 from .ops import (
@@ -2706,26 +2708,120 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
         for index, entry in enumerate(mine):
             if entry["outcome"]["move"] and index != len(mine) - 1:
                 raise refuse("a derivation that removed the target and another after it, where a move ends the cycle")
+            decided = _outcome_from_record(entry["outcome"])
             if entry["stage"] in recorded:
                 position = stages.index(entry["stage"])
                 if not any(_DECIDED_ON in effect for effect in effects if effect["stage"] == entry["stage"]):
                     raise refuse(f"a registration {entry['stage']!r} recorded without the branch it was decided on")
                 if index + 1 < len(recorded):
                     between = stages[position + 1: stages.index(recorded[index + 1])]
-                    if len(between) != 1 or not between[0].startswith("commit:") or any(
+                    carried = len(between) == 1 and between[0].startswith("commit:") and not any(
                         effect["kind"] not in ("git_commit", "git_push")
                         for effect in effects
                         if effect["stage"] == between[0]
+                    )
+                    # None at all is the one other shape a derivation can leave: the commit that would
+                    # have carried it was made by another subject, so this mutation recorded no Git
+                    # stage for it and never can. It continues only where that is shown, exactly
+                    # (:func:`_registration_already_committed`); anything else refuses as before.
+                    if not carried and not (
+                        not between and _registration_already_committed(mutation, subject, entry["stage"], decided)
                     ):
                         raise refuse(
                             f"the stages {between} between {entry['stage']!r} and the derivation after it, where a "
                             "derivation records only the commit that carries it"
                         )
             proven[entry["stage"]] = _ProvenDerivation(
-                subject, entry["stage"], _outcome_from_record(entry["outcome"]), entry["moved_by"],
+                subject, entry["stage"], decided, entry["moved_by"],
                 entry["stage"] in recorded, entry.get(DECIDED_DISPLAY),
             )
     return tuple(proven[entry["stage"]] for entry in entries)
+
+
+#: The effect kinds a derivation's registration stage is made of (``create.register_works``): the Work files and
+#: derivation details it writes whole, and the relations it adds to the ledgers.
+_REGISTRATION_KINDS = ("write_file", "add_relation")
+
+
+def _added_relations_in_head(mutation: Mutation, effects: list[dict[str, Any]]) -> bool:
+    """Whether the relation ledgers committed in HEAD hold every relation ``effects`` added, by its ID.
+
+    A ledger is re-rendered by every stage that writes it, so what it holds now
+    shows nothing about a particular stage. What a stage added is named by the
+    reserved ID of each relation, and an ID is in the committed ledger or it is
+    not - a question Git answers about HEAD's tree alone, whatever the working
+    tree has become since (:func:`_in_head_event_log` asks the event log the same
+    way). Anything Git cannot answer counts as not held: this is what allows a
+    record to be continued, so what cannot be shown must not allow it.
+    """
+    for effect in effects:
+        if effect["kind"] != "add_relation":
+            continue
+        path, record = effect_path(effect), effect["payload"].get("record")
+        relation_id = record.get("id") if isinstance(record, dict) else None
+        if path is None or not isinstance(relation_id, str) or not relation_id:
+            return False
+        found = gitcmd.run_git(mutation.store.root, "grep", "-q", "-F", "-e", relation_id, "HEAD", "--", path, check=False)
+        if found.returncode != 0:
+            return False
+    return True
+
+
+def _registration_already_committed(mutation: Mutation, work_id: str, stage: str, outcome: Derive) -> bool:
+    """Whether ``stage`` is the registration this derivation decides and the branch already holds it, committed.
+
+    A derivation's registration is followed by the commit that carries it, and a
+    resume shows the record holds exactly that one Git stage between two
+    derivations (:func:`_derivations_to_reuse`). It holds none at all when, while
+    this START was interrupted between applying that registration and recording
+    its Git stage, another subject committed the working tree: the registration's
+    paths no longer differ from HEAD, so :meth:`_Session._commit` finds nothing
+    to commit and records no stage. The record then holds two derivations side by
+    side, and a proof that reads only the stage list can never continue it again -
+    not by any retry, and not by any Git action the person can take, because what
+    is missing is a record, not a state (BL-054).
+
+    So the gap is passed over only where what that Git stage was there to
+    establish is shown instead, and only that:
+
+    * the stage is made of nothing but a registration's own effects - the Works
+      and derivation details it writes whole, and the relations it adds - so a
+      lifecycle, a result or a Git stage is never read as one;
+    * every effect of it is applied, and the branch it was decided on already
+      holds, committed, exactly the bytes this mutation wrote for every whole
+      file (:func:`mutation.stage_writes_already_committed`) and every relation
+      it added, by the ID reserved for it (:func:`_added_relations_in_head`);
+    * the stage is the registration this derivation decided, compared exactly as
+      the replay compares it (:func:`_recorded_registration` over
+      :func:`_derivation_registration`, on the Project without that stage's own
+      applied effects) - so a registration the Project does not hold as the
+      decision makes it, one under other reserved IDs, and a record whose
+      decision was rewritten are refused here, with the message the replay gives.
+
+    No commit is identified, none is taken for this mutation's own, no commit ID
+    is written, and publication is untouched: a recorded push still publishes
+    only the commit its own Git stage made (BL-050). Nothing is recorded, applied
+    or committed here. A record that cannot show all of this is refused exactly
+    as it is today.
+    """
+    effects = mutation.stage_effects(stage)
+    if any(effect["kind"] not in _REGISTRATION_KINDS for effect in effects):
+        return False
+    if not stage_writes_already_committed(mutation, effects) or not _added_relations_in_head(mutation, effects):
+        return False
+    try:
+        view = ProjectView.load(mutation.store)
+        work = view.works.get(work_id)
+        if work is None:
+            return False
+        _require_registrable(outcome)
+        applied = [effect for effect in effects if effect.get("applied")]
+        specs, relations = _derivation_registration(view, _own_effects_free_view(view, applied), work, outcome)
+    except StopError:
+        return False  # the decision's registration cannot be rebuilt on this Project: nothing is shown
+    # A stage that is not the registration its decision makes is refused here, as the replay refuses it.
+    _recorded_registration(mutation, stage, specs, relations)
+    return True
 
 
 #: How many Git stages of its own a recorded move may hold between its registration and the removal of
