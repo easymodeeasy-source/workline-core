@@ -2728,6 +2728,43 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
     return tuple(proven[entry["stage"]] for entry in entries)
 
 
+#: How many Git stages of its own a recorded move may hold between its registration and the removal of
+#: the target (:func:`_derive_move_to_finish`). One: the replay of an earlier derivation of the same
+#: cycle commits the registration it finds uncommitted, under that derivation's own message
+#: (:meth:`_Session.run_work`), and a cycle can hold no more than one of those - once that commit is
+#: made nothing of the registration is left uncommitted for a later replay to carry (BL-052).
+_MOVE_LEADING_GIT_STAGES = 1
+
+
+def _own_git_stage(effects: list[dict[str, Any]], name: str) -> bool:
+    """Whether ``name`` is a Git stage of this mutation and nothing else, so it decides nothing.
+
+    ``_Session._commit`` records a Git stage as the one ``git_commit`` it makes,
+    and the ``git_push`` that publishes it where the Project has a destination
+    (:func:`gitops.finalize_effects`), over paths this mutation's own effects
+    write. A stage of exactly that shape finalizes a decision made elsewhere and
+    makes none of its own, so a proof that reads what this START decided may pass
+    over it.
+
+    Anything else is never passed over: a lifecycle stage, a result, a
+    registration, a stage under another name, a stage holding a file effect
+    beside its commit, one whose commit names no path or a path no effect of this
+    mutation writes. A Git stage is not "any stage whose kinds look like Git" -
+    it is one this START writes.
+    """
+    if not name.startswith("commit:"):
+        return False
+    stage = [effect for effect in effects if effect["stage"] == name]
+    paths = stage[0]["payload"].get("paths") if stage else None
+    return (
+        [effect["kind"] for effect in stage] in (["git_commit"], ["git_commit", "git_push"])
+        and isinstance(paths, list)
+        and bool(paths)
+        and all(isinstance(path, str) for path in paths)
+        and set(paths) <= set(_owned_paths([e for e in effects if e["kind"] in FILE_EFFECT_KINDS]))
+    )
+
+
 def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivation, ...]) -> _ProvenMove | None:
     """The move a recorded derivation of this START decided and a retry finishes, or ``None``.
 
@@ -2754,6 +2791,18 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
     only that it still resolves by its stable ID; the display it is shown under
     now is not part of what was decided, and a person may change it at any time
     without touching the record (BL-048).
+
+    The removal is the next thing this move records, but not always the next
+    stage the record holds: the replay of an earlier derivation of the same cycle
+    commits whatever of the cycle it finds uncommitted, so the registration of a
+    move interrupted before its removal is carried by a Git stage of that
+    derivation's own (BL-051 residual (a), left as it is). A Git stage decides
+    nothing, so at most the one such commit a cycle can hold is passed over
+    (:func:`_own_git_stage`, :data:`_MOVE_LEADING_GIT_STAGES`) and the removal is
+    looked for after it. Nothing else is passed over, and what the move is shown
+    by is unchanged: the registration this START decided, the removal of that
+    Work's target under the ID reserved for it, and the commit that carries the
+    move with the message that move decided (BL-052).
     """
     if not derivations:
         return None
@@ -2767,8 +2816,15 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
     after = stages[position + 1:]
     number = len({name for name in stages[:position] if name.startswith(f"{last.work_id}:lifecycle:")})
     lifecycle = f"{last.work_id}:lifecycle:{number}"
+    lead = 0
+    while lead < min(len(after), _MOVE_LEADING_GIT_STAGES) and _own_git_stage(effects, after[lead]):
+        lead += 1
+    after = after[lead:]
     if not after or after[0] != lifecycle:
         return None
+    # The removal's own place in the record: what comes after it is the commit carrying the move, and
+    # the Git stages before it - this move's registration commit among them - are already made.
+    removal_position = position + 1 + lead
     removal = [effect for effect in effects if effect["stage"] == lifecycle]
     event = removal[0]["payload"].get("record") if removal else None
     if not (
@@ -2785,7 +2841,7 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
     rest = after[1:]
     committed = bool(rest)
     if committed:
-        commit_stage = f"commit:{len([name for name in stages[:position + 1] if name.startswith('commit:')])}"
+        commit_stage = f"commit:{len([name for name in stages[:removal_position] if name.startswith('commit:')])}"
         if rest != [commit_stage]:
             return None
         work = ProjectView.load(mutation.store).works.get(last.work_id)
