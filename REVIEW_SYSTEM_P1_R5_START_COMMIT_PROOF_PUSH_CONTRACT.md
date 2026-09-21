@@ -1,6 +1,6 @@
 # Review System P1 — R5 START Result Commit / Proof / Push Split Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 3 REPAIRED / LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 3 REPAIRED / LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / P1-FLBR-01 + D1 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the Git transaction shape required by Candidate 7 for Review-v1 Work completion. It is non-normative until implementation and canonical authority activation.
 
@@ -353,18 +353,76 @@ Implementation requirement **R5-IMPL-2**: the publication contract is recorded a
 publication_contract = review-v1-split-v1
 ```
 
-Frozen rules for that identity:
-
-```text
-absent            -> current-combined (§12.1), unconditionally
-present and known -> that contract's validator
-present, unknown / unreadable / contradictory
-                  -> fail closed; never defaulted to either contract
-```
-
 It is **non-lifecycle operation metadata**, used only by mutation/recovery validation. It is not a lifecycle authority, it does not appear in `ProjectView/state.py` derivation, and it never changes Work/Phase/Roadmap state. Review remains a subordinate authorization gate.
 
-No existing mutation is promoted to Review-v1 by its shape, its content, the presence of Review files, or the absence of a combined pair. A mutation without the identity is current-combined, full stop. Absence of the identity is a positive answer, not an unknown.
+#### 12.3.1 Precedence — an absent discriminator is not by itself an answer
+
+A missing `publication_contract` has two entirely different causes, and they must not be collapsed:
+
+```text
+a mutation that was never under the Review-v1 contract
+a Review-v1 mutation whose identity is missing
+```
+
+The second is a real reachable state: R5-IMPL-2 requires the identity to be durable before the first Git stage, but a mutation can bind Review-v1 operation metadata and then be interrupted before that save. Treating its absence as a positive "current-combined" answer would route a Review-v1 mutation to §12.1, where a same-stage commit+push pair is well-formed — publishing without C-2. Absence is therefore read together with the rest of the mutation's durable Review-v1 operation metadata, never alone.
+
+```text
+Review-v1 durable operation metadata
+  = review operation identity
+  | review contract / version
+  | review_run_id / generation
+  | any other durable Review-v1 binding on the mutation
+```
+
+Frozen selection rules:
+
+```text
+A. publication_contract absent
+   AND no durable Review-v1 operation metadata
+   -> current-combined (§12.1)
+
+B. publication_contract absent
+   AND any durable Review-v1 operation metadata present
+   -> contradictory metadata -> fail closed
+      (never current-combined, never review-v1-split)
+
+C. publication_contract = review-v1-split-v1
+   AND matching Review-v1 durable metadata
+   -> review-v1-split (§12.2)
+
+D. publication_contract present but unknown / unreadable
+   / unsupported version
+   -> fail closed
+
+E. publication_contract present but contradicted by the
+   mutation's durable operation metadata
+   (current-combined against Review-v1 metadata;
+    review-v1-split-v1 against an incompatible or absent
+    operation identity / version)
+   -> fail closed
+```
+
+The default of case A is available **only** on the positive showing that no durable Review-v1 operation metadata exists. It is not a fallback for metadata that could not be read: metadata whose presence or absence cannot itself be determined is case D, fail closed.
+
+`unknown` is never `proven`, and a contradiction is never resolved by preferring the weaker contract.
+
+#### 12.3.2 Never inferred from shape or content
+
+Contract selection reads durable operation metadata and nothing else. It is frozen that the contract is **never** inferred from:
+
+```text
+stage shape
+presence of a git_commit + git_push pair
+absence of a git_commit + git_push pair
+presence of Review files
+absence of Review files
+Candidate file existence
+any content pattern
+```
+
+Stage shape is what the selected contract validates; it is not the selector. Using it either way would let a malformed current-combined stage re-describe itself as a Review-v1 split, or let a Review-v1 mutation be judged by a rule it was never under.
+
+No existing mutation is promoted to Review-v1 by shape or content, and none is demoted out of Review-v1 by them either. Case B in particular is decided by metadata alone: a Review-v1 mutation missing its `publication_contract` fails closed whatever its stages look like.
 
 ### 12.4 Review-v1 split binding — S-c / C-2 / S-p
 
@@ -439,6 +497,11 @@ a Review-v1 mutation contains a current-combined
 same-stage git_commit + git_push pair
 -> it does not bypass C-2
 -> Review-v1 contract validation refuses that path
+
+Review-v1 durable operation metadata present but
+publication_contract absent (§12.3.1 case B)
+-> contradictory -> fail closed before any contract is selected
+-> never routed to §12.1, so the pair cannot publish without C-2
 ```
 
 `unknown` is never `proven` anywhere in this matrix.
@@ -477,8 +540,9 @@ Repair, contract text only:
 §12.2   review-v1-split - explicitly not the same-stage pair,
         and explicitly not permitted to push through one
 §12.3   discriminator - contract read from durable non-lifecycle
-        operation metadata (R5-IMPL-2), never inferred from shape;
-        absent identity means current-combined, unconditionally
+        operation metadata (R5-IMPL-2), never inferred from shape
+        (the precedence this round gave the absent case was
+         superseded by §12.3.1; see §15)
 §12.4   S-c / C-2 / S-p minimum bindings
 §12.5   Review-v1 split fail-closed matrix
 §1.2    cross-reference to the above
@@ -488,6 +552,37 @@ Nothing in §12.1 was relaxed: a current-combined mutation whose Git stage is no
 
 ```text
 P1-FLBR-01: REPAIRED / FROZEN
+```
+
+Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+Architecture: `RETAIN`. Architecture reopen: `No`. Candidate 8: `No`. HUMAN decision: `None`.
+
+## 15. P1-FLBR-01-D1 repair disposition
+
+Finding P1-FLBR-01-D1 of the closure review, severity MID: the discriminator's precedence was incomplete. §12.3 read `absent -> current-combined, unconditionally` and `a mutation without the identity is current-combined, full stop`, which collapsed two different states into one answer.
+
+A mutation that binds Review-v1 operation metadata and is then interrupted before `publication_contract` is saved has an absent identity while not being a legacy mutation. Under the old wording it fell through to §12.1, where a same-stage commit+push pair is well-formed — so it could publish without C-2. The defect was the default, not the shape rules.
+
+Repair, contract text only:
+
+```text
+§12.3.1  precedence split into cases A-E: absence defaults to
+         current-combined only on the positive showing that no
+         durable Review-v1 operation metadata exists; absence
+         alongside Review-v1 metadata is contradictory and fails
+         closed; an explicit value contradicted by operation
+         metadata fails closed; unreadable metadata is case D
+§12.3.2  contract never inferred from shape, pair presence or
+         absence, Review files, Candidate existence or content
+§12.5    contradictory-absence row added to the matrix
+```
+
+§12.1's current-combined rule and §12.2's split rule are unchanged; only the selection between them was corrected. Nothing in this repair widens what either validator accepts — case B moves a state that previously reached §12.1 into fail-closed, so the change is strictly narrowing.
+
+```text
+P1-FLBR-01-D1: REPAIRED / FROZEN
+P1-FLBR-01:    RESOLVED
 ```
 
 Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.

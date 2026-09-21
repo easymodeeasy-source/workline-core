@@ -1,6 +1,6 @@
 # Review System P1 — Final Baseline Repair Checkpoint (P1-FLBR-01)
 
-Status: P1-FLBR-01 REPAIRED / FROZEN / IMPLEMENTATION NOT STARTED / CLOSURE VERIFICATION REQUIRED
+Status: P1-FLBR-01 RESOLVED (D1 REPAIRED / FROZEN) / IMPLEMENTATION NOT STARTED / FINAL READINESS CHECK REQUIRED
 
 This checkpoint records the repair of the single Finding left by the final focused live-baseline review. It is non-normative until implementation and canonical authority activation.
 
@@ -86,13 +86,11 @@ A validator never infers the contract from observed shape. The contract is read 
 publication_contract = review-v1-split-v1
 ```
 
-```text
-absent            -> current-combined, unconditionally
-present and known -> that contract's validator
-unknown / unreadable / contradictory -> fail closed
-```
+Non-lifecycle operation metadata for mutation/recovery validation only. Not a lifecycle authority, absent from `ProjectView/state.py` derivation, and it never changes Work/Phase/Roadmap state.
 
-Non-lifecycle operation metadata for mutation/recovery validation only. Not a lifecycle authority, absent from `ProjectView/state.py` derivation, and it never changes Work/Phase/Roadmap state. No existing mutation is promoted to Review-v1 by shape, content, presence of Review files, or absence of a combined pair.
+Selection precedence, as repaired by P1-FLBR-01-D1 (§9 below), is the cases A-E of R5 §12.3.1. An absent identity is not by itself an answer: it defaults to current-combined only on the positive showing that the mutation carries no durable Review-v1 operation metadata.
+
+No mutation is promoted into Review-v1 by shape, content, presence or absence of Review files, Candidate existence, or presence or absence of a combined pair — and none is demoted out of it by them either (R5 §12.3.2).
 
 ## 4. Review-v1 split bindings (R5 §12.4)
 
@@ -185,10 +183,77 @@ state.py remains independent of Review metadata
 
 R1-R4, R6, R7, R8-R11 are untouched. Candidate 7 architecture is unchanged.
 
-## 8. Disposition
+## 8. P1-FLBR-01 closure condition
+
+Closure condition, as required by the Finding: the current-combined publication validator and the Review-v1 split publication validator are now distinct contracts in text (R5 §12.1 vs §12.2), selected by a shape-independent discriminator (§12.3), with the Review-v1 `S-c -> durable C-2 -> S-p` binding (§12.4) and failure matrix (§12.5) frozen, and with the test contract split correspondingly (R12 `C-current` and §10.2).
+
+## 9. P1-FLBR-01-D1 — discriminator precedence
+
+The closure review of the above returned one Finding, severity MID.
+
+### 9.1 The defect
+
+§12.3 as first written said `absent -> current-combined, unconditionally` and `a mutation without the identity is current-combined, full stop`. That collapsed two unlike states into one answer:
 
 ```text
-P1-FLBR-01: REPAIRED / FROZEN
+a mutation that was never under the Review-v1 contract
+a Review-v1 mutation whose identity is missing
+```
+
+The second is reachable. R5-IMPL-2 requires `publication_contract` to be durable before the first Git stage, but a mutation can bind Review-v1 operation metadata and then be interrupted before that save. The old default routed it to §12.1, where a same-stage commit+push pair is well-formed — so it could publish without C-2. The hole was in the default, not in either shape rule.
+
+### 9.2 Repaired precedence (R5 §12.3.1)
+
+```text
+A. publication_contract absent
+   AND no durable Review-v1 operation metadata
+   -> current-combined
+
+B. publication_contract absent
+   AND any durable Review-v1 operation metadata present
+   -> contradictory -> fail closed
+      (never current-combined, never review-v1-split)
+
+C. publication_contract = review-v1-split-v1
+   AND matching Review-v1 durable metadata
+   -> review-v1-split
+
+D. publication_contract present but unknown / unreadable
+   / unsupported version, or metadata whose presence cannot
+   itself be determined
+   -> fail closed
+
+E. publication_contract present but contradicted by the
+   mutation's durable operation metadata
+   -> fail closed
+```
+
+Case A's default is available **only** on the positive showing that no durable Review-v1 operation metadata exists. Absence that cannot be established is case D. A contradiction is never resolved by preferring the weaker contract.
+
+`Review-v1 durable operation metadata` means review operation identity, review contract/version, `review_run_id` / generation, or any other durable Review-v1 binding on the mutation.
+
+### 9.3 Test repair (R12 V9)
+
+```text
+V9-A  true legacy/current absence   -> current-combined
+V9-B  contradictory absence         -> fail closed   [MANDATORY]
+V9-C  explicit Review-v1            -> split validator
+V9-D  unknown / undeterminable      -> fail closed
+V9-E  explicit value contradicted   -> fail closed
+V9-F  shape and content are never selectors
+```
+
+V9-B is the mandatory negative regression test for this Finding: a Review-v1 mutation interrupted after binding Review-v1 metadata and before `publication_contract` was saved must not reach the current-combined validator, and no same-stage pair in it may publish without C-2.
+
+### 9.4 Scope of the change
+
+§12.1's current-combined rule, §12.2's split rule, §12.4's bindings, §12.5's matrix (one row added), R12 `C-current` and V1-V8 are all unchanged. Only the selection between contracts was corrected, and strictly in the narrowing direction: case B moves a state that previously reached §12.1 into fail-closed. Nothing became newly acceptable.
+
+## 10. Current checkpoint
+
+```text
+P1-FLBR-01-D1: REPAIRED / FROZEN
+P1-FLBR-01:    RESOLVED
 
 Architecture: RETAIN
 Architecture reopen: No
@@ -202,7 +267,5 @@ Implementation:
 NOT STARTED
 
 Next:
-one final focused verification of P1-FLBR-01 closure
+final P1 implementation readiness check
 ```
-
-Closure condition, as required by the Finding: the current-combined publication validator and the Review-v1 split publication validator are now distinct contracts in text (R5 §12.1 vs §12.2), selected by a shape-independent discriminator (§12.3), with the Review-v1 `S-c -> durable C-2 -> S-p` binding (§12.4) and failure matrix (§12.5) frozen, and with the test contract split correspondingly (R12 `C-current` and §10.2).

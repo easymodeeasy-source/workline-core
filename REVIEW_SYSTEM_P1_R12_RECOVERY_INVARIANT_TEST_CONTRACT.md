@@ -1,6 +1,6 @@
 # Review System P1 — R12 Recovery / Invariant Test Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 4 REPAIRED / LIVE-BASELINE RECONCILED / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / LIVE-BASELINE RECONCILED / P1-FLBR-01 + D1 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the minimum interruption/invariant test matrix required before Review contracts may activate.
 
@@ -418,12 +418,62 @@ Expected: it does **not** bypass C-2. Review-v1 contract validation refuses that
 
 ### V9. Discriminator integrity
 
+Contract selection is decided by durable operation metadata alone (R5 §12.3.1). Each case below is a separate mandatory test; an absent discriminator is not by itself an answer.
+
+#### V9-A. True legacy/current absence
+
 ```text
-publication contract identity absent      -> current-combined, unconditionally
-identity unknown / unreadable / contradictory -> fail closed
+publication_contract absent
+no durable Review-v1 operation metadata
 ```
 
-Expected: the contract is never selected from observed stage shape, and no existing mutation is promoted to Review-v1 by shape, content, presence of Review files, or absence of a combined pair.
+Expected: `current-combined`. The default applies only on this positive showing.
+
+#### V9-B. Contradictory absence — mandatory negative test
+
+```text
+publication_contract absent
+durable Review-v1 operation metadata present
+  (review operation identity / review contract/version /
+   review_run_id / generation / any other Review-v1 binding)
+```
+
+Expected: **fail closed.** Never `current-combined`, never `review-v1-split`.
+
+This is the P1-FLBR-01-D1 regression test and is mandatory. Cover at least a Review-v1 mutation interrupted after binding Review-v1 operation metadata and before `publication_contract` was saved, and assert specifically that it is **not** routed to the current-combined validator and that no same-stage `git_commit` + `git_push` pair in it can publish without C-2.
+
+#### V9-C. Explicit Review-v1
+
+```text
+publication_contract = review-v1-split-v1
+matching Review-v1 durable metadata
+```
+
+Expected: the Review-v1 split validator.
+
+#### V9-D. Unknown discriminator
+
+```text
+publication_contract present but unknown / unreadable / unsupported version
+```
+
+Expected: fail closed. Also cover metadata whose presence or absence cannot itself be determined — that is this case, not V9-A.
+
+#### V9-E. Explicit discriminator contradicts operation metadata
+
+```text
+publication_contract = current-combined
+  BUT durable operation metadata says Review-v1
+
+publication_contract = review-v1-split-v1
+  BUT operation identity / version is incompatible or absent
+```
+
+Expected: fail closed.
+
+#### V9-F. Shape and content are never selectors
+
+Expected: across V9-A..V9-E the selected contract does not change when the mutation's stage shape, the presence or absence of a `git_commit` + `git_push` pair, the presence or absence of Review files, Candidate file existence, or any content pattern is varied. No mutation is promoted into Review-v1 by those, and none is demoted out of it by them.
 
 ## 11. R8/R9 semantic round-trip
 
@@ -489,6 +539,34 @@ C -> C-current   scoped to current-combined mutations, i.e. those
 
 ```text
 P1-FLBR-01: REPAIRED / FROZEN
+```
+
+Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+Architecture: `RETAIN`. Architecture reopen: `No`. Candidate 8: `No`. HUMAN decision: `None`.
+
+## 18. P1-FLBR-01-D1 repair disposition
+
+V9 tested the discriminator as a two-way rule — absent means current-combined, anything unreadable fails closed — which is the precedence defect P1-FLBR-01-D1 names. It had no case for an absent `publication_contract` alongside durable Review-v1 operation metadata, the state a Review-v1 mutation is in when it is interrupted before that identity is saved.
+
+Repair, test-contract text only:
+
+```text
+V9 -> V9-A  true legacy/current absence      -> current-combined
+      V9-B  contradictory absence            -> fail closed
+            (mandatory negative regression test for D1)
+      V9-C  explicit Review-v1               -> split validator
+      V9-D  unknown / undeterminable         -> fail closed
+      V9-E  explicit value contradicted by
+            operation metadata                -> fail closed
+      V9-F  shape and content are never selectors
+```
+
+`C-current` and V1-V8 are unchanged; only V9 was expanded. No case was removed or relaxed, and V9-B converts a state that V9 previously allowed into the current-combined path into a fail-closed one.
+
+```text
+P1-FLBR-01-D1: REPAIRED / FROZEN
+P1-FLBR-01:    RESOLVED
 ```
 
 Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.

@@ -1,6 +1,6 @@
 # Review System P1 — Live Baseline Reconciliation Checkpoint
 
-Status: CONTRACT RECONCILED TO LIVE BASELINE / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED / CLOSURE VERIFICATION REQUIRED
+Status: CONTRACT RECONCILED TO LIVE BASELINE / P1-FLBR-01 RESOLVED (D1 REPAIRED) / IMPLEMENTATION NOT STARTED / FINAL READINESS CHECK REQUIRED
 
 The focused review of this reconciliation returned one Finding, `P1-FLBR-01`, now repaired and frozen: see `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`. §4.1 below is amended by it — the same-stage `git_commit` -> `git_push` pair is the current/legacy combined publication shape (R5 §12.1), not the Review-v1 split shape (R5 §12.2).
 
@@ -148,7 +148,8 @@ The 293 seam tests covering the `19bf5e71..e32a741` window were already green at
 ## 7. Current checkpoint
 
 ```text
-P1-FLBR-01:                REPAIRED / FROZEN
+P1-FLBR-01-D1:             REPAIRED / FROZEN
+P1-FLBR-01:                RESOLVED
 
 Candidate 7 architecture:  RETAIN
 Architecture reopen:       No
@@ -160,9 +161,9 @@ Live implementation baseline:
 
 Implementation:            NOT STARTED
 
-Next: one final focused verification of P1-FLBR-01 closure
+Next: final P1 implementation readiness check
 
-Status: READY_FOR_FLBR01_CLOSURE_REVIEW
+Status: READY_FOR_FINAL_P1_IMPLEMENTATION_READINESS_CHECK
 ```
 
-The focused review of this reconciliation is complete. It returned exactly one Finding, `P1-FLBR-01`, repaired in `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md` against contract text only; the live implementation baseline did not move.
+The focused review of this reconciliation is complete. It returned exactly one Finding, `P1-FLBR-01`, repaired in `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`. The closure review of that repair returned one further Finding, `P1-FLBR-01-D1` (discriminator precedence, MID), repaired in the same document at its section 9. Both were contract text only; the live implementation baseline did not move.
