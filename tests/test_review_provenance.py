@@ -8,8 +8,10 @@ from helpers import WorklineTestCase
 from workline.errors import ValidationError
 from workline.mutation import Effect, MutationController, WriteScope
 from workline.oplock import project_operation
-from workline.review import ReviewStore, paths, records, serialize
+from workline.review import ReviewStore, fsafe, paths, records, serialize
 from workline.validate import validate_project
+
+CREATE_SUPPORTED = fsafe.immutable_create_supported()
 
 RUN_ID = "rr_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 TASK_ID = "rtk_01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -129,12 +131,21 @@ class ProvenanceDigestTests(WorklineTestCase):
         self.addCleanup(lock.__exit__, None, None, None)
 
     def _create(self, relative: str, record: dict) -> None:
-        mutation = self.controller.open(
-            "start", {"operation": "review-provenance", "path": relative}, WriteScope(files=(relative,))
-        )
-        mutation.add_effects("review", [Effect.create_file(relative, serialize.canonical_text(record))])
-        mutation.apply()
-        mutation.complete()
+        """Lay a Review record down. Through the immutable create where the platform supports it; where the create is
+        fail-closed (POSIX), place the same canonical bytes directly, so these provenance-digest tests still exercise
+        the reader on POSIX. The create boundary itself is covered by test_review_safe_create."""
+        text = serialize.canonical_text(record)
+        if CREATE_SUPPORTED:
+            mutation = self.controller.open(
+                "start", {"operation": "review-provenance", "path": relative}, WriteScope(files=(relative,))
+            )
+            mutation.add_effects("review", [Effect.create_file(relative, text)])
+            mutation.apply()
+            mutation.complete()
+        else:
+            target = self.store.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8", newline="")
 
     def test_material_digest_is_over_the_stored_snapshot_bytes(self) -> None:
         record = snapshot_record()

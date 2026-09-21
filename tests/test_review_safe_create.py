@@ -1,15 +1,22 @@
-"""P1-REV-001: the immutable Review create is race-safe at the physical create boundary itself.
+"""P1-REV-001: the immutable Review create is safe at the physical create boundary itself.
 
-The create is bound to the proven parent handle (no pathname is re-resolved
-after the proof), every component is opened without following it, and the final
-placement is exclusive - it fails on an existing name instead of replacing it.
+Where the platform can keep the create inside the Project (Windows: every held
+directory is opened without ``FILE_SHARE_DELETE``, so nothing from the root down
+can be renamed, deleted or replaced while a create runs), the create is bound to
+the proven parent handle - no pathname is re-resolved after the proof, every
+component is opened without following it, and the final placement is exclusive,
+failing on an existing name instead of replacing it.
+
+Where it cannot (POSIX: an fd pins nothing, so a held directory can be renamed
+out of the Project and the create through the fd would land wherever it went),
+the immutable Review create is refused before anything is opened or written -
+no record is ever created outside the Project and then taken back out.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import unittest
@@ -24,6 +31,10 @@ from workline.review import fsafe, paths, serialize
 from test_review_authorization import RECEIPT_ID, receipt_record
 
 WINDOWS = sys.platform == "win32"
+CREATE_SUPPORTED = fsafe.immutable_create_supported()
+FAIL_CLOSED = "the immutable Review create is fail-closed on this platform (POSIX pins no held directory)"
+CREATE_ONLY = unittest.skipUnless(CREATE_SUPPORTED, FAIL_CLOSED)
+POSIX_FAIL_CLOSED = unittest.skipIf(CREATE_SUPPORTED, "this platform supports the immutable create; fail-closed is POSIX-only")
 
 
 def make_junction(link: Path, target: Path) -> bool:
@@ -53,12 +64,19 @@ class SafeCreateTests(WorklineTestCase):
         self.target = self.store.root / self.relative
         self.text = serialize.canonical_text(receipt_record())
 
-    def _mutation(self):
-        mutation = self.controller.open(
+    def _open(self):
+        return self.controller.open(
             "start", {"operation": "review-safe-create", "path": self.relative}, WriteScope(files=(self.relative,))
         )
+
+    def _mutation(self):
+        mutation = self._open()
         mutation.add_effects("review", [Effect.create_file(self.relative, self.text)])
         return mutation
+
+    def _no_temp_debris(self) -> None:
+        leftovers = [p.name for p in self.store.tmp.iterdir()] if self.store.tmp.is_dir() else []
+        self.assertEqual([], leftovers, "a fail-closed create leaves no temporary file")
 
     @staticmethod
     def _remove_link(link: Path) -> None:
@@ -72,15 +90,18 @@ class SafeCreateTests(WorklineTestCase):
         self.assertEqual([], sorted(p.name for p in self.outside.rglob("*")), "nothing may land outside the Project")
 
     # the three immutable outcomes -------------------------------------------
+    @CREATE_ONLY
     def test_absent_target_is_created_with_exact_canonical_bytes(self) -> None:
         self._mutation().apply()
         self.assertEqual(self.text.encode("utf-8"), self.target.read_bytes())
 
+    @CREATE_ONLY
     def test_same_bytes_replay_is_matching(self) -> None:
         mutation = self._mutation()
         mutation.apply()
         self.assertEqual([MATCHING], [c for _, c in mutation.apply()])
 
+    @CREATE_ONLY
     def test_different_bytes_reconcile_and_are_not_replaced(self) -> None:
         mutation = self._mutation()
         self.target.parent.mkdir(parents=True)
@@ -89,6 +110,7 @@ class SafeCreateTests(WorklineTestCase):
             mutation.apply()
         self.assertEqual(b"someone: else\n", self.target.read_bytes())
 
+    @CREATE_ONLY
     def test_a_directory_at_the_target_reconciles(self) -> None:
         mutation = self._mutation()
         self.target.mkdir(parents=True)
@@ -97,6 +119,7 @@ class SafeCreateTests(WorklineTestCase):
             mutation.apply()
         self.assertTrue(self.target.is_dir())
 
+    @CREATE_ONLY
     def test_a_crlf_copy_of_the_record_is_not_the_record(self) -> None:
         """Replay compares stored bytes, not text a reader normalised."""
         mutation = self._mutation()
@@ -105,6 +128,7 @@ class SafeCreateTests(WorklineTestCase):
         self.assertEqual(MISMATCH, self.controller.classify(mutation.effects[0]))
 
     # races at the create boundary -------------------------------------------
+    @CREATE_ONLY
     def test_target_created_by_another_actor_after_classification_is_never_overwritten(self) -> None:
         mutation = self._mutation()
         self.assertEqual(UNAPPLIED, self.controller.classify(mutation.effects[0]))
@@ -121,6 +145,7 @@ class SafeCreateTests(WorklineTestCase):
                 mutation.apply()
         self.assertEqual(b"foreign: 1\n", self.target.read_bytes())
 
+    @CREATE_ONLY
     def test_identical_record_created_concurrently_is_an_exact_replay(self) -> None:
         mutation = self._mutation()
         real = fsafe.SafeDirectory.create_file_exclusive
@@ -134,6 +159,7 @@ class SafeCreateTests(WorklineTestCase):
         self.assertEqual(self.text.encode("utf-8"), self.target.read_bytes())
         self.assertEqual([MATCHING], [c for _, c in mutation.apply()])
 
+    @CREATE_ONLY
     def test_parent_swapped_after_the_proof_writes_nothing_outside(self) -> None:
         """A swap between the no-follow walk and the physical create is refused or harmless - never a redirect.
 
@@ -177,28 +203,55 @@ class SafeCreateTests(WorklineTestCase):
             self.assertTrue(outcome.get("refused"), "a substituted parent must fail closed")
             self.assertEqual([], list(outcome["moved"].iterdir()), "the record is taken back out of the moved directory")
 
-    @unittest.skipIf(WINDOWS, "on Windows a held directory cannot be relocated at all")
-    def test_posix_proven_directory_relocated_outside_is_taken_back_out(self) -> None:
-        """The POSIX-inherent case: the proven directory object itself is moved out of the Project.
+    # POSIX: the immutable create is fail-closed, before anything is written ---
+    #
+    # An fd pins no directory, so a held parent can be renamed out of the
+    # Project while it is held and the create through the fd would land wherever
+    # it went. No POSIX primitive makes that placement fail once the parent has
+    # left the Project, and creating anyway, then noticing and removing the
+    # record, would still have put it outside. So the create is refused before
+    # any directory, temporary file or record is opened or written.
 
-        The fd follows the object, so the create lands in it wherever it went.
-        The post-create walk no longer reaches it from the root, so the record
-        is removed through the held fd and the create is refused.
-        """
+    def _expect_create_refused(self):
+        """Open the mutation and record the create; assert it is refused fail-closed. Returns the raised error."""
+        mutation = self._open()
+        with self.assertRaises(ValidationError) as caught:
+            mutation.add_effects("review", [Effect.create_file(self.relative, self.text)])
+        self.assertEqual(fsafe.UNSUPPORTED_CODE, caught.exception.code)
+        return caught.exception
+
+    @POSIX_FAIL_CLOSED
+    def test_the_immutable_create_is_fail_closed_before_any_write(self) -> None:
+        self.assertFalse(fsafe.immutable_create_supported())
+        with self.assertRaises(ValidationError) as caught:
+            fsafe.require_immutable_create()
+        self.assertEqual(fsafe.UNSUPPORTED_CODE, caught.exception.code)
+        self._expect_create_refused()
+        self.assertFalse(self.target.exists(), "nothing is written")
+        self._no_temp_debris()
+        self._outside_is_empty()
+
+    @POSIX_FAIL_CLOSED
+    def test_a_relocation_attempt_puts_no_record_outside_and_fails_closed(self) -> None:
+        """The required proof: under a relocation attempt, no final record appears anywhere, and the create fails closed."""
         parent = self.target.parent
         parent.mkdir(parents=True)
-        mutation = self._mutation()
-        real = fsafe.SafeDirectory.create_file_exclusive
         relocated = self.outside / "receipts"
+        os.rename(parent, relocated)  # the parent is now outside the Project, exactly the case that cannot be contained
+        self._expect_create_refused()
+        self.assertFalse(self.target.exists())
+        self.assertEqual([], list(relocated.iterdir()), "no record is created in the relocated directory")
+        self._no_temp_debris()
 
-        def relocating(directory, name, data, tmp):
-            os.rename(parent, relocated)
-            return real(directory, name, data, tmp)
-
-        with mock.patch.object(fsafe.SafeDirectory, "create_file_exclusive", relocating):
-            with self.assertRaises(ReconcileRequired):
-                mutation.apply()
-        self.assertEqual([], list(relocated.iterdir()), "the record does not stay outside the Project")
+    @POSIX_FAIL_CLOSED
+    def test_even_a_direct_apply_of_a_create_effect_is_fail_closed(self) -> None:
+        """Defence in depth: were a create effect recorded elsewhere, applying it here still writes nothing."""
+        record = {"kind": "create_file", "payload": {"path": self.relative, "content": self.text}}
+        with self.assertRaises(ValidationError) as caught:
+            self.controller.apply_effect(record)
+        self.assertEqual(fsafe.UNSUPPORTED_CODE, caught.exception.code)
+        self.assertFalse(self.target.exists())
+        self._no_temp_debris()
 
     @unittest.skipUnless(WINDOWS, "the share-mode pin is a Windows mechanism")
     def test_windows_held_directories_cannot_be_renamed_during_the_create(self) -> None:
@@ -253,29 +306,24 @@ class SafeCreateTests(WorklineTestCase):
         self.assertEqual(["converted"], converted, "the attacker's conversion must actually have happened")
         self._outside_is_empty()
 
-    @unittest.skipIf(WINDOWS, "file symlinks need a privilege this Windows account does not hold")
-    def test_a_symlink_at_the_target_is_refused(self) -> None:
+    @POSIX_FAIL_CLOSED
+    def test_a_symlink_at_the_target_is_fail_closed_and_its_victim_is_untouched(self) -> None:
+        """The record-target-symlink case: refused before any write, and what the symlink points at is never touched."""
         self.target.parent.mkdir(parents=True)
         victim = self.outside / "victim.yaml"
         victim.write_bytes(b"outside: 1\n")
-        self.assertTrue(try_symlink(self.target, victim, False))
-        mutation = self._mutation()
-        self.assertEqual(MISMATCH, self.controller.classify(mutation.effects[0]))
-        with self.assertRaises(ReconcileRequired):
-            mutation.apply()
-        self.assertEqual(b"outside: 1\n", victim.read_bytes())
+        if not try_symlink(self.target, victim, False):
+            self.skipTest("cannot create a file symlink here")
+        self._expect_create_refused()
+        self.assertEqual(b"outside: 1\n", victim.read_bytes(), "the symlink's target is never written through")
 
-    @unittest.skipIf(WINDOWS, "directory symlinks need a privilege this Windows account does not hold")
-    def test_a_symlinked_parent_is_refused(self) -> None:
+    @POSIX_FAIL_CLOSED
+    def test_a_symlinked_parent_is_fail_closed_and_nothing_lands_outside(self) -> None:
         review = self.store.root / paths.REVIEW_DIR
         review.mkdir(parents=True)
-        self.assertTrue(try_symlink(review / "receipts", self.outside, True))
-        mutation = self._mutation()
-        self.assertEqual(MISMATCH, self.controller.classify(mutation.effects[0]))
-        with self.assertRaises(ReconcileRequired):
-            mutation.apply()
-        with self.assertRaises(ValidationError):
-            self.controller.apply_effect(mutation.effects[0])
+        if not try_symlink(review / "receipts", self.outside, True):
+            self.skipTest("cannot create a directory symlink here")
+        self._expect_create_refused()
         self._outside_is_empty()
 
     # the generic primitive stays away ----------------------------------------
@@ -286,6 +334,7 @@ class SafeCreateTests(WorklineTestCase):
         with self.assertRaises(ValidationError):
             mutation.add_effects("review", [Effect.write_file(self.relative, self.text)])
 
+    @CREATE_ONLY
     def test_a_failed_temporary_write_leaves_no_debris_and_no_record(self) -> None:
         """A write failure partway through (disk full, I/O error) removes the temporary file and places nothing."""
         mutation = self._mutation()
@@ -308,6 +357,7 @@ class SafeCreateTests(WorklineTestCase):
         self.controller.load(mutation.id).apply()
         self.assertEqual(self.text.encode("utf-8"), self.target.read_bytes())
 
+    @CREATE_ONLY
     def test_no_temporary_file_is_left_behind(self) -> None:
         self._mutation().apply()
         self.assertEqual([], [p.name for p in self.store.tmp.iterdir()] if self.store.tmp.is_dir() else [])

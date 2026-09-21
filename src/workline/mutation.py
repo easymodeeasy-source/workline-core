@@ -1781,6 +1781,10 @@ class MutationController:
                     raise ValidationError(
                         f"create_file writes canonical Review records; {path!r} is not one"
                     )
+                # Where no create can be kept inside the Project, none is
+                # recorded either: no mutation is left holding one it could
+                # never apply.
+                fsafe.require_immutable_create()
                 return
             if "base" in payload and not isinstance(payload["base"], str):
                 raise ValidationError("write_file base must be text")
@@ -2092,18 +2096,24 @@ class MutationController:
     def _create_review_record(self, relative: str, content: str) -> None:
         """Create one immutable Review record at the physical create boundary itself.
 
+        Only where the platform keeps every held directory pinned in place until
+        the create is done (:func:`workline.review.fsafe.immutable_create_supported`).
+        Anywhere else the create is refused here, before any directory, temporary
+        file or record is opened or written: a POSIX fd follows its directory
+        wherever it is moved, and creating anyway, then noticing and taking the
+        record back out, would still have put it outside the Project.
+
         The parent is walked from the Project root one component at a time, each
         opened *relative to the one already held* and without following any
-        indirection, and every directory stays held until the create is done
+        indirection, and every directory stays held - and pinned: nobody can
+        rename, delete or replace it - until the create is done
         (:mod:`workline.review.fsafe`). The record is written to a temporary
-        file in the likewise-held runtime area and then placed under its name
-        by an exclusive, handle-relative operation - ``linkat`` on POSIX, a
-        rename with ``ReplaceIfExists = FALSE`` relative to the parent handle on
-        Windows - which fails rather than replace an existing name.
+        file in the likewise-held runtime area and then placed under its name by
+        a rename relative to the parent handle with ``ReplaceIfExists = FALSE``,
+        which fails rather than replace an existing name.
 
-        So the create is bound to the directory that was proven, not to a path
-        that could be re-resolved elsewhere after the proof, and it can never
-        overwrite:
+        So the create lands in the directory that was proven, still where it was
+        proven, and it can never overwrite:
 
         ```text
         name free                    -> created with exactly these bytes
@@ -2111,45 +2121,23 @@ class MutationController:
                                         writer of the identical record)
         name taken by anything else  -> reconcile required; nothing replaced
         ```
-
-        After creating, the parent is walked to again from the root and must
-        still be the directory the record went into. On Windows no held
-        directory can be renamed or replaced, so this cannot fail; on POSIX a
-        directory can be moved while held, and if it was, the record is taken
-        back out of it through the held handle and the create is refused.
         """
         review_paths.require_review_record_path(relative)
+        fsafe.require_immutable_create()
         parts = relative.split("/")
         name = parts[-1]
         data = content.encode("utf-8")
         with fsafe.walk(self.store.root, parts[:-1], create=True) as parent, fsafe.walk(
             self.store.root, TMP_DIR.split("/"), create=True
         ) as tmp:
-            created = parent.last.create_file_exclusive(name, data, tmp.last)
-            if not created:
-                stored = parent.last.read_file(name)
-                if stored == data:
-                    return  # the identical record is already there: replay, never a second write
-                raise ReconcileRequired(
-                    f"{relative} already exists and does not hold the record this mutation creates; an immutable "
-                    "Review record is never overwritten: reconcile required"
-                )
-            proven = parent.last.identity()
-            try:
-                again = fsafe.walk(self.store.root, parts[:-1])
-            except ValidationError:
-                again = None
-            moved = again is None
-            if again is not None:
-                with again:
-                    moved = again.last.identity() != proven
-            if moved:
-                parent.last.remove_file(name)
-                raise ReconcileRequired(
-                    f"the directory {relative} was created in stopped being reachable from the Project root at the "
-                    "same place while it was being written; the record was taken back out and nothing is left: "
-                    "reconcile required"
-                )
+            if parent.last.create_file_exclusive(name, data, tmp.last):
+                return
+            if parent.last.read_file(name) == data:
+                return  # the identical record is already there: replay, never a second write
+        raise ReconcileRequired(
+            f"{relative} already exists and does not hold the record this mutation creates; an immutable "
+            "Review record is never overwritten: reconcile required"
+        )
 
     def _planned_write(self, record: dict[str, Any]) -> tuple[Path, str] | None:
         """The file this effect writes and the exact text it puts there; ``None`` for one that writes no file.

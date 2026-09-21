@@ -8,8 +8,11 @@ from helpers import WorklineTestCase
 from workline.errors import ValidationError
 from workline.mutation import MATCHING, UNAPPLIED, Effect, MutationController, WriteScope
 from workline.oplock import project_operation
-from workline.review import ReviewStore, gate, paths, records, serialize
+from workline.review import ReviewStore, fsafe, gate, paths, records, serialize
 from workline.validate import validate_project
+
+CREATE_SUPPORTED = fsafe.immutable_create_supported()
+CREATE_ONLY = unittest.skipUnless(CREATE_SUPPORTED, "the immutable Review create is fail-closed on this platform")
 
 from test_review_gate_generation import gate_record
 from test_review_provenance import CANDIDATE, TASK_ID, snapshot_record, task_input_record
@@ -223,6 +226,7 @@ class SealAndConsumptionTests(WorklineTestCase):
         codes = [p.code for p in validate_project(self.store)]
         self.assertIn("review_gate_chain", codes)
 
+    @CREATE_ONLY
     def test_seal_and_receipt_are_one_stage_and_resume_together(self) -> None:
         """A partial stage resumes the remaining effect; nothing is consumable before both exist."""
         first = gate_record(1, candidate_hash=CANDIDATE)
@@ -307,6 +311,7 @@ class SealAndConsumptionTests(WorklineTestCase):
             self.review.consumption_by_terminal_event()
         self.assertEqual("review_consumption_conflict", caught.exception.code)
 
+    @CREATE_ONLY
     def test_exact_replay_of_one_consumption_is_idempotent(self) -> None:
         self._chain_to_seal()
         relative = paths.consumption_rel(CONSUMPTION_ID)

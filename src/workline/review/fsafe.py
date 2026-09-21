@@ -1,9 +1,9 @@
 """Handle-bound, no-follow access to the canonical Review namespace.
 
 Every Review read and every Review create goes through a :class:`SafeDirectory`:
-an opened, pinned handle to a directory that has been *proven* to be a plain
-in-Project directory, walked to from the Project root one component at a time
-without following anything.
+an opened handle to a directory that has been *proven* to be a plain in-Project
+directory, walked to from the Project root one component at a time without
+following anything.
 
 Why a handle, and not a path checked beforehand
 -----------------------------------------------
@@ -15,8 +15,7 @@ Adding a second check narrows that window without closing it. What closes it is
 binding the operation to the directory object that was proven:
 
 ```text
-POSIX    openat(parent_fd, name, O_NOFOLLOW ...)   - relative to the proven fd
-         linkat(tmp_fd, tmp, parent_fd, name, 0)   - exclusive: EEXIST, never replace
+POSIX    openat(parent_fd, name, O_NOFOLLOW ...)   - relative to the proven fd (reads only)
 Windows  NtCreateFile(RootDirectory = parent handle, FILE_OPEN_REPARSE_POINT ...)
          NtSetInformationFile(FileRenameInformation,
                               RootDirectory = parent handle,
@@ -29,9 +28,28 @@ resolved by name through it again: each step opens the next component
 never overwritten, because the final step is exclusive - it fails on an
 existing name instead of replacing it.
 
-On Windows each held directory is also opened without ``FILE_SHARE_DELETE``,
-so while a create is in progress no component from the Project root down can be
-renamed, deleted or replaced by anyone.
+Where a create is possible at all
+---------------------------------
+
+Binding to a handle keeps the operation on the proven directory *object*. A
+create also needs that object to still be inside the Project when the name is
+placed, and only a pinned object is:
+
+```text
+Windows  every held directory, from the Project root down, is opened without
+         FILE_SHARE_DELETE, so while a create runs none of them can be renamed,
+         deleted or replaced by anyone                    -> create supported
+POSIX    an fd pins nothing: the directory it holds can be renamed anywhere
+         while it is held - out of the Project included - and a create through
+         the fd lands wherever it went                   -> create refused
+```
+
+No primitive available here makes a POSIX placement fail once the directory is
+no longer under the Project root, and creating anyway, then noticing and taking
+the record back out, still puts it outside for as long as that takes. So the
+immutable create is refused on POSIX before anything is opened or written
+(:func:`require_immutable_create`); reading, listing and validating stay
+available there exactly as on Windows.
 
 No-follow
 ---------
@@ -43,9 +61,10 @@ matters most there: to ``os.path`` it is a directory and not a symlink, so a
 check that asked only those two questions would follow it. Here any reparse
 point - junction, symlink, anything carrying a reparse tag - is refused.
 
-This module decides nothing about Review semantics. It opens, lists, reads and
-creates, and it refuses anything it cannot positively show to be a plain file
-or directory inside the Project.
+This module decides nothing about Review semantics. It opens, lists, reads and -
+where the platform can keep a create inside the Project - creates, and it
+refuses anything it cannot positively show to be a plain file or directory
+inside the Project.
 """
 
 from __future__ import annotations
@@ -63,6 +82,9 @@ from ..errors import ValidationError
 #: What refusing an indirection or an unprovable component is reported as.
 CODE = "review_containment"
 
+#: What refusing a create on a platform that cannot keep its parent inside the Project is reported as.
+UNSUPPORTED_CODE = "review_create_unsupported"
+
 
 @dataclass(frozen=True)
 class Entry:
@@ -78,6 +100,16 @@ def _refuse(message: str) -> ValidationError:
     return ValidationError(message, code=CODE)
 
 
+def _unsupported() -> ValidationError:
+    return ValidationError(
+        "canonical Review records cannot be created on this platform: a directory held open here can still be "
+        "renamed while it is held (POSIX pins nothing), so a create bound to its proven parent could land wherever "
+        "that directory was moved, outside the Project included. The immutable Review create is refused before "
+        "anything is written; Review records are still read and validated here",
+        code=UNSUPPORTED_CODE,
+    )
+
+
 def _require_component(name: str) -> None:
     if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
         raise _refuse(f"not a single path component: {name!r}")
@@ -90,9 +122,12 @@ def _tmp_name(name: str) -> str:
 # --------------------------------------------------------------------------- POSIX
 
 class _PosixDirectory:
-    """A directory held open by fd, reached without following anything."""
+    """A directory held open by fd, reached without following anything. Reads only: an fd pins nothing."""
 
     _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+
+    #: A held fd keeps nothing where it was proven: the directory can be renamed anywhere while it is held.
+    PINS_HELD_DIRECTORIES = False
 
     def __init__(self, fd: int, described: str) -> None:
         self.fd = fd
@@ -106,36 +141,26 @@ class _PosixDirectory:
             raise _refuse(f"the Project root cannot be opened as a plain directory ({path}): {exc}") from exc
         return cls(fd, str(path))
 
-    def identity(self) -> tuple[int, int]:
-        info = os.fstat(self.fd)
-        return (info.st_dev, info.st_ino)
-
     def child(self, name: str, *, create: bool) -> "_PosixDirectory | None":
         _require_component(name)
+        if create:
+            raise _unsupported()  # a directory made here is only as contained as the unpinned fd it is made in
         described = f"{self.described}/{name}"
-        for _ in range(2):
-            try:
-                fd = os.open(name, self._DIR_FLAGS, dir_fd=self.fd)
-            except FileNotFoundError:
-                if not create:
-                    return None
-                try:
-                    os.mkdir(name, 0o777, dir_fd=self.fd)
-                except FileExistsError:
-                    pass  # another actor made it; open it and prove what it is
-                continue
-            except OSError as exc:
-                if exc.errno in (errno.ELOOP, errno.ENOTDIR, getattr(errno, "EMLINK", -1)):
-                    raise _refuse(
-                        f"{described} is a symlink or not a directory, and a Review path is walked only "
-                        "through plain in-Project directories"
-                    ) from exc
-                raise _refuse(f"{described} cannot be opened: {exc}") from exc
-            if not stat.S_ISDIR(os.fstat(fd).st_mode):
-                os.close(fd)
-                raise _refuse(f"{described} is not a plain directory")
-            return _PosixDirectory(fd, described)
-        raise _refuse(f"{described} could not be created and opened")
+        try:
+            fd = os.open(name, self._DIR_FLAGS, dir_fd=self.fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR, getattr(errno, "EMLINK", -1)):
+                raise _refuse(
+                    f"{described} is a symlink or not a directory, and a Review path is walked only "
+                    "through plain in-Project directories"
+                ) from exc
+            raise _refuse(f"{described} cannot be opened: {exc}") from exc
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise _refuse(f"{described} is not a plain directory")
+        return _PosixDirectory(fd, described)
 
     def entries(self) -> list[Entry]:
         found: list[Entry] = []
@@ -177,51 +202,8 @@ class _PosixDirectory:
             os.close(fd)
 
     def create_file_exclusive(self, name: str, data: bytes, tmp: "_PosixDirectory") -> bool:
-        """Create ``name`` holding ``data``; ``False``, with nothing changed, if the name already exists."""
-        _require_component(name)
-        tmp_name = _tmp_name(name)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(tmp_name, flags, 0o644, dir_fd=tmp.fd)
-        try:
-            try:
-                view = memoryview(data)
-                while view:
-                    written = os.write(fd, view)
-                    view = view[written:]
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-        except BaseException:
-            try:
-                os.unlink(tmp_name, dir_fd=tmp.fd)
-            except FileNotFoundError:
-                pass
-            raise
-        try:
-            # linkat, relative to both proven fds: the one POSIX primitive that
-            # places a fully written file under a name only if that name does not
-            # exist yet. The source is the regular file just created with
-            # O_EXCL|O_NOFOLLOW, so where linkat cannot be told not to follow,
-            # following it changes nothing.
-            if os.link in os.supports_follow_symlinks:
-                os.link(tmp_name, name, src_dir_fd=tmp.fd, dst_dir_fd=self.fd, follow_symlinks=False)
-            else:
-                os.link(tmp_name, name, src_dir_fd=tmp.fd, dst_dir_fd=self.fd)
-            created = True
-        except FileExistsError:
-            created = False
-        finally:
-            try:
-                os.unlink(tmp_name, dir_fd=tmp.fd)
-            except FileNotFoundError:
-                pass
-        if created:
-            os.fsync(self.fd)
-        return created
-
-    def remove_file(self, name: str) -> None:
-        _require_component(name)
-        os.unlink(name, dir_fd=self.fd)
+        """Refused before anything is written, not even a temporary file: see :func:`immutable_create_supported`."""
+        raise _unsupported()
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -373,6 +355,9 @@ if sys.platform == "win32":
     class _WindowsDirectory:
         """A directory held open by handle - pinned, reached without following anything."""
 
+        #: Held without FILE_SHARE_DELETE: nobody can rename, delete or replace it while it is held.
+        PINS_HELD_DIRECTORIES = True
+
         def __init__(self, handle: int, described: str) -> None:
             self.handle = handle
             self.described = described
@@ -400,10 +385,6 @@ if sys.platform == "win32":
             if handle in (None, 0, _INVALID_HANDLE):
                 raise _refuse(f"the Project root cannot be opened as a plain directory ({path}): error {ctypes.get_last_error()}")
             return cls._checked(handle, str(path))
-
-        def identity(self) -> tuple[int, int]:
-            info = _info(self.handle)
-            return (info.dwVolumeSerialNumber, (info.nFileIndexHigh << 32) | info.nFileIndexLow)
 
         def child(self, name: str, *, create: bool) -> "_WindowsDirectory | None":
             _require_component(name)
@@ -527,19 +508,6 @@ if sys.platform == "win32":
             finally:
                 _CloseHandle(handle)
 
-        def remove_file(self, name: str) -> None:
-            _require_component(name)
-            status, handle = _nt_open(
-                self.handle, name, _DELETE | _SYNCHRONIZE, _FILE_SHARE_READ, _FILE_OPEN,
-                _FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
-            )
-            if status != 0:
-                raise _refuse(f"{self.described}\\{name} cannot be removed (NTSTATUS 0x{status:08X})")
-            try:
-                self._set_information(handle, ctypes.create_string_buffer(b"\x01", 1), _FileDispositionInformation)
-            finally:
-                _CloseHandle(handle)
-
         def close(self) -> None:
             if self.handle:
                 _CloseHandle(self.handle)
@@ -552,8 +520,25 @@ else:
 
 # --------------------------------------------------------------------------- public surface
 
+def immutable_create_supported() -> bool:
+    """Whether a create here can keep its proven parent inside the Project until the name is placed.
+
+    Only a backend that pins every directory it holds can: nothing it holds,
+    from the Project root down, can be moved while the create runs. On Windows
+    that is the share mode every directory is opened with; on POSIX an fd pins
+    nothing, so there is no create there at all.
+    """
+    return _Backend.PINS_HELD_DIRECTORIES
+
+
+def require_immutable_create() -> None:
+    """Refuse, before anything is opened or written, a canonical Review create this platform cannot contain."""
+    if not immutable_create_supported():
+        raise _unsupported()
+
+
 class SafeDirectory:
-    """A proven, pinned, plain in-Project directory. Use as a context manager."""
+    """A proven, plain in-Project directory, held open. Use as a context manager."""
 
     def __init__(self, backend: object) -> None:
         self._backend = backend
@@ -572,9 +557,6 @@ class SafeDirectory:
     def described(self) -> str:
         return self._backend.described
 
-    def identity(self) -> tuple[int, int]:
-        return self._backend.identity()
-
     def child(self, name: str, *, create: bool = False) -> "SafeDirectory | None":
         found = self._backend.child(name, create=create)
         return None if found is None else SafeDirectory(found)
@@ -586,10 +568,9 @@ class SafeDirectory:
         return self._backend.read_file(name)
 
     def create_file_exclusive(self, name: str, data: bytes, tmp: "SafeDirectory") -> bool:
+        """Create ``name`` holding ``data``; ``False``, with nothing changed, if the name already exists."""
+        require_immutable_create()
         return self._backend.create_file_exclusive(name, data, tmp._backend)
-
-    def remove_file(self, name: str) -> None:
-        self._backend.remove_file(name)
 
     def close(self) -> None:
         self._backend.close()
@@ -622,8 +603,12 @@ def walk(root: Path, parts: list[str], *, create: bool = False) -> Chain | None:
 
     ``None`` when a component does not exist and ``create`` is false - the
     lazily created Review directories are simply not there yet. Anything present
-    that is not a plain directory is refused, not skipped.
+    that is not a plain directory is refused, not skipped. Creating the missing
+    ones is part of a create, so it is refused wherever a create is
+    (:func:`require_immutable_create`).
     """
+    if create:
+        require_immutable_create()
     directories: list[SafeDirectory] = [SafeDirectory.open_root(root)]
     try:
         for part in parts:

@@ -9,7 +9,10 @@ from workline.errors import ReconcileRequired, ValidationError
 from workline.ids import is_valid_id, kind_of, new_id
 from workline.mutation import Effect, MutationController, WriteScope
 from workline.oplock import project_operation
-from workline.review import ReviewStore, gate, paths, records, serialize
+from workline.review import ReviewStore, fsafe, gate, paths, records, serialize
+
+CREATE_SUPPORTED = fsafe.immutable_create_supported()
+CREATE_ONLY = unittest.skipUnless(CREATE_SUPPORTED, "the immutable Review create is fail-closed on this platform")
 
 RUN_ID = "rr_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 OTHER_RUN = "rr_01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -222,6 +225,7 @@ class GateChainTests(WorklineTestCase):
             [paths.gate_rel(RUN_ID, 1), paths.serialization_token_rel(RUN_ID)], scope.files
         )
 
+    @CREATE_ONLY
     def test_the_token_is_never_created_on_disk(self) -> None:
         mutation, scope = self._open_generation_mutation()
         mutation.add_effects("gate", [Effect.create_file(scope.gate_path, serialize.canonical_text(gate_record(1)))])
@@ -229,6 +233,7 @@ class GateChainTests(WorklineTestCase):
         self.assertTrue((self.store.root / scope.gate_path).is_file())
         self.assertFalse((self.store.root / scope.token_path).exists())
 
+    @CREATE_ONLY
     def test_a_pending_same_run_mutation_blocks_a_new_generation(self) -> None:
         """The crash window: the physical generation exists, its applied flag does not."""
         mutation, scope = self._open_generation_mutation()
@@ -241,6 +246,7 @@ class GateChainTests(WorklineTestCase):
             gate.next_generation_scope(self.store, RUN_ID)
         self.assertEqual("review_generation_pending", caught.exception.code)
 
+    @CREATE_ONLY
     def test_no_n_plus_two_fork_after_that_crash(self) -> None:
         mutation, scope = self._open_generation_mutation()
         mutation.add_effects("gate", [Effect.create_file(scope.gate_path, serialize.canonical_text(gate_record(1)))])
@@ -251,6 +257,7 @@ class GateChainTests(WorklineTestCase):
         with self.assertRaises(ValidationError):
             gate.next_generation_scope(self.store, RUN_ID)
 
+    @CREATE_ONLY
     def test_resuming_the_pending_mutation_lets_the_next_generation_proceed(self) -> None:
         mutation, scope = self._open_generation_mutation()
         mutation.add_effects("gate", [Effect.create_file(scope.gate_path, serialize.canonical_text(gate_record(1)))])

@@ -12,10 +12,13 @@ from helpers import WorklineTestCase, git
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.mutation import MATCHING, MISMATCH, UNAPPLIED, Effect, MutationController, WriteScope
 from workline.oplock import project_operation
-from workline.review import ReviewStore, paths, records, serialize
+from workline.review import ReviewStore, fsafe, paths, records, serialize
 from workline.review.gate import require_committable
 from workline.store import WORKLINE_DIR
 from workline.validate import validate_project
+
+CREATE_SUPPORTED = fsafe.immutable_create_supported()
+CREATE_ONLY = unittest.skipUnless(CREATE_SUPPORTED, "the immutable Review create is fail-closed on this platform")
 
 RUN_ID = "rr_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 RECEIPT_ID = "rcp_01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -60,10 +63,19 @@ class ReviewLayoutTests(WorklineTestCase):
         )
 
     def _create(self, relative: str, record: dict):
-        mutation = self._mutation(relative)
-        mutation.add_effects("review", [Effect.create_file(relative, serialize.canonical_text(record))])
-        mutation.apply()
-        return mutation
+        """Lay a record down for the reader/validation tests. Through the immutable create where the platform supports
+        it; where the create is fail-closed (POSIX), place the same canonical bytes directly, so those tests still run
+        on POSIX. The create boundary itself is covered by test_review_safe_create; ``None`` is returned there."""
+        text = serialize.canonical_text(record)
+        if CREATE_SUPPORTED:
+            mutation = self._mutation(relative)
+            mutation.add_effects("review", [Effect.create_file(relative, text)])
+            mutation.apply()
+            return mutation
+        target = self.store.root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8", newline="")
+        return None
 
     # lazy namespace ---------------------------------------------------------
     def test_project_with_no_review_namespace_is_valid(self) -> None:
@@ -76,6 +88,7 @@ class ReviewLayoutTests(WorklineTestCase):
         for name in paths.REVIEW_SUBDIRS:
             self.assertFalse((self.store.root / paths.REVIEW_DIR / name).exists())
 
+    @CREATE_ONLY
     def test_first_review_write_creates_parents_lazily(self) -> None:
         relative = paths.receipt_rel(RECEIPT_ID)
         self._create(relative, receipt_record())
@@ -83,6 +96,7 @@ class ReviewLayoutTests(WorklineTestCase):
         self.assertTrue(self.review.exists())
         self.assertEqual(RECEIPT_ID, self.review.read_receipt(RECEIPT_ID).receipt_id)
 
+    @CREATE_ONLY
     def test_review_record_holds_exactly_the_canonical_bytes(self) -> None:
         relative = paths.receipt_rel(RECEIPT_ID)
         record = receipt_record()
@@ -92,6 +106,7 @@ class ReviewLayoutTests(WorklineTestCase):
         self.assertNotIn(b"\r\n", stored)
 
     # immutable create-only --------------------------------------------------
+    @CREATE_ONLY
     def test_exact_replay_is_matching_and_writes_nothing_again(self) -> None:
         relative = paths.receipt_rel(RECEIPT_ID)
         text = serialize.canonical_text(receipt_record())
@@ -106,6 +121,7 @@ class ReviewLayoutTests(WorklineTestCase):
         record = {"kind": "create_file", "payload": {"path": relative, "content": "a: 1\n"}}
         self.assertEqual(UNAPPLIED, self.controller.classify(record))
 
+    @CREATE_ONLY
     def test_different_bytes_at_the_target_reconcile(self) -> None:
         relative = paths.receipt_rel(RECEIPT_ID)
         mutation = self._mutation(relative)
@@ -160,6 +176,7 @@ class ReviewLayoutTests(WorklineTestCase):
     # refuses on its own if it is reached directly. The fuller race and
     # attack cases live in test_review_safe_create.
 
+    @CREATE_ONLY
     @unittest.skipUnless(hasattr(os, "symlink"), "no symlink support")
     def test_symlinked_parent_is_refused(self) -> None:
         outside = self.tmp / "outside"
@@ -212,6 +229,7 @@ class ReviewLayoutTests(WorklineTestCase):
         self.assertEqual("review_containment", caught.exception.code)
         self.assertEqual([], list(outside.iterdir()))
 
+    @CREATE_ONLY
     def test_a_file_where_a_review_directory_belongs_is_refused(self) -> None:
         review = self.store.root / paths.REVIEW_DIR
         review.mkdir(parents=True)
@@ -226,6 +244,7 @@ class ReviewLayoutTests(WorklineTestCase):
         self.assertEqual("review_containment", caught.exception.code)
         self.assertEqual(b"not a directory\n", (review / "receipts").read_bytes())
 
+    @CREATE_ONLY
     def test_parent_replaced_between_proof_and_write_writes_into_the_proven_directory_or_nothing(self) -> None:
         """TOCTOU at the actual create: the create is bound to the directory that was proven.
 
