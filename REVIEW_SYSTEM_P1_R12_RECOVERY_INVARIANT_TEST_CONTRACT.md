@@ -245,6 +245,95 @@ Expected: changed material Review provenance or Git semantics invalidates reuse 
 
 Cover positive operation-owned transformed K1, non-owned/unexpected delta, multi-parent, lineage drift, already-published remote K1, metadata-only K2 mismatch, no recursive Receipt chain and failure after K2 before push.
 
+## 10.1 Live-baseline reconciliation tests (mandatory minimum)
+
+Frozen by the Round-5 reconciliation to live baseline `e32a741`. These are a minimum, not a ceiling, and are additional to §7 and §10.
+
+### A. Owned commit, lost record
+
+```text
+commit_local succeeds
+record save crashes before commit_id/applied
+operation-owned commit identity positively reconstructed
+-> backfill allowed, then normal exact-K proof
+-> still no push before proof
+```
+
+### B. Foreign byte-identical commit
+
+```text
+a commit with identical content/tree/parent/branch/message exists
+operation ownership cannot be positively proven
+-> MUST NOT adopt as K1
+-> no backfill, no commit_id write, no push
+-> reconcile / new Candidate / applicable fail-closed path
+```
+
+Assert explicitly that no publication occurred and that content equality alone never produced adoption.
+
+### C. Publication stage shape violated
+
+```text
+a recorded push whose Git stage is not the exact ordered pair
+  (git_commit then git_push, adjacent, seq-consecutive,
+   nothing else carrying that stage)
+-> fail closed / reconcile
+-> nothing pushed, no branch-tip fallback
+```
+
+Cover at least: a third effect in the stage, non-adjacent recording, non-consecutive `seq`, missing commit ID, branch-name mismatch, and a commit no longer held by the recorded branch.
+
+### D. Exact-commit publication
+
+```text
+authorized commit K, with later foreign commits on the same branch
+-> only K is published
+-> refspec is <exact K>:refs/heads/<branch>, never forced
+-> the later foreign commits do not reach the destination
+```
+
+### E. Destination already holds the exact commit
+
+```text
+destination branch is at, or has moved past, exact K
+-> classified by the positive destination read
+-> published; nothing pushed; branch left as it is
+```
+
+Cover both the `=` case and the `!`-resolved-as-published case.
+
+### F. Unanswerable or shifting destination
+
+```text
+Git rewrites the recorded locator to another repository
+destination unreadable
+destination branch changes while being read
+destination identity/pin changed
+-> fail closed
+-> never resolved as published, never as unpublished
+-> nothing pushed, nothing forced
+```
+
+### G. Incomplete delta plumbing
+
+```text
+complete changed-path list available
+mode / object-identity proof unavailable
+-> Class A unavailable
+-> reconcile; no adoption on path evidence alone
+```
+
+### H. Proof-before-push across crash/resume
+
+```text
+for every crash/resume window in the commit -> proof -> push sequence
+-> NO PUSH BEFORE EXACT PROOF holds
+-> proof completeness is never inferred from the existence
+   of a recorded push
+```
+
+Include the R5 §1.2 split stages: crash between the commit stage and the proof checkpoint, and crash between the proof checkpoint and the push stage.
+
 ## 11. R8/R9 semantic round-trip
 
 Roadmap and Phase-entry tests cover exact reserved IDs, canonical reload, generated integration/confirmation edges and fault injection. R9 review-v1 self-selection is enforced by Roadmap-owned planning precondition, not adapter-only override.
@@ -279,3 +368,13 @@ This revision adds explicit tests for the remaining provenance-reuse seam while 
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
+
+## 16. Round-5 live-baseline reconciliation disposition
+
+Reconciled to live baseline `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+§10.1 freezes mandatory cases A-H for ownership-proven backfill, refusal to adopt a foreign byte-identical commit, publication stage shape, exact-commit publication, destination-read classification, fail-closed unanswerable reads, unavailable Class A on incomplete delta plumbing, and proof-before-push across every crash/resume window.
+
+All Round-3 and Round-4 mandatory tests remain in force; none is replaced or relaxed.
+
+Architecture reopen: `No`. Candidate 8: `No`.

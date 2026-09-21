@@ -126,6 +126,34 @@ The fact that an external helper was not observed in one run is not enough if th
 
 A signing-enabled Git default does not invalidate Review-v1 commit-local-v1 by itself because the frozen Review-v1 primitive explicitly disables signing. The effective fact that signing is disabled for that primitive is itself bound into Evidence/Git-state identity. A future signed Review-v1 contract is a different semantic identity.
 
+### 10.1 Publication-state remote read
+
+Re-verified at baseline `e32a741`: the live publication path reads the pinned destination read-only (`git ls-remote --refs`, plus an isolated history fetch into the object database alone) after proof, to decide whether an exact commit is already published.
+
+This read is not publication and writes nothing, but it is material and is declared, not waived:
+
+```text
+network            transport to the pinned destination
+external_service   the destination repository's semantic identity
+git_state          pinned locator identity, the proof that Git reads that
+                   locator as itself rather than rewriting it, and the
+                   destination branch/ancestry fact relied upon
+runtime_toolchain  the Git implementation performing the read
+```
+
+Coverage rules:
+
+```text
+destination identity unpinned or rewritten by Git
+  -> not covered -> fail closed, the read is not performed
+read unanswerable, or the destination changed while being read
+  -> unknown -> fail closed
+absence of a discovered publication
+  -> never coverage, and never proof of non-publication
+```
+
+Distinguish this from R6 §7's pre-proof external-process problem: a pre-proof uncontrolled external side effect is fail-closed on reachability grounds, whereas a post-proof publication-state read is permitted and merely has to be completely declared.
+
 ## 11. External-process versus subprocess/network classes
 
 Git-configured external helpers are represented in `git_state` for Git semantic reachability and identity, while their execution-side effects also implicate `subprocess`, `network`, `filesystem_external`, or `external_service` as appropriate.
@@ -180,3 +208,13 @@ Round-3 signing/external-process safeguards remain in force.
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
+
+## 16. Round-5 live-baseline reconciliation disposition
+
+Consequential update only, reconciled to live baseline `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+§10.1 declares the post-proof publication-state remote read across `network`, `external_service`, `git_state` and `runtime_toolchain`, with fail-closed handling for unpinned destination identity and unanswerable reads.
+
+The `review-dependency-classes-v1` vocabulary is unchanged — no class added, removed or renamed — so no completeness claim is inherited or invalidated by this revision.
+
+Architecture reopen: `No`. Candidate 8: `No`.

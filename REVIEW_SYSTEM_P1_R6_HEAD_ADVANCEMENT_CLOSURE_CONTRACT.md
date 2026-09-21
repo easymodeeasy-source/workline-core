@@ -119,6 +119,26 @@ Signing-disabled mode is part of the Review-v1 Git persistence/commit-execution 
 
 Surfaces that Git supports but the exact path cannot invoke need not be declared material unless configuration makes them reachable.
 
+### 6.1 Publication-state remote read
+
+Re-verified at baseline `e32a741`: the live publication path performs read-only network queries against the pinned destination — `git ls-remote --refs` for the destination branch, and an isolated history fetch into the object database alone (no ref, no `FETCH_HEAD`, no tag, no submodule, no bundle URI, no maintenance), each put only to a locator Git proves it reads as itself.
+
+These are a distinct surface from §7's pre-proof external-process problem, and the two must not be conflated:
+
+```text
+pre-proof uncontrolled external side effect
+  = an external process the commit path can reach before proof
+  -> fail closed (§7)
+
+post-proof authorized publication-state read
+  = a read-only query about where the pinned destination stands
+  -> permitted, and materially declared
+```
+
+A publication-state read is not publication: it writes nothing locally or remotely. It is nonetheless material and must be declared through R11 (`network`, `external_service`, `git_state`, and the tool/runtime identity performing it). Destination identity — the pinned locator and the proof that Git reads it as itself — is part of that identity.
+
+An unanswerable or unprovable read is fail-closed; it is never resolved as published, and never as unpublished.
+
 ## 7. External-process completeness
 
 For the Review-v1 staging/local-commit boundary, a complete closure must establish either:
@@ -193,3 +213,13 @@ Round-3 signing/external-process closure remains in force.
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
+
+## 15. Round-5 live-baseline reconciliation disposition
+
+Consequential update only, reconciled to live baseline `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+§6.1 adds the post-proof publication-state remote read to the material Git-semantics surface and separates it from the pre-proof external-process rule.
+
+§1's pinned live fact was re-verified and is unchanged: `_head_advanced_independently()` is byte-identical between the readiness baseline and `e32a741`. No closure class, completeness rule or fast-path condition changed.
+
+Architecture reopen: `No`. Candidate 8: `No`.

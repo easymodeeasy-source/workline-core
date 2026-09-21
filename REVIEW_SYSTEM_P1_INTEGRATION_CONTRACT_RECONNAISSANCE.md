@@ -1,6 +1,6 @@
 # Review System P1 — Integration Contract Reconnaissance Checkpoint
 
-Status: ROUND 4 CONTRACT REPAIRS FROZEN / IMPLEMENTATION NOT STARTED / CURRENT-HEAD FINAL RE-REVIEW REQUIRED
+Status: ROUND 4 CONTRACT REPAIRS FROZEN / ROUND 5 LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / IMPLEMENTATION NOT STARTED / FOCUSED RECONCILIATION RE-REVIEW REQUIRED
 
 Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code until implementation/activation.
 
@@ -24,6 +24,8 @@ Round 2: `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND2.md`
 Round 3: `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND3.md`
 
 Round 4: `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND4.md`
+
+Round 5 (live-baseline reconciliation, not an architecture round): `REVIEW_SYSTEM_P1_LIVE_BASELINE_RECONCILIATION.md`
 
 ## Round-3 repairs already frozen before the latest supplied review
 
@@ -96,6 +98,22 @@ Mandatory tests now include negative HEAD-advance cases where Candidate/request 
 
 Round-3 activation serializer and signing/external-process tests remain mandatory.
 
+## Round-5 live-baseline reconciliation
+
+The final readiness review reached `READY_FOR_P1_IMPLEMENTATION` against baseline `19bf5e71da6c7d735666e62cbe5b12ed9fffa5a9`. Live `main` then advanced 11 commits to `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+A baseline reconciliation confirmed the Candidate 7 architecture seam intact — `state.py` and `ids.py` byte-identical, the R1/R2 layout and ID surfaces untouched, `_head_advanced_independently()` unchanged — while R5 and R7 carried frozen text that live canonical authority had moved past.
+
+Round 5 reflects that live drift into the contracts. It is not an architecture round: no Candidate 8, no architecture document, no change to lifecycle/progression authority or to Review's subordinate-gate role.
+
+```text
+R5   updated (§1.1, §1.2, §3, §7, §12, §13)
+R7   updated (§1, §2, §4, §8, §10, §13)
+R6   consequential (§6.1, §15)
+R11  consequential (§10.1, §16)
+R12  updated (§10.1, §16)
+```
+
 ## Current checkpoint
 
 ```text
@@ -103,14 +121,22 @@ Round 1 findings: REPAIRED/FROZEN
 Round 2 findings: REPAIRED/FROZEN
 Round 3 findings: REPAIRED/FROZEN
 Round 4 provenance reuse seam: REPAIRED/FROZEN
+Round 5 live-baseline reconciliation: APPLIED/FROZEN
+
+Candidate 7 architecture: RETAIN
+Architecture reopen: No
+HUMAN decision: None
 
 P1 implementation: NOT STARTED
-Implementation activation: BLOCKED pending one current-HEAD final focused independent re-review
+Implementation activation: BLOCKED pending one focused independent
+re-review of the Round-5 live-baseline reconciliation only
 ```
 
 ## Next stage
 
-Run one final focused readiness review against the **current live main HEAD**, not the old `d38f02c...` snapshot.
+Run one focused independent re-review scoped to **the Round-5 live-baseline reconciliation against `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`** — not a re-review of Candidate 7 architecture, and not a re-review of Rounds 1-4, which stay frozen.
+
+Review target: `REVIEW_SYSTEM_P1_LIVE_BASELINE_RECONCILIATION.md` and the R5/R7/R6/R11/R12 changes it records.
 
 Final verdict must be one of:
 
