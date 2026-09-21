@@ -19,10 +19,7 @@ opposite of refusing only what is recognisably wrong.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-import stat
-from typing import Any
 
 from ..errors import ValidationError
 from ..ids import is_valid_id
@@ -148,123 +145,32 @@ def _require_digest(value: str, described: str) -> None:
         raise ValidationError(f"{described} is not a lowercase hex SHA-256: {value!r}", code="review_record_invalid")
 
 
-# --------------------------------------------------------------------------- containment / no-follow
+# --------------------------------------------------------------------------- record path shape
 
-def _reparse(info: os.stat_result) -> bool:
-    """Whether ``info`` describes a reparse point - a junction, a symlink, or anything else with one.
+#: The Review subdirectories whose records sit directly inside them, by name.
+_FLAT_RECORD_DIRS = ("receipts", "consumptions", "supersessions", "candidate-snapshots", "task-inputs", "activation")
 
-    Windows junctions are directories to ``S_ISDIR`` and are followed by every
-    ordinary path operation, so directory-ness alone proves nothing there.
-    ``st_file_attributes`` carries the reparse flag; ``st_reparse_tag`` is
-    nonzero for every reparse kind. Either one is enough to refuse.
+
+def require_review_record_path(relative: str) -> None:
+    """Refuse ``relative`` unless it has the exact shape of a canonical Review record path.
+
+    Structural only: which directory, how deep, a ``.yaml`` leaf, no traversal,
+    no empty or dot component. Whether the directories on the way are plain,
+    in-Project directories is proven where the path is actually used - by a
+    handle-bound, no-follow walk (:mod:`workline.review.fsafe`) - because a
+    check on a path string, however careful, says nothing about what the path
+    resolves to by the time it is opened.
     """
-    attributes = getattr(info, "st_file_attributes", 0)
-    if attributes and attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
-        return True
-    return bool(getattr(info, "st_reparse_tag", 0))
-
-
-def _identity(info: os.stat_result) -> tuple[Any, Any]:
-    """What identifies a directory across two looks at it.
-
-    ``st_dev``/``st_ino`` are meaningful on POSIX and, on Windows, are filled in
-    from the volume serial number and file index by CPython, which is exactly
-    the pair that changes when a component is swapped for another directory.
-    """
-    return (info.st_dev, info.st_ino)
-
-
-def directory_identity(path: Path) -> tuple[Any, Any]:
-    """The identity of the existing plain directory at ``path``, or a STOP.
-
-    No-follow: ``lstat`` describes the component itself, so a symlink or
-    junction standing where a directory is expected is seen as what it is
-    instead of as whatever it points at.
-    """
-    try:
-        info = os.lstat(path)
-    except OSError as exc:
-        raise ValidationError(
-            f"a Review write cannot show what {path} is: {exc}", code="review_containment"
-        ) from exc
-    if _reparse(info):
-        raise ValidationError(
-            f"a Review write refuses {path}: it is a symlink, junction or other reparse point, "
-            "and a Review record is written only through plain in-Project directories",
-            code="review_containment",
-        )
-    if not stat.S_ISDIR(info.st_mode):
-        raise ValidationError(
-            f"a Review write refuses {path}: a plain directory is expected there",
-            code="review_containment",
-        )
-    return _identity(info)
-
-
-def prove_containment(root: Path, relative: str) -> tuple[Any, Any] | None:
-    """Prove every existing component of ``relative`` is a plain in-Project directory.
-
-    Walks root -> ... -> parent with :func:`directory_identity`. A component
-    that does not exist yet is one of the lazily created ones: there is nothing
-    there to prove, and the walk stops, because a component *after* a gap could
-    only be reached through the gap.
-
-    Returns the target parent's identity when the parent already exists, and
-    ``None`` when it does not. That distinction is what
-    :func:`require_proven_parent` needs: an existing parent can be swapped
-    between this proof and the write, and a parent this operation is about to
-    create cannot have been proven beforehand and is proven by the second walk
-    instead.
-    """
-    return _walk_to_parent(root, relative)
-
-
-def _walk_to_parent(root: Path, relative: str) -> tuple[Any, Any] | None:
-    """Prove root -> ... -> parent, returning the parent's identity or ``None`` if it is absent."""
     if not is_review_path(relative):
-        raise ValidationError(
-            f"containment is proven for canonical Review paths; {relative!r} is not one", code="review_containment"
-        )
+        raise ValidationError(f"not a canonical Review path: {relative!r}", code="review_containment")
     parts = relative.split("/")
-    if any(part in ("", ".", "..") for part in parts):
-        raise ValidationError(f"a Review path holds no traversal: {relative!r}", code="review_containment")
-    root = Path(root)
-    directory_identity(root)
-    current = root
-    identity: tuple[Any, Any] | None = None
-    for part in parts[:-1]:
-        current = current / part
-        if not current.exists() and not current.is_symlink():
-            return None  # not created yet; the create boundary proves what it actually writes into
-        identity = directory_identity(current)
-    return identity
-
-
-def require_proven_parent(root: Path, relative: str, expected: tuple[Any, Any] | None) -> None:
-    """Re-prove the whole chain at the create boundary, and refuse a parent that changed.
-
-    The walk is done again, in full, so that every component the bytes will
-    actually pass through is shown to be a plain in-Project directory *now* -
-    including the ones this operation created a moment ago, which no earlier
-    walk could have proven.
-
-    When the parent already existed, its identity must still be the one
-    :func:`prove_containment` proved. A component replaced with a link in the
-    window between the two walks changes that identity, so it is a refusal
-    rather than a redirect. When the parent did not exist, this walk is the
-    proof, and there is nothing to compare it against.
-    """
-    found = _walk_to_parent(root, relative)
-    parent = Path(root) / Path(relative).parent
-    if found is None:
-        raise ValidationError(
-            f"the directory a Review record is written into does not exist at the moment of writing ({parent}); "
-            "nothing is written: reconcile required",
-            code="review_containment",
-        )
-    if expected is not None and found != expected:
-        raise ValidationError(
-            f"the directory a Review record would be written into changed while it was being written "
-            f"({parent}); nothing is written: reconcile required",
-            code="review_containment",
-        )
+    if any(part in ("", ".", "..") or "\\" in part for part in parts):
+        raise ValidationError(f"a Review path holds no traversal or empty component: {relative!r}", code="review_containment")
+    below = parts[len(REVIEW_DIR.split("/")):]
+    if not below[-1].endswith(".yaml"):
+        raise ValidationError(f"a Review record is a .yaml file: {relative!r}", code="review_containment")
+    if below[0] == "gates" and len(below) == 3:
+        return
+    if below[0] in _FLAT_RECORD_DIRS and len(below) == 2:
+        return
+    raise ValidationError(f"not a canonical Review record location: {relative!r}", code="review_containment")

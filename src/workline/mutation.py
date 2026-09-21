@@ -69,6 +69,7 @@ from .destination import resolve_active_push_locator, verify_recorded_destinatio
 from .durable import DurableWriteError, durable_write_text
 from .errors import GitError, ReconcileRequired, StopError, ValidationError
 from .ids import is_valid_id, kind_of, new_id
+from .review import fsafe
 from .review import paths as review_paths
 from .store import (
     ENTITY_DIRS,
@@ -84,6 +85,7 @@ from .store import (
     ROADMAP_RELATION_TYPES,
     ROADMAP_TERMINAL_EVENTS,
     RUNTIME_DIR,
+    TMP_DIR,
     WORK_EVENTS,
     WORK_TERMINAL_EVENTS,
     WORKLINE_DIR,
@@ -1900,22 +1902,7 @@ class MutationController:
         kind = record["kind"]
         payload = record["payload"]
         if kind == "create_file":
-            # Immutable create (``R1`` §8): absent is not written yet, the exact
-            # bytes are already applied, and anything else - other content, a
-            # directory, something unreadable - is a mismatch. There is no
-            # ``base`` branch, because nothing here is ever an update.
-            path = self.store.abs(payload["path"])
-            if path.is_symlink():
-                return MISMATCH
-            if not path.exists():
-                return UNAPPLIED
-            if not path.is_file():
-                return MISMATCH
-            try:
-                current = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                return MISMATCH
-            return MATCHING if current == payload["content"] else MISMATCH
+            return self._classify_review_create(payload["path"], payload["content"])
         if kind == "write_file":
             path = self.store.abs(payload["path"])
             if not path.exists():
@@ -2067,26 +2054,102 @@ class MutationController:
         )
 
     # application ---------------------------------------------------------------
-    def _create_review_record(self, relative: str, content: str) -> None:
-        """Write one immutable Review record, proving it lands inside this Project.
+    def _classify_review_create(self, relative: str, content: str) -> str:
+        """Classify an immutable Review create by the exact bytes at its target, read without following anything.
 
-        The proof is taken twice on purpose (``R1`` §9). Once by walking the
-        Project root down to the target's parent with no-follow semantics, so
-        that a symlink, junction or other reparse point standing anywhere on the
-        way is refused rather than followed. Once again at the create boundary,
-        comparing the parent's identity with the one that was proven, so a
-        component replaced in the window between the walk and the write cannot
-        redirect the bytes somewhere else.
+        ``R1`` §8, and read the way the writer writes (``R1`` §9): the parents
+        are walked from the Project root with no-follow, handle-bound opens
+        (:mod:`workline.review.fsafe`), and the target is opened relative to its
+        proven parent. So an indirection anywhere on the way is a mismatch -
+        never followed to whatever it points at - and the comparison is over
+        the stored bytes, not over text a reader normalised (a CRLF copy of a
+        record is not that record).
 
-        The parent is created only after the walk succeeds, and the write itself
-        is the ordinary durable write every canonical file gets: the bytes reach
-        the file, are fsynced, and are moved into place atomically.
+        ```text
+        parents not there yet, or target absent -> unapplied
+        exactly these bytes                     -> applied, matching
+        anything else, a directory, an indirection anywhere
+                                                -> applied, mismatch
+        ```
         """
-        expected = review_paths.prove_containment(self.store.root, relative)
-        path = self.store.abs(relative)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        review_paths.require_proven_parent(self.store.root, relative, expected)
-        durable_write_text(path, content, tmp_dir=self.store.tmp)
+        review_paths.require_review_record_path(relative)
+        parts = relative.split("/")
+        try:
+            chain = fsafe.walk(self.store.root, parts[:-1])
+        except ValidationError:
+            return MISMATCH
+        if chain is None:
+            return UNAPPLIED
+        with chain:
+            try:
+                stored = chain.last.read_file(parts[-1])
+            except ValidationError:
+                return MISMATCH
+        if stored is None:
+            return UNAPPLIED
+        return MATCHING if stored == content.encode("utf-8") else MISMATCH
+
+    def _create_review_record(self, relative: str, content: str) -> None:
+        """Create one immutable Review record at the physical create boundary itself.
+
+        The parent is walked from the Project root one component at a time, each
+        opened *relative to the one already held* and without following any
+        indirection, and every directory stays held until the create is done
+        (:mod:`workline.review.fsafe`). The record is written to a temporary
+        file in the likewise-held runtime area and then placed under its name
+        by an exclusive, handle-relative operation - ``linkat`` on POSIX, a
+        rename with ``ReplaceIfExists = FALSE`` relative to the parent handle on
+        Windows - which fails rather than replace an existing name.
+
+        So the create is bound to the directory that was proven, not to a path
+        that could be re-resolved elsewhere after the proof, and it can never
+        overwrite:
+
+        ```text
+        name free                    -> created with exactly these bytes
+        name taken by these bytes    -> already applied (replay, or another
+                                        writer of the identical record)
+        name taken by anything else  -> reconcile required; nothing replaced
+        ```
+
+        After creating, the parent is walked to again from the root and must
+        still be the directory the record went into. On Windows no held
+        directory can be renamed or replaced, so this cannot fail; on POSIX a
+        directory can be moved while held, and if it was, the record is taken
+        back out of it through the held handle and the create is refused.
+        """
+        review_paths.require_review_record_path(relative)
+        parts = relative.split("/")
+        name = parts[-1]
+        data = content.encode("utf-8")
+        with fsafe.walk(self.store.root, parts[:-1], create=True) as parent, fsafe.walk(
+            self.store.root, TMP_DIR.split("/"), create=True
+        ) as tmp:
+            created = parent.last.create_file_exclusive(name, data, tmp.last)
+            if not created:
+                stored = parent.last.read_file(name)
+                if stored == data:
+                    return  # the identical record is already there: replay, never a second write
+                raise ReconcileRequired(
+                    f"{relative} already exists and does not hold the record this mutation creates; an immutable "
+                    "Review record is never overwritten: reconcile required"
+                )
+            proven = parent.last.identity()
+            try:
+                again = fsafe.walk(self.store.root, parts[:-1])
+            except ValidationError:
+                again = None
+            moved = again is None
+            if again is not None:
+                with again:
+                    moved = again.last.identity() != proven
+            if moved:
+                parent.last.remove_file(name)
+                raise ReconcileRequired(
+                    f"the directory {relative} was created in stopped being reachable from the Project root at the "
+                    "same place while it was being written; the record was taken back out and nothing is left: "
+                    "reconcile required"
+                )
 
     def _planned_write(self, record: dict[str, Any]) -> tuple[Path, str] | None:
         """The file this effect writes and the exact text it puts there; ``None`` for one that writes no file.

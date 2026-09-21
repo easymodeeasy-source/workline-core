@@ -153,6 +153,13 @@ class ReviewLayoutTests(WorklineTestCase):
             mutation.add_effects("review", [Effect.create_file(f"{paths.RUNTIME_REVIEW_DIR}/scratch.yaml", "x")])
 
     # containment / no-follow ------------------------------------------------
+    #
+    # An indirection or a non-directory on the way is refused twice over: the
+    # no-follow classifier reports a mismatch before anything is written, so
+    # the mutation stops with reconcile required (P1-REV-001), and the writer
+    # refuses on its own if it is reached directly. The fuller race and
+    # attack cases live in test_review_safe_create.
+
     @unittest.skipUnless(hasattr(os, "symlink"), "no symlink support")
     def test_symlinked_parent_is_refused(self) -> None:
         outside = self.tmp / "outside"
@@ -166,10 +173,12 @@ class ReviewLayoutTests(WorklineTestCase):
         relative = paths.receipt_rel(RECEIPT_ID)
         mutation = self._mutation(relative)
         mutation.add_effects("review", [Effect.create_file(relative, "a: 1\n")])
-        with self.assertRaises(ValidationError) as caught:
+        with self.assertRaises(ReconcileRequired):
             mutation.apply()
+        with self.assertRaises(ValidationError) as caught:
+            self.controller.apply_effect(mutation.effects[0])
         self.assertEqual("review_containment", caught.exception.code)
-        self.assertFalse((outside / f"{RECEIPT_ID}.yaml").exists())
+        self.assertEqual([], list(outside.iterdir()))
 
     @unittest.skipUnless(sys.platform == "win32", "junctions are a Windows reparse point")
     def test_a_junctioned_parent_is_refused(self) -> None:
@@ -196,53 +205,87 @@ class ReviewLayoutTests(WorklineTestCase):
         relative = paths.receipt_rel(RECEIPT_ID)
         mutation = self._mutation(relative)
         mutation.add_effects("review", [Effect.create_file(relative, "a: 1\n")])
-        with self.assertRaises(ValidationError) as caught:
+        with self.assertRaises(ReconcileRequired):
             mutation.apply()
+        with self.assertRaises(ValidationError) as caught:
+            self.controller.apply_effect(mutation.effects[0])
         self.assertEqual("review_containment", caught.exception.code)
         self.assertEqual([], list(outside.iterdir()))
 
     def test_a_file_where_a_review_directory_belongs_is_refused(self) -> None:
         review = self.store.root / paths.REVIEW_DIR
         review.mkdir(parents=True)
-        (review / "receipts").write_text("not a directory\n", encoding="utf-8")
+        (review / "receipts").write_bytes(b"not a directory\n")
         relative = paths.receipt_rel(RECEIPT_ID)
         mutation = self._mutation(relative)
         mutation.add_effects("review", [Effect.create_file(relative, "a: 1\n")])
-        with self.assertRaises(ValidationError) as caught:
+        with self.assertRaises(ReconcileRequired):
             mutation.apply()
+        with self.assertRaises(ValidationError) as caught:
+            self.controller.apply_effect(mutation.effects[0])
         self.assertEqual("review_containment", caught.exception.code)
+        self.assertEqual(b"not a directory\n", (review / "receipts").read_bytes())
 
-    def test_parent_replaced_between_proof_and_write_is_refused(self) -> None:
-        """TOCTOU: the identity proven by the walk is taken again at the create boundary."""
+    def test_parent_replaced_between_proof_and_write_writes_into_the_proven_directory_or_nothing(self) -> None:
+        """TOCTOU at the actual create: the create is bound to the directory that was proven.
+
+        The proven directory is removed and replaced by another one between the
+        walk and the physical create. Windows refuses the removal outright (the
+        held directory is pinned); POSIX removes it, and the handle-bound create
+        into the dead directory fails rather than following the name to the
+        replacement. Either way the replacement never receives the record.
+        """
+        from workline.review import fsafe
+
         relative = paths.receipt_rel(RECEIPT_ID)
         parent = self.store.root / paths.RECEIPTS_DIR
         parent.mkdir(parents=True)
         mutation = self._mutation(relative)
         mutation.add_effects("review", [Effect.create_file(relative, "a: 1\n")])
+        real = fsafe.SafeDirectory.create_file_exclusive
+        replaced: list[bool] = []
 
-        real = paths.prove_containment
+        def replace_parent(directory, name, data, tmp):
+            try:
+                parent.rmdir()
+            except OSError:
+                replaced.append(False)  # pinned
+            else:
+                parent.mkdir()
+                replaced.append(True)
+            return real(directory, name, data, tmp)
 
-        def swap(root, rel):
-            identity = real(root, rel)
-            # Between the proof and the write, the proven directory is replaced
-            # by a different one.
-            parent.rmdir()
-            parent.mkdir()
-            return identity
-
-        with mock.patch.object(paths, "prove_containment", swap):
-            with self.assertRaises(ValidationError) as caught:
+        with mock.patch.object(fsafe.SafeDirectory, "create_file_exclusive", replace_parent):
+            try:
                 mutation.apply()
-        self.assertEqual("review_containment", caught.exception.code)
-        self.assertFalse((self.store.root / relative).exists())
+            except (ReconcileRequired, ValidationError, OSError):
+                pass
+        if replaced == [True]:
+            self.assertFalse((self.store.root / relative).exists(), "the replacement directory never gets the record")
+        else:
+            self.assertEqual(b"a: 1\n", (self.store.root / relative).read_bytes())
 
-    def test_containment_refuses_a_path_outside_the_review_namespace(self) -> None:
+    def test_a_path_outside_the_review_namespace_is_not_a_review_record_path(self) -> None:
         with self.assertRaises(ValidationError):
-            paths.prove_containment(self.store.root, f"{WORKLINE_DIR}/project.yaml")
+            paths.require_review_record_path(f"{WORKLINE_DIR}/project.yaml")
 
-    def test_containment_refuses_traversal(self) -> None:
+    def test_a_traversing_path_is_not_a_review_record_path(self) -> None:
         with self.assertRaises(ValidationError):
-            paths.prove_containment(self.store.root, f"{paths.REVIEW_DIR}/../escape.yaml")
+            paths.require_review_record_path(f"{paths.REVIEW_DIR}/../escape.yaml")
+        with self.assertRaises(ValidationError):
+            paths.require_review_record_path(f"{paths.REVIEW_DIR}/receipts/./x.yaml")
+
+    def test_only_canonical_record_locations_are_review_record_paths(self) -> None:
+        paths.require_review_record_path(paths.receipt_rel(RECEIPT_ID))
+        paths.require_review_record_path(paths.gate_rel("rr_01ARZ3NDEKTSV4RRFFQ69G5FAV", 1))
+        for bad in (
+            f"{paths.REVIEW_DIR}/stray.yaml",
+            f"{paths.REVIEW_DIR}/receipts/nested/x.yaml",
+            f"{paths.REVIEW_DIR}/gates/x.yaml",
+            f"{paths.REVIEW_DIR}/receipts/x.txt",
+        ):
+            with self.assertRaises(ValidationError, msg=bad):
+                paths.require_review_record_path(bad)
 
     # git committability preflight -------------------------------------------
     def test_ignored_review_path_stops_before_any_effect(self) -> None:
@@ -271,7 +314,9 @@ class ReviewLayoutTests(WorklineTestCase):
         relative = paths.receipt_rel(RECEIPT_ID)
         target = self.store.root / relative
         target.parent.mkdir(parents=True)
-        target.write_text("schema: review-authorization-receipt\nversion: 1\n", encoding="utf-8")
+        # Canonical bytes of an incomplete record, so what is refused is the
+        # missing fields, not the line endings (those have their own test).
+        target.write_bytes(b"schema: review-authorization-receipt\nversion: 1\n")
         codes = [p.code for p in validate_project(self.store)]
         self.assertIn("review_record_invalid", codes)
 
