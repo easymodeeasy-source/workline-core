@@ -541,6 +541,19 @@ class ReviewStore:
     def task_input_ids(self) -> tuple[str, ...]:
         return self._ids_in(paths.TASK_INPUTS_DIR, "review_task")
 
+    def candidate_snapshot_hashes(self) -> tuple[str, ...]:
+        """Every stored Candidate snapshot, by the candidate hash its filename must be, in sorted order.
+
+        Read the way every Review directory is: no indirection, plain ``.yaml``
+        files only, and a filename that is a lowercase-hex SHA-256 - so an
+        unreferenced snapshot with an unknown name, a nested directory, or a
+        reparse point in ``candidate-snapshots/`` fails closed here rather than
+        being missed because nothing happened to reference it (``R1`` §11).
+        """
+        return self._stems_in(
+            paths.CANDIDATE_SNAPSHOTS_DIR, lambda stem: records.DIGEST_RE.match(stem) is not None, "candidate_hash"
+        )
+
     def candidate_material_digest(self, candidate_hash: str) -> str:
         """The provenance identity of the stored Candidate snapshot, over its exact canonical bytes.
 
@@ -654,6 +667,17 @@ class ReviewStore:
 
     # helpers ----------------------------------------------------------------
     def _ids_in(self, directory_rel: str, kind: str) -> tuple[str, ...]:
+        return self._stems_in(directory_rel, lambda stem: is_valid_id(stem, kind), f"{kind} id")
+
+    def _stems_in(
+        self, directory_rel: str, valid_stem: Callable[[str], bool], name_description: str
+    ) -> tuple[str, ...]:
+        """The ``.yaml`` stems of ``directory_rel``, each a plain in-Project file whose name ``valid_stem`` accepts.
+
+        The one enumeration every flat Review record directory is read through:
+        no indirection, no nested directory, no non-``.yaml`` entry, and no
+        filename that is not the identity a record there is named by.
+        """
         found_entries = self.entries(directory_rel)
         if found_entries is None:
             return ()
@@ -670,9 +694,9 @@ class ReviewStore:
                     code="review_namespace_invalid",
                 )
             stem = entry.name[: -len(".yaml")]
-            if not is_valid_id(stem, kind):
+            if not valid_stem(stem):
                 raise ValidationError(
-                    f"{directory_rel} holds {entry.name}, whose name is not a {kind} id",
+                    f"{directory_rel} holds {entry.name}, whose name is not a {name_description}",
                     code="review_namespace_invalid",
                 )
             found.append(stem)

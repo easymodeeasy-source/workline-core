@@ -94,6 +94,8 @@ def validate_review(store: ProjectStore) -> list[ReviewProblem]:
     problems.extend(receipt_problems)
     problems.extend(_supersessions(review, chains, receipts))
     problems.extend(_consumptions(review, chains, receipts))
+    problems.extend(_candidate_snapshots(review))
+    problems.extend(_task_inputs(review))
     problems.extend(_provenance(review, chains))
     problems.extend(_activation(review))
     return problems
@@ -394,10 +396,94 @@ def _provenance(review: ReviewStore, chains: dict[str, GateChain]) -> list[Revie
     return problems
 
 
-def _activation(review: ReviewStore) -> list[ReviewProblem]:
-    """The activation record, if present, must parse. P1 creates none and activates nothing."""
+def _candidate_snapshots(review: ReviewStore) -> list[ReviewProblem]:
+    """Every stored Candidate snapshot, referenced or not, is structurally valid (``R1`` §11, P1-REV-008).
+
+    A snapshot is read only when an accepted task points at it (:func:`_provenance`),
+    so a structurally broken snapshot that nothing references - malformed,
+    non-canonical, an indirection, or a filename that is not the candidate hash
+    inside it - would otherwise never be looked at. Enumerating them here reads
+    each one the way every Review record is read (no-follow, canonical bytes,
+    schema round-trip, filename == identity inside), so its shape is checked
+    whether or not it is reachable. A valid but unreferenced snapshot is a legal
+    orphan (crash/recovery, immutable write ordering) and is simply validated,
+    not condemned - no reachability or garbage-collection policy is introduced.
+    """
     try:
-        review.read_activation()
+        hashes = review.candidate_snapshot_hashes()
     except ValidationError as exc:
         return [_problem(exc)]
-    return []
+    problems: list[ReviewProblem] = []
+    for candidate_hash in hashes:
+        try:
+            review.read_candidate_snapshot(candidate_hash)
+        except ValidationError as exc:
+            problems.append(_problem(exc))
+    return problems
+
+
+def _task_inputs(review: ReviewStore) -> list[ReviewProblem]:
+    """Every stored task input, referenced or not, is structurally valid (``R1`` §11, P1-REV-008).
+
+    The same blind spot as Candidate snapshots: a task input is read only when
+    an accepted task names it, so an unreferenced one is enumerated and read
+    here - canonical bytes, schema round-trip, and a filename that is the
+    ``review_task`` id inside it. A valid unreferenced task input is a legal
+    orphan and only validated.
+    """
+    try:
+        task_ids = review.task_input_ids()
+    except ValidationError as exc:
+        return [_problem(exc)]
+    problems: list[ReviewProblem] = []
+    for task_id in task_ids:
+        try:
+            review.read_task_input(task_id)
+        except ValidationError as exc:
+            problems.append(_problem(exc))
+    return problems
+
+
+def _activation(review: ReviewStore) -> list[ReviewProblem]:
+    """The activation directory holds only the one activation record P1 defines, and it parses if present.
+
+    Fully enumerated, not read by exact path alone (P1-REV-008): the only
+    physical entry ``activation/`` may hold is ``work-terminal-v1.yaml`` as a
+    plain file. An unknown entry, a nested directory, or a symlink/junction/
+    reparse point anywhere in it fails closed. An *absent* record stays valid
+    and means review-v1 Work terminalization is not activated - the state P1
+    leaves every Project in - and even a present, valid record activates no
+    START, Roadmap or P3 behavior here; it is only structurally validated.
+    """
+    problems: list[ReviewProblem] = []
+    try:
+        found = review.entries(paths.ACTIVATION_DIR)
+    except ValidationError as exc:
+        return [_problem(exc)]
+    allowed = paths.WORK_TERMINAL_ACTIVATION_REL.rsplit("/", 1)[-1]
+    for entry in found or []:
+        if entry.name == allowed and entry.is_file and not entry.is_indirection:
+            continue
+        if entry.is_indirection:
+            problems.append(
+                ReviewProblem("review_containment", f"{paths.ACTIVATION_DIR}/{entry.name} is a symlink, junction or other reparse point")
+            )
+        elif entry.name != allowed:
+            problems.append(
+                ReviewProblem(
+                    "review_namespace_invalid",
+                    f"{paths.ACTIVATION_DIR} holds {entry.name}; the only activation record P1 defines is {allowed}",
+                )
+            )
+        else:  # the expected name, but a directory rather than a plain file
+            problems.append(
+                ReviewProblem("review_namespace_invalid", f"{paths.ACTIVATION_DIR}/{entry.name} is not a plain file")
+            )
+    # The record parses (if it is present as a plain file). When the activation
+    # file itself is the broken entry, the enumeration above already said so.
+    if not any(entry.name == allowed and (entry.is_indirection or not entry.is_file) for entry in found or []):
+        try:
+            review.read_activation()
+        except ValidationError as exc:
+            problems.append(_problem(exc))
+    return problems
