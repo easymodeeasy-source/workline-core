@@ -1,6 +1,6 @@
 # Review System P1 — R12 Recovery / Invariant Test Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 4 REPAIRED / LIVE-BASELINE RECONCILED / P1-FLBR-01 + D1 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / LIVE-BASELINE RECONCILED / P1-FLBR-01 + D1 + D2 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the minimum interruption/invariant test matrix required before Review contracts may activate.
 
@@ -273,7 +273,21 @@ Assert explicitly that no publication occurred and that content equality alone n
 
 ### C-current. Publication stage shape violated — current-combined path only
 
-Scope: an existing/current **combined-publication** mutation, i.e. one carrying no Review-v1 split publication contract identity (R5 §12.3). This case says nothing about the Review-v1 split path, which has its own tests in §10.2.
+Scope: a mutation **positively selected as current-combined by R5 §12.3.1 case A** — `publication_contract` absent *and* positive proof that no durable Review-v1 operation metadata exists. This case says nothing about the Review-v1 split path, which has its own tests in §10.2.
+
+A missing `publication_contract` does not by itself put a mutation here. Two neighbouring states are outside this case and must not be tested under it:
+
+```text
+publication_contract absent
+  BUT durable Review-v1 operation metadata present
+  -> R5 §12.3.1 case B: contradictory -> fail closed
+
+cannot determine whether durable Review-v1 operation
+metadata exists
+  -> R5 §12.3.1 case D: fail closed
+```
+
+Neither is a current-combined mutation, and neither may be judged by the exact-pair rule below — passing or failing it.
 
 ```text
 for a current-combined mutation,
@@ -286,7 +300,16 @@ a recorded push whose Git stage is not the exact ordered pair
 
 Cover at least: a third effect in the stage, non-adjacent recording, non-consecutive `seq`, missing commit ID, branch-name mismatch, and a commit no longer held by the recorded branch.
 
-Also cover, as the discriminator's negative direction: a current-combined mutation is **never** rescued from this failure by being re-read as a Review-v1 split. Absence of the split contract identity is a positive answer, and shape never selects the contract.
+Also cover, as the discriminator's negative direction: a mutation selected as current-combined by case A is **never** rescued from this failure by being re-read as a Review-v1 split, and shape never selects the contract.
+
+What supplies the current-combined answer is case A's positive proof that no durable Review-v1 operation metadata exists — not the missing `publication_contract` on its own:
+
+```text
+case A's positive proof that no durable Review-v1
+operation metadata exists is the current-combined answer.
+
+publication_contract absence alone is not an answer.
+```
 
 ### D. Exact-commit publication
 
@@ -566,6 +589,37 @@ V9 -> V9-A  true legacy/current absence      -> current-combined
 
 ```text
 P1-FLBR-01-D1: REPAIRED / FROZEN
+P1-FLBR-01:    RESOLVED
+```
+
+Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+Architecture: `RETAIN`. Architecture reopen: `No`. Candidate 8: `No`. HUMAN decision: `None`.
+
+## 19. P1-FLBR-01-D2 repair disposition
+
+The D1 repair corrected the precedence in R5 §12.3.1 but left `C-current`'s own selector on the pre-D1 wording. It scoped itself to "one carrying no Review-v1 split publication contract identity" and asserted that "absence of the split contract identity is a positive answer" — exactly the equivalence D1 had just removed.
+
+Left standing, a Review-v1 mutation interrupted before `publication_contract` was saved satisfied `C-current`'s own stated scope, so the test contract still admitted it to the combined-pair rule that R5 §12.3.1 case B fails closed.
+
+Repair, selector wording only:
+
+```text
+scope    -> a mutation positively selected as current-combined
+            by R5 §12.3.1 case A: publication_contract absent AND
+            positive proof that no durable Review-v1 operation
+            metadata exists
+            plus the two neighbouring states named as out of scope
+            (case B contradictory, case D undeterminable)
+closing  -> case A's positive proof is the current-combined answer;
+            publication_contract absence alone is not an answer
+```
+
+Unchanged by this repair: `C-current`'s exact-pair failure conditions and coverage list, V1-V8, V9-A..V9-F, and all of R5. Only the selector was aligned with D1, and only in the narrowing direction — two states that previously fell inside `C-current`'s stated scope now fall outside it, into fail-closed.
+
+```text
+P1-FLBR-01-D2: REPAIRED / FROZEN
+P1-FLBR-01-D1: RESOLVED
 P1-FLBR-01:    RESOLVED
 ```
 

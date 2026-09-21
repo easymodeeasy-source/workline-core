@@ -1,6 +1,6 @@
 # Review System P1 — Live Baseline Reconciliation Checkpoint
 
-Status: CONTRACT RECONCILED TO LIVE BASELINE / P1-FLBR-01 RESOLVED (D1 REPAIRED) / IMPLEMENTATION NOT STARTED / FINAL READINESS CHECK REQUIRED
+Status: CONTRACT RECONCILED TO LIVE BASELINE / P1-FLBR-01 RESOLVED (D1 + D2 REPAIRED) / IMPLEMENTATION NOT STARTED / D2 CLOSURE VERIFICATION REQUIRED
 
 The focused review of this reconciliation returned one Finding, `P1-FLBR-01`, now repaired and frozen: see `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`. §4.1 below is amended by it — the same-stage `git_commit` -> `git_push` pair is the current/legacy combined publication shape (R5 §12.1), not the Review-v1 split shape (R5 §12.2).
 
@@ -148,7 +148,8 @@ The 293 seam tests covering the `19bf5e71..e32a741` window were already green at
 ## 7. Current checkpoint
 
 ```text
-P1-FLBR-01-D1:             REPAIRED / FROZEN
+P1-FLBR-01-D2:             REPAIRED / FROZEN
+P1-FLBR-01-D1:             RESOLVED
 P1-FLBR-01:                RESOLVED
 
 Candidate 7 architecture:  RETAIN
@@ -161,9 +162,10 @@ Live implementation baseline:
 
 Implementation:            NOT STARTED
 
-Next: final P1 implementation readiness check
+Next: D2 closure verification, then the final P1
+      implementation readiness check
 
-Status: READY_FOR_FINAL_P1_IMPLEMENTATION_READINESS_CHECK
+Status: READY_FOR_D2_CLOSURE_VERIFICATION
 ```
 
-The focused review of this reconciliation is complete. It returned exactly one Finding, `P1-FLBR-01`, repaired in `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`. The closure review of that repair returned one further Finding, `P1-FLBR-01-D1` (discriminator precedence, MID), repaired in the same document at its section 9. Both were contract text only; the live implementation baseline did not move.
+The focused review of this reconciliation is complete. It returned exactly one Finding, `P1-FLBR-01`, repaired in `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`. The closure review of that repair returned one further Finding, `P1-FLBR-01-D1` (discriminator precedence, MID), repaired in the same document at its section 9, and a follow-on Finding `P1-FLBR-01-D2` (stale `C-current` selector wording, MID) at its section 11. All were contract text only; the live implementation baseline did not move.

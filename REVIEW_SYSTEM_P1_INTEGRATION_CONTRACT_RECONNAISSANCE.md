@@ -1,6 +1,6 @@
 # Review System P1 — Integration Contract Reconnaissance Checkpoint
 
-Status: ROUND 4 CONTRACT REPAIRS FROZEN / ROUND 5 LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / P1-FLBR-01 RESOLVED (D1 REPAIRED) / IMPLEMENTATION NOT STARTED / FINAL READINESS CHECK REQUIRED
+Status: ROUND 4 CONTRACT REPAIRS FROZEN / ROUND 5 LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / P1-FLBR-01 RESOLVED (D1 + D2 REPAIRED) / IMPLEMENTATION NOT STARTED / D2 CLOSURE VERIFICATION REQUIRED
 
 Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code until implementation/activation.
 
@@ -132,6 +132,13 @@ The closure review of that repair returned one further Finding, `P1-FLBR-01-D1` 
 
 ```text
 P1-FLBR-01-D1: REPAIRED / FROZEN
+```
+
+A follow-on Finding `P1-FLBR-01-D2` (severity MID) then caught that the D1 repair had left R12 `C-current` describing its own scope in pre-D1 terms - "one carrying no Review-v1 split publication contract identity", with "absence of the split contract identity is a positive answer" - so the test contract still admitted to the combined-pair rule a mutation that R5 case B fails closed. `C-current` is now scoped to a mutation positively selected by R5 section 12.3.1 case A, with case B and case D named as outside it. Selector wording only; its failure conditions, V1-V8 and V9-A..V9-F are unchanged.
+
+```text
+P1-FLBR-01-D2: REPAIRED / FROZEN
+P1-FLBR-01-D1: RESOLVED
 P1-FLBR-01:    RESOLVED
 ```
 
@@ -144,7 +151,8 @@ Round 3 findings: REPAIRED/FROZEN
 Round 4 provenance reuse seam: REPAIRED/FROZEN
 Round 5 live-baseline reconciliation: APPLIED/FROZEN
 P1-FLBR-01: RESOLVED
-P1-FLBR-01-D1: REPAIRED/FROZEN
+P1-FLBR-01-D1: RESOLVED
+P1-FLBR-01-D2: REPAIRED/FROZEN
 
 Candidate 7 architecture: RETAIN
 Architecture reopen: No
@@ -154,13 +162,13 @@ Live implementation baseline:
 e32a74192e70d3ce8aec09f1921f175ac72b2d1d
 
 P1 implementation: NOT STARTED
-Implementation activation: BLOCKED pending the final P1
-implementation readiness check
+Implementation activation: BLOCKED pending D2 closure
+verification, then the final P1 implementation readiness check
 ```
 
 ## Next stage
 
-Run the final P1 implementation readiness check. Both publication Findings are closed; what remains is the go/no-go on starting implementation, not a further contract-review round. Candidate 7 architecture, Rounds 1-4, and the untouched parts of Round 5 stay frozen and are out of scope.
+Verify P1-FLBR-01-D2 closure, then run the final P1 implementation readiness check. The publication Findings are closed; what remains is confirmation of the D2 selector alignment and then the go/no-go on starting implementation, not a further contract-review round. Candidate 7 architecture, Rounds 1-4, and the untouched parts of Round 5 stay frozen and are out of scope.
 
 Review target: `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`, R5 §12 (including §12.3.1 precedence) and R12 `C-current` / §10.2 / V9-A..V9-F.
 

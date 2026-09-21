@@ -1,6 +1,6 @@
 # Review System P1 — Final Baseline Repair Checkpoint (P1-FLBR-01)
 
-Status: P1-FLBR-01 RESOLVED (D1 REPAIRED / FROZEN) / IMPLEMENTATION NOT STARTED / FINAL READINESS CHECK REQUIRED
+Status: P1-FLBR-01 RESOLVED (D1 + D2 REPAIRED / FROZEN) / IMPLEMENTATION NOT STARTED / D2 CLOSURE VERIFICATION REQUIRED
 
 This checkpoint records the repair of the single Finding left by the final focused live-baseline review. It is non-normative until implementation and canonical authority activation.
 
@@ -143,11 +143,13 @@ Review-v1 mutation contains a combined pair   -> does not bypass C-2;
 ## 6. Test contract repair (R12)
 
 ```text
-C -> C-current   scoped to current-combined mutations, i.e. those
-                 carrying no Review-v1 split publication contract
-                 identity; failure conditions unchanged, and a
-                 current-combined mutation is never rescued by being
-                 re-read as a Review-v1 split
+C -> C-current   scoped to current-combined mutations; failure
+                 conditions unchanged, and a current-combined
+                 mutation is never rescued by being re-read as a
+                 Review-v1 split
+                 (this round scoped it by absence of the split
+                  contract identity; that selector was superseded
+                  by P1-FLBR-01-D2 - see section 11)
 §10.2            new mandatory Review-v1 split cases:
                  V1 well-formed split publication
                  V2 crash before proof            -> no push
@@ -247,12 +249,67 @@ V9-B is the mandatory negative regression test for this Finding: a Review-v1 mut
 
 ### 9.4 Scope of the change
 
-§12.1's current-combined rule, §12.2's split rule, §12.4's bindings, §12.5's matrix (one row added), R12 `C-current` and V1-V8 are all unchanged. Only the selection between contracts was corrected, and strictly in the narrowing direction: case B moves a state that previously reached §12.1 into fail-closed. Nothing became newly acceptable.
+§12.1's current-combined rule, §12.2's split rule, §12.4's bindings, §12.5's matrix (one row added), R12 `C-current`'s failure conditions and V1-V8 are all unchanged. Only the selection between contracts was corrected, and strictly in the narrowing direction: case B moves a state that previously reached §12.1 into fail-closed. Nothing became newly acceptable.
 
-## 10. Current checkpoint
+`C-current`'s own selector wording was **not** updated in this round, which P1-FLBR-01-D2 then caught: see section 11.
+
+## 10. P1-FLBR-01-D1 closure condition
+
+The discriminator's absent case no longer answers on its own: it answers only through case A's positive proof, and the two states that previously hid inside it now fail closed.
+
+## 11. P1-FLBR-01-D2 — stale `C-current` selector wording
+
+The D1 repair corrected R5 §12.3.1 but left R12 `C-current` describing its own scope in pre-D1 terms.
+
+### 11.1 The defect
+
+`C-current` said it applied to "an existing/current combined-publication mutation, i.e. one carrying no Review-v1 split publication contract identity", and closed with "Absence of the split contract identity is a positive answer".
+
+Both sentences restate the equivalence D1 had just removed. Under them, a Review-v1 mutation interrupted before `publication_contract` was saved satisfied `C-current`'s stated scope — so the test contract still admitted to the combined-pair rule a mutation that R5 §12.3.1 case B fails closed. R5 and R12 disagreed about who `C-current` governs.
+
+### 11.2 Repaired selector
 
 ```text
-P1-FLBR-01-D1: REPAIRED / FROZEN
+C-current applies to a mutation positively selected as
+current-combined by R5 §12.3.1 case A:
+
+  publication_contract absent
+  AND positive proof that no durable Review-v1
+      operation metadata exists
+```
+
+Named as explicitly outside it:
+
+```text
+publication_contract absent
+  BUT durable Review-v1 operation metadata present
+  -> case B: contradictory -> fail closed
+
+cannot determine whether durable Review-v1 operation
+metadata exists
+  -> case D: fail closed
+```
+
+Neither may be judged by the exact-pair rule at all — not passing it, not failing it.
+
+The closing sentence became:
+
+```text
+case A's positive proof that no durable Review-v1
+operation metadata exists is the current-combined answer.
+
+publication_contract absence alone is not an answer.
+```
+
+### 11.3 Scope of the change
+
+Selector wording only. `C-current`'s exact-pair failure conditions and coverage list, V1-V8, V9-A..V9-F and all of R5 are unchanged. Strictly narrowing: two states that previously fell inside `C-current`'s stated scope now fall outside it, into fail-closed.
+
+## 12. Current checkpoint
+
+```text
+P1-FLBR-01-D2: REPAIRED / FROZEN
+P1-FLBR-01-D1: RESOLVED
 P1-FLBR-01:    RESOLVED
 
 Architecture: RETAIN
@@ -267,5 +324,6 @@ Implementation:
 NOT STARTED
 
 Next:
-final P1 implementation readiness check
+D2 closure verification, then the final P1
+implementation readiness check
 ```
