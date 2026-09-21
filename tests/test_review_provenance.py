@@ -57,7 +57,9 @@ def task_input_record(**overrides: object) -> dict:
         "request_digest": "d" * 64,
         "candidate_hash": CANDIDATE,
         "reconstruction_mode": records.RECONSTRUCTION_SNAPSHOT,
-        "candidate_material_digest": "e" * 64,
+        # The digest of the snapshot this task reconstructs from - the same
+        # identity the accepted descriptor binds (P1-REV-005).
+        "candidate_material_digest": serialize.digest(snapshot_record()),
         "review_context_hash": "f" * 64,
         "effective_policy_hash": "0" * 64,
         "accepted_generation": 1,

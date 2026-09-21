@@ -132,6 +132,47 @@ def parse(text: str, described: str) -> dict[str, Any]:
     return data
 
 
+def parse_canonical(raw: bytes, described: str) -> tuple[dict[str, Any], str]:
+    """The record ``raw`` holds - only if ``raw`` is exactly that record's canonical bytes.
+
+    The read boundary of ``R1`` §4, and the mirror image of the writer: a
+    Review record has one physical representation, and a reader accepts that
+    one and nothing that merely parses to the same thing.
+
+    ```text
+    exact stored bytes
+    -> strict UTF-8 decode           (invalid UTF-8 is refused, not replaced)
+    -> parse
+    -> canonical re-render
+    -> re-rendered text == stored text, byte for byte
+    ```
+
+    So reordered keys, a comment, CRLF line ends, a missing final LF, extra
+    whitespace, an alternative spelling of a scalar, a duplicated key the parser
+    would have collapsed - each is refused, because each renders back to
+    something other than what is stored. Only after this proof are the stored
+    bytes used as the record's identity - its predecessor digest, its
+    provenance digest - so a digest can never be taken over a representation
+    the writer would not have produced.
+
+    Returns the parsed mapping and the stored text; the text *is* the canonical
+    text, so ``digest_of_text`` of it equals :func:`digest` of the mapping.
+    """
+    try:
+        text = raw.decode(ENCODING, errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValidationError(f"{described} is not valid UTF-8: {exc}", code="review_record_noncanonical") from exc
+    data = parse(text, described)
+    rendered = canonical_text(data)
+    if rendered != text:
+        raise ValidationError(
+            f"{described} is not stored in its canonical form (the same record renders to different bytes); "
+            "a Review record is read only in the one representation the writer produces",
+            code="review_record_noncanonical",
+        )
+    return data, text
+
+
 def require_schema(record: dict[str, Any], schema: str, version: int, described: str) -> None:
     """Refuse ``record`` unless it declares exactly ``schema`` at exactly ``version``.
 

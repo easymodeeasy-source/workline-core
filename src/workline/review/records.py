@@ -72,6 +72,9 @@ SCHEMA_ACTIVATION = "review-work-terminal-activation"
 
 VERSION = 1
 
+#: The terminal event a Work-kind Consumption binds (``R4`` section 2).
+WORK_TERMINAL_EVENT = "work_completed"
+
 #: The operation contract a review-v1 Work terminal event declares (``R4`` §5).
 #: P1 defines the constant; P3 activates the behaviour.
 OPERATION_CONTRACT_REVIEW_V1 = "review-v1"
@@ -242,6 +245,7 @@ GATE_FIELDS = (
     "settled_tasks",
     "status",
     "receipt_id",
+    "authorized_operation_stage",
 )
 
 
@@ -273,6 +277,10 @@ class GateGeneration:
     settled_tasks: tuple[dict[str, Any], ...]
     status: str
     receipt_id: str | None
+    #: The operation stage a sealed generation authorizes. The Receipt it issues
+    #: carries the same value, and binding the two is only possible if the seal
+    #: itself records it: a Receipt's stage checked against nothing is not bound.
+    authorized_operation_stage: str | None = None
 
     @property
     def sealed(self) -> bool:
@@ -312,6 +320,7 @@ class GateGeneration:
                 "settled_tasks": [dict(task) for task in self.settled_tasks],
                 "status": self.status,
                 "receipt_id": self.receipt_id,
+                "authorized_operation_stage": self.authorized_operation_stage,
             }
         )
         return record
@@ -347,6 +356,21 @@ class GateGeneration:
                 f"{described} is {GATE_STATUS_OPEN} and carries a receipt_id; only a sealed generation issues one",
                 code="review_record_invalid",
             )
+        stage = record.get("authorized_operation_stage")
+        if status == GATE_STATUS_SEALED:
+            # A seal is what issues the Receipt (R3 section 7), and it records the
+            # stage it authorizes so that the Receipt's stage is bound to something.
+            if receipt_id is None:
+                raise ValidationError(f"{described} is sealed and issues no receipt", code="review_record_invalid")
+            if not isinstance(stage, str) or not stage:
+                raise ValidationError(
+                    f"{described} is sealed and names no authorized_operation_stage", code="review_record_invalid"
+                )
+        elif stage is not None:
+            raise ValidationError(
+                f"{described} is {GATE_STATUS_OPEN} and names an authorized_operation_stage; only a seal authorizes one",
+                code="review_record_invalid",
+            )
         accepted = tuple(validate_accepted_task(item, described) for item in _require_list(record, "accepted_tasks", described))
         settled = tuple(validate_settled_task(item, described) for item in _require_list(record, "settled_tasks", described))
         accepted_ids = [str(task["task_id"]) for task in accepted]
@@ -360,6 +384,13 @@ class GateGeneration:
             raise ValidationError(
                 f"{described} settles task(s) it never accepted: {', '.join(unknown_settled)}",
                 code="review_record_invalid",
+            )
+        future = sorted(str(task["task_id"]) for task in settled if task["settled_generation"] > generation)
+        if future:
+            raise ValidationError(
+                f"{described} is generation {generation} and holds settlement(s) from a later generation: "
+                f"{', '.join(future)}",
+                code="review_gate_chain",
             )
         return GateGeneration(
             review_run_id=_require_id(record, "review_run_id", "review_run", described),
@@ -381,6 +412,7 @@ class GateGeneration:
             settled_tasks=settled,
             status=status,
             receipt_id=None if receipt_id is None else str(receipt_id),
+            authorized_operation_stage=None if stage is None else str(stage),
         )
 
 
@@ -531,6 +563,16 @@ class Consumption:
     target_identity: str
     authorized_result_commit_sha: str | None
 
+    @property
+    def work_kind(self) -> bool:
+        """Whether this Consumption binds a Work terminal event (``R4`` section 2)."""
+        return self.terminal_event_id is not None
+
+    @property
+    def work_id(self) -> str | None:
+        """The Work a Work-kind Consumption terminates - its target - and ``None`` for any other kind."""
+        return self.target_identity if self.work_kind else None
+
     def to_record(self) -> dict[str, Any]:
         record = _header(SCHEMA_CONSUMPTION)
         record.update(
@@ -557,21 +599,40 @@ class Consumption:
         _require_exact_fields(record, CONSUMPTION_FIELDS, described)
         event_id = record.get("terminal_event_id")
         event_type = record.get("terminal_event_type")
-        if (event_id is None) != (event_type is None):
-            raise ValidationError(
-                f"{described} names a terminal event without its type, or the other way round",
-                code="review_record_invalid",
-            )
-        if event_id is not None and not is_valid_id(str(event_id), "event"):
-            raise ValidationError(
-                f"{described} terminal_event_id is not an event id: {event_id!r}", code="review_record_invalid"
-            )
         commit = record.get("authorized_result_commit_sha")
-        if commit is not None and (not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}", commit) is None):
+        # A Work-kind Consumption binds one terminal event of one Work to one
+        # authorized result commit (R4 section 2). The three are a single binding:
+        # either all are there, or - for a planning or policy Consumption, which
+        # never invents a Work terminal event (R4 section 7) - none is.
+        present = [value is not None for value in (event_id, event_type, commit)]
+        if any(present) and not all(present):
             raise ValidationError(
-                f"{described} authorized_result_commit_sha is not a full commit id: {commit!r}",
+                f"{described} carries part of a Work terminal binding (terminal_event_id, terminal_event_type, "
+                "authorized_result_commit_sha); a Work-kind Consumption carries all three and any other kind none",
                 code="review_record_invalid",
             )
+        if event_id is not None:
+            if not is_valid_id(str(event_id), "event"):
+                raise ValidationError(
+                    f"{described} terminal_event_id is not an event id: {event_id!r}", code="review_record_invalid"
+                )
+            if event_type != WORK_TERMINAL_EVENT:
+                raise ValidationError(
+                    f"{described} terminal_event_type is {event_type!r}; a Work terminal Consumption binds "
+                    f"{WORK_TERMINAL_EVENT}",
+                    code="review_record_invalid",
+                )
+            if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit) is None:
+                raise ValidationError(
+                    f"{described} authorized_result_commit_sha is not a full commit id: {commit!r}",
+                    code="review_record_invalid",
+                )
+            target = record.get("target_identity")
+            if not isinstance(target, str) or not is_valid_id(target, "work"):
+                raise ValidationError(
+                    f"{described} binds a Work terminal event but its target_identity is not a work id: {target!r}",
+                    code="review_record_invalid",
+                )
         return Consumption(
             consumption_id=_require_id(record, "consumption_id", "review_consumption", described),
             receipt_id=_require_id(record, "receipt_id", "review_receipt", described),

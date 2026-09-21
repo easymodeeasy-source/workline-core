@@ -38,8 +38,14 @@ def gate_record(generation: int, *, previous_digest: str | None = None, **overri
         "settled_tasks": [],
         "status": records.GATE_STATUS_OPEN,
         "receipt_id": None,
+        "authorized_operation_stage": None,
     }
     record.update(overrides)
+    # A seal records the operation stage it authorizes (it is what the Receipt's
+    # own stage is bound to). Tests that seal get the same stage the Receipt
+    # fixtures name, unless they say otherwise.
+    if record["status"] == records.GATE_STATUS_SEALED and "authorized_operation_stage" not in overrides:
+        record["authorized_operation_stage"] = "work-terminal"
     return record
 
 

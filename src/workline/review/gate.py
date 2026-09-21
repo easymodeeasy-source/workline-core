@@ -270,48 +270,43 @@ def validate_settlement(
             f"a result arrived for Review Run {review_run_id}, which has no gate chain: unknown callback",
             code="review_callback_unknown",
         )
-    accepted: dict[str, Any] | None = None
-    for generation in chain.generations:
-        for task in generation.accepted_tasks:
-            if str(task["task_id"]) == task_id:
-                accepted = task
-                break
-        if accepted is not None:
-            break
-    if accepted is None:
+    accepted = chain.accepted_descriptor(task_id)
+    accepted_generation = chain.accepted_at(task_id)
+    if accepted is None or accepted_generation is None:
         raise ValidationError(
             f"a result arrived for task {task_id}, which Review Run {review_run_id} never accepted: "
             "unknown callback",
             code="review_callback_unknown",
         )
-    for generation in chain.generations:
-        for settled in generation.settled_tasks:
-            if str(settled["task_id"]) != task_id:
-                continue
-            if str(settled["result_digest"]) == result_digest:
-                return accepted  # the same fact arriving twice
-            raise ValidationError(
-                f"task {task_id} is already settled with result {settled['result_digest']}, and a different "
-                f"result {result_digest} arrived: reconcile required",
-                code="review_callback_conflict",
-            )
-    if not review.task_input_exists(task_id):
+    # Every arrival is matched to canonical provenance first - a duplicate
+    # included. The same cross-binding structural validation applies: every
+    # identity the accepted descriptor, the stored task input and the stored
+    # Candidate snapshot share must agree, not only the task-input digest. A
+    # repeat of an earlier result is only "the same fact" if the material it
+    # answers is still the material that was accepted.
+    problems = review.provenance_problems(accepted, accepted_generation)
+    if problems:
+        code, message = problems[0]
         raise ValidationError(
-            f"task {task_id} has no stored canonical task input, so its request cannot be reconstructed and the "
-            "arriving result cannot be shown to answer it",
-            code="review_record_missing",
-        )
-    found = review.task_input_digest(task_id)
-    if found != accepted["task_input_digest"]:
-        raise ValidationError(
-            f"task {task_id} was accepted against task input {accepted['task_input_digest']}, and the stored task "
-            f"input now digests to {found}: the provenance changed since acceptance",
-            code="review_provenance_conflict",
+            f"the result for task {task_id} cannot be matched to canonical provenance: {message}",
+            code=code,
         )
     if reviewer_identity != accepted["reviewer_identity"]:
         raise ValidationError(
             f"task {task_id} was accepted for reviewer {accepted['reviewer_identity']}, and a result arrived from "
             f"{reviewer_identity}",
             code="review_callback_unknown",
+        )
+    # The chain is a full snapshot, so the latest generation holds every
+    # settlement ever recorded for this Run.
+    for settled in chain.latest.settled_tasks:
+        if str(settled["task_id"]) != task_id:
+            continue
+        if str(settled["result_digest"]) == result_digest:
+            return accepted  # the same fact arriving twice
+        raise ValidationError(
+            f"task {task_id} is already settled with result {settled['result_digest']}, and a different "
+            f"result {result_digest} arrived: reconcile required",
+            code="review_callback_conflict",
         )
     return accepted

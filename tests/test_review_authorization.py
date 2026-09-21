@@ -66,8 +66,10 @@ def receipt_record(**overrides: object) -> dict:
         "authorized_candidate_hash": CANDIDATE,
         "review_context_hash": "b" * 64,
         "effective_policy_hash": "c" * 64,
-        "coverage_hash": "d" * 64,
-        "adjudication_hash": "e" * 64,
+        # Exactly what the sealing gate generation fixture says (coverage_digest,
+        # adjudication_digest): a Receipt repeats its seal's identities.
+        "coverage_hash": "e" * 64,
+        "adjudication_hash": "0" * 64,
         "obligation_digest": "1" * 64,
         "unresolved_obligations": 0,
         "authorized_operation_stage": "work-terminal",
@@ -365,6 +367,18 @@ class SealAndConsumptionTests(WorklineTestCase):
 
     def test_a_supersession_alongside_its_receipt_validates(self) -> None:
         self._chain_to_seal()
+        # The invalidation: a later open generation, carrying every task fact forward.
+        sealed = self.review.gate_chain(RUN_ID)
+        self._put(
+            paths.gate_rel(RUN_ID, 4),
+            gate_record(
+                4,
+                previous_digest=sealed.latest_digest,
+                candidate_hash=CANDIDATE,
+                accepted_tasks=[accepted_task()],
+                settled_tasks=[settled_task()],
+            ),
+        )
         self._put(
             paths.supersession_rel(RECEIPT_ID),
             {

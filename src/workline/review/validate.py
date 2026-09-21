@@ -9,11 +9,15 @@ The baseline is that a Project with no ``.workline/review/`` is valid. Review
 capability arrives lazily with the first Review write, and a Project that never
 uses it keeps exactly the shape it has today.
 
-Everything else fails closed: an unknown entry, a file where a directory
-belongs, a symlink or reparse point anywhere in the namespace, a malformed
-record, a name that does not match the identity inside the file, a
-non-contiguous generation chain, a duplicate logical ID, a conflicting
-immutable fact, malformed provenance, or a contradictory activation state.
+Everything else fails closed, and is read the way the writer writes - through
+the handle-bound, no-follow walk (:mod:`workline.review.fsafe`) and the
+canonical read boundary (:func:`workline.review.serialize.parse_canonical`):
+an unknown entry, a file where a directory belongs, a symlink, junction or
+other reparse point anywhere in the namespace, a malformed or non-canonical
+record, a name that does not match the identity inside the file, a broken or
+non-full-snapshot generation chain, a duplicate logical ID, an authorization
+record whose shared identities do not match what issued it, malformed or
+inconsistent provenance, or a contradictory activation state.
 
 P3 activation semantics are not applied. An absent activation record means
 review-v1 Work terminalization is not activated, which is the state P1 leaves
@@ -23,12 +27,12 @@ every Project in, and no terminal event is classified by anything here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from ..errors import ValidationError
 from ..store import ProjectStore
-from . import paths, records
-from .store import ReviewStore
+from . import paths
+from .records import Consumption, GateGeneration, Receipt
+from .store import GateChain, ReviewStore
 
 
 @dataclass(frozen=True)
@@ -37,22 +41,60 @@ class ReviewProblem:
     message: str
 
 
+#: What a sealed generation and the Receipt it issues must both say, field by
+#: field. Where the two records name the same identity differently the pair
+#: says so explicitly - the gate's ``coverage_digest`` *is* the Receipt's
+#: ``coverage_hash`` - so no shared identity is left unbound because its name
+#: differs (``R3`` §6-7, Candidate 7 §5).
+GATE_RECEIPT_BINDING = (
+    ("receipt_id", "receipt_id"),
+    ("review_run_id", "review_run_id"),
+    ("generation", "review_generation"),
+    ("review_kind", "review_kind"),
+    ("target_identity", "target_identity"),
+    ("operation_identity", "operation_identity"),
+    ("candidate_hash", "authorized_candidate_hash"),
+    ("review_context_hash", "review_context_hash"),
+    ("effective_policy_hash", "effective_policy_hash"),
+    ("coverage_digest", "coverage_hash"),
+    ("adjudication_digest", "adjudication_hash"),
+    ("obligation_digest", "obligation_digest"),
+    ("authorized_operation_stage", "authorized_operation_stage"),
+)
+
+#: What a Consumption repeats from the Receipt it consumes, and must repeat
+#: exactly (``R4`` §2).
+RECEIPT_CONSUMPTION_BINDING = (
+    "receipt_id",
+    "review_run_id",
+    "review_generation",
+    "review_kind",
+    "target_identity",
+    "operation_identity",
+    "authorized_candidate_hash",
+)
+
+
 def validate_review(store: ProjectStore) -> list[ReviewProblem]:
     """Structural problems in this Project's Review namespace; empty when there are none."""
     review = ReviewStore(store)
-    if not review.exists():
-        return []  # a Project that has never used Review is a valid Project
-    problems: list[ReviewProblem] = []
-    problems.extend(_namespace_shape(review))
+    try:
+        if not review.exists():
+            return []  # a Project that has never used Review is a valid Project
+    except ValidationError as exc:
+        return [_problem(exc)]
+    problems = _namespace_shape(review)
     if problems:
         # A namespace whose shape is wrong cannot be read record by record
         # without reporting the same broken thing repeatedly.
         return problems
-    problems.extend(_gates(review))
-    problems.extend(_receipts(review))
-    problems.extend(_consumptions(review))
-    problems.extend(_supersessions(review))
-    problems.extend(_provenance(review))
+    chains, chain_problems = _chains(review)
+    problems.extend(chain_problems)
+    receipts, receipt_problems = _receipts(review, chains)
+    problems.extend(receipt_problems)
+    problems.extend(_supersessions(review, chains, receipts))
+    problems.extend(_consumptions(review, chains, receipts))
+    problems.extend(_provenance(review, chains))
     problems.extend(_activation(review))
     return problems
 
@@ -62,43 +104,33 @@ def _problem(exc: ValidationError) -> ReviewProblem:
 
 
 def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
-    """Only the seven known directories, each a plain directory, and nothing else."""
-    problems: list[ReviewProblem] = []
-    root = review.review
-    if root.is_symlink():
-        return [ReviewProblem("review_containment", f"{paths.REVIEW_DIR} is a symlink or reparse point")]
+    """Only the seven known directories, each a plain directory, and nothing else - read without following."""
     try:
-        entries = sorted(root.iterdir())
-    except OSError as exc:
-        return [ReviewProblem("review_namespace_invalid", f"{paths.REVIEW_DIR} unreadable: {exc}")]
-    for entry in entries:
+        found = review.entries(paths.REVIEW_DIR) or []
+    except ValidationError as exc:
+        return [_problem(exc)]
+    problems: list[ReviewProblem] = []
+    for entry in found:
         if entry.name not in paths.REVIEW_SUBDIRS:
+            problems.append(ReviewProblem("review_namespace_invalid", f"{paths.REVIEW_DIR} holds unknown entry {entry.name}"))
+        elif entry.is_indirection:
             problems.append(
-                ReviewProblem(
-                    "review_namespace_invalid",
-                    f"{paths.REVIEW_DIR} holds unknown entry {entry.name}",
-                )
+                ReviewProblem("review_containment", f"{paths.REVIEW_DIR}/{entry.name} is a symlink, junction or other reparse point")
             )
-            continue
-        if entry.is_symlink():
+        elif not entry.is_dir:
             problems.append(
-                ReviewProblem("review_containment", f"{paths.REVIEW_DIR}/{entry.name} is a symlink or reparse point")
-            )
-        elif not entry.is_dir():
-            problems.append(
-                ReviewProblem(
-                    "review_namespace_invalid", f"{paths.REVIEW_DIR}/{entry.name} is a file where a directory belongs"
-                )
+                ReviewProblem("review_namespace_invalid", f"{paths.REVIEW_DIR}/{entry.name} is a file where a directory belongs")
             )
     return problems
 
 
-def _gates(review: ReviewStore) -> list[ReviewProblem]:
+def _chains(review: ReviewStore) -> tuple[dict[str, GateChain], list[ReviewProblem]]:
+    chains: dict[str, GateChain] = {}
     problems: list[ReviewProblem] = []
     try:
         run_ids = review.run_ids()
     except ValidationError as exc:
-        return [_problem(exc)]
+        return chains, [_problem(exc)]
     for review_run_id in run_ids:
         try:
             chain = review.gate_chain(review_run_id)
@@ -114,151 +146,128 @@ def _gates(review: ReviewStore) -> list[ReviewProblem]:
                 )
             )
             continue
-        problems.extend(_chain_facts(review, chain))
-    return problems
+        chains[review_run_id] = chain
+    return chains, problems
 
 
-def _chain_facts(review: ReviewStore, chain: Any) -> list[ReviewProblem]:
-    """Facts a validated chain must agree with itself and the rest of the namespace about."""
-    problems: list[ReviewProblem] = []
-    first = chain.generations[0]
-    for found in chain.generations:
-        for field_name in ("review_kind", "target_identity"):
-            if getattr(found, field_name) != getattr(first, field_name):
-                problems.append(
-                    ReviewProblem(
-                        "review_gate_chain",
-                        f"Review Run {chain.review_run_id} generation {found.generation} changes {field_name}; "
-                        "a Run's kind and target are immutable facts",
-                    )
-                )
-        if found.receipt_id is not None and not review.receipt_exists(found.receipt_id):
-            problems.append(
-                ReviewProblem(
-                    "review_record_missing",
-                    f"Review Run {chain.review_run_id} generation {found.generation} issues receipt "
-                    f"{found.receipt_id}, which is not stored",
-                )
-            )
-    issued = [found.receipt_id for found in chain.generations if found.receipt_id is not None]
-    if len(set(issued)) != len(issued):
-        problems.append(
-            ReviewProblem(
-                "review_gate_chain",
-                f"Review Run {chain.review_run_id} issues the same receipt from two generations",
-            )
-        )
-    for found in chain.generations:
-        if found.sealed and found.unsettled_task_ids():
-            problems.append(
-                ReviewProblem(
-                    "review_gate_chain",
-                    f"Review Run {chain.review_run_id} generation {found.generation} is sealed with "
-                    f"unsettled accepted task(s): {', '.join(found.unsettled_task_ids())}",
-                )
-            )
-    return problems
-
-
-def _receipts(review: ReviewStore) -> list[ReviewProblem]:
+def _receipts(review: ReviewStore, chains: dict[str, GateChain]) -> tuple[dict[str, Receipt], list[ReviewProblem]]:
+    """Every Receipt, bound exactly to the sealed generation that issued it - and every seal to its Receipt."""
+    receipts: dict[str, Receipt] = {}
     problems: list[ReviewProblem] = []
     try:
         receipt_ids = review.receipt_ids()
     except ValidationError as exc:
-        return [_problem(exc)]
+        return receipts, [_problem(exc)]
     for receipt_id in receipt_ids:
         try:
             receipt = review.read_receipt(receipt_id)
         except ValidationError as exc:
             problems.append(_problem(exc))
             continue
-        try:
-            chain = review.gate_chain(receipt.review_run_id)
-        except ValidationError as exc:
-            problems.append(_problem(exc))
-            continue
+        receipts[receipt_id] = receipt
+        chain = chains.get(receipt.review_run_id)
         if chain is None:
             problems.append(
                 ReviewProblem(
                     "review_record_missing",
-                    f"receipt {receipt_id} names Review Run {receipt.review_run_id}, which has no gate chain",
+                    f"receipt {receipt_id} names Review Run {receipt.review_run_id}, which has no valid gate chain",
                 )
             )
             continue
-        try:
-            generation = chain.generation(receipt.review_generation)
-        except ValidationError as exc:
-            problems.append(_problem(exc))
+        if not chain.has_generation(receipt.review_generation):
+            problems.append(
+                ReviewProblem(
+                    "review_record_conflict",
+                    f"receipt {receipt_id} says it was issued by generation {receipt.review_generation}, which "
+                    f"Review Run {receipt.review_run_id} does not have",
+                )
+            )
             continue
-        if generation.receipt_id != receipt_id:
-            problems.append(
-                ReviewProblem(
-                    "review_record_conflict",
-                    f"receipt {receipt_id} says it was issued by generation {receipt.review_generation}, "
-                    f"which issues {generation.receipt_id!r}",
+        problems.extend(_gate_receipt_binding(chain.generation(receipt.review_generation), receipt))
+    for chain in chains.values():
+        for generation in chain.generations:
+            if generation.receipt_id is not None and generation.receipt_id not in receipts:
+                problems.append(
+                    ReviewProblem(
+                        "review_record_missing",
+                        f"Review Run {chain.review_run_id} generation {generation.generation} issues receipt "
+                        f"{generation.receipt_id}, which is not stored",
+                    )
                 )
-            )
-        if not generation.sealed:
-            problems.append(
-                ReviewProblem(
-                    "review_record_conflict",
-                    f"receipt {receipt_id} was issued by generation {receipt.review_generation}, which is "
-                    f"{generation.status}; only a {records.GATE_STATUS_SEALED} generation issues one",
+    issued: dict[str, str] = {}
+    for chain in chains.values():
+        for generation in chain.generations:
+            if generation.receipt_id is None:
+                continue
+            where = f"{chain.review_run_id} generation {generation.generation}"
+            if generation.receipt_id in issued:
+                problems.append(
+                    ReviewProblem(
+                        "review_gate_chain",
+                        f"receipt {generation.receipt_id} is issued by both {issued[generation.receipt_id]} and {where}",
+                    )
                 )
+            issued[generation.receipt_id] = where
+    return receipts, problems
+
+
+def _gate_receipt_binding(generation: GateGeneration, receipt: Receipt) -> list[ReviewProblem]:
+    problems: list[ReviewProblem] = []
+    if not generation.sealed:
+        problems.append(
+            ReviewProblem(
+                "review_record_conflict",
+                f"receipt {receipt.receipt_id} was issued by generation {generation.generation}, which is "
+                f"{generation.status}; only a sealed generation issues a Receipt",
             )
-        if generation.candidate_hash != receipt.authorized_candidate_hash:
+        )
+    for gate_field, receipt_field in GATE_RECEIPT_BINDING:
+        gate_value = getattr(generation, gate_field)
+        receipt_value = getattr(receipt, receipt_field)
+        if gate_value != receipt_value:
             problems.append(
                 ReviewProblem(
                     "review_record_conflict",
-                    f"receipt {receipt_id} authorizes candidate {receipt.authorized_candidate_hash}, "
-                    f"but its generation reviewed {generation.candidate_hash}",
+                    f"receipt {receipt.receipt_id} says {receipt_field} {receipt_value!r}, but the generation that "
+                    f"issued it says {gate_field} {gate_value!r}",
                 )
             )
     return problems
 
 
-def _consumptions(review: ReviewStore) -> list[ReviewProblem]:
+def _superseded(chains: dict[str, GateChain], review: ReviewStore) -> tuple[set[str], list[ReviewProblem]]:
+    """Receipts that are superseded, and whether the record and the chain agree about it.
+
+    ``R3`` §8: invalidation creates a later open generation *and* a
+    supersession record. A Receipt the chain has moved past without a
+    supersession record, or a supersession record for a Receipt the chain has
+    not moved past, is a half-written invalidation.
+    """
     problems: list[ReviewProblem] = []
     try:
-        by_receipt = review.consumption_by_receipt()
-        review.consumption_by_terminal_event()
+        recorded = set(review.superseded_receipt_ids())
     except ValidationError as exc:
-        return [_problem(exc)]
-    for receipt_id, consumption in by_receipt.items():
-        if not review.receipt_exists(receipt_id):
-            problems.append(
-                ReviewProblem(
-                    "review_record_missing",
-                    f"consumption {consumption.consumption_id} consumes receipt {receipt_id}, which is not stored",
-                )
+        return set(), [_problem(exc)]
+    derived: set[str] = set()
+    for chain in chains.values():
+        derived.update(chain.superseded_receipts())
+    for receipt_id in sorted(derived - recorded):
+        problems.append(
+            ReviewProblem(
+                "review_record_missing",
+                f"receipt {receipt_id} was moved past by a later generation, but no supersession record says so",
             )
-            continue
-        try:
-            receipt = review.read_receipt(receipt_id)
-        except ValidationError as exc:
-            problems.append(_problem(exc))
-            continue
-        if receipt.authorized_candidate_hash != consumption.authorized_candidate_hash:
-            problems.append(
-                ReviewProblem(
-                    "review_record_conflict",
-                    f"consumption {consumption.consumption_id} names candidate "
-                    f"{consumption.authorized_candidate_hash}, but receipt {receipt_id} authorized "
-                    f"{receipt.authorized_candidate_hash}",
-                )
-            )
-        if receipt.review_run_id != consumption.review_run_id:
-            problems.append(
-                ReviewProblem(
-                    "review_record_conflict",
-                    f"consumption {consumption.consumption_id} and receipt {receipt_id} name different Review Runs",
-                )
-            )
-    return problems
+        )
+    return recorded | derived, problems
 
 
-def _supersessions(review: ReviewStore) -> list[ReviewProblem]:
+def _supersessions(
+    review: ReviewStore, chains: dict[str, GateChain], receipts: dict[str, Receipt]
+) -> list[ReviewProblem]:
+    """Each supersession names a stored Receipt of the same Run and a real, later, open generation."""
     problems: list[ReviewProblem] = []
+    _, derived_problems = _superseded(chains, review)
+    problems.extend(derived_problems)
     try:
         superseded_ids = review.superseded_receipt_ids()
     except ValidationError as exc:
@@ -269,18 +278,11 @@ def _supersessions(review: ReviewStore) -> list[ReviewProblem]:
         except ValidationError as exc:
             problems.append(_problem(exc))
             continue
-        if not review.receipt_exists(receipt_id):
+        receipt = receipts.get(receipt_id)
+        if receipt is None:
             problems.append(
-                ReviewProblem(
-                    "review_record_missing",
-                    f"supersession names receipt {receipt_id}, which is not stored",
-                )
+                ReviewProblem("review_record_missing", f"supersession names receipt {receipt_id}, which is not stored")
             )
-            continue
-        try:
-            receipt = review.read_receipt(receipt_id)
-        except ValidationError as exc:
-            problems.append(_problem(exc))
             continue
         if receipt.review_run_id != supersession.review_run_id:
             problems.append(
@@ -290,122 +292,105 @@ def _supersessions(review: ReviewStore) -> list[ReviewProblem]:
                     f"but the receipt names {receipt.review_run_id}",
                 )
             )
+            continue
+        chain = chains.get(supersession.review_run_id)
+        if chain is None or not chain.has_generation(supersession.superseding_generation):
+            problems.append(
+                ReviewProblem(
+                    "review_record_conflict",
+                    f"supersession of {receipt_id} names superseding generation {supersession.superseding_generation}, "
+                    f"which Review Run {supersession.review_run_id} does not have",
+                )
+            )
+            continue
+        if supersession.superseding_generation <= receipt.review_generation:
+            problems.append(
+                ReviewProblem(
+                    "review_record_conflict",
+                    f"supersession of {receipt_id} names generation {supersession.superseding_generation}, which is "
+                    f"not later than the generation {receipt.review_generation} that issued the receipt",
+                )
+            )
+            continue
+        if chain.generation(supersession.superseding_generation).sealed:
+            problems.append(
+                ReviewProblem(
+                    "review_record_conflict",
+                    f"supersession of {receipt_id} names generation {supersession.superseding_generation}, which is "
+                    "sealed; an invalidation creates an open generation",
+                )
+            )
     return problems
 
 
-def _provenance(review: ReviewStore) -> list[ReviewProblem]:
-    """Every accepted task's reconstruction material must actually be stored and agree.
-
-    An accepted task whose snapshot or task input is missing, or whose stored
-    provenance digests do not match what the gate bound, cannot be rerun or
-    retrieved after runtime loss - which is the whole point of the records
-    being canonical rather than runtime (``R3`` §4).
-    """
+def _consumptions(
+    review: ReviewStore, chains: dict[str, GateChain], receipts: dict[str, Receipt]
+) -> list[ReviewProblem]:
     problems: list[ReviewProblem] = []
     try:
-        run_ids = review.run_ids()
+        by_receipt = review.consumption_by_receipt()
+        review.consumption_by_terminal_event()
     except ValidationError as exc:
         return [_problem(exc)]
-    for review_run_id in run_ids:
-        try:
-            chain = review.gate_chain(review_run_id)
-        except ValidationError:
-            continue  # already reported by the gate pass
-        if chain is None:
+    superseded, _ = _superseded(chains, review)
+    for receipt_id, consumption in by_receipt.items():
+        receipt = receipts.get(receipt_id)
+        if receipt is None:
+            problems.append(
+                ReviewProblem(
+                    "review_record_missing",
+                    f"consumption {consumption.consumption_id} consumes receipt {receipt_id}, which is not stored",
+                )
+            )
             continue
-        # Each generation is a full snapshot, so a task accepted at generation N
-        # is carried forward by every generation after it. Its provenance is one
-        # fact and is checked once, against the generation that first accepted
-        # it - which is what its task input records as ``accepted_generation``.
-        first_seen: dict[str, tuple[int, dict[str, Any]]] = {}
+        if receipt_id in superseded:
+            problems.append(
+                ReviewProblem(
+                    "review_record_conflict",
+                    f"consumption {consumption.consumption_id} consumes receipt {receipt_id}, which is superseded; "
+                    "a superseded authorization is never consumed",
+                )
+            )
+        problems.extend(_receipt_consumption_binding(receipt, consumption))
+    return problems
+
+
+def _receipt_consumption_binding(receipt: Receipt, consumption: Consumption) -> list[ReviewProblem]:
+    problems: list[ReviewProblem] = []
+    for name in RECEIPT_CONSUMPTION_BINDING:
+        if getattr(receipt, name) != getattr(consumption, name):
+            problems.append(
+                ReviewProblem(
+                    "review_record_conflict",
+                    f"consumption {consumption.consumption_id} says {name} {getattr(consumption, name)!r}, but the "
+                    f"receipt it consumes says {getattr(receipt, name)!r}",
+                )
+            )
+    return problems
+
+
+def _provenance(review: ReviewStore, chains: dict[str, GateChain]) -> list[ReviewProblem]:
+    """Every accepted task's reconstruction material is stored and agrees with it exactly.
+
+    An accepted task whose snapshot or task input is missing, or whose stored
+    provenance disagrees with it in any shared identity, cannot be rerun or
+    retrieved after runtime loss - which is the whole point of the records being
+    canonical rather than runtime (``R3`` §4). Each task is checked once, at the
+    generation that first accepted it: later generations carry the identical
+    descriptor forward, which the chain has already proven.
+    """
+    problems: list[ReviewProblem] = []
+    for review_run_id, chain in sorted(chains.items()):
+        seen: set[str] = set()
         for generation in chain.generations:
             for task in generation.accepted_tasks:
                 task_id = str(task["task_id"])
-                if task_id not in first_seen:
-                    first_seen[task_id] = (generation.generation, task)
-                elif first_seen[task_id][1] != task:
-                    problems.append(
-                        ReviewProblem(
-                            "review_provenance_conflict",
-                            f"Review Run {review_run_id} carries accepted task {task_id} forward with different "
-                            f"provenance at generation {generation.generation}; an accepted task is an immutable fact",
-                        )
-                    )
-        for task_id, (generation_number, task) in sorted(first_seen.items()):
-            problems.extend(_accepted_task_provenance(review, review_run_id, generation_number, task))
-    return problems
-
-
-def _accepted_task_provenance(
-    review: ReviewStore, review_run_id: str, generation: int, task: dict[str, Any]
-) -> list[ReviewProblem]:
-    problems: list[ReviewProblem] = []
-    where = f"Review Run {review_run_id} generation {generation} accepted task {task['task_id']}"
-    candidate_hash = str(task["candidate_hash"])
-    if not review.candidate_snapshot_exists(candidate_hash):
-        problems.append(
-            ReviewProblem("review_record_missing", f"{where} has no stored candidate snapshot {candidate_hash}")
-        )
-    else:
-        try:
-            found = review.candidate_material_digest(candidate_hash)
-            if found != task["candidate_material_digest"]:
-                problems.append(
-                    ReviewProblem(
-                        "review_provenance_conflict",
-                        f"{where} bound candidate_material_digest {task['candidate_material_digest']}, "
-                        f"but the stored snapshot digests to {found}",
-                    )
-                )
-            snapshot = review.read_candidate_snapshot(candidate_hash)
-            if snapshot.reconstruction_mode != task["reconstruction_mode"]:
-                problems.append(
-                    ReviewProblem(
-                        "review_provenance_conflict",
-                        f"{where} bound reconstruction mode {task['reconstruction_mode']}, "
-                        f"but the stored snapshot is {snapshot.reconstruction_mode}",
-                    )
-                )
-        except ValidationError as exc:
-            problems.append(_problem(exc))
-    task_id = str(task["task_id"])
-    if not review.task_input_exists(task_id):
-        problems.append(ReviewProblem("review_record_missing", f"{where} has no stored task input"))
-        return problems
-    try:
-        found = review.task_input_digest(task_id)
-        if found != task["task_input_digest"]:
-            problems.append(
-                ReviewProblem(
-                    "review_provenance_conflict",
-                    f"{where} bound task_input_digest {task['task_input_digest']}, "
-                    f"but the stored task input digests to {found}",
-                )
-            )
-        task_input = review.read_task_input(task_id)
-        for field_name, bound in (
-            ("request_digest", "request_digest"),
-            ("candidate_hash", "candidate_hash"),
-            ("review_context_hash", "review_context_hash"),
-            ("effective_policy_hash", "effective_policy_hash"),
-        ):
-            if getattr(task_input, field_name) != task[bound]:
-                problems.append(
-                    ReviewProblem(
-                        "review_provenance_conflict",
-                        f"{where} bound {bound} {task[bound]}, but its stored task input says "
-                        f"{getattr(task_input, field_name)}",
-                    )
-                )
-        if task_input.accepted_generation != generation:
-            problems.append(
-                ReviewProblem(
-                    "review_provenance_conflict",
-                    f"{where} stores a task input accepted at generation {task_input.accepted_generation}",
-                )
-            )
-    except ValidationError as exc:
-        problems.append(_problem(exc))
+                if task_id in seen:
+                    continue
+                seen.add(task_id)
+                where = f"Review Run {review_run_id} generation {generation.generation}"
+                for code, message in review.provenance_problems(task, generation.generation):
+                    problems.append(ReviewProblem(code, f"{where}: {message}"))
     return problems
 
 
