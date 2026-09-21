@@ -78,6 +78,8 @@
 | BL-043 | Operation commits, erases or adopts a change another subject makes to an owned path after it begins | RESOLVED |
 | BL-044 | START resume re-decides a recorded hold and grows duplicate lifecycle effects on every retry | RESOLVED |
 | BL-045 | Replan resume refuses after another Work changes only the recomputed display numbering | RESOLVED |
+| BL-046 | START resume re-decides a recorded derivation and registers the same fix Work again | RESOLVED |
+| BL-047 | Recovery finalization refuses a recorded decision when only a Work's live display changed | RESOLVED |
 | BL-048 | Derive(move=True) finalization refuses a recorded commit when only the Work's live display changed | RESOLVED |
 | BL-049 | START resume stops on a requires_completion its own recorded move registered, before the move's target removal is recorded | RESOLVED |
 | BL-050 | Recorded push publishes the branch as it is when the push runs, including later commits the mutation did not make | RESOLVED |
