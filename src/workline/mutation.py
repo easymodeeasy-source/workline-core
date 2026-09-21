@@ -69,6 +69,7 @@ from .destination import resolve_active_push_locator, verify_recorded_destinatio
 from .durable import DurableWriteError, durable_write_text
 from .errors import GitError, ReconcileRequired, StopError, ValidationError
 from .ids import is_valid_id, kind_of, new_id
+from .review import paths as review_paths
 from .store import (
     ENTITY_DIRS,
     INFRA_WRITE_PATHS,
@@ -109,9 +110,11 @@ UNAPPLIED = "unapplied"
 MATCHING = "applied_matching"
 MISMATCH = "applied_mismatch"
 
-EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_event", "git_commit", "git_push")
+EFFECT_KINDS = (
+    "write_file", "create_file", "add_relation", "remove_relation", "append_event", "git_commit", "git_push",
+)
 #: The effects that write a Project's files rather than Git.
-FILE_EFFECT_KINDS = ("write_file", "add_relation", "remove_relation", "append_event")
+FILE_EFFECT_KINDS = ("write_file", "create_file", "add_relation", "remove_relation", "append_event")
 
 # A recorded commit names its base by the full object ID and its branch by the full ref name, never by an
 # expression Git would resolve.
@@ -162,7 +165,7 @@ def effect_path(effect: "dict[str, Any] | Effect") -> str | None:
     it wrote are the same path.
     """
     kind, payload = (effect["kind"], effect["payload"]) if isinstance(effect, dict) else (effect.kind, effect.payload)
-    if kind == "write_file":
+    if kind in ("write_file", "create_file"):
         return payload["path"]
     if kind in ("add_relation", "remove_relation"):
         return f"{WORKLINE_DIR}/relations/{payload['file']}.yaml"
@@ -222,6 +225,36 @@ class Effect:
         if base is not None:
             payload["base"] = base
         return Effect("write_file", payload)
+
+    @staticmethod
+    def create_file(path: str, content: str) -> "Effect":
+        """Create ``path`` holding exactly ``content``, once, and never update it.
+
+        The immutable create-only primitive canonical Review records are written
+        with (``R1`` §8). It differs from :meth:`write_file` in what it refuses
+        rather than in what it does:
+
+        ```text
+        target absent          -> create exactly these bytes
+        target holds them      -> already applied, matching; replay writes nothing
+        target holds anything else, or is not a plain file
+                               -> reconcile required
+        ```
+
+        There is no ``base``, and there cannot be one: a ``base`` is how an
+        update says what it expects to replace, and an immutable record is never
+        replaced. That is why this is its own effect kind instead of a
+        convention about calling ``write_file`` without one - a convention can
+        be forgotten at one call site, and a kind that has no ``base`` field
+        cannot be handed one.
+
+        Before the bytes are written, containment from the Project root to the
+        target's parent is proven with no-follow semantics, and the parent's
+        identity is taken again at the create boundary
+        (:mod:`workline.review.paths`), so a component swapped mid-write cannot
+        redirect the record out of the Project.
+        """
+        return Effect("create_file", {"path": path, "content": content})
 
     @staticmethod
     def add_relation(file: str, relation: Relation) -> "Effect":
@@ -1721,7 +1754,7 @@ class MutationController:
         payload = record["payload"]
         if kind not in EFFECT_KINDS:
             raise ValidationError(f"unknown effect kind: {kind}")
-        if kind == "write_file":
+        if kind in ("write_file", "create_file"):
             path = payload.get("path")
             canonical = (
                 _safe_relative(path)
@@ -1732,13 +1765,30 @@ class MutationController:
             # infrastructure files (the bootstrap Skill), not a general escape
             # from the .workline boundary.
             if not canonical and path not in INFRA_WRITE_PATHS:
-                raise ValidationError(f"write_file path must be a canonical .workline path: {path!r}")
+                raise ValidationError(f"{kind} path must be a canonical .workline path: {path!r}")
             if not isinstance(payload.get("content"), str):
-                raise ValidationError("write_file content must be text")
+                raise ValidationError(f"{kind} content must be text")
+            if any(e["kind"] in ("write_file", "create_file") and e["payload"]["path"] == path for e in previous):
+                raise ValidationError(f"{kind} path written twice in one mutation: {path}")
+            if kind == "create_file":
+                # An immutable record has nothing to replace, so it carries no
+                # expectation of what it replaces.
+                if "base" in payload:
+                    raise ValidationError("create_file is immutable and takes no base")
+                if not review_paths.is_review_path(path):
+                    raise ValidationError(
+                        f"create_file writes canonical Review records; {path!r} is not one"
+                    )
+                return
             if "base" in payload and not isinstance(payload["base"], str):
                 raise ValidationError("write_file base must be text")
-            if any(e["kind"] == "write_file" and e["payload"]["path"] == path for e in previous):
-                raise ValidationError(f"write_file path written twice in one mutation: {path}")
+            # A canonical Review record is immutable (``R1`` §8): the generic
+            # update primitive is mechanically kept away from it, so no owner
+            # can rewrite one by reaching for the effect it uses everywhere else.
+            if review_paths.is_review_path(path):
+                raise ValidationError(
+                    f"{path} is a canonical Review record and is written only by create_file, which never updates one"
+                )
             if path == PROJECT_YAML_REL:
                 self._guard_push_pin(payload["content"], owner)
             return
@@ -1849,6 +1899,23 @@ class MutationController:
     def classify(self, record: dict[str, Any]) -> str:
         kind = record["kind"]
         payload = record["payload"]
+        if kind == "create_file":
+            # Immutable create (``R1`` §8): absent is not written yet, the exact
+            # bytes are already applied, and anything else - other content, a
+            # directory, something unreadable - is a mismatch. There is no
+            # ``base`` branch, because nothing here is ever an update.
+            path = self.store.abs(payload["path"])
+            if path.is_symlink():
+                return MISMATCH
+            if not path.exists():
+                return UNAPPLIED
+            if not path.is_file():
+                return MISMATCH
+            try:
+                current = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                return MISMATCH
+            return MATCHING if current == payload["content"] else MISMATCH
         if kind == "write_file":
             path = self.store.abs(payload["path"])
             if not path.exists():
@@ -2000,6 +2067,27 @@ class MutationController:
         )
 
     # application ---------------------------------------------------------------
+    def _create_review_record(self, relative: str, content: str) -> None:
+        """Write one immutable Review record, proving it lands inside this Project.
+
+        The proof is taken twice on purpose (``R1`` §9). Once by walking the
+        Project root down to the target's parent with no-follow semantics, so
+        that a symlink, junction or other reparse point standing anywhere on the
+        way is refused rather than followed. Once again at the create boundary,
+        comparing the parent's identity with the one that was proven, so a
+        component replaced in the window between the walk and the write cannot
+        redirect the bytes somewhere else.
+
+        The parent is created only after the walk succeeds, and the write itself
+        is the ordinary durable write every canonical file gets: the bytes reach
+        the file, are fsynced, and are moved into place atomically.
+        """
+        expected = review_paths.prove_containment(self.store.root, relative)
+        path = self.store.abs(relative)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        review_paths.require_proven_parent(self.store.root, relative, expected)
+        durable_write_text(path, content, tmp_dir=self.store.tmp)
+
     def _planned_write(self, record: dict[str, Any]) -> tuple[Path, str] | None:
         """The file this effect writes and the exact text it puts there; ``None`` for one that writes no file.
 
@@ -2010,7 +2098,7 @@ class MutationController:
         """
         kind = record["kind"]
         payload = record["payload"]
-        if kind == "write_file":
+        if kind in ("write_file", "create_file"):
             return self.store.abs(payload["path"]), payload["content"]
         if kind == "add_relation":
             relations = self.store.read_relation_file(payload["file"])
@@ -2032,6 +2120,9 @@ class MutationController:
     def apply_effect(self, record: dict[str, Any]) -> None:
         kind = record["kind"]
         payload = record["payload"]
+        if kind == "create_file":
+            self._create_review_record(payload["path"], payload["content"])
+            return
         planned = self._planned_write(record)
         if planned is not None:
             path, text = planned

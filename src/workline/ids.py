@@ -22,9 +22,22 @@ PREFIXES = {
     "relation": "rel",
     "event": "evt",
     "derivation": "der",
+    # Review (``skills/review``). Review allocates its stable identities here,
+    # through the same generator and the same ``Mutation.reserve_id`` semantics
+    # as every other kind, so that a Review ID is replay-stable for exactly the
+    # reason a Work ID is. A Review generation is not among them: it is a
+    # positive integer scoped to one Review Run, and Candidate / Context /
+    # Policy / Coverage / Adjudication / obligation identities are digests of
+    # content rather than allocated IDs.
+    "review_run": "rr",
+    "review_receipt": "rcp",
+    "review_consumption": "rcs",
+    "review_task": "rtk",
 }
 
-_ID_RE = re.compile(r"^(mut|r|p|w|rel|evt|der)_([0-9A-HJKMNP-TV-Z]{26})$")
+# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_`` are read as
+# themselves rather than as the Roadmap prefix ``r`` followed by text.
+_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
 
 
 def new_ulid(now_ms: int | None = None) -> str:
