@@ -299,10 +299,30 @@ def _self_hosting_problems(store: ProjectStore) -> list[Problem]:
     return [Problem(self_hosting.CODE, problem)] if problem else []
 
 
+def _review_problems(store: ProjectStore) -> list[Problem]:
+    """Review namespace structure, checked outside ``ProjectView`` (``R1`` §11).
+
+    Separate from the structural pass on purpose: Review records are not
+    lifecycle truth, so the thing that derives lifecycle never loads them, and
+    a problem with them is reported without any of them reaching ``state.py``.
+
+    A Project with no ``.workline/review/`` has no problems here. Review
+    capability is lazy, and never having used it is a valid state, not a gap.
+    """
+    from .review.validate import validate_review
+
+    try:
+        found = validate_review(store)
+    except Exception as exc:  # anything unreadable in the namespace
+        return [Problem("review_unreadable", str(exc))]
+    return [Problem(problem.code, problem.message) for problem in found]
+
+
 def validate_project(store: ProjectStore) -> list[Problem]:
-    """Full validation: project.yaml + registry routing + supported topology + structure."""
+    """Full validation: project.yaml + registry routing + supported topology + structure + Review."""
     problems = validate_project_yaml(store)
     problems.extend(_self_hosting_problems(store))
+    problems.extend(_review_problems(store))
     try:
         view = ProjectView.load(store)
     except Exception as exc:  # ValidationError from store
