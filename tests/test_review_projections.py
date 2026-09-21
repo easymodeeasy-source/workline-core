@@ -1,4 +1,7 @@
-"""Candidate 7 §4 / R8-R11: the three projections, the adapter round trip, and Evidence completeness."""
+"""Candidate 7 §4 / R8-R10: the three projections and the adapter round trip.
+
+Evidence and Review-validity completeness live in test_review_completeness.
+"""
 
 from __future__ import annotations
 
@@ -14,26 +17,6 @@ from workline.review.adapter import (
     prove_expected_scope,
     prove_round_trip,
 )
-from workline.review.closure import (
-    COMPLETE,
-    DENIED,
-    GIT_STATE,
-    NETWORK,
-    NOT_REQUIRED,
-    OBSERVED,
-    PINNED,
-    REPOSITORY_FILES,
-    REVIEW_PROVENANCE,
-    RUNTIME_TOOLCHAIN,
-    SUBPROCESS,
-    UNKNOWN,
-    ClassCoverage,
-    EvidenceDeclaration,
-    ReviewProvenance,
-    ReviewValidityClosure,
-    may_reuse,
-)
-
 
 class ProjectionTests(unittest.TestCase):
     def test_the_three_kinds_are_distinct(self) -> None:
@@ -208,183 +191,6 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertTrue(prove_expected_scope(expected, expected).matched)
         self.assertFalse(prove_expected_scope(expected, extra).matched)
-
-
-# --------------------------------------------------------------------------- evidence / closure
-
-def _declaration(**overrides: Any) -> EvidenceDeclaration:
-    defaults: dict[str, Any] = {
-        "adapter_identity": "tests-adapter",
-        "implementation_version": "1.0",
-        "required": (REPOSITORY_FILES, SUBPROCESS, NETWORK),
-        "coverage": (
-            ClassCoverage(REPOSITORY_FILES, OBSERVED, basis="tree walk", identities=("a" * 64,)),
-            ClassCoverage(SUBPROCESS, PINNED, basis="pinned toolchain"),
-            ClassCoverage(NETWORK, DENIED, basis="sandbox denies sockets"),
-        ),
-    }
-    defaults.update(overrides)
-    return EvidenceDeclaration(**defaults)
-
-
-PROVENANCE = ReviewProvenance(
-    candidate_hash="a" * 64,
-    candidate_material_digest="b" * 64,
-    task_input_digest="c" * 64,
-    request_digest="d" * 64,
-    reviewer_identity="reviewer-a",
-    reviewer_version="3.1",
-    review_context_hash="e" * 64,
-    effective_policy_hash="f" * 64,
-)
-
-
-def _closure(**overrides: Any) -> ReviewValidityClosure:
-    defaults: dict[str, Any] = {
-        "version": 1,
-        "base_commit_sha": "0" * 40,
-        "provenance": PROVENANCE,
-        "evidence_dependencies": (_declaration(),),
-        "git_semantics": {"commit_signing": "disabled"},
-        "completeness_basis": "every material surface enumerated by the adapter contract",
-    }
-    defaults.update(overrides)
-    return ReviewValidityClosure(**defaults)
-
-
-class EvidenceTests(unittest.TestCase):
-    def test_a_complete_declaration_is_reusable(self) -> None:
-        declaration = _declaration()
-        self.assertEqual(COMPLETE, declaration.completeness())
-        self.assertTrue(declaration.reusable())
-
-    def test_a_required_class_with_no_coverage_is_unknown(self) -> None:
-        declaration = _declaration(required=(REPOSITORY_FILES, SUBPROCESS, NETWORK, GIT_STATE))
-        self.assertEqual((GIT_STATE,), declaration.unaccounted())
-        self.assertEqual(UNKNOWN, declaration.completeness())
-        self.assertFalse(declaration.reusable())
-
-    def test_unknown_coverage_does_not_account_for_a_class(self) -> None:
-        declaration = _declaration(
-            coverage=(
-                ClassCoverage(REPOSITORY_FILES, OBSERVED, basis="tree walk"),
-                ClassCoverage(SUBPROCESS, PINNED, basis="pinned"),
-                ClassCoverage(NETWORK, UNKNOWN),
-            )
-        )
-        self.assertEqual((NETWORK,), declaration.unaccounted())
-        self.assertFalse(declaration.reusable())
-
-    def test_not_required_positively_excludes_a_class(self) -> None:
-        declaration = _declaration(
-            coverage=(
-                ClassCoverage(REPOSITORY_FILES, OBSERVED, basis="tree walk"),
-                ClassCoverage(SUBPROCESS, NOT_REQUIRED, basis="closed execution contract spawns nothing"),
-                ClassCoverage(NETWORK, DENIED, basis="sandbox"),
-            )
-        )
-        self.assertTrue(declaration.complete())
-
-    def test_coverage_must_state_a_basis(self) -> None:
-        with self.assertRaises(ValidationError) as caught:
-            ClassCoverage(NETWORK, DENIED)
-        self.assertIn("shown, not asserted", str(caught.exception))
-
-    def test_a_class_outside_the_vocabulary_is_refused(self) -> None:
-        with self.assertRaises(ValidationError):
-            ClassCoverage("telepathy", OBSERVED, basis="x")
-        with self.assertRaises(ValidationError):
-            _declaration(required=("telepathy",))
-
-    def test_a_class_covered_twice_is_refused(self) -> None:
-        with self.assertRaises(ValidationError):
-            _declaration(
-                coverage=(
-                    ClassCoverage(NETWORK, DENIED, basis="a"),
-                    ClassCoverage(NETWORK, OBSERVED, basis="b"),
-                )
-            )
-
-
-class ClosureTests(unittest.TestCase):
-    def test_git_write_compatibility_is_not_review_validity(self) -> None:
-        """A closure with no stated basis is unknown however untouched the paths are."""
-        self.assertEqual(UNKNOWN, _closure(completeness_basis="").completeness())
-
-    def test_a_complete_closure_with_unchanged_identities_reuses(self) -> None:
-        decision = may_reuse(_closure(), _closure())
-        self.assertTrue(decision.reusable, decision.reason)
-
-    def test_one_unknown_evidence_dependency_makes_the_closure_unknown(self) -> None:
-        closure = _closure(evidence_dependencies=(_declaration(), _declaration(required=(GIT_STATE,), coverage=())))
-        self.assertEqual(UNKNOWN, closure.completeness())
-        self.assertFalse(may_reuse(closure, closure).reusable)
-
-    def test_changed_candidate_provenance_invalidates_reuse(self) -> None:
-        import dataclasses
-
-        changed = dataclasses.replace(PROVENANCE, candidate_material_digest="9" * 64)
-        decision = may_reuse(_closure(), _closure(provenance=changed))
-        self.assertFalse(decision.reusable)
-        self.assertIn("provenance", decision.reason)
-
-    def test_changed_task_provenance_invalidates_reuse(self) -> None:
-        import dataclasses
-
-        changed = dataclasses.replace(PROVENANCE, task_input_digest="9" * 64)
-        self.assertFalse(may_reuse(_closure(), _closure(provenance=changed)).reusable)
-
-    def test_same_candidate_hash_with_changed_material_still_invalidates(self) -> None:
-        """Equal results do not make equal reconstruction (``R6`` §4)."""
-        import dataclasses
-
-        changed = dataclasses.replace(PROVENANCE, candidate_material_digest="9" * 64)
-        self.assertEqual(PROVENANCE.candidate_hash, changed.candidate_hash)
-        self.assertFalse(may_reuse(_closure(), _closure(provenance=changed)).reusable)
-
-    def test_changed_builder_version_invalidates_reuse(self) -> None:
-        import dataclasses
-
-        before = dataclasses.replace(PROVENANCE, builder_identity="b", builder_version="1.0")
-        after = dataclasses.replace(PROVENANCE, builder_identity="b", builder_version="1.1")
-        self.assertFalse(may_reuse(_closure(provenance=before), _closure(provenance=after)).reusable)
-
-    def test_changed_tool_runtime_identity_invalidates_reuse(self) -> None:
-        decision = may_reuse(
-            _closure(tool_runtime_dependencies=("python-3.14",)),
-            _closure(tool_runtime_dependencies=("python-3.15",)),
-        )
-        self.assertFalse(decision.reusable)
-        self.assertIn("tool/runtime", decision.reason)
-
-    def test_changed_git_semantics_invalidates_reuse(self) -> None:
-        decision = may_reuse(_closure(), _closure(git_semantics={"commit_signing": "enabled"}))
-        self.assertFalse(decision.reusable)
-
-    def test_changed_evidence_declaration_invalidates_reuse(self) -> None:
-        other = _declaration(implementation_version="2.0")
-        self.assertFalse(may_reuse(_closure(), _closure(evidence_dependencies=(other,))).reusable)
-
-    def test_the_closure_digest_covers_provenance_and_completeness(self) -> None:
-        import dataclasses
-
-        changed = dataclasses.replace(PROVENANCE, request_digest="9" * 64)
-        self.assertNotEqual(_closure().digest(), _closure(provenance=changed).digest())
-
-    def test_the_vocabulary_carries_the_classes_the_contracts_name(self) -> None:
-        from workline.review.closure import DEPENDENCY_CLASSES, VOCABULARY
-
-        self.assertEqual("review-dependency-classes-v1", VOCABULARY)
-        for name in (
-            REPOSITORY_FILES,
-            SUBPROCESS,
-            NETWORK,
-            GIT_STATE,
-            RUNTIME_TOOLCHAIN,
-            REVIEW_PROVENANCE,
-        ):
-            self.assertIn(name, DEPENDENCY_CLASSES)
-            ClassCoverage(name, PINNED, basis="declared by the adapter contract")
 
 
 if __name__ == "__main__":
