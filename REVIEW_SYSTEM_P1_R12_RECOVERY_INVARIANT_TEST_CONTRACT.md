@@ -1,6 +1,6 @@
 # Review System P1 — R12 Recovery / Invariant Test Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 4 REPAIRED / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 4 REPAIRED / LIVE-BASELINE RECONCILED / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the minimum interruption/invariant test matrix required before Review contracts may activate.
 
@@ -271,9 +271,12 @@ operation ownership cannot be positively proven
 
 Assert explicitly that no publication occurred and that content equality alone never produced adoption.
 
-### C. Publication stage shape violated
+### C-current. Publication stage shape violated — current-combined path only
+
+Scope: an existing/current **combined-publication** mutation, i.e. one carrying no Review-v1 split publication contract identity (R5 §12.3). This case says nothing about the Review-v1 split path, which has its own tests in §10.2.
 
 ```text
+for a current-combined mutation,
 a recorded push whose Git stage is not the exact ordered pair
   (git_commit then git_push, adjacent, seq-consecutive,
    nothing else carrying that stage)
@@ -282,6 +285,8 @@ a recorded push whose Git stage is not the exact ordered pair
 ```
 
 Cover at least: a third effect in the stage, non-adjacent recording, non-consecutive `seq`, missing commit ID, branch-name mismatch, and a commit no longer held by the recorded branch.
+
+Also cover, as the discriminator's negative direction: a current-combined mutation is **never** rescued from this failure by being re-read as a Review-v1 split. Absence of the split contract identity is a positive answer, and shape never selects the contract.
 
 ### D. Exact-commit publication
 
@@ -334,6 +339,92 @@ for every crash/resume window in the commit -> proof -> push sequence
 
 Include the R5 §1.2 split stages: crash between the commit stage and the proof checkpoint, and crash between the proof checkpoint and the push stage.
 
+## 10.2 Review-v1 split publication tests (mandatory minimum)
+
+Frozen by the P1-FLBR-01 repair. Scope: mutations carrying the Review-v1 split publication contract identity (R5 §12.3). These are additional to §10.1 and do not replace `C-current`, which continues to govern the current-combined path unchanged.
+
+Stage/checkpoint names follow R5 §12.4: `S-c` commit stage, `C-2` durable proof checkpoint, `S-p` push stage.
+
+### V1. Well-formed split publication
+
+```text
+S-c exact K
+-> C-2 exact K complete
+-> S-p exact same K / destination / current authorization
+```
+
+Expected: valid. Assert explicitly that S-p being a push stage with no `git_commit` beside it in the same stage is **not** a shape violation under this contract.
+
+### V2. Crash before proof
+
+```text
+S-c
+-> crash before C-2
+```
+
+Expected: no push recorded and no push applied. Resume does not manufacture C-2, and does not proceed to S-p.
+
+### V3. Crash before push
+
+```text
+C-2 durable
+-> crash before S-p
+```
+
+Expected: resume revalidates C-2 and the latest authorization, and only then may record and apply the same exact push. A C-2 that was complete before the crash is not taken as still-current without that revalidation.
+
+### V4. Proof and push bind different commits
+
+```text
+C-2 binds K1
+S-p binds K2
+```
+
+Expected: fail closed. Nothing pushed, nothing forced.
+
+### V5. Push without provable proof
+
+```text
+C-2 missing
+S-p exists
+```
+
+Expected: proof is **not** inferred from the existence of the push. Reconcile / historical-escape handling as applicable. Cover both an S-p recorded but unapplied and a push that already reached the destination.
+
+### V6. Superseded authorization
+
+```text
+C-2 stale because a later Review generation invalidated authorization
+```
+
+Expected: no push.
+
+### V7. Destination pin changed after proof
+
+```text
+destination pin changes after C-2
+```
+
+Expected: no push until the current proof requirements are satisfied against the current pin. The pre-apply recheck of S-p catches a pin that changed between record and apply.
+
+### V8. Combined pair inside a Review-v1 mutation
+
+```text
+a Review-v1 mutation contains a current-combined
+same-stage git_commit + git_push pair
+```
+
+Expected: it does **not** bypass C-2. Review-v1 contract validation refuses that path rather than accepting it as a valid current-combined publication.
+
+### V9. Discriminator integrity
+
+```text
+publication contract identity absent      -> current-combined, unconditionally
+identity unknown / unreadable / contradictory -> fail closed
+```
+
+Expected: the contract is never selected from observed stage shape, and no existing mutation is promoted to Review-v1 by shape, content, presence of Review files, or absence of a combined pair.
+
 ## 11. R8/R9 semantic round-trip
 
 Roadmap and Phase-entry tests cover exact reserved IDs, canonical reload, generated integration/confirmation edges and fault injection. R9 review-v1 self-selection is enforced by Roadmap-owned planning precondition, not adapter-only override.
@@ -378,3 +469,28 @@ Reconciled to live baseline `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
 All Round-3 and Round-4 mandatory tests remain in force; none is replaced or relaxed.
 
 Architecture reopen: `No`. Candidate 8: `No`.
+
+## 17. P1-FLBR-01 repair disposition
+
+Case C of §10.1 read unconditionally, so a Review-v1 split push - which by R5 §1.2 has no `git_commit` beside it in the same stage - fell under a rule written for the current-combined shape. The two validators collided in contract text.
+
+Repair, test-contract text only:
+
+```text
+C -> C-current   scoped to current-combined mutations, i.e. those
+                 carrying no Review-v1 split publication contract
+                 identity (R5 §12.3); its failure conditions are
+                 unchanged, and a current-combined mutation is never
+                 rescued by being re-read as a Review-v1 split
+§10.2            new mandatory Review-v1 split cases V1-V9
+```
+
+`C-current` was scoped, not relaxed: every condition it failed closed on before, it still fails closed on. No Round-3, Round-4 or Round-5 test was replaced, narrowed or removed.
+
+```text
+P1-FLBR-01: REPAIRED / FROZEN
+```
+
+Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+Architecture: `RETAIN`. Architecture reopen: `No`. Candidate 8: `No`. HUMAN decision: `None`.

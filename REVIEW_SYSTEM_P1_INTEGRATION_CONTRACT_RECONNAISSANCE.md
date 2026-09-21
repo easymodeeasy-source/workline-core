@@ -1,6 +1,6 @@
 # Review System P1 — Integration Contract Reconnaissance Checkpoint
 
-Status: ROUND 4 CONTRACT REPAIRS FROZEN / ROUND 5 LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / IMPLEMENTATION NOT STARTED / FOCUSED RECONCILIATION RE-REVIEW REQUIRED
+Status: ROUND 4 CONTRACT REPAIRS FROZEN / ROUND 5 LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED / CLOSURE VERIFICATION REQUIRED
 
 Runtime authority remains `registry.md`, registry-routed canonical Skills, and live code until implementation/activation.
 
@@ -26,6 +26,8 @@ Round 3: `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND3.md`
 Round 4: `REVIEW_SYSTEM_P1_CONTRACT_REPAIR_ROUND4.md`
 
 Round 5 (live-baseline reconciliation, not an architecture round): `REVIEW_SYSTEM_P1_LIVE_BASELINE_RECONCILIATION.md`
+
+Final baseline repair (P1-FLBR-01, contract text only): `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`
 
 ## Round-3 repairs already frozen before the latest supplied review
 
@@ -114,6 +116,18 @@ R11  consequential (§10.1, §16)
 R12  updated (§10.1, §16)
 ```
 
+## Final baseline review — P1-FLBR-01
+
+The focused re-review of the Round-5 reconciliation returned one Finding.
+
+`P1-FLBR-01`: the current/legacy combined publication path and the future Review-v1 split publication path had colliding validation rules in contract text — R12 case C declared any push outside a same-stage `git_commit` -> `git_push` pair malformed, which would have condemned every push produced by the split R5 §1.2 requires.
+
+Repaired against contract text only; the live implementation baseline did not move. R5 §12 now freezes two separately validated publication contracts (`current-combined`, `review-v1-split`) selected by a shape-independent discriminator, with the Review-v1 `S-c -> C-2 -> S-p` bindings and fail-closed matrix, and R12 scopes case C to `C-current` and adds Review-v1 split cases V1-V9.
+
+```text
+P1-FLBR-01: REPAIRED / FROZEN
+```
+
 ## Current checkpoint
 
 ```text
@@ -122,21 +136,25 @@ Round 2 findings: REPAIRED/FROZEN
 Round 3 findings: REPAIRED/FROZEN
 Round 4 provenance reuse seam: REPAIRED/FROZEN
 Round 5 live-baseline reconciliation: APPLIED/FROZEN
+P1-FLBR-01: REPAIRED/FROZEN
 
 Candidate 7 architecture: RETAIN
 Architecture reopen: No
 HUMAN decision: None
 
+Live implementation baseline:
+e32a74192e70d3ce8aec09f1921f175ac72b2d1d
+
 P1 implementation: NOT STARTED
-Implementation activation: BLOCKED pending one focused independent
-re-review of the Round-5 live-baseline reconciliation only
+Implementation activation: BLOCKED pending one final focused
+verification of P1-FLBR-01 closure
 ```
 
 ## Next stage
 
-Run one focused independent re-review scoped to **the Round-5 live-baseline reconciliation against `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`** — not a re-review of Candidate 7 architecture, and not a re-review of Rounds 1-4, which stay frozen.
+Run one final focused verification scoped to **P1-FLBR-01 closure** — not a re-review of Candidate 7 architecture, not Rounds 1-4, and not the Round-5 reconciliation beyond the parts this repair touched. All of those stay frozen.
 
-Review target: `REVIEW_SYSTEM_P1_LIVE_BASELINE_RECONCILIATION.md` and the R5/R7/R6/R11/R12 changes it records.
+Review target: `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`, R5 §12 and R12 `C-current` / §10.2.
 
 Final verdict must be one of:
 

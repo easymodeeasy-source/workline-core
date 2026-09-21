@@ -1,6 +1,8 @@
 # Review System P1 — Live Baseline Reconciliation Checkpoint
 
-Status: CONTRACT RECONCILED TO LIVE BASELINE / IMPLEMENTATION NOT STARTED / FOCUSED RE-REVIEW REQUIRED
+Status: CONTRACT RECONCILED TO LIVE BASELINE / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED / CLOSURE VERIFICATION REQUIRED
+
+The focused review of this reconciliation returned one Finding, `P1-FLBR-01`, now repaired and frozen: see `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md`. §4.1 below is amended by it — the same-stage `git_commit` -> `git_push` pair is the current/legacy combined publication shape (R5 §12.1), not the Review-v1 split shape (R5 §12.2).
 
 This checkpoint records the reconciliation of the frozen P1 Integration Contract to the current live baseline. It is non-normative until implementation and canonical authority activation.
 
@@ -146,18 +148,21 @@ The 293 seam tests covering the `19bf5e71..e32a741` window were already green at
 ## 7. Current checkpoint
 
 ```text
+P1-FLBR-01:                REPAIRED / FROZEN
+
 Candidate 7 architecture:  RETAIN
 Architecture reopen:       No
 Candidate 8:               No
 HUMAN decision:            None
 
-P1 contract reconciled to: e32a74192e70d3ce8aec09f1921f175ac72b2d1d
+Live implementation baseline:
+                           e32a74192e70d3ce8aec09f1921f175ac72b2d1d
 
 Implementation:            NOT STARTED
 
-Next: focused independent re-review of this live-baseline
-      reconciliation only - not Candidate 7 architecture,
-      and not Rounds 1-4, which stay frozen
+Next: one final focused verification of P1-FLBR-01 closure
 
-Status: READY_FOR_FINAL_BASELINE_REVIEW
+Status: READY_FOR_FLBR01_CLOSURE_REVIEW
 ```
+
+The focused review of this reconciliation is complete. It returned exactly one Finding, `P1-FLBR-01`, repaired in `REVIEW_SYSTEM_P1_FINAL_BASELINE_REPAIR.md` against contract text only; the live implementation baseline did not move.

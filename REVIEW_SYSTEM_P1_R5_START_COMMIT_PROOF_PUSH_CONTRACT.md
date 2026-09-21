@@ -1,6 +1,6 @@
 # Review System P1 — R5 START Result Commit / Proof / Push Split Contract Freeze
 
-Status: CONTRACT FROZEN / ROUND 3 REPAIRED / LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / IMPLEMENTATION NOT STARTED
+Status: CONTRACT FROZEN / ROUND 3 REPAIRED / LIVE-BASELINE RECONCILED (`e32a74192e70d3ce8aec09f1921f175ac72b2d1d`) / P1-FLBR-01 REPAIRED / IMPLEMENTATION NOT STARTED
 
 This checkpoint freezes the Git transaction shape required by Candidate 7 for Review-v1 Work completion. It is non-normative until implementation and canonical authority activation.
 
@@ -67,6 +67,8 @@ Each stage remains individually crash-safe and resumable.
 ```
 
 This is an implementation requirement created by the reconciliation, not a weakening of any invariant. **`NO PUSH BEFORE EXACT PROOF` is not relaxed to accommodate the current combined stage.** If the split cannot be implemented, Review-v1 result push is unavailable and the operation fails closed; it does not fall back to pushing before proof.
+
+The split shape is a publication contract of its own, separate from the current/legacy combined shape and validated separately: see §12.2 for the boundary, §12.3 for how a validator tells the two apart, §12.4 for the exact S-c / C-2 / S-p bindings and §12.5 for the fail-closed matrix.
 
 ## 2. `commit_local(...)`
 
@@ -264,7 +266,18 @@ Architecture blocker: `None`.
 
 HUMAN decision: `None`.
 
-## 12. Live Git publication stage shape
+## 12. Publication shapes — two frozen contracts
+
+There are exactly two publication shapes, and they are separate contracts with separate validators. Neither one's rule is evidence about the other.
+
+```text
+current-combined publication    §12.1   existing/current operations
+review-v1-split publication     §12.2   Review-v1 only
+```
+
+A validator selects between them by the discriminator of §12.3, never by looking at the shape it finds.
+
+### 12.1 `current-combined` publication
 
 Re-verified at baseline `e32a741` in `src/workline/mutation.py` (`_recorded_publication`, `Mutation.apply`, `_publish`, `MutationController._classify_push`).
 
@@ -283,17 +296,152 @@ and, additionally, that the commit is recorded applied with the full ID of a com
 
 Anything short of that names no commit, and the push is refused with `reconcile_required` rather than falling back to the branch tip.
 
-Frozen consequences for P1:
+This is the correct and complete recovery invariant for every existing/current operation, and **it is not weakened, narrowed or made conditional by anything in this contract.** A current-combined mutation whose Git stage is not that exact pair fails closed exactly as it does today.
+
+Frozen consequences inside this shape:
 
 ```text
-the Review proof is not an effect inside that pair (§1.1)
+no third effect may be added to the pair, so the Review proof
+  cannot be an effect inside it (§1.1)
 the terminal event + Consumption stage is a separate stage
   from any Git stage (R4 §6), and adding a Consumption effect
   into a Git stage would break publication and fail closed
-a Review-v1 result push requires the stage split of §1.2
 ```
 
 `Mutation.apply` applies the recorded effects in one ordered pass with no interposition point between a commit and its push, which is why §1.2 is an implementation requirement rather than a sequencing note.
+
+### 12.2 `review-v1-split` publication
+
+Frozen boundary:
+
+```text
+the same-stage exact git_commit -> git_push pair
+is the current/legacy combined publication recovery shape (§12.1).
+
+It is NOT the Review-v1 split publication shape.
+
+Review-v1 uses the §1.2 cross-checkpoint
+S-c -> C-2 -> S-p binding.
+```
+
+Review-v1 result publication therefore **does not** take the same-stage commit+push pair as its well-formed shape, and a Review-v1 push stage is not malformed merely because no `git_commit` sits beside it in the same stage. Its correctness is established across checkpoints instead, by the bindings of §12.4.
+
+The converse is equally frozen: Review-v1 may **not** reach the destination through the current-combined shape. Using a combined stage would place the push in the same uninterrupted apply pass as the commit, which is precisely a push before proof. §12.5 refuses it.
+
+```text
+review-v1-split publication does not require a same-stage pair
+review-v1-split publication may not use a combined stage to push
+  before proof
+neither statement relaxes §12.1 for anyone else
+```
+
+### 12.3 Discriminator — how a validator knows which contract applies
+
+A validator must **never** infer the publication contract from the shape it observes. Shape is the thing being validated; using it to choose the rule would let a malformed current-combined stage re-describe itself as a Review-v1 split, and would let a Review-v1 mutation be judged by a rule it was never under.
+
+The contract is read from durable operation metadata that the Review-v1 path already binds to its mutation:
+
+```text
+review operation identity
+review contract / version
+Review-v1 binding (review_run_id / generation as applicable)
+```
+
+Implementation requirement **R5-IMPL-2**: the publication contract is recorded as a versioned identity on the mutation, durable before any Git stage of that mutation is recorded.
+
+```text
+publication_contract = review-v1-split-v1
+```
+
+Frozen rules for that identity:
+
+```text
+absent            -> current-combined (§12.1), unconditionally
+present and known -> that contract's validator
+present, unknown / unreadable / contradictory
+                  -> fail closed; never defaulted to either contract
+```
+
+It is **non-lifecycle operation metadata**, used only by mutation/recovery validation. It is not a lifecycle authority, it does not appear in `ProjectView/state.py` derivation, and it never changes Work/Phase/Roadmap state. Review remains a subordinate authorization gate.
+
+No existing mutation is promoted to Review-v1 by its shape, its content, the presence of Review files, or the absence of a combined pair. A mutation without the identity is current-combined, full stop. Absence of the identity is a positive answer, not an unknown.
+
+### 12.4 Review-v1 split binding — S-c / C-2 / S-p
+
+Minimum durable bindings. Each is proven from its own record; none is reconstructed from a later one.
+
+**S-c — commit stage.** Identifies the exact operation-owned commit K:
+
+```text
+exact commit ID K
+expected branch (full ref name)
+expected parent / recorded base
+operation identity
+```
+
+Ownership is the precondition of §3.1: a commit this operation cannot show it created is not K, however exactly its content matches.
+
+**C-2 — durable proof checkpoint.** Binds at least:
+
+```text
+exact K
+Review Candidate / applicable projection identity
+ReviewValidity identity
+current authorization / generation identity
+proof result
+proof contract / version
+```
+
+```text
+C-2 is never reconstructed from the existence of a push.
+```
+
+A push that exists without a provable C-2 is not evidence that a proof happened; it is an escape to be reconciled (§12.5).
+
+**S-p — push stage.** Binds:
+
+```text
+the same exact K as C-2
+exact pinned destination
+exact destination branch / ref
+latest valid authorization generation
+review-v1 split publication contract identity
+```
+
+Before S-p is recorded **and** before it is applied, C-2 is re-checked as durably complete and still current. Passing the check once at record time does not carry to apply time.
+
+### 12.5 Review-v1 split fail-closed matrix
+
+```text
+S-c exists, C-2 missing
+-> no push
+
+C-2 exists but binds a different K
+-> fail closed
+
+C-2 stale / superseded authorization
+-> fail closed
+
+S-p binds a different K than C-2
+-> fail closed
+
+S-p binds a different destination
+-> fail closed
+
+S-p exists but C-2 cannot be positively validated
+-> reconcile / STOP
+
+push already occurred but C-2 is absent or unprovable
+-> NEVER infer proof from push
+-> historical escape / reconcile as appropriate
+
+a Review-v1 mutation contains a current-combined
+same-stage git_commit + git_push pair
+-> it does not bypass C-2
+-> Review-v1 contract validation refuses that path
+```
+
+`unknown` is never `proven` anywhere in this matrix.
 
 ## 13. Round-5 live-baseline reconciliation disposition
 
@@ -314,3 +462,34 @@ Architecture reopen: `No`. Candidate 8: `No`.
 Architecture blocker: `None`.
 
 HUMAN decision: `None`.
+
+## 14. P1-FLBR-01 repair disposition
+
+Finding P1-FLBR-01 of the final focused live-baseline review: Round 5 recorded the live same-stage `git_commit` -> `git_push` pair as *the* publication shape while also requiring a Review-v1 split, so the two validation rules collided — a Review-v1 split push read as malformed under the very section that introduced the split.
+
+Repair, contract text only:
+
+```text
+§12     restructured into two named, separately validated
+        publication contracts
+§12.1   current-combined - the live shape, preserved verbatim
+        in substance and explicitly not narrowed
+§12.2   review-v1-split - explicitly not the same-stage pair,
+        and explicitly not permitted to push through one
+§12.3   discriminator - contract read from durable non-lifecycle
+        operation metadata (R5-IMPL-2), never inferred from shape;
+        absent identity means current-combined, unconditionally
+§12.4   S-c / C-2 / S-p minimum bindings
+§12.5   Review-v1 split fail-closed matrix
+§1.2    cross-reference to the above
+```
+
+Nothing in §12.1 was relaxed: a current-combined mutation whose Git stage is not the exact pair fails closed exactly as before. Nothing in the split path permits publication before proof.
+
+```text
+P1-FLBR-01: REPAIRED / FROZEN
+```
+
+Live implementation baseline unchanged: `e32a74192e70d3ce8aec09f1921f175ac72b2d1d`.
+
+Architecture: `RETAIN`. Architecture reopen: `No`. Candidate 8: `No`. HUMAN decision: `None`.
