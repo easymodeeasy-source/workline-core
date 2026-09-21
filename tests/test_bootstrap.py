@@ -225,14 +225,14 @@ class DynamicDiscoveryTests(WorklineTestCase, SyntheticRootMixin):
         bootstrap = project / BOOTSTRAP_REL_PATH
         before_bytes = bootstrap.read_bytes()
         before_head = git(project, "rev-parse", "HEAD").strip()
-        self.assertNotIn("skills/review", skill_inventory(wl))
+        self.assertNotIn("skills/audit", skill_inventory(wl))
 
         # a Skill is added centrally, and only centrally
-        self.write_registry(wl, extra={"skills/review": CONTEXT_PROJECT})
+        self.write_registry(wl, extra={"skills/audit": CONTEXT_PROJECT})
 
-        self.assertIn("skills/review", skill_inventory(wl))
-        self.assertIn("skills/review", router_candidates(wl))
-        self.assertEqual(resolve_skill(wl, "skills/review").context, CONTEXT_PROJECT)
+        self.assertIn("skills/audit", skill_inventory(wl))
+        self.assertIn("skills/audit", router_candidates(wl))
+        self.assertEqual(resolve_skill(wl, "skills/audit").context, CONTEXT_PROJECT)
         # the Project did not change by a single byte
         self.assertEqual(bootstrap.read_bytes(), before_bytes)
         self.assertEqual(git(project, "rev-parse", "HEAD").strip(), before_head)
@@ -318,8 +318,8 @@ class BrokenRoutingTests(WorklineTestCase, SyntheticRootMixin):
 
     def test_every_registered_skill_is_validated_not_just_required(self) -> None:
         root = self.synthetic_root()
-        self.write_registry(root, extra={"skills/review": CONTEXT_PROJECT})
-        (root / "skills/review/SKILL.md").unlink()
+        self.write_registry(root, extra={"skills/audit": CONTEXT_PROJECT})
+        (root / "skills/audit/SKILL.md").unlink()
         with self.assertRaises(StopError) as ctx:
             skill_inventory(root)
         self.assertEqual(ctx.exception.code, "registry_invalid")

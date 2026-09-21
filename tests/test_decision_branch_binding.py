@@ -673,8 +673,9 @@ class ProcessKillTests(DecisionCase):
 # --------------------------------------------------------------------------- the record
 class RecordShapeTests(DecisionCase):
     def test_the_binding_lives_in_the_decided_effects_and_changes_nothing_else(self) -> None:
-        self.assertEqual((INTENT_VERSION, EFFECT_KINDS), (1, ("write_file", "add_relation", "remove_relation",
-                                                                "append_event", "git_commit", "git_push")))
+        self.assertEqual((INTENT_VERSION, EFFECT_KINDS), (1, ("write_file", "create_file", "add_relation",
+                                                                "remove_relation", "append_event", "git_commit",
+                                                                "git_push")))
         self.world("record", "phase hold")
         rm.hold_phase(self.store, self.pb)
         self.assertEqual(list(self.store.mutations.glob("*.yaml")), [])  # a finished operation still removes its own record

@@ -365,7 +365,8 @@ class DecisionRecordTests(CancelCase):
         self.assertEqual([re.sub(r"^w_\w+:", "<I1>:", s) for s in stages], REPOINT_STAGES)
         self.assertEqual(set(saves[-1]), CLOSED_RECORD_FIELDS)
         self.assertEqual((INTENT_VERSION, EFFECT_KINDS),
-                         (1, ("write_file", "add_relation", "remove_relation", "append_event", "git_commit", "git_push")))
+                         (1, ("write_file", "create_file", "add_relation", "remove_relation", "append_event",
+                              "git_commit", "git_push")))
         # and the closed record of an uninterrupted cancel is still taken away (BL-019)
         self.assertNotIn(result.mutation_id, {r["mutation_id"] for r in MutationController(self.store).list_records()})
 

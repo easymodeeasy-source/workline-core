@@ -692,3 +692,8 @@ Skill本文はこのregistryに置かない。identityは `workline-id`、現在
 <!-- workline-id: skills/start -->
 <!-- workline-target: .claude/skills/start/SKILL.md -->
 <!-- workline-context: project -->
+
+## REVIEW
+<!-- workline-id: skills/review -->
+<!-- workline-target: .claude/skills/review/SKILL.md -->
+<!-- workline-context: project -->

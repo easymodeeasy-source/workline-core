@@ -64,10 +64,15 @@ def copy_workline_root(dest: Path, *, registry: str | None = None) -> Path:
     shutil.copy2(WORKLINE_ROOT / "registry.md", dest / "registry.md")
     shutil.copy2(WORKLINE_ROOT / LAUNCHER_NAME, dest / LAUNCHER_NAME)
     shutil.copytree(WORKLINE_ROOT / ".claude" / "skills", dest / ".claude" / "skills")
-    package = dest / "src" / "workline"
-    package.mkdir(parents=True)
-    for source in sorted((WORKLINE_ROOT / "src" / "workline").glob("*.py")):
-        shutil.copy2(source, package / source.name)
+    # The whole package, subpackages included, minus anything a checkout would
+    # not carry. Copying only the top-level ``*.py`` would leave a subpackage
+    # behind and the copy would fail to import for a reason that has nothing to
+    # do with what the test is about.
+    shutil.copytree(
+        WORKLINE_ROOT / "src" / "workline",
+        dest / "src" / "workline",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+    )
     if registry is not None:
         (dest / "registry.md").write_text(registry, encoding="utf-8")
     return dest.resolve()

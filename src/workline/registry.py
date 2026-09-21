@@ -27,6 +27,7 @@ REQUIRED_SKILL_IDS = (
     "skills/phase-create",
     "skills/create",
     "skills/start",
+    "skills/review",
 )
 
 SKILL_ID_PREFIX = "skills/"
