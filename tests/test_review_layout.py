@@ -171,6 +171,36 @@ class ReviewLayoutTests(WorklineTestCase):
         self.assertEqual("review_containment", caught.exception.code)
         self.assertFalse((outside / f"{RECEIPT_ID}.yaml").exists())
 
+    @unittest.skipUnless(sys.platform == "win32", "junctions are a Windows reparse point")
+    def test_a_junctioned_parent_is_refused(self) -> None:
+        """A junction is ``is_dir()`` and not ``is_symlink()`` - only its reparse tag gives it away.
+
+        Needs no developer mode, unlike a directory symlink, so this is the
+        Windows reparse branch actually exercised on an ordinary machine. A
+        check that asked only "is it a directory and not a symlink?" would
+        follow this and write the record outside the Project.
+        """
+        import subprocess
+
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        review = self.store.root / paths.REVIEW_DIR
+        review.mkdir(parents=True)
+        link = review / "receipts"
+        made = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(outside)], capture_output=True, text=True)
+        if made.returncode != 0:
+            self.skipTest(f"cannot create a junction here: {made.stderr.strip() or made.stdout.strip()}")
+        self.addCleanup(lambda: os.rmdir(link) if os.path.lexists(link) else None)  # the junction, never its target
+        self.assertTrue(link.is_dir())
+        self.assertFalse(link.is_symlink())
+        relative = paths.receipt_rel(RECEIPT_ID)
+        mutation = self._mutation(relative)
+        mutation.add_effects("review", [Effect.create_file(relative, "a: 1\n")])
+        with self.assertRaises(ValidationError) as caught:
+            mutation.apply()
+        self.assertEqual("review_containment", caught.exception.code)
+        self.assertEqual([], list(outside.iterdir()))
+
     def test_a_file_where_a_review_directory_belongs_is_refused(self) -> None:
         review = self.store.root / paths.REVIEW_DIR
         review.mkdir(parents=True)
