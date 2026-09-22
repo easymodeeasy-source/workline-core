@@ -101,6 +101,18 @@ class UncommittedTests(_BasisCase):
         self.append_uncommitted(self.completion_lines())
         self.assert_refused_uncommitted()
 
+    def test_the_r9_step_comes_before_the_working_tree_compatibility_check(self) -> None:
+        # §14.4 step 2: the R9 selection on HEAD's committed basis, then the working-tree compatibility check. With an
+        # uncommitted completion of the predecessor, the working tree lets w1 start and HEAD does not: the explicit
+        # entry w1 passes the live startability check (working tree) and is not HEAD's canonical w2 - that refusal first
+        self.append_uncommitted(self.completion_lines())
+        with self.assertRaises(StopError) as raised:
+            self.entry(self.the_design(entry="w1"))
+        self.assertEqual("review_entry_not_canonical", raised.exception.code)
+        self.assertEqual((), run_ids(self.store), "before any Review record")
+        self.assertEqual([], [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"],
+                         "the planning mutation abandoned")
+
     def test_c_an_uncommitted_relation_change_of_a_compared_fact(self) -> None:
         store = self.planning_project("gated")
         created = rm.create_roadmap(store, rm.RoadmapPlan(

@@ -1880,11 +1880,6 @@ def _setup_new_run(op: _Op, mutation: Mutation, destination: Any, discovery: Any
         base_wt = declared_base(wt_view, content)
     except _NotInBase:
         base_wt = None
-    if base_wt is None or serialize.canonical_data(base_wt) != serialize.canonical_data(base):
-        raise ValidationError(
-            "the working tree and HEAD give a different declared base; commit or discard the change first",
-            code="review_base_uncommitted",
-        )
     pre = planning.candidate_record(op.kind.review_kind, content, base)
     projected = project_on_strict(store, pre, head)
     problems = validate_structure(projected.view)
@@ -1893,12 +1888,21 @@ def _setup_new_run(op: _Op, mutation: Mutation, destination: Any, discovery: Any
             "postcheck: " + "; ".join(f"{problem.code}: {problem.message}" for problem in problems), code="postcheck_failed"
         )
     first_id: str | None = None
+    selection: Selection | None = None
     if not op.roadmap_kind:
         selection = r9_selection(projected.view, op.phase_id or "")
         first = first_work_of(selection, content, op.entry_key)
         content = dict(content)
         content["canonical_first_work"] = first
         first_id = None if first is None else first["id"]
+    # the working-tree compatibility check, after the R9 selection (§14.4 step 2): the declared base, then (Phase
+    # entry) the Phase's Work set and the R9 selection, each on the working tree and on HEAD's committed view (§7.4)
+    if base_wt is None or serialize.canonical_data(base_wt) != serialize.canonical_data(base):
+        raise ValidationError(
+            "the working tree and HEAD give a different declared base; commit or discard the change first",
+            code="review_base_uncommitted",
+        )
+    if not op.roadmap_kind:
         wt_works = sorted(work.id for work in wt_view.phase_works(op.phase_id or ""))
         committed_works = sorted(work.id for work in committed.phase_works(op.phase_id or ""))
         wt_selection = r9_selection(wt_view.with_effects(list(projected.effects)), op.phase_id or "")
