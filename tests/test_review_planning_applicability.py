@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -10,7 +11,7 @@ from planning_helpers import CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, 
 from workline import roadmap as rm
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.mutation import MutationController
-from workline.review import checkout, fsafe, planning
+from workline.review import checkout, fsafe, planning, serialize
 from workline.review import paths as review_paths
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore, render_body, render_entity
@@ -68,6 +69,40 @@ class LegacyUnchangedTests(PlanningTestCase):
             result = rm.create_roadmap(store, plan())
             rm.enter_phase(store, result.phase_ids["a"], design())
         self.assertEqual("chore(workline): expand phase P-01", self.subjects(store)[0])
+
+
+class LegacyBaselineTests(PlanningTestCase):
+    """§28 A and N item G: the legacy path byte for byte as at the implementation baseline.
+
+    ``p2_legacy_scenario.run_scenario`` records a legacy Roadmap creation and Phase entry - the pending records
+    (invocation, stages, every recorded effect), every commit (subject, parents, every file's bytes), every push, and
+    the results - with deterministic IDs; ``p2_legacy_baseline.json`` is that record made on ``de3681c``.
+    """
+
+    def test_a_legacy_roadmap_creation_and_phase_entry_are_the_baselines_byte_for_byte(self) -> None:
+        import json
+
+        from p2_legacy_scenario import run_scenario
+
+        golden = json.loads((Path(__file__).parent / "p2_legacy_baseline.json").read_text(encoding="utf-8"))
+        self.assertEqual("de3681c94d9a0c8bf1ac8263513b5793c495a02e", golden["baseline"])
+        forbidden = [mock.patch.object(serialize, "canonical_data", side_effect=AssertionError("canonicalized")),
+                     mock.patch.object(rr, "writer_input", side_effect=AssertionError("W computed"))]
+        forbidden += [mock.patch.object(rr, name, side_effect=AssertionError(f"roadmap_review.{name}"))
+                      for name in ("require_entry_gate", "preflight_roadmap_request", "preflight_phase_entry_request",
+                                   "create_roadmap_reviewed", "enter_phase_reviewed")]
+        for patcher in forbidden:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        record = run_scenario(self)
+        for key in golden["record"]:
+            with self.subTest(key):
+                self.assertEqual(golden["record"][key], record[key])
+        self.assertEqual(set(golden["record"]), set(record))
+        related = record["entry:commit"]["files"][".workline/relations/related.yaml"][1]
+        self.assertLess(related.index("pattern: "), related.index("kind: path_glob"), "the caller's key order")
+        self.assertEqual(record["create:commit"]["head"], record["create:commit"]["published"], "pushed")
+        self.assertEqual(record["entry:commit"]["head"], record["entry:commit"]["published"], "pushed")
 
 
 class GatedTests(PlanningTestCase):

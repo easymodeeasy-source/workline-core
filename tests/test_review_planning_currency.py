@@ -562,6 +562,15 @@ class R9Tests(PlanningTestCase):
         self.assertEqual("review_entry_ambiguous", raised.exception.code)
         self.assertEqual((), run_ids(self.store))
 
+    def test_entry_a_ambiguous_a_not_among_the_ties(self) -> None:
+        # §7.7's table has no row for an explicit entry that is startable but not among the ties of an ambiguous
+        # selection (P2-IMPL-BLOCKER-005): the implementation refuses it as ambiguous, like the row for A among them
+        the_design = design(works={"w1": "W1", "w2": "W2", "w3": "W3"}, planned_next=(("w1", "w2"),), entry="w2")
+        with self.assertRaises(StopError) as raised:
+            self._entry(the_design)
+        self.assertEqual("review_entry_ambiguous", raised.exception.code)
+        self.assertEqual((), run_ids(self.store))
+
     def test_no_entry_unique_a(self) -> None:
         result = self._entry(design())
         self.assertEqual(result.registration.work_ids["w1"], result.registration.entry_work_id)

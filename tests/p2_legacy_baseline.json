@@ -1,0 +1,535 @@
+{
+ "baseline": "de3681c94d9a0c8bf1ac8263513b5793c495a02e",
+ "record": {
+  "create:commit": {
+   "files": {
+    ".workline/phases/p_00000000000000000000000004.md": [
+     "A",
+     "---\nid: p_00000000000000000000000004\ndisplay: P-01\ntype: phase\nroadmap_id: r_00000000000000000000000003\n---\n\n# Phase A\n\n## 成立させたい状態\nA が成立する\n"
+    ],
+    ".workline/phases/p_00000000000000000000000005.md": [
+     "A",
+     "---\nid: p_00000000000000000000000005\ndisplay: P-02\ntype: phase\nroadmap_id: r_00000000000000000000000003\n---\n\n# Phase B\n\n## 成立させたい状態\nB が成立する\n"
+    ],
+    ".workline/relations/roadmap.yaml": [
+     "M",
+     "relations:\n  - id: rel_00000000000000000000000006\n    type: planned_next\n    from: p_00000000000000000000000004\n    to: p_00000000000000000000000005\n"
+    ],
+    ".workline/roadmaps/r_00000000000000000000000003.md": [
+     "A",
+     "---\nid: r_00000000000000000000000003\ndisplay: R-01\ntype: roadmap\n---\n\n# Legacy Roadmap\n\n## 背景\n計画の背景\n\n## 達成したい状態\n達成したい状態\n\n## 対象範囲\n"
+    ]
+   },
+   "head": "<C2>",
+   "parents": 1,
+   "published": "<C2>",
+   "subject": "chore(workline): create roadmap R-01"
+  },
+  "create:pending": [
+   {
+    "effects": [
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C1>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: r_00000000000000000000000003\ndisplay: R-01\ntype: roadmap\n---\n\n# Legacy Roadmap\n\n## 背景\n計画の背景\n\n## 達成したい状態\n達成したい状態\n\n## 対象範囲\n",
+       "path": ".workline/roadmaps/r_00000000000000000000000003.md"
+      },
+      "seq": 1,
+      "stage": "roadmap",
+      "wrote": "sha256:3ba2e299093baa6b700809a162b82ac568cf4664e688c5172152acca764599b5"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C1>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: p_00000000000000000000000004\ndisplay: P-01\ntype: phase\nroadmap_id: r_00000000000000000000000003\n---\n\n# Phase A\n\n## 成立させたい状態\nA が成立する\n",
+       "path": ".workline/phases/p_00000000000000000000000004.md"
+      },
+      "seq": 2,
+      "stage": "phases",
+      "wrote": "sha256:8d9d39a66101854a4085b24202f79e2e7b49fdef8ca12335c9b3eeb16f63af80"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C1>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: p_00000000000000000000000005\ndisplay: P-02\ntype: phase\nroadmap_id: r_00000000000000000000000003\n---\n\n# Phase B\n\n## 成立させたい状態\nB が成立する\n",
+       "path": ".workline/phases/p_00000000000000000000000005.md"
+      },
+      "seq": 3,
+      "stage": "phases",
+      "wrote": "sha256:dede2173e262c927ddba1dd5ad09774352d21a621dfc227dc38924ee010e46c1"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C1>"
+      },
+      "held_before": "sha256:c03b8bc4aa3ad13877bb34b5aee4bfaeeaeb664b2718c6ddefe017fee7de98ba",
+      "kind": "add_relation",
+      "payload": {
+       "file": "roadmap",
+       "record": {
+        "from": "p_00000000000000000000000004",
+        "id": "rel_00000000000000000000000006",
+        "to": "p_00000000000000000000000005",
+        "type": "planned_next"
+       }
+      },
+      "seq": 4,
+      "stage": "phases",
+      "wrote": "sha256:f8a2d871d5567728f7e65c9217f836f8861e20d2e2c6807da9f2c8c5140be8dc"
+     },
+     {
+      "applied": true,
+      "commit_id": "<C2>",
+      "kind": "git_commit",
+      "payload": {
+       "base_head": "<C1>",
+       "branch": "refs/heads/main",
+       "message": "chore(workline): create roadmap R-01",
+       "paths": [
+        ".workline/phases/p_00000000000000000000000004.md",
+        ".workline/phases/p_00000000000000000000000005.md",
+        ".workline/relations/roadmap.yaml",
+        ".workline/roadmaps/r_00000000000000000000000003.md"
+       ]
+      },
+      "seq": 5,
+      "stage": "finalize"
+     },
+     {
+      "applied": true,
+      "kind": "git_push",
+      "payload": {
+       "branch": "main",
+       "locator": "<tmp>\\legacy-remote.git",
+       "remote": "origin"
+      },
+      "seq": 6,
+      "stage": "finalize"
+     }
+    ],
+    "invocation": {
+     "name": "Legacy Roadmap",
+     "operation": "roadmap-create",
+     "request": {
+      "background": "計画の背景",
+      "desired_state": "達成したい状態",
+      "name": "Legacy Roadmap",
+      "out_of_scope": null,
+      "phases": [
+       {
+        "desired_state": "A が成立する",
+        "key": "a",
+        "name": "Phase A"
+       },
+       {
+        "desired_state": "B が成立する",
+        "key": "b",
+        "name": "Phase B"
+       }
+      ],
+      "relations": [
+       {
+        "from": "a",
+        "to": "b",
+        "type": "planned_next"
+       }
+      ],
+      "scope": "",
+      "version": 1
+     }
+    },
+    "mutation_id": "mut_00000000000000000000000002",
+    "notes": {
+     "preexisting_dirty": []
+    },
+    "owner": "roadmap",
+    "reserved_ids": {
+     "phases:phase:a": "p_00000000000000000000000004",
+     "phases:phase:b": "p_00000000000000000000000005",
+     "phases:rel:0": "rel_00000000000000000000000006",
+     "roadmap": "r_00000000000000000000000003"
+    },
+    "status": "pending",
+    "version": 1,
+    "workline": "workline-mutation-intent",
+    "write_scope": {
+     "entities": [
+      "p_00000000000000000000000004",
+      "p_00000000000000000000000005",
+      "r_00000000000000000000000003"
+     ],
+     "files": [
+      ".workline/relations/roadmap.yaml"
+     ]
+    }
+   }
+  ],
+  "create:result": {
+   "head": "<C2>",
+   "mutation_id": "mut_00000000000000000000000002",
+   "phase_ids": {
+    "a": "p_00000000000000000000000004",
+    "b": "p_00000000000000000000000005"
+   },
+   "resumed": true,
+   "roadmap_id": "r_00000000000000000000000003"
+  },
+  "entry:commit": {
+   "files": {
+    ".workline/relations/related.yaml": [
+     "M",
+     "relations:\n  - id: rel_0000000000000000000000000B\n    type: conditional_must_read\n    from: w_00000000000000000000000008\n    to: src/x.py\n    condition:\n      pattern: \"src/*.py\"\n      kind: path_glob\n"
+    ],
+    ".workline/relations/roadmap.yaml": [
+     "M",
+     "relations:\n  - id: rel_00000000000000000000000006\n    type: planned_next\n    from: p_00000000000000000000000004\n    to: p_00000000000000000000000005\n  - id: rel_0000000000000000000000000A\n    type: planned_next\n    from: w_00000000000000000000000008\n    to: w_00000000000000000000000009\n  - id: rel_0000000000000000000000000D\n    type: requires_completion\n    from: w_00000000000000000000000008\n    to: w_0000000000000000000000000C\n  - id: rel_0000000000000000000000000E\n    type: requires_completion\n    from: w_00000000000000000000000009\n    to: w_0000000000000000000000000C\n  - id: rel_0000000000000000000000000G\n    type: requires_completion\n    from: w_0000000000000000000000000C\n    to: w_0000000000000000000000000F\n"
+    ],
+    ".workline/works/w_00000000000000000000000008.md": [
+     "A",
+     "---\nid: w_00000000000000000000000008\ndisplay: W-01\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\n---\n\n# W1\n\n## このWorkで成立させる状態\nW1 が成立する\n"
+    ],
+    ".workline/works/w_00000000000000000000000009.md": [
+     "A",
+     "---\nid: w_00000000000000000000000009\ndisplay: W-02\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\n---\n\n# W2\n\n## このWorkで成立させる状態\nW2 が成立する\n"
+    ],
+    ".workline/works/w_0000000000000000000000000C.md": [
+     "A",
+     "---\nid: w_0000000000000000000000000C\ndisplay: W-03\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\nwork_kind: phase_integration_check\n---\n\n# Integration\n\n## このWorkで成立させる状態\n全Workの統合確認が取れている\n"
+    ],
+    ".workline/works/w_0000000000000000000000000F.md": [
+     "A",
+     "---\nid: w_0000000000000000000000000F\ndisplay: W-04\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\nwork_kind: human_confirmation\nconfirmation_target: w_0000000000000000000000000C\n---\n\n# Confirmation\n\n## このWorkで成立させる状態\n人間が成果を確認した\n"
+    ]
+   },
+   "head": "<C3>",
+   "parents": 1,
+   "published": "<C3>",
+   "subject": "chore(workline): expand phase P-01"
+  },
+  "entry:pending": [
+   {
+    "effects": [
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: w_00000000000000000000000008\ndisplay: W-01\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\n---\n\n# W1\n\n## このWorkで成立させる状態\nW1 が成立する\n",
+       "path": ".workline/works/w_00000000000000000000000008.md"
+      },
+      "seq": 1,
+      "stage": "works",
+      "wrote": "sha256:62648e40ae71e4919441212df45efe249113683598fd0e3cac8502d7a980893c"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: w_00000000000000000000000009\ndisplay: W-02\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\n---\n\n# W2\n\n## このWorkで成立させる状態\nW2 が成立する\n",
+       "path": ".workline/works/w_00000000000000000000000009.md"
+      },
+      "seq": 2,
+      "stage": "works",
+      "wrote": "sha256:840e5448d63e87271d2e5849cd59cc4b25ff38fc906236f8b11b01ec26ebfbc3"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "sha256:f8a2d871d5567728f7e65c9217f836f8861e20d2e2c6807da9f2c8c5140be8dc",
+      "kind": "add_relation",
+      "payload": {
+       "file": "roadmap",
+       "record": {
+        "from": "w_00000000000000000000000008",
+        "id": "rel_0000000000000000000000000A",
+        "to": "w_00000000000000000000000009",
+        "type": "planned_next"
+       }
+      },
+      "seq": 3,
+      "stage": "works",
+      "wrote": "sha256:c3b3bc5836e7c1c9c1a0995382a7c20b01e0d05b0ec352c9842fd7b1c66fda9a"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "sha256:c03b8bc4aa3ad13877bb34b5aee4bfaeeaeb664b2718c6ddefe017fee7de98ba",
+      "kind": "add_relation",
+      "payload": {
+       "file": "related",
+       "record": {
+        "condition": {
+         "kind": "path_glob",
+         "pattern": "src/*.py"
+        },
+        "from": "w_00000000000000000000000008",
+        "id": "rel_0000000000000000000000000B",
+        "to": "src/x.py",
+        "type": "conditional_must_read"
+       }
+      },
+      "seq": 4,
+      "stage": "works",
+      "wrote": "sha256:a56acd983a96a38de3a870675b820058cb7b0846af2e68610306ed825da1f88b"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: w_0000000000000000000000000C\ndisplay: W-03\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\nwork_kind: phase_integration_check\n---\n\n# Integration\n\n## このWorkで成立させる状態\n全Workの統合確認が取れている\n",
+       "path": ".workline/works/w_0000000000000000000000000C.md"
+      },
+      "seq": 5,
+      "stage": "integration",
+      "wrote": "sha256:d5ea44d67435a783a38a60f8bd0484d228d0b6d414294d19683918a3e583c9df"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "sha256:c3b3bc5836e7c1c9c1a0995382a7c20b01e0d05b0ec352c9842fd7b1c66fda9a",
+      "kind": "add_relation",
+      "payload": {
+       "file": "roadmap",
+       "record": {
+        "from": "w_00000000000000000000000008",
+        "id": "rel_0000000000000000000000000D",
+        "to": "w_0000000000000000000000000C",
+        "type": "requires_completion"
+       }
+      },
+      "seq": 6,
+      "stage": "integration",
+      "wrote": "sha256:d0de850b58c8aeb31c53d5f97434569791e2d74f36b0497faaa9f9ae7ad47057"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "sha256:c3b3bc5836e7c1c9c1a0995382a7c20b01e0d05b0ec352c9842fd7b1c66fda9a",
+      "kind": "add_relation",
+      "payload": {
+       "file": "roadmap",
+       "record": {
+        "from": "w_00000000000000000000000009",
+        "id": "rel_0000000000000000000000000E",
+        "to": "w_0000000000000000000000000C",
+        "type": "requires_completion"
+       }
+      },
+      "seq": 7,
+      "stage": "integration",
+      "wrote": "sha256:797558e62d34be3bcef54e768e0c88c0f3061c8bad022a4d65e2801c2d68b8b0"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "absent",
+      "kind": "write_file",
+      "payload": {
+       "content": "---\nid: w_0000000000000000000000000F\ndisplay: W-04\ntype: work\nphase_id: p_00000000000000000000000004\norigin:\n  type: roadmap\n  roadmap_id: r_00000000000000000000000003\n  phase_id: p_00000000000000000000000004\nwork_kind: human_confirmation\nconfirmation_target: w_0000000000000000000000000C\n---\n\n# Confirmation\n\n## このWorkで成立させる状態\n人間が成果を確認した\n",
+       "path": ".workline/works/w_0000000000000000000000000F.md"
+      },
+      "seq": 8,
+      "stage": "confirmation",
+      "wrote": "sha256:fb528a09740570b9d3ef737d9256362d03166086cb5571dc5f1e927ab12f5870"
+     },
+     {
+      "applied": true,
+      "decided_on": {
+       "branch": "refs/heads/main",
+       "head": "<C2>"
+      },
+      "held_before": "sha256:797558e62d34be3bcef54e768e0c88c0f3061c8bad022a4d65e2801c2d68b8b0",
+      "kind": "add_relation",
+      "payload": {
+       "file": "roadmap",
+       "record": {
+        "from": "w_0000000000000000000000000C",
+        "id": "rel_0000000000000000000000000G",
+        "to": "w_0000000000000000000000000F",
+        "type": "requires_completion"
+       }
+      },
+      "seq": 9,
+      "stage": "confirmation",
+      "wrote": "sha256:de9bed840ab3cec94945b0066e1f794d0aca001a9c0b059307854f3e0a10260d"
+     },
+     {
+      "applied": true,
+      "commit_id": "<C3>",
+      "kind": "git_commit",
+      "payload": {
+       "base_head": "<C2>",
+       "branch": "refs/heads/main",
+       "message": "chore(workline): expand phase P-01",
+       "paths": [
+        ".workline/relations/related.yaml",
+        ".workline/relations/roadmap.yaml",
+        ".workline/works/w_00000000000000000000000008.md",
+        ".workline/works/w_00000000000000000000000009.md",
+        ".workline/works/w_0000000000000000000000000C.md",
+        ".workline/works/w_0000000000000000000000000F.md"
+       ]
+      },
+      "seq": 10,
+      "stage": "finalize"
+     },
+     {
+      "applied": true,
+      "kind": "git_push",
+      "payload": {
+       "branch": "main",
+       "locator": "<tmp>\\legacy-remote.git",
+       "remote": "origin"
+      },
+      "seq": 11,
+      "stage": "finalize"
+     }
+    ],
+    "invocation": {
+     "design": {
+      "confirmation": {
+       "desired_state": "人間が成果を確認した",
+       "name": "Confirmation",
+       "related": []
+      },
+      "entry": null,
+      "integration": {
+       "desired_state": "全Workの統合確認が取れている",
+       "name": "Integration",
+       "related": []
+      },
+      "planned_next": [
+       {
+        "from": "w1",
+        "to": "w2"
+       }
+      ],
+      "requires_completion": [],
+      "version": 1,
+      "works": [
+       {
+        "desired_state": "W1 が成立する",
+        "key": "w1",
+        "name": "W1",
+        "related": [
+         {
+          "condition": {
+           "kind": "path_glob",
+           "pattern": "src/*.py"
+          },
+          "to": "src/x.py",
+          "type": "conditional_must_read"
+         }
+        ]
+       },
+       {
+        "desired_state": "W2 が成立する",
+        "key": "w2",
+        "name": "W2",
+        "related": []
+       }
+      ]
+     },
+     "operation": "phase-entry",
+     "phase_id": "p_00000000000000000000000004"
+    },
+    "mutation_id": "mut_00000000000000000000000007",
+    "notes": {
+     "preexisting_dirty": []
+    },
+    "owner": "roadmap",
+    "reserved_ids": {
+     "confirmation:rel:0": "rel_0000000000000000000000000G",
+     "confirmation:work:confirmation": "w_0000000000000000000000000F",
+     "integration:rel:0": "rel_0000000000000000000000000D",
+     "integration:rel:1": "rel_0000000000000000000000000E",
+     "integration:work:integration": "w_0000000000000000000000000C",
+     "works:rel:0": "rel_0000000000000000000000000A",
+     "works:related:w1:0": "rel_0000000000000000000000000B",
+     "works:work:w1": "w_00000000000000000000000008",
+     "works:work:w2": "w_00000000000000000000000009"
+    },
+    "status": "pending",
+    "version": 1,
+    "workline": "workline-mutation-intent",
+    "write_scope": {
+     "entities": [
+      "p_00000000000000000000000004",
+      "w_00000000000000000000000008",
+      "w_00000000000000000000000009",
+      "w_0000000000000000000000000C",
+      "w_0000000000000000000000000F"
+     ],
+     "files": [
+      ".workline/relations/related.yaml",
+      ".workline/relations/roadmap.yaml"
+     ]
+    }
+   }
+  ],
+  "entry:result": {
+   "confirmation_id": "w_0000000000000000000000000F",
+   "entry_work_id": "w_00000000000000000000000008",
+   "expanded": true,
+   "head": "<C3>",
+   "integration_id": "w_0000000000000000000000000C",
+   "mutation_id": "mut_00000000000000000000000007",
+   "phase_id": "p_00000000000000000000000004",
+   "work_ids": {
+    "w1": "w_00000000000000000000000008",
+    "w2": "w_00000000000000000000000009"
+   }
+  },
+  "pending:after": []
+ },
+ "scenario": "tests/p2_legacy_scenario.py"
+}
