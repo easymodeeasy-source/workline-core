@@ -506,3 +506,9 @@ class StaticInvariantTests(unittest.TestCase):
         text = (SRC / "gitcmd.py").read_text(encoding="utf-8")
         cache = text[text.index("_OBJECT_ANSWERS"):]
         self.assertNotIn("open(", cache[:cache.index("def _remembered")], "never persisted")
+
+    def test_the_publication_proof_reads_committed_objects_only_and_evaluates_no_attribute(self) -> None:
+        for name in ("publication.py", "committed.py"):
+            text = (SRC / "review" / name).read_text(encoding="utf-8").replace("CommittedReviewStore(", "")
+            for forbidden in ("checkout", "check_attributes", "ReviewStore(", "read_text("):
+                self.assertNotIn(forbidden, text, f"review/{name} uses {forbidden}")
