@@ -1,0 +1,508 @@
+"""P2 §28 S: the reason attribute and catalogue, base_exact, the delta record, and the Git minimums."""
+
+from __future__ import annotations
+
+import ast
+from dataclasses import replace
+from pathlib import Path
+import unittest
+from unittest import mock
+
+from helpers import WORKLINE_ROOT, cwd, git
+from planning_helpers import (
+    CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, crash_at, design, noncanonical_registration, plan, plumb_commit,
+    registered, rr, run_ids,
+)
+from workline import errors, gitcmd, gitops
+from workline import mutation as mutation_module
+from workline import roadmap as rm
+from workline.errors import ReconcileRequired, StopError
+from workline.mutation import MutationController
+from workline.project_start import project_start
+from workline.review import planning, publication, serialize
+from workline.review.store import ReviewStore
+from workline.store import ProjectStore
+
+SRC = Path(rr.__file__).parent
+
+#: §25.1: every reason a ReconcileRequired P2 raises carries.
+CATALOGUE_REASONS = {
+    "review_marker_mismatch", "review_recovery_incomplete", "review_recovery_ambiguous", "review_discovery_changed",
+    "review_recovery_reservation_conflict", "review_setup_invalid", "review_binding_moved", "review_chain_invalid",
+    "review_task_invalid", "review_generation_owner_conflict", "review_candidate_mismatch", "review_receipt_invalid",
+    "review_registration_base_moved", "review_registration_currency_changed", "review_registration_projection_mismatch",
+    "review_commit_unowned", "review_persisted_proof_failed", "review_metadata_commit_mismatch",
+    "review_publication_invalid", "review_publication_contract_invalid",
+}
+#: §25.1: every StopError / ValidationError code the contract uses (P2's, the live ones it keeps, and P1's).
+CATALOGUE_CODES = {
+    "review_contract_invalid", "review_create_unsupported", "review_git_unsupported", "review_candidate_unrepresentable",
+    "review_base_uncommitted", "review_entry_not_canonical", "review_entry_ambiguous", "review_context_unavailable",
+    "review_reviewer_failed", "review_report_invalid", "review_reviewer_mismatch", "review_git_transform",
+    "review_checkout_unsafe", "review_checkout_unknown", "review_namespace_unreadable", "review_hooks_path_invalid",
+    "review_publication_barrier", "validation_failed", "postcheck_failed", "structure_invalid", "dirty_overlap",
+    "phase_already_expanded", "ambiguous_startable_candidates", "phase_blocked", "spec_violation",
+    "review_not_persisted", "review_persistence_unknown", "review_roundtrip_mismatch", "review_callback_unknown",
+    "review_callback_conflict", "review_consumption_conflict", "review_generation_conflict", "review_generation_pending",
+    "review_path_ignored", "review_committability_unknown", "review_containment", "review_record_invalid",
+    "review_record_noncanonical", "review_record_missing", "review_record_version", "review_gate_chain",
+    "review_namespace_invalid", "review_projection_invalid", "review_dependency_invalid", "review_adapter_unresolved",
+}
+#: The modules P2 adds, or the parts it adds to live modules.
+P2_MODULES = [
+    SRC / "roadmap_review.py", SRC / "committed_view.py", SRC / "review" / "planning.py", SRC / "review" / "recovery.py",
+    SRC / "review" / "publication.py", SRC / "review" / "checkout.py", SRC / "review" / "committed.py",
+    SRC / "mutation.py", SRC / "gitops.py", SRC / "roadmap.py",
+]
+
+
+def _raised(path: Path) -> tuple[set[str], set[str]]:
+    """The literal reasons and codes of every P2 refusal constructed in ``path``."""
+    reasons: set[str] = set()
+    codes: set[str] = set()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        for keyword in node.keywords:
+            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                if keyword.arg == "reason" and name == "ReconcileRequired":
+                    reasons.add(keyword.value.value)
+                if keyword.arg == "code" and name in ("StopError", "ValidationError"):
+                    codes.add(keyword.value.value)
+        if name in ("_reconcile", "_Refused") and len(node.args) >= 2:
+            last = node.args[1]
+            if isinstance(last, ast.Constant) and isinstance(last.value, str):
+                reasons.add(last.value)
+    return reasons, codes
+
+
+class ReasonAttributeTests(PlanningTestCase):
+    def test_a_reconcile_required_keeps_its_code_and_carries_a_reason(self) -> None:
+        built = ReconcileRequired("a live reconcile")
+        self.assertEqual(("reconcile_required", None), (built.code, built.reason))
+        p2 = ReconcileRequired("a P2 reconcile", reason="review_commit_unowned")
+        self.assertEqual(("reconcile_required", "review_commit_unowned"), (p2.code, p2.reason))
+
+    def test_a_live_reconcile_on_the_review_v1_path_has_no_reason(self) -> None:
+        store = self.planning_project()
+        with crash_at(rr, "_use_check"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(store)
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.reviewed_roadmap(store, Reviewer(), rm.RoadmapPlan("Planned Roadmap", "another background", "状態",
+                                                                    {"a": planning_phase("A")}))
+        self.assertEqual(("reconcile_required", None), (raised.exception.code, raised.exception.reason))
+
+    def test_every_reason_and_code_p2_raises_is_in_the_catalogue(self) -> None:
+        reasons: set[str] = set()
+        codes: set[str] = set()
+        for path in P2_MODULES:
+            found_reasons, found_codes = _raised(path)
+            reasons |= found_reasons
+            codes |= {code for code in found_codes if code.startswith("review_")}
+        self.assertTrue(reasons >= {"review_commit_unowned", "review_persisted_proof_failed"})
+        self.assertEqual(set(), reasons - CATALOGUE_REASONS, "a reason outside §25.1")
+        self.assertEqual(set(), codes - CATALOGUE_CODES, "a code outside §25.1")
+
+
+def planning_phase(name: str):
+    from workline.phase_create import PhaseSpec
+
+    return PhaseSpec(name, f"{name} が成立する")
+
+
+class BaseExactTests(PlanningTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.planning_project()
+
+    def crash_before_kp_is_made(self) -> None:
+        with crash_at(mutation_module, "_make_planning_commit", when=lambda n, s, payload, paths: payload.get("base_exact") is True):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+
+    def test_an_unapplied_kp_on_its_base_is_made_after_the_pre_replay_proof(self) -> None:
+        self.crash_before_kp_is_made()
+        order: list[str] = []
+        real_proof, real_make = rr._pre_kp_proof, mutation_module._make_planning_commit
+
+        def proof(*args, **kwargs):
+            order.append("pre-Kp proof")
+            return real_proof(*args, **kwargs)
+
+        def make(store, payload, paths):
+            if payload.get("base_exact") is True:
+                order.append("Kp made")
+            return real_make(store, payload, paths)
+
+        with mock.patch.object(rr, "_pre_kp_proof", proof), mock.patch.object(mutation_module, "_make_planning_commit", make):
+            self.assertEqual("registered", self.reviewed_roadmap(self.store).status)
+        self.assertEqual(["pre-Kp proof", "Kp made"], order)
+
+    def test_an_independent_advance_is_a_mismatch_never_the_independent_advancement_path(self) -> None:
+        self.crash_before_kp_is_made()
+        (self.store.root / "notes.txt").write_text("independent\n", encoding="utf-8")
+        self.commit_all(self.store, "an independent commit", "notes.txt")
+        real = mutation_module._head_advanced_independently
+        asked: list[dict] = []
+
+        def spy(repo, payload, head):
+            asked.append(payload)
+            return real(repo, payload, head)
+
+        with mock.patch.object(mutation_module, "_head_advanced_independently", spy):
+            with self.assertRaises(ReconcileRequired) as raised:
+                self.reviewed_roadmap(self.store)
+        self.assertEqual("review_registration_base_moved", raised.exception.reason)
+        self.assertFalse([p for p in asked if p.get("base_exact") is True], "never asked for a base-exact commit")
+
+    def test_a_kp_recorded_applied_with_its_id_is_decided_by_that_id(self) -> None:
+        with crash_at(rr, "_c2_kp"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+        kp = self.head(self.store)
+        with mock.patch.object(mutation_module, "_make_planning_commit", side_effect=AssertionError("made again")):
+            with crash_at(rr, "_consumption_record"):
+                with self.assertRaises(Crash):
+                    self.reviewed_roadmap(self.store)  # its ID shows it held: C-2(Kp) runs, nothing is made again
+        git(self.store.root, "reset", "-q", "--hard", f"{kp}~1")  # the branch no longer holds that ID
+        with self.assertRaises(ReconcileRequired):
+            self.reviewed_roadmap(self.store)
+
+    def test_a_legacy_commit_keeps_the_independent_advancement_rule(self) -> None:
+        other = rm.create_roadmap(self.store, plan("Other Roadmap")).roadmap_id
+        with crash_at(mutation_module, "_make_commit", when=lambda n, mutation, record: "roadmap_held" in record["payload"]["message"]):
+            with self.assertRaises(Crash):
+                rm.hold_roadmap(self.store, other)
+        (self.store.root / "notes.txt").write_text("independent\n", encoding="utf-8")
+        advanced = self.commit_all(self.store, "an independent commit", "notes.txt")
+        held = rm.hold_roadmap(self.store, other)
+        self.assertEqual(advanced, git(self.store.root, "rev-parse", f"{held.head}~1").strip(), "made on the new HEAD")
+
+
+class DeltaRecordTests(PlanningTestCase):
+    def assert_types(self, record: dict, length: int) -> None:
+        for entry in record["entries"]:
+            self.assertIsInstance(entry["old_mode"], str)
+            self.assertIsInstance(entry["new_mode"], str)
+            self.assertIn(entry["old_mode"], ("000000", "100644"))
+            self.assertEqual("100644", entry["new_mode"])
+            for key in ("old_blob", "new_blob"):
+                self.assertIsInstance(entry[key], str)
+                self.assertEqual(length, len(entry[key]))
+                self.assertEqual(entry[key], entry[key].lower())
+                int(entry[key], 16)
+        self.assertEqual(length, len(record["parent"]))
+
+    def test_every_scalar_has_its_type_and_integer_modes_digest_differently(self) -> None:
+        store = self.planning_project()
+        result = self.reviewed_roadmap(store)
+        found = registered(store, result)
+        context = ReviewStore(store).read_task_input(
+            self.chain(store, result.review_run_id).generations[0].accepted_tasks[0]["task_id"]).request_envelope["context"]
+        expected = rr.expected_projection(store, found.material, context, found.parent)
+        record = expected.delta_record(found.kp)
+        self.assert_types(record, 40)
+        self.assertIn("0" * 40, [entry["old_blob"] for entry in record["entries"]], "the zero ID for an added path")
+        integer_modes = {**record, "entries": [{**e, "old_mode": int(e["old_mode"]), "new_mode": int(e["new_mode"])}
+                                               for e in record["entries"]]}
+        forged_digest = serialize.digest(integer_modes)
+        self.assertNotEqual(expected.delta_digest(found.kp), forged_digest)
+        forged = replace(found.consumption, persisted_result={**found.consumption.persisted_result,
+                                                              "registration_delta_digest": forged_digest})
+        km = plumb_commit(store, found.kp, {found.consumption_path: serialize.canonical_text(forged.to_record())})
+        (run,) = [r for r in publication.registered_runs(store.root, km)
+                  if r.candidate_hash == planning.candidate_hash(found.material)]
+        self.assertEqual("CP9", publication.committed_planning_proof(store.root, km, run)[0])
+
+    def test_a_sha256_repository_gives_64_character_ids_and_a_64_character_zero_id(self) -> None:
+        root = self.tmp / "sha256"
+        root.mkdir()
+        git(root, "init", "-q", "--object-format=sha256", "-b", "main")
+        with cwd(WORKLINE_ROOT):
+            project_start(root, WORKLINE_ROOT)
+        self.enter(root)
+        store = ProjectStore(root)
+        self.commit_attributes(store, "* text=auto\n" + CANONICAL_RULE + "\n")
+        result = self.reviewed_roadmap(store)
+        self.assertEqual("registered", result.status)
+        found = registered(store, result)
+        self.assertEqual(64, len(found.kp))
+        context = ReviewStore(store).read_task_input(
+            self.chain(store, result.review_run_id).generations[0].accepted_tasks[0]["task_id"]).request_envelope["context"]
+        record = rr.expected_projection(store, found.material, context, found.parent).delta_record(found.kp)
+        self.assert_types(record, 64)
+        self.assertIn("0" * 64, [entry["old_blob"] for entry in record["entries"]])
+
+
+def version(value):
+    return mock.patch.object(gitcmd, "running_git_version", lambda: value)
+
+
+class GitMinimumTests(PlanningTestCase):
+    """The version reader patched to each version; the histories built for real and run through the production proof."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.planning_project(remote=True)
+        self.other = rm.create_roadmap(self.store, plan("Other Roadmap")).roadmap_id
+
+    def legacy_push(self) -> str:
+        held = rm.hold_roadmap(self.store, self.other)
+        self.assertEqual(held.head, self.remote_head())
+        return held.head
+
+    def test_a_2_40_0_passes_the_gate_and_the_publication_proof_runs(self) -> None:
+        proofs: list[str] = []
+        real = publication.committed_planning_proof
+        with version((2, 40, 0)), mock.patch.object(publication, "committed_planning_proof",
+                                                    lambda repo, commit, run: proofs.append(commit) or real(repo, commit, run)):
+            result = self.reviewed_roadmap(self.store)
+        self.assertEqual("registered", result.status)
+        self.assertIn(result.registration.head, proofs)
+
+    def test_b_2_39_refuses_review_v1_and_leaves_a_pending_mutation_untouched(self) -> None:
+        with crash_at(rr, "_use_check"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+        (record,) = self.pending(self.store)
+        path = self.store.mutations / f"{record['mutation_id']}.yaml"
+        before = path.read_bytes()
+        with version((2, 39, 5)):
+            with self.assertRaises(StopError) as raised:
+                self.reviewed_roadmap(self.store)
+        self.assertEqual("review_git_unsupported", raised.exception.code)
+        self.assertEqual(before, path.read_bytes())
+
+    def test_b_2_39_a_legacy_invocation_registers_as_today(self) -> None:
+        with version((2, 39, 5)):
+            created = rm.create_roadmap(self.store, plan("A Legacy Roadmap"))
+        self.assertEqual(created.head, self.remote_head())
+
+    def publication_behaviour(self, found_version) -> None:
+        with version(found_version):
+            self.legacy_push()  # a history with no Candidate snapshot is cleared by the fast path
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store, Reviewer(), plan("Generation One Only"))
+        runs: list[str] = []
+        real = publication.registered_runs
+        with version(found_version), mock.patch.object(publication, "registered_runs",
+                                                       lambda repo, commit: runs.append(commit) or real(repo, commit)):
+            rm.resume_roadmap(self.store, self.other)  # a snapshot and generation 1 only: no registration commit
+        self.assertTrue(runs, "registered-Run discovery ran with the publication command set")
+        self.assertEqual(self.head(self.store), self.remote_head())
+
+    def test_b_the_publication_behaviour_on_2_39(self) -> None:
+        self.publication_behaviour((2, 39, 5))
+
+    def test_c_the_publication_behaviour_on_exactly_2_31_0(self) -> None:
+        self.publication_behaviour((2, 31, 0))
+
+    def test_b_a_valid_kp_km_history_passes_and_an_invalid_kp_holds_on_2_39(self) -> None:
+        valid = self.reviewed_roadmap(self.store)
+        with version((2, 39, 5)):
+            self.assertIsNone(publication.barrier_problem(self.store.root, valid.registration.head))
+            self.legacy_push()
+        with noncanonical_registration():
+            with self.assertRaises(ReconcileRequired):
+                self.reviewed_roadmap(self.store, Reviewer(), plan("Invalid Registration"))
+        with version((2, 39, 5)):
+            self.assertIn("CP5 fails", publication.barrier_problem(self.store.root, self.head(self.store)))
+
+    def test_d_2_30_9_clears_a_snapshot_free_history_and_refuses_one_holding_a_snapshot(self) -> None:
+        with version((2, 30, 9)):
+            self.legacy_push()
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+        with version((2, 30, 9)):
+            with self.assertRaises(StopError) as raised:
+                rm.resume_roadmap(self.store, self.other)
+        self.assertEqual("review_publication_barrier", raised.exception.code)
+        self.assertIn(publication.UNAVAILABLE_BELOW, str(raised.exception))
+        self.assertNotIn("candidate", str(raised.exception), "names no Run")
+
+    def test_e_an_unparseable_version(self) -> None:
+        with version(None):
+            with self.assertRaises(StopError) as raised:
+                self.reviewed_roadmap(self.store)
+            self.assertEqual("review_git_unsupported", raised.exception.code)
+            self.legacy_push()  # the fast-path read ran and listed nothing
+            with mock.patch.object(gitcmd, "history_touches", lambda repo, commit, directory: None):
+                self.assertIsNotNone(publication.barrier_problem(self.store.root, self.head(self.store)))
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+        with version(None):
+            problem = publication.barrier_problem(self.store.root, self.head(self.store))
+        self.assertEqual(publication.UNAVAILABLE_UNKNOWN, problem)
+
+    def pushes_on_2_31_0(self) -> None:
+        with version((2, 31, 0)):
+            self.legacy_push()
+
+    def crashed(self, name: str) -> None:
+        with crash_at(rr, name):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+
+    def test_f_generation_1_only(self) -> None:
+        self.crashed("_launch_and_settle")
+        self.pushes_on_2_31_0()
+
+    def test_f_generation_2_only(self) -> None:
+        self.crashed("_seal")
+        self.pushes_on_2_31_0()
+
+    def test_f_generation_3_without_a_registration_commit(self) -> None:
+        self.crashed("_use_check")
+        self.pushes_on_2_31_0()
+
+    def test_f_generation_4_and_stale(self) -> None:
+        self.crashed("_use_check")
+        real = planning._read_authority
+        with mock.patch.object(planning, "_read_authority",
+                               lambda path: real(path) + (b"\nchanged\n" if str(path).endswith("registry.md") else b"")):
+            self.assertEqual("stale", self.reviewed_roadmap(self.store).status)
+        self.pushes_on_2_31_0()
+
+    def test_f_not_authorized(self) -> None:
+        self.assertEqual("not_authorized", self.reviewed_roadmap(self.store, Reviewer(status="declined")).status)
+        self.pushes_on_2_31_0()
+
+
+class NoAttributeEvaluationTests(PlanningTestCase):
+    def test_the_barrier_and_the_proof_read_committed_objects_only(self) -> None:
+        store = self.planning_project()
+        found = registered(store, self.reviewed_roadmap(store))
+        (run,) = [r for r in publication.registered_runs(store.root, found.km)
+                  if r.candidate_hash == planning.candidate_hash(found.material)]
+        broken = plumb_commit(store, found.km, {".workline/review/gates/" + run_ids(store)[0] + "/000002.yaml": "x: 1\n"})
+        before = (publication.barrier_problem(store.root, found.km), publication.barrier_problem(store.root, broken))
+        import shutil
+
+        shutil.rmtree(store.root / ".workline" / "review")
+        gitcmd.forget_object_answers()
+        with mock.patch.object(gitcmd, "check_attributes", side_effect=AssertionError("check-attr ran")):
+            after = (publication.barrier_problem(store.root, found.km), publication.barrier_problem(store.root, broken))
+        self.assertEqual(before, after)
+        self.assertIsNone(after[0])
+        self.assertIn("CP4 fails", after[1])
+
+
+class OneSpellingTests(PlanningTestCase):
+    def test_the_add_history_read_always_runs_diff_merges_combined(self) -> None:
+        reads: list[tuple] = []
+        real = gitcmd.run_git_bytes
+
+        def spy(repo, *args, **kwargs):
+            if "log" in args and "--diff-filter=A" in args:
+                reads.append(args)
+            return real(repo, *args, **kwargs)
+
+        store = self.planning_project(remote=True)
+        other = rm.create_roadmap(store, plan("Other Roadmap")).roadmap_id
+        with mock.patch.object(gitcmd, "run_git_bytes", spy):
+            self.reviewed_roadmap(store)
+            for found_version in ((2, 31, 0), (2, 54, 0)):
+                gitcmd.forget_object_answers()
+                with version(found_version):
+                    (rm.hold_roadmap if found_version[1] == 31 else rm.resume_roadmap)(store, other)
+        self.assertTrue(reads)
+        for args in reads:
+            self.assertIn("--diff-merges=combined", args)
+            self.assertEqual(["--full-history", "--no-renames", "--diff-merges=combined", "--diff-filter=A", "--name-only", "-z"],
+                             [a for a in args if a.startswith("-") and a != "--" and not a.startswith("--format")])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+class AuthorityTextTests(unittest.TestCase):
+    """§26: each rule has one normative owner; the Skills name rules/git instead of restating it."""
+
+    @staticmethod
+    def read(*parts: str) -> str:
+        return WORKLINE_ROOT.joinpath(*parts).read_text(encoding="utf-8")
+
+    def test_rules_git_carries_the_git_operation_rules_and_no_write_scope_list(self) -> None:
+        registry = self.read("registry.md")
+        rules_git = registry[registry.index("<!-- workline-id: rules/git -->"):registry.index("## AI Decision")]
+        for phrase in (
+            "review-v1 planning operation", "recovery planning mutation", "`recovery_of_review_run_id`",  # item 1
+            "`review-v1-planning-local-v1`", "`core.hooksPath`", "`dirty_overlap`",  # item 2
+            "`base_exact`", "`review_registration_base_moved`",  # item 3
+            "expected physical projection",  # item 4
+            "`review-v1-planning-publication-v1`", "`review-publication`", "C-2(Km)",  # item 5
+            "publication barrier", "`.workline/review/candidate-snapshots/`", "fast-path read",  # item 6
+            "`not_authorized`", "`stale`",  # item 7
+            "### Git versions", "P2_REVIEW_GIT_MIN      = 2.40.0", "P2_PUBLICATION_GIT_MIN = 2.31.0",
+            "`review_git_unsupported`", "`review_publication_barrier`",  # item 8
+        ):
+            with self.subTest(phrase):
+                self.assertIn(phrase, rules_git)
+        self.assertNotIn("consumptions/<consumption_id>.yaml", rules_git, "rules/git keeps no per-operation write scope")
+        self.assertNotIn("予定write scopeは", rules_git)
+
+    def test_the_roadmap_skill_carries_the_planning_operation_and_the_write_scope_exception(self) -> None:
+        skill = self.read(".claude", "skills", "roadmap", "SKILL.md")
+        section = skill[skill.index("## Review-v1 planning"):skill.index("## Mutation / Git")]
+        for phrase in (
+            "review=PlanningReview(...)", "`review_marker_mismatch`", "`P2_REVIEW_GIT_MIN`",
+            "canonical-input preflight", "canonical recovery discovery", "phase_already_expanded",
+            "R9のcanonical self-selection", "`review_base_uncommitted`", "`use_check_head`", "pre-Kp currency proof",
+            "CanonicalPlanningWriterInput", "display base check", "`review_binding`", "recovery planning mutation",
+            "`recovery_binding`", "pre-freeze resume setup", "`review_setup_invalid`", "`reason`",
+        ):
+            with self.subTest(phrase):
+                self.assertIn(phrase, section)
+        scope = skill[skill.index("各Roadmap operationが宣言する予定write scope"):]
+        self.assertIn("1つだけ例外", scope)
+        self.assertIn("`.workline/review/consumptions/<consumption_id>.yaml`", scope)
+        self.assertIn("この規則はlegacy Phase entryのものである", skill, "the resumed-entry rule stays for legacy")
+
+    def test_the_review_skill_carries_its_part_and_names_rules_git(self) -> None:
+        skill = self.read(".claude", "skills", "review", "SKILL.md")
+        for phrase in (
+            "roadmap-plan-v1", "phase-entry-design-v1", "## Planning Review Policy", "PlanningReview(reviewer",
+            "## Adjudication", "PlanningConsumption", "`review-planning-delta`", '`"100644"`', "64文字",
+            "invalidate", "committed planning proof", "expected physical projection", "`set_aside_runs`",
+            "## Checkout capability", "form L", ".workline/review/** !text eol=lf -filter -ident -working-tree-encoding",
+            "subordinate", "NOT ACTIVATED",
+        ):
+            with self.subTest(phrase):
+                self.assertIn(phrase, skill)
+        self.assertIn("`rules/git`（Commit / push、Push destination、Git versions）が所有", skill)
+        self.assertNotIn("2.31.0", skill, "the minimums are named, not restated")
+        self.assertNotIn("2.40.0", skill)
+
+
+class StaticInvariantTests(unittest.TestCase):
+    def test_every_push_point_holds_the_publication_barrier(self) -> None:
+        mutation_text = (SRC / "mutation.py").read_text(encoding="utf-8")
+        self.assertEqual(1, mutation_text.count("gitcmd.push("), "one place pushes")
+        apply_effect = mutation_text[mutation_text.index("    def apply_effect("):]
+        self.assertLess(apply_effect.index("_require_publication_barrier("), apply_effect.index("gitcmd.push("))
+        classify = mutation_text[mutation_text.index("    def _classify_push("):mutation_text.index("    def _create_review_record(")]
+        self.assertIn("_require_publication_barrier(", classify)
+        gitops_text = (SRC / "gitops.py").read_text(encoding="utf-8")
+        finalize = gitops_text[gitops_text.index("def finalize("):]
+        self.assertIn("publication.require_barrier_clear(", finalize[:finalize.index("\ndef ")])
+        for path in sorted(SRC.rglob("*.py")):
+            if path.name != "mutation.py":
+                self.assertNotIn("gitcmd.push(", path.read_text(encoding="utf-8"), path.name)
+
+    def test_p3_stays_inactive_and_nothing_writes_an_activation_record(self) -> None:
+        for path in sorted(SRC.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            if "WORK_TERMINAL_ACTIVATION_REL" in text:
+                self.assertIn(path.name, ("paths.py", "store.py", "validate.py"), f"{path.name} names the activation path")
+
+    def test_the_object_answer_cache_is_in_process_only(self) -> None:
+        text = (SRC / "gitcmd.py").read_text(encoding="utf-8")
+        cache = text[text.index("_OBJECT_ANSWERS"):]
+        self.assertNotIn("open(", cache[:cache.index("def _remembered")], "never persisted")

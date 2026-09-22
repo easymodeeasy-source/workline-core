@@ -10,19 +10,23 @@ it. Nothing here shortcuts production code: the flows run through
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
+import itertools
+import os
 from pathlib import Path
 import shutil
+import subprocess
 from typing import Any, Iterator
 from unittest import mock
 
 from helpers import WorklineTestCase, git
-from workline import gitcmd
+from workline import gitcmd, ids
 from workline import roadmap as rm
 from workline import roadmap_review as rr
 from workline.mutation import MutationController
 from workline.phase_create import PhaseRelationSpec, PhaseSpec
 from workline.review import paths as review_paths
-from workline.review import planning, serialize
+from workline.review import planning, publication, records, serialize
 from workline.review.planning import PlanningReview, PlanningReviewFinding, PlanningReviewReport
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore
@@ -215,6 +219,168 @@ def crash_at(target: Any, name: str, *, after: bool = False, when: Any = None) -
         yield patched
 
 
+@contextmanager
+def executable_registration() -> Iterator[None]:
+    """A fixture Kp whose Roadmap file is committed with mode ``100755`` (every other byte is the writer's).
+
+    The planning commit primitive commits the working tree with ``--only``, which
+    takes each mode from the filesystem; the fixture re-commits the same parent
+    with the index mode changed, so the commit recorded as made is the changed one.
+    """
+    real = gitcmd.contained_commit
+
+    def commit(repo: Path, message: str, paths: list[str], hooks: str) -> None:
+        real(repo, message, paths, hooks)
+        roadmaps = [path for path in paths if "/roadmaps/" in path]
+        if roadmaps:
+            git(repo, "update-index", "--chmod=+x", roadmaps[0])
+            git(repo, "-c", f"core.hooksPath={hooks}", "commit", "-q", "--amend", "--no-edit", "--no-verify")
+
+    with mock.patch.object(gitcmd, "contained_commit", commit):
+        yield
+
+
+@contextmanager
+def noncanonical_registration() -> Iterator[None]:
+    """A fixture Kp whose Roadmap file ends with one extra blank line: the same meaning (§31), other bytes.
+
+    The bytes change inside the planning commit primitive's staging, after
+    every own-bytes check, as a concurrent foreign change would; the proof over
+    Kp then fails at P3 while the committed view still loads.
+    """
+    real = gitcmd.contained_add
+
+    def add(repo: Path, paths: list[str], hooks: str) -> None:
+        roadmaps = [path for path in paths if "/roadmaps/" in path]
+        if roadmaps:
+            target = Path(repo) / roadmaps[0]
+            target.write_bytes(target.read_bytes() + b"\n")
+        real(repo, paths, hooks)
+
+    with mock.patch.object(gitcmd, "contained_add", add):
+        yield
+
+
+def raw_git(repo: Path, *args: str, env: dict[str, str] | None = None, data: bytes | None = None) -> str:
+    """``git`` with an optional environment overlay and raw stdin bytes (fixture plumbing only)."""
+    completed = subprocess.run(
+        ["git", "-C", str(repo), *args], input=data, capture_output=True, env={**os.environ, **(env or {})},
+    )
+    if completed.returncode != 0:
+        raise AssertionError(f"git {' '.join(args)} failed: {completed.stderr.decode('utf-8', 'replace')}")
+    return completed.stdout.decode("utf-8")
+
+
+def plumb_commit(
+    store: ProjectStore,
+    parents: str | list[str],
+    changes: dict[str, bytes | str | None],
+    message: str = "a fixture commit",
+    *,
+    modes: dict[str, str] | None = None,
+    base: str | None = None,
+) -> str:
+    """A commit made with plumbing only: ``base``'s tree (default: the first parent's) with ``changes`` applied.
+
+    A ``str`` is written as UTF-8 bytes exactly as given, ``None`` removes the
+    path. Nothing in the working tree, the index or any ref moves.
+    """
+    repo = store.root
+    parents = [parents] if isinstance(parents, str) else list(parents)
+    index = repo / ".git" / f"fixture-index-{os.getpid()}"
+    env = {"GIT_INDEX_FILE": str(index)}
+    try:
+        raw_git(repo, "read-tree", base or parents[0], env=env)
+        for path, content in changes.items():
+            if content is None:
+                raw_git(repo, "update-index", "--force-remove", "--", path, env=env)
+                continue
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            oid = raw_git(repo, "hash-object", "-w", "--stdin", data=data).strip()
+            mode = (modes or {}).get(path, "100644")
+            raw_git(repo, "update-index", "--add", "--cacheinfo", f"{mode},{oid},{path}", env=env)
+        tree = raw_git(repo, "write-tree", env=env).strip()
+    finally:
+        if index.exists():
+            index.unlink()
+    args = ["commit-tree", tree, "-m", message]
+    for parent in parents:
+        args += ["-p", parent]
+    return raw_git(repo, *args).strip()
+
+
+def blob_at(store: ProjectStore, commit: str, path: str) -> bytes:
+    completed = subprocess.run(["git", "-C", str(store.root), "cat-file", "blob", f"{commit}:{path}"], capture_output=True)
+    if completed.returncode != 0:
+        raise AssertionError(f"{commit}:{path} is not a blob")
+    return completed.stdout
+
+
+def move_branch(store: ProjectStore, commit: str) -> None:
+    """Put the current branch, index and working tree at ``commit`` (a fixture history only; untracked files stay)."""
+    git(store.root, "reset", "-q", "--hard", commit)
+
+
+@contextmanager
+def deterministic_ids(start: int = 1) -> Iterator[None]:
+    """Every new ID from one deterministic sequence, so two Projects built alike get the same IDs."""
+    counter = itertools.count(start)
+
+    def next_ulid(now_ms: int | None = None) -> str:
+        value = next(counter)
+        chars = []
+        for _ in range(26):
+            chars.append("0123456789ABCDEFGHJKMNPQRSTVWXYZ"[value & 31])
+            value >>= 5
+        return "".join(reversed(chars))
+
+    with mock.patch.object(ids, "new_ulid", next_ulid):
+        yield
+
+
+def state_entries(store: ProjectStore) -> dict[str, bytes | None]:
+    """Every entry under ``.workline`` - directories as ``None``, files as their bytes - except the execution lock."""
+    found: dict[str, bytes | None] = {}
+    base = store.root / ".workline"
+    for path in sorted(base.rglob("*")):
+        relative = path.relative_to(store.root).as_posix()
+        if "/locks" in relative:
+            continue
+        found[relative] = path.read_bytes() if path.is_file() else None
+    return found
+
+
+@dataclass(frozen=True)
+class Registered:
+    """What a completed review-v1 registration left: Kp, its parent P, Km, the Candidate and its Consumption."""
+
+    kp: str
+    parent: str
+    km: str
+    material: dict[str, Any]
+    consumption: Any
+    consumption_path: str
+
+    def run(self, repo: Path, commit: str | None = None) -> Any:
+        (found,) = [r for r in publication.registered_runs(repo, commit or self.km)
+                    if r.candidate_hash == planning.candidate_hash(self.material)]
+        return found
+
+    def registration_blobs(self, store: ProjectStore) -> dict[str, bytes]:
+        return {path: blob_at(store, self.kp, path) for path in rr.registration_paths(self.material)}
+
+
+def registered(store: ProjectStore, result: Any) -> Registered:
+    """Read a completed ``ReviewedPlanningResult`` back from its Consumption."""
+    review = ReviewStore(store)
+    consumption = review.read_consumption(result.consumption_id)
+    material = review.read_candidate_snapshot(consumption.authorized_candidate_hash).material
+    kp = consumption.persisted_result["registration_commit"]
+    relative = review_paths.consumption_rel(result.consumption_id)
+    km = git(store.root, "log", "--format=%H", "--diff-filter=A", "-n", "1", "--", relative).strip()
+    return Registered(kp, consumption.persisted_result["registration_parent"], km, material, consumption, relative)
+
+
 def run_ids(store: ProjectStore) -> tuple[str, ...]:
     return ReviewStore(store).run_ids()
 
@@ -225,6 +391,8 @@ def snapshot_material(store: ProjectStore, run_id: str) -> dict[str, Any]:
 
 
 __all__ = [
-    "CANONICAL_RULE", "Crash", "PlanningTestCase", "Reviewer", "condition", "crash_at", "design", "plan",
-    "planning", "review_paths", "rr", "run_ids", "serialize", "snapshot_material",
+    "CANONICAL_RULE", "Crash", "PlanningTestCase", "Registered", "Reviewer", "blob_at", "condition", "crash_at", "design",
+    "deterministic_ids", "executable_registration", "move_branch", "noncanonical_registration", "plan", "planning",
+    "plumb_commit", "raw_git",
+    "registered", "review_paths", "rr", "run_ids", "serialize", "snapshot_material", "state_entries",
 ]
