@@ -1,6 +1,6 @@
 # Review System P2 — Planning Review Gates: Integration Contract
 
-Status: `CONTRACT FROZEN / FINAL READINESS REPAIR ROUND 2 (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008; final readiness repair round 1: P2-READY-001..004 with P2-CONTRACT-004 closed again, and P2-READY-005, -006, -018, -024, -027; final readiness repair round 2: P2-READY-004 and P2-READY-029, with P2-CONTRACT-004 closed again) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT FINAL IMPLEMENTATION READINESS RE-CHECK`
+Status: `CONTRACT FROZEN / FINAL READINESS REPAIR ROUND 2 (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008; final readiness repair round 1: P2-READY-001..004 with P2-CONTRACT-004 closed again, and P2-READY-005, -006, -018, -024, -027; final readiness repair round 2: P2-READY-004 and P2-READY-029, with P2-CONTRACT-004 closed again) / FINAL IMPLEMENTATION READINESS READY (independent re-check of 6004669, §32) / ACCEPTED FOR IMPLEMENTATION / IMPLEMENTATION NOT STARTED`
 
 Runtime authority is unchanged by this document: `registry.md`, the registry-routed canonical Skills, and the live implementation and tests. This is a non-normative contract checkpoint. It freezes how P2 connects RoadmapPlan Review and PhaseEntryDesign Review to the landed P1 Review Core and to the live Roadmap operation, so that the P2 implementation is left with no choice to make. It starts no implementation and edits no authority; §26 states the authority text the implementation changes under the approval of this contract.
 
@@ -2945,8 +2945,15 @@ Checkout capability:            the canonical rule as the last attribute rule of
 Lifecycle separation:           PASS
 P1 frozen contract repair:      not required
 P2 Integration Contract:        FROZEN / FINAL READINESS REPAIR ROUND 2
+Final Implementation Readiness
+  reviewed checkpoint:          6004669460be04aaf0a1b3dbd2a6233e808025e0 — the exact contract the independent
+                                Final Implementation Readiness Re-check judged
+P2 Final Implementation Readiness:
+                                READY (independent re-check of the reviewed checkpoint)
+Verdict-recording checkpoint:   the docs-only commit on the reviewed checkpoint that adds this record; no
+                                contract-semantic change; not a reviewed contract checkpoint (below)
+P2 accepted for implementation: YES
 P2 implementation:              NOT STARTED
-P2 accepted for implementation: NO (pending independent Final Implementation Readiness Re-check)
 Candidate 7:                    RETAIN
 Architecture reopen:            No
 Architecture blocker:           None
@@ -2954,8 +2961,10 @@ HUMAN:                          None
 P3:                             NOT STARTED
 Outstanding HIGH:               0
 Outstanding MID:                0
-Status:                         READY_FOR_P2_FINAL_READINESS_RECHECK
+Status:                         READY_FOR_P2_IMPLEMENTATION
 ```
+
+**Final Implementation Readiness verdict** (non-normative record). The independent Final Implementation Readiness Re-check was performed on `6004669460be04aaf0a1b3dbd2a6233e808025e0`, the contract after final readiness repair round 2, and judged it READY: HIGH 0, MID 0, every P2-READY and P2-CONTRACT finding closed. P2 implementation had not started at verdict time. A subsequent docs-only commit, the verdict-recording checkpoint, records that verdict in this section and in the status line. It changes no contract rule, and it is not a reviewed contract checkpoint: the reviewed contract stays `6004669`. A commit cannot name itself, so the verdict-recording checkpoint is the commit on `6004669` that introduced `READY_FOR_P2_IMPLEMENTATION` into this file (`git log --format=%H -S READY_FOR_P2_IMPLEMENTATION -- REVIEW_SYSTEM_P2_INTEGRATION_CONTRACT.md`). The next P2 implementation session may take it as its live-main start baseline, after verifying that its only difference from `6004669` is this record.
 
 ## 33. Repair dispositions
 
