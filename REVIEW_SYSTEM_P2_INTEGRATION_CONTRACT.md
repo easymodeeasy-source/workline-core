@@ -1,6 +1,6 @@
 # Review System P2 — Planning Review Gates: Integration Contract
 
-Status: `CONTRACT FROZEN / ROUND 5 REPAIRED (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT CONTRACT RE-REVIEW`
+Status: `CONTRACT FROZEN / FINAL READINESS REPAIR ROUND 1 (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008; final readiness repair round 1: P2-READY-001..004 with P2-CONTRACT-004 closed again, and P2-READY-005, -006, -018, -024, -027) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT FINAL IMPLEMENTATION READINESS RE-CHECK`
 
 Runtime authority is unchanged by this document: `registry.md`, the registry-routed canonical Skills, and the live implementation and tests. This is a non-normative contract checkpoint. It freezes how P2 connects RoadmapPlan Review and PhaseEntryDesign Review to the landed P1 Review Core and to the live Roadmap operation, so that the P2 implementation is left with no choice to make. It starts no implementation and edits no authority; §26 states the authority text the implementation changes under the approval of this contract.
 
@@ -13,7 +13,11 @@ P2 scope:               1. RoadmapPlan Review
                         2. PhaseEntryDesign Review
                         3. semantic round-trip integration
 C-1 .. C-6:             CLOSED BY P2 CONTRACT (§23)
-P2-CONTRACT-001 .. 008: CLOSED (round 1: 001-004; round 2: 001, 005; round 3: 006; round 4: 007; round 5: 008; §33); cross-finding pass §34
+P2-CONTRACT-001 .. 008: CLOSED (round 1: 001-004; round 2: 001, 005; round 3: 006; round 4: 007; round 5: 008;
+                        004 closed again by the final readiness repair; §33); cross-finding pass §34
+P2-READY-001 .. 004:    CLOSED (final readiness repair round 1, §33.6)
+P2-READY-005, -006, -018, -024, -027:
+                        RESOLVED (final readiness repair round 1, §33.6)
 P3:                     NOT STARTED, and nothing here activates it
 ```
 
@@ -42,6 +46,7 @@ Where the accepted reconnaissance listed contract directions, this document name
 | round-3 repair baseline = contract under repair | `459f431c9715c5db0c50691d63f42d90b0c70513` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 | round-4 repair baseline = contract under repair | `bbdd93d38c48eddb86ce2200e27a4cc1f774a7bb` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 | round-5 repair baseline = contract under repair | `bd2e70da24bdb44b51ad7f9f9ee795e1625050c4` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
+| final readiness repair round 1 baseline = contract under repair | `a6adf8106daf2a1d3f764798dc64a00d35fe12f7` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`. The Final Implementation Readiness Check of this checkpoint raised P2-READY-001..004 (P2-READY-004 HIGH: P2-CONTRACT-004's form B is unsound) and the durable LOW items this repair folds in (§33.6); the repair changes this document only |
 
 Accepted inputs, not reopened here:
 
@@ -62,7 +67,7 @@ P3                      NOT STARTED
 
 In scope: the review-v1 path of `roadmap.create_roadmap` (RoadmapPlan Review) and of `roadmap.enter_phase` (PhaseEntryDesign Review), the semantic round trip both require, and the P2 planning commit / proof / publication boundary those two paths need to satisfy Frozen P1 R8/R9.
 
-Not implemented or activated by P2: START Review Gate; Work Formal Review runtime; Work completion Review; review-v1 `work_completed`; Work-terminal activation (`activation/work-terminal-v1.yaml` stays absent); Work-terminal Consumption totality; the P3 result-commit publication contract (`review-v1-split-v1`); P3 Class A / B / C; P3 Review-validity closure; P3 HEAD-advancement reuse; P3 stale-generation Work blocking; P3 Work commit / proof / push; P4+ learning, repair and policy systems. The planning publication contract of §18 is P2-native and activates none of them. Its publication barrier (§18.7) applies to every Workline push, legacy ones included, and refuses nothing in a history that holds no review-v1 planning registration commit: it asks nothing of the operation that pushes, only that what it publishes carries no unproven review-v1 registration.
+Not implemented or activated by P2: START Review Gate; Work Formal Review runtime; Work completion Review; review-v1 `work_completed`; Work-terminal activation (`activation/work-terminal-v1.yaml` stays absent); Work-terminal Consumption totality; the P3 result-commit publication contract (`review-v1-split-v1`); P3 Class A / B / C; P3 Review-validity closure; P3 HEAD-advancement reuse; P3 stale-generation Work blocking; P3 Work commit / proof / push; P4+ learning, repair and policy systems. The planning publication contract of §18 is P2-native and activates none of them. Its publication barrier (§18.7) applies to every Workline push, legacy ones included, and refuses nothing in a history that holds no review-v1 planning registration commit: it asks nothing of the operation that pushes, only that what it publishes carries no unproven review-v1 registration. A history in which no commit ever touched the candidate-snapshot directory is cleared by one path-limited history read that every Git the live baseline runs on answers, so a legacy push is never refused because the running Git is older than the P2 minimum (§5.7, §18.7).
 
 Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`, Related maintenance, plan exclusion with replan, START derivations, direct CREATE.
 
@@ -89,7 +94,7 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | pre-Kp currency proof | the full currency re-proof on P, with the physical projection check of the recorded registration, right before Kp is recorded and right before a recorded Kp is replayed (§15.6) |
 | registration commit | a commit that adds registration paths of a planning Run: Kp, or anyone's commit of those files (§18.7) |
 | publication barrier | the rule that no Workline push publishes a history holding a registration commit unless the committed planning proof proves that registration (§18.7, §18.8) |
-| checkout capability | the positive proof that Git reproduces canonical Review bytes in this repository and in a fresh clone (§14.5) |
+| checkout capability | the positive proof that Git reproduces canonical Review bytes in this repository and in a fresh clone: the committed and the effective attributes of every Review path are exactly form L, the one accepted form (§14.5) |
 | committed planning proof (CP) | the proof, re-run from committed objects alone, that a registered Run's Kp (its exact bytes and its meaning), Consumption and Km are exactly what its Receipt authorized; the durable basis of C-2(Km) and the only thing that clears the publication barrier (§18.8) |
 | canonical-input preflight | the pure check, before `_open`, that the request identity an explicit review-v1 invocation is about to make durable is exact P1 canonical data apart from mapping key order; a refusal begins nothing (§5.6) |
 | canonical planning writer input (W) | `CanonicalPlanningWriterInput`: the exact inputs the live Roadmap, Phase CREATE and Work CREATE writer helpers receive on the review-v1 path, computed from the canonical Candidate record alone; computed, never stored (§7.8) |
@@ -99,6 +104,10 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | recoverable Run | a matching Run that is cleanly persisted, reconstructs exactly, is not terminal and not set aside, has no registration commit, and — below generation 3 — has a current Candidate (§12.2–§12.3) |
 | recovery planning mutation | a planning mutation begun after runtime loss to continue exactly one recoverable Run; its invocation carries `recovery_of_review_run_id` (§12.4) |
 | set aside | a matching Run that a new Run does not continue (terminal or obsolete), named in the new Run's request envelope (`set_aside_runs`) and never recovered afterwards (§12.2, §12.8) |
+| committed basis | a commit's committed view (§15.4) with W's expected registration effects applied by the writer's own planned-write computation: §15.7 steps 1–2 computed on that commit. The R9 selection (§7.7) and the freeze's projected checks (§7.6) are evaluated on the committed basis of HEAD, or of the base commit B of a rebuild (§13), and never on the working tree |
+| working-tree compatibility check | the check at the freeze that the working tree and HEAD's committed view give the same declared base and, for a Phase entry, the same Work set of the Phase and the same R9 selection; a difference is `review_base_uncommitted` (§7.4) |
+| pre-freeze resume setup | how a resumed review-v1 planning mutation that has recorded no effect and started no generation mutation completes its setup: its missing discovery outcome or recovered binding is established on that same mutation, its recorded reservations are reused (§12.9) |
+| minimum Git version | Git 2.40.0, the oldest release that answers every Git question review-v1 planning and the committed planning proof ask (§5.7) |
 
 ## 4. Decision summary
 
@@ -116,12 +125,20 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | staleness | before a Receipt: terminal `stale`, nothing written; after the Receipt and before the registration: generation 4 (`open`) + Supersession in one stage, then terminal `stale`; after the registration began: `ReconcileRequired`, never `stale`; no re-review inside the operation | §13 |
 | publication barrier (P2-CONTRACT-001) | no Workline push of any operation publishes a history holding a planning registration commit unless the committed planning proof (CP) proves that Run from committed objects at that push; the existence of a Consumption or of Km, and what the destination holds, are never proof | §18.7, §18.8 |
 | C-2(Km) durable proof (P2-CONTRACT-001, round 2) | C-2(Km) = the operation's ownership checks + CP; its durable basis is the committed objects CP reads, reproducible in any clone; `publication_proof` is a runtime marker only; the barrier needs CP alone — safe history for another operation to publish ≠ a commit this planning mutation may adopt as its own | §18.2, §18.8 |
-| runtime-loss recovery (P2-CONTRACT-005) | before any new Run is reserved, canonical recovery discovery finds the matching Runs; exactly one recoverable → a recovery planning mutation (`recovery_of_review_run_id`) binds the canonical Run, task, Receipt and domain IDs and continues the same Run and task; none → a new Run that records the set-aside Runs; several, or any matching Run that is incomplete → `ReconcileRequired` | §12.1–§12.8, §21.2 |
+| runtime-loss recovery (P2-CONTRACT-005) | before any new Run is reserved, canonical recovery discovery finds the matching Runs; exactly one recoverable → a recovery planning mutation (`recovery_of_review_run_id`) binds the canonical Run, task, Receipt and domain IDs and continues the same Run and task; none → a new Run that records the set-aside Runs; several, or any matching Run that is incomplete → `ReconcileRequired` (`review_recovery_ambiguous`, `review_recovery_incomplete`) | §12.1–§12.9, §21.2 |
 | exact physical projection (P2-CONTRACT-006, round 3) | Kp's delta must be exactly E: the path set, transitions, modes and every byte — whole ledgers included — that the writer's own builders and planned-write computation produce from the committed Candidate snapshot on Kp's exact parent P; one computation and one comparison for the pre-Kp proof, C-2(Kp) and the committed planning proof; semantic equality stays separately required, and each proof is required on its own; `registration_delta_digest` is derived from the proven E | §15.7, §15.3, §15.6, §18.8, §20 |
 | canonical writer input (P2-CONTRACT-007, round 4) | on the review-v1 path the canonical Candidate is the only source of byte-affecting writer input: W is computed from the canonical Candidate record — mappings in the P1 canonical key order, sequences in Candidate order, every entry kept — and feeds the representability check, the actual registration, E, the pre-Kp proof, C-2(Kp), recovery and the committed planning proof; after the freeze the caller's plan or design never reaches a byte-producing helper; legacy is unchanged | §7.8, §7.6, §15.1, §15.7, §20 |
 | canonical-input preflight (P2-CONTRACT-008, round 5) | before `_open`, and before the request identity is compared with any pending record, review-v1 checks the request identity with the live `validate_condition` and the P1 serializer — canonical data equal to the value apart from key order, canonical bytes, read back; a failure is `review_candidate_unrepresentable` (a condition the live validator refuses keeps its live refusal) with nothing begun; the full §7.6 check still runs after `_open`; legacy unchanged | §5.6, §7.6 |
+| R9 basis (P2-READY-001) | the R9 selection and the freeze's projected checks are evaluated on the committed basis — HEAD's, or a rebuild's base commit B's, committed view with W's expected effects — never on the working tree; the freeze refuses with `review_base_uncommitted` when the working tree and HEAD give a different declared base, Work set of the Phase or R9 selection; every rebuild compares the declared base first (a difference follows the stale and base rules) and the rest of the Candidate only with the declared base equal (a difference is `ReconcileRequired`, `review_candidate_mismatch`) | §7.4, §7.6, §7.7, §13, §15.3, §18.8 |
+| pre-freeze resume (P2-READY-002) | a resumed review-v1 planning mutation that has recorded no effect and started no generation mutation completes its setup on that same mutation: discovery runs again when its outcome is not recorded, recorded reservations are reused, a recovered binding is made or checked; a new Run for which discovery now finds a recoverable Run is `ReconcileRequired` (`review_discovery_changed`), never rewritten into a recovery; before its first generation mutation a review-v1 planning mutation is abandoned on every STOP, begun or resumed, a Phase entry included; legacy unchanged | §12, §12.4, §12.5, §12.9 |
+| Phase-entry order (P2-READY-003) | argument, platform and Git version checks; the live checks up to the request identity; the preflight; the same-request and marker checks; the remaining live acceptance checks, `phase_already_expanded` included, under the live interrupted-entry rule for a pending mutation of this very request; canonical recovery discovery only with no pending planning mutation; `_open`; setup | §5.6, §11.8, §12.2, §12.7, §21, §28 |
+| error reasons (P2-READY-005) | `ReconcileRequired` gains the attribute `reason` (default `None`; `code` unchanged); every `ReconcileRequired` P2 raises carries one reason of the catalogue | §25, §25.1 |
+| `base_exact` (P2-READY-006) | removes only the independent-advancement step of the live classification; a recorded Kp classified unapplied is made only while HEAD is its `base_head`, after the pre-replay proof | §15.2, §15.6 |
+| delta record types (P2-READY-018) | every scalar of `review-planning-delta` is text of an exact form: six-character octal modes, full lowercase hexadecimal object IDs of the repository's object format, status `A` / `M` | §15.7, §16.1 |
+| authority routing (P2-READY-024) | `rules/git` owns the Git-operation rules, `skills/roadmap` the planning operation and its write scope, `skills/review` the meaning of Review records and proofs; each rule has one normative owner | §26 |
+| minimum Git (P2-READY-027) | Git 2.40.0; an explicit review-v1 invocation on an older Git stops before the lock (`review_git_unsupported`); the barrier clears a history that never touched the candidate-snapshot directory with one read every Git answers, and holds on an older Git for any other history | §5.7, §18.7 |
 | registration base (P2-CONTRACT-003) | `use_check_head` noted at the use check; Kp made on exactly its recorded parent P (`base_exact`); P = `use_check_head`, or a descendant through commits that touch no planning-owned path, with full currency on P; C-2(Kp) proves full currency on P's committed view | §13, §15.2, §15.3, §15.6, §17 |
-| checkout capability (P2-CONTRACT-004) | committed and effective attributes of Review paths must be exactly form L or form B; every existing Review record must read canonically; fail closed before the first Review record; P1 reader unchanged; legacy unchanged | §14.5, §14.6 |
+| checkout capability (P2-CONTRACT-004; closed again by P2-READY-004) | committed and effective attributes of Review paths must be exactly form L (`text` unspecified, `eol=lf`, `filter`, `ident` and `working-tree-encoding` unset); form B is withdrawn, because its reading cannot tell a real `-text` from the literal value `text=unset`, which a fresh clone converts (**Measured**); every existing Review record must read canonically; fail closed before the first Review record; P1 reader unchanged; legacy unchanged | §14.5, §14.6 |
 | not authorized | terminal `not_authorized` outcome, nothing registered, planning mutation completed | §19 |
 | reviewer | synchronous callback inside the lock; one required slot; static policy v1 | §9, §10 |
 
@@ -179,16 +196,16 @@ The request and design identities, `ROADMAP_REQUEST_VERSION` and `DESIGN_IDENTIT
 | pending record | invocation | outcome |
 | --- | --- | --- |
 | no `review_contract` (legacy) | legacy | live behaviour, unchanged |
-| no `review_contract` (legacy) | review-v1 | `ReconcileRequired` — no silent upgrade; record untouched |
-| the frozen marker pair | legacy | `ReconcileRequired` — no silent downgrade; record untouched |
+| no `review_contract` (legacy) | review-v1 | `ReconcileRequired` (`review_marker_mismatch`) — no silent upgrade; record untouched |
+| the frozen marker pair | legacy | `ReconcileRequired` (`review_marker_mismatch`) — no silent downgrade; record untouched |
 | the frozen marker pair | review-v1 | continue (resume by exact invocation) |
 | the frozen marker pair plus `recovery_of_review_run_id` (a well-formed Review Run ID) | review-v1 | continue: the recovery planning mutation is resumed by its exact recorded invocation (§12.4) |
-| the frozen marker pair plus `recovery_of_review_run_id` | legacy | `ReconcileRequired` — no silent downgrade; record untouched |
-| any other `review_contract` / `publication_contract` presence or value, a `recovery_of_review_run_id` without the marker pair, or any other added key | any | `ReconcileRequired` — unknown contract, fail closed |
+| the frozen marker pair plus `recovery_of_review_run_id` | legacy | `ReconcileRequired` (`review_marker_mismatch`) — no silent downgrade; record untouched |
+| any other `review_contract` / `publication_contract` presence or value, a `recovery_of_review_run_id` without the marker pair, or any other added key | any | `ReconcileRequired` (`review_marker_mismatch`) — unknown contract, fail closed |
 
-The check is added to the legacy entry too. It fires only for a pending record that carries a marker, which no baseline or legacy run writes, so every legacy outcome is unchanged; where it fires, the baseline would already stop the same call with `reconcile_required` through the scope overlap in `MutationController.open` (reconnaissance Q15, Measured), and now stops earlier with the same class and a precise reason.
+The check is added to the legacy entry too. It fires only for a pending record that carries a marker, which no baseline or legacy run writes, so every legacy outcome is unchanged; where it fires, the baseline would already stop the same call with `reconcile_required` through the scope overlap in `MutationController.open` (reconnaissance Q15, Measured), and now stops earlier with the same class and the reason `review_marker_mismatch`.
 
-A review-v1 invocation that finds a pending review-v1 planning mutation for its slot resumes it by that record's exact invocation, with or without the recovery key: that is normal retry, and nothing of §12 runs. Only when the slot has no pending review-v1 planning mutation does the entry run canonical recovery discovery (§12.2), before any planning mutation is begun or any ID reserved.
+A review-v1 invocation that finds a pending review-v1 planning mutation for its slot resumes it by that record's exact invocation, with or without the recovery key: that is normal retry, and canonical recovery discovery does not run at the entry. While that mutation has recorded no effect and started no generation mutation, its resume completes its setup by the pre-freeze resume setup (§12.9), which runs discovery again only where the mutation has not recorded its outcome. Only when the slot has no pending review-v1 planning mutation does the entry run canonical recovery discovery (§12.2): after the remaining live acceptance checks (§5.6 step 6), before any planning mutation is begun or any ID reserved.
 
 The canonical-input preflight (§5.6) runs before the live same-request check and before this comparison, on the current caller object, so no comparison ever serializes a caller value the canonical form cannot carry.
 
@@ -198,7 +215,7 @@ The canonical-input preflight (§5.6) runs before the live same-request check an
 
 The checkout capability (§14.5) and the readability of the existing Review namespace (§14.6) are the second applicability condition of an opted-in invocation. They read the repository's attributes and records, so they are checked under the lock — readability first at recovery discovery (§12.2), both at the freeze or the recovery setup (§12.4) — before the first Review record: a failure is `review_checkout_unsafe`, `review_checkout_unknown` or `review_namespace_unreadable`, with nothing written. At recovery discovery no planning mutation exists yet, so nothing is begun; at the freeze or the recovery setup the planning mutation is abandoned (§12). Legacy invocations check none of this and are unchanged.
 
-An opted-in invocation never falls back to the legacy path: every inability of the gate — platform, checkout capability, Review namespace, Git persistence preflight, Context unavailable, reviewer failure, proof failure — is a STOP or a terminal review outcome, never an ungated registration.
+An opted-in invocation never falls back to the legacy path: every inability of the gate — platform, Git version (§5.7), checkout capability, Review namespace, Git persistence preflight, Context unavailable, reviewer failure, proof failure — is a STOP or a terminal review outcome, never an ungated registration.
 
 ### 5.5 What is never read to decide applicability
 
@@ -241,23 +258,39 @@ On a refusal nothing exists to undo: no planning mutation (so nothing is abandon
 **Where it runs.** The review-v1 entry order:
 
 ```text
-1  §5.1 argument validation; §5.4 platform check                               (before the lock)
+1  §5.1 argument validation; §5.4 platform check; §5.7 Git version check        (before the lock)
 2  the live checks that precede the request identity, unchanged:
      Roadmap creation: the payload checks, the structure precheck
      Phase entry:      the structure precheck; the Phase, Roadmap and lifecycle states; the dependencies
-3  the request identity (the live roadmap_request_identity / design_identity), then this preflight
-4  the live same-request check (require_same_request / _require_resumable) and the marker check (§5.3);
-   without a pending review-v1 planning mutation, canonical recovery discovery (§12.2); the remaining
-   live checks (Phase entry: already expanded, Work keys, entry checks)
-5  _open: the pending planning mutation resumed by its exact recorded invocation, or a planning
+3  the request identity (the live roadmap_request_identity / design_identity)
+4  this preflight
+5  the live same-request check (require_same_request / _require_resumable) and the marker check (§5.3)
+6  the remaining live acceptance checks, unchanged (Phase entry: already expanded, at least one normal
+   Work, reserved Work keys, the explicit entry's startability, the unique entry; Roadmap creation has
+   none), under the live interrupted-entry rule below
+7  only when the slot has no pending review-v1 planning mutation: canonical recovery discovery (§12.2)
+8  _open: the pending planning mutation resumed by its exact recorded invocation, or a planning
    mutation begun (MutationController.begin) for a new Run or a recovery (§12.4)
-6  a new Run: the recovery_discovery note, the reservations, the Candidate and W, the full
-   representability check (§7.6) and the rest of the freeze (§14.4); a recovery: the recovered
-   reservations and its setup (§12.4, §12.5), with W from the committed snapshot (§7.8)
-7  the Review flow
+9  setup: a resumed planning mutation that has recorded no effect and started no generation mutation
+   completes its setup by the pre-freeze resume setup (§12.9); a new Run: the recovery_discovery note,
+   the reservations, the Candidate on the committed basis with the working-tree compatibility check
+   (§7.4, §7.7), W, the full representability check (§7.6) and the rest of the freeze (§14.4); a
+   recovery: the recovered reservations and its setup (§12.4, §12.5), with W from the committed
+   snapshot (§7.8)
+then the Review flow
 ```
 
-**Resume.** A resumed planning mutation passed the preflight when it was begun. The preflight still runs on the current caller object, because it comes before the comparison that decides whether the pending mutation is this request (step 4):
+This order is frozen for both kinds (P2-READY-003). Live Roadmap semantics decide whether the call is an admissible operation (steps 2, 5 and 6) before Review recovery decides which Run it continues (step 7).
+
+**The live interrupted-entry rule.** The live Phase-entry code takes a pending Phase entry of this Phase that is this very request for an interrupted expansion (`_pending_phase_entry`, `_require_resumable`, `roadmap.py:786-792`). On the review-v1 path that is the pending review-v1 planning mutation step 5 accepted as this request. For it, as for a live interrupted expansion, two checks of step 6 are skipped:
+- `phase_already_expanded` (`roadmap.py:793-805`), so the mutation's own applied registration stages are never taken for a finished expansion;
+- the unique-entry check (`_require_unique_entry`, `roadmap.py:812-817`).
+
+Every other check of steps 2 and 6 always runs: the structure precheck, the Phase, Roadmap and lifecycle states, the settled-lifecycle check, the dependencies, the at-least-one-normal-Work and reserved-key checks, and the explicit entry's startability (`_require_startable_entry`, `roadmap.py:811`).
+
+**No pending mutation.** With no pending planning mutation for the slot, an already expanded Phase stops at step 6 with the live `phase_already_expanded`, before canonical recovery discovery. A historical Run of that Phase is not read to answer the caller — whether it was consumed, or holds a registration commit the committed planning proof does not prove. The publication barrier keeps any such unproven registration commit out of every published history on its own (§18.7). Discovery, with its `review_recovery_incomplete` and `review_recovery_ambiguous` refusals, runs only for an admissible operation: every Roadmap creation, and a Phase entry that passed step 6.
+
+**Resume.** A resumed planning mutation passed the preflight when it was begun. The preflight still runs on the current caller object, because it comes before the comparison that decides whether the pending mutation is this request (step 5):
 
 - an unrepresentable caller → the refusal, with the pending mutation untouched;
 - a representable caller → the live comparison decides, as before.
@@ -265,6 +298,24 @@ On a refusal nothing exists to undo: no planning mutation (so nothing is abandon
 **Recovery.** Canonical recovery discovery matches Runs by the operation identity digested from I (§6.2, §12.2), so the preflight comes first. An unrepresentable caller is refused before discovery and before any recovery planning mutation, and the canonical Run is left untouched. Once a Run is recovered, the caller's values only prove the identity: the writer takes W from the committed snapshot (§7.8).
 
 **Legacy** invocations run no preflight. They keep their live outcomes, the serializer errors above included (§29 item 7).
+
+### 5.7 Minimum Git version
+
+**Frozen** (P2-READY-027). P2's review-v1 planning requires Git 2.40.0 or newer: the oldest release that answers every Git question P2 asks.
+- **The newest Git feature P2 needs** is `git check-attr --source=<tree-ish>`, which the committed evaluation of the checkout capability runs (§14.5). The release notes of Git 2.40.0 record `check-attr` learning to read `.gitattributes` from a given tree-ish.
+- **Every other Git feature P2 relies on is older:**
+  - `git log --diff-merges=<how>` of the add-history read (§12.2, §18.7), in the release notes of 2.31.0;
+  - `GIT_CONFIG_GLOBAL` of the isolated attribute evaluation, 2.32.0;
+  - SHA-256 repository support, whose final leg landed in 2.29.0;
+  - `check-attr --stdin -z`, `diff-tree`, `cat-file`, `ls-tree`, `hash-object --no-filters`, `rev-list --full-history` and `commit --only`, all long present.
+  - **Measured** (§31) with Git for Windows 2.54.0.
+- **Object format.** It needs no command: a repository's object format is the length of its full object IDs — 40 hexadecimal characters for SHA-1, 64 for SHA-256, the forms `gitcmd` accepts (`gitcmd.py:17-18`).
+
+Frozen behaviour:
+
+- **The gate.** The running Git's version is read once with `git --version`, as its first three numeric components (`git version 2.54.0.windows.1` gives 2.54.0). An explicit review-v1 invocation stops at §5.6 step 1, before the lock, with `StopError` code `review_git_unsupported` when that version is older than 2.40.0 or the version text does not parse. Nothing is begun: no lock, no mutation record, no Review record, no write. A pending planning mutation of the slot is left exactly as it is, and continues once a supported Git runs it.
+- **Legacy invocations** check nothing here and are refused by nothing here.
+- **The publication barrier** needs the minimum only where a history can hold a planning registration (§18.7). A history in which no commit ever touched `.workline/review/candidate-snapshots/` is cleared by one `git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/` read, which every Git the live baseline runs on answers. Any other history needs the committed planning proof. On an older Git, or one whose version text does not parse, the barrier holds: `review_publication_barrier`, the failing item naming the Git version. An unknown Git is never a clear barrier.
 
 ## 6. Identities
 
@@ -338,7 +389,7 @@ declared_base: <kind-specific: §7.4>
 - CandidateSnapshot (P1 schema, snapshot mode) at `.workline/review/candidate-snapshots/<candidate_hash>.yaml`: `{candidate_hash, reconstruction_mode: snapshot, projection_semantics_version, material: <candidate record>, builder: null}`.
 - `candidate_material_digest` = SHA-256 of the snapshot record's canonical bytes (`ReviewStore.candidate_material_digest`).
 - Reconstruction mode: `snapshot`. `builder_v1` is not used: its inputs (the request and the reserved IDs) live only in the runtime record, which is not clone-safe.
-- Reconstruction on resume: from the planning invocation (`request` / `design`), the planning mutation's reserved IDs (for a recovery planning mutation, the IDs bound from the snapshot, §12.5) and the declared base recomputed under the lock on the committed view of the base commit that currency is evaluated on (§7.4, §13). The rebuilt record must digest to the Run's `candidate_hash` and equal the stored snapshot's `material`; it is compared, never written from — the writer takes W from the stored snapshot (§7.8). A different declared base is staleness or, once the registration began, reconciliation (§13); any other difference is `ReconcileRequired`.
+- Reconstruction on resume: from the planning invocation (`request` / `design`), the planning mutation's reserved IDs (for a recovery planning mutation, the IDs bound from the snapshot, §12.5), the declared base recomputed under the lock on the committed view of the base commit B that currency is evaluated on (§7.4, §13), and the R9 selection recomputed on the committed basis of B (§7.7). The declared base is compared first: a different declared base is staleness or, once the registration began, reconciliation (§13 item 3). Only with the declared base equal is the rest compared: the rebuilt record must digest to the Run's `candidate_hash` and equal the stored snapshot's `material`, and any other difference is `ReconcileRequired` (reason `review_candidate_mismatch`, §13 item 4). The rebuilt record is compared, never written from — the writer takes W from the stored snapshot (§7.8).
 - After runtime loss the planning mutation's reservations are gone, but the Candidate is not: the committed snapshot holds the reviewed content with every reserved domain ID, and the Run's records hold the Run and task IDs. The same logical invocation recovers them (§12): discovery, then a recovery planning mutation that binds exactly those IDs and continues the same Run and task. A fresh Candidate (new reserved IDs, new `candidate_hash`, new Run) is built only when no matching Run is recoverable (§12.8), and a matching Run that cannot be shown whole stops the call instead of being replaced (§12.3). A registration commit whose Run has no CP-proven Consumption is never recovered and never bypassed: the publication barrier keeps it unpublished (§18.7, §21.2).
 
 ### 7.2 RoadmapPlan content (`normalize_candidate`)
@@ -412,7 +463,7 @@ A condition is recorded as `serialize.canonical_data` gives it: keys in the P1 c
 
 ### 7.4 Declared base
 
-**Frozen.** Computed under the lock on the committed view of HEAD (§3, §15.4) — at the freeze HEAD is `review_binding.head` — never on the working tree: the registration is committed on a commit, and the currency that authorizes it is that commit's (§13). Part of the Candidate and so of `candidate_hash` (Candidate 7 §4.1: "reviewed artifact identity plus declared base/context identity"). An entity the declared base names that the committed view does not hold (a Phase or Work present only in the working tree) → at the freeze `ValidationError` code `review_base_uncommitted`, before any Review record, planning abandoned; at any subsequent evaluation, a declared-base difference (§13). The live preconditions keep reading the working tree, unchanged; a working-tree-only change of a declared-base fact is not part of the base until it is committed.
+**Frozen.** Computed under the lock on the committed view of HEAD (§3, §15.4) — at the freeze HEAD is `review_binding.head` — never on the working tree: the registration is committed on a commit, and the currency that authorizes it is that commit's (§13). Part of the Candidate and so of `candidate_hash` (Candidate 7 §4.1: "reviewed artifact identity plus declared base/context identity"). The live preconditions keep reading the working tree, unchanged. A working-tree-only change of a declared-base fact is never part of the base, and the freeze refuses to review while one exists (the working-tree compatibility check below). At every evaluation after the freeze, a declared-base difference is decided by §13.
 
 ```text
 RoadmapPlan:
@@ -428,6 +479,20 @@ PhaseEntryDesign:
     - {id, phase_id, state}
 ```
 
+**Working-tree compatibility check** (P2-READY-001). At the freeze, while the Candidate is built (§14.4 step 2) and before any Review record, review-v1 proves that no uncommitted change alters a fact the Candidate is derived from. The same production `ProjectView` code computes each of these twice — on the working tree (`ProjectView.load(store)`, the view the live preconditions read) and on HEAD's committed view (§15.4):
+
+- the declared base above;
+- PhaseEntryDesign: the Work set of the Phase (`phase_works`, the fact of the live "no Work" precondition);
+- PhaseEntryDesign: the R9 selection (§7.7) — on the committed basis of HEAD, and on the working tree with the same expected effects applied (`ProjectView.load(store).with_effects(...)`, used for this comparison and nowhere else).
+
+The two sides must be equal; otherwise `ValidationError` code `review_base_uncommitted`, before any Review record, and the planning mutation is abandoned (§12). An entity the declared base names that the committed view does not hold (a Phase or Work present only in the working tree) is one such difference.
+
+- **What it covers.** Both sides are `ProjectView`'s reading of the same canonical files — the entity files, `relations/roadmap.yaml`, `relations/related.yaml` and `events/events.jsonl` — so the comparison covers every file these facts are derived from. An uncommitted change that alters a compared fact is refused: a change to the Phase or Roadmap entity, to a Work the design names, to a relation, or to a lifecycle event of any of them (a `phase_resumed` of a held Phase, a predecessor's `work_completed`).
+- **What it does not cover.** An uncommitted change that alters no compared fact — another Roadmap's event, a file no compared fact reads — leaves the Candidate exactly as HEAD gives it, and is not refused. No whole-working-tree cleanliness is required.
+- **What the working tree is for.** It is checked for safety only, and is never the semantic basis of the Candidate: the Candidate is derived from HEAD's committed view and, for R9, from the committed basis (§7.7).
+
+`review_base_uncommitted` therefore has one meaning: a fact the review would rest on is not committed.
+
 ### 7.5 Excluded as presentation or runtime material
 
 Display numbers (`R-xx`, `P-xx`, `W-xx`), commit messages, frontmatter layout and key order, ledger file order and whole-file rendering, timestamps, mutation IDs, lock holder, Git commits and branch, the `entry` field as such (the canonical first Work stands for its meaning, §7.7), filesystem enumeration order. The bytes that carry display and layout are never reviewed as meaning, and they are not free: Kp must hold exactly the expected physical projection (§15.7), which the pre-Kp proof (§15.6 item 6), C-2(Kp) (§15.3 P3) and the committed planning proof (§18.8 CP5) require. A layout the reader accepts with the same meaning is a physical mismatch. The key order of a caller-supplied mapping (a Related condition) is likewise no reviewed meaning: the reviewed condition is the mapping value. Once the Candidate is frozen, its canonical representation is what the writer receives (§7.8), so it decides the bytes without adding anything to what was reviewed.
@@ -436,8 +501,8 @@ Display numbers (`R-xx`, `P-xx`, `W-xx`), commit messages, frontmatter layout an
 
 **Frozen.** At the freeze, after every reservation and the live payload and structure refusals, before any Review record:
 
-1. the expected effects, built from W (§7.8) — computed from the canonical Candidate record, never from the caller's plan or design — by the writer's own builders: RoadmapPlan: the Roadmap `write_file` effect exactly as `_create_roadmap` builds it (`roadmap.py:478-486`) plus the `decide_phases` effects; PhaseEntryDesign: the three stages' effects built by the registration core's own effect builder (`create._registration_effects` with `_allocated_displays`, counts accumulating across stages, the reserved relation and Related IDs) — reused, or extracted as pure functions with no behaviour change;
-2. `projected = ProjectView.load(store).with_effects(expected effects)`;
+1. the expected effects, built from W (§7.8) — computed from the canonical Candidate record, never from the caller's plan or design — by the writer's own builders, exactly as §15.7 step 2 builds them on HEAD: RoadmapPlan: the Roadmap `write_file` effect exactly as `_create_roadmap` builds it (`roadmap.py:478-486`) plus the `decide_phases` effects; PhaseEntryDesign: the three stages' effects built by the registration core's own effect builder (`create._registration_effects` with `_allocated_displays`, counts accumulating across stages, the reserved relation and Related IDs) — reused, or extracted as pure functions with no behaviour change;
+2. `projected` = the committed basis of HEAD (§3; P2-READY-001): HEAD's committed view (§15.4) with those effects applied by the writer's own planned-write computation, i.e. `ProjectView.load` over the scratch directory of §15.7 steps 1–2 computed on HEAD. The working tree is not the basis; the working-tree compatibility check (§7.4) proves it gives the same facts;
 3. `validate_structure(projected) == []`;
 4. `adapter.normalize_persisted(adapter.load_persisted(result identity, projected))` equals `adapter.normalize_candidate(...)` exactly (projection identity);
 5. PhaseEntryDesign: R9 (§7.7) evaluated on `projected`.
@@ -446,13 +511,19 @@ Every caller value the Candidate takes has passed the canonical-input preflight 
 
 Failure of 3 → the live refusal (`ValidationError` code `postcheck_failed`); of 4 → `ValidationError` code `review_candidate_unrepresentable`; of 5 → the R9 codes of §7.7. Every one happens after `_open` and before any Review record or domain effect, and the planning mutation is abandoned (§12); a refusal of the canonical-input preflight comes before `_open` and begins nothing (§5.6). Nothing is normalized away to make it pass: a Roadmap name with a trailing space, a `## heading` line injected into a section, a CR or CRLF in any text, U+2028 in a name — every loss the reconnaissance measured (§10.2 there) — is refused here, and a lone CR can therefore never strand a review-v1 run (reconnaissance §17 item 1).
 
-This check predicts the working tree with the same W and the same effect builders the expected physical projection uses (§7.8, §15.7 step 2). It is not the persisted proof, which is over the committed result, physically and semantically (§15.3, §15.7).
+This check predicts the committed result on HEAD with the same W, the same effect builders and the same planned-write computation the expected physical projection uses (§7.8, §15.7 steps 1–2), and the working-tree compatibility check (§7.4) proves that the working tree agrees on every fact the Candidate is derived from. It is not the persisted proof, which is over the committed result, physically and semantically (§15.3, §15.7).
 
 ### 7.7 R9 canonical self-selection
 
 **Frozen P1** R9 §4, §11 as repaired: the rule belongs to Roadmap authority, the adapter only verifies it, legacy is unchanged.
 
-**Frozen.** Roadmap-owned code evaluates, on the projected canonical view of §7.6 (all new Works are in the Phase, which held no Work before):
+**Frozen.** Roadmap-owned code evaluates the selection on the committed basis only (§3; P2-READY-001), never on the working tree (all new Works are in the Phase, which held no Work before):
+- at the freeze, on the projected view of §7.6: HEAD's committed view with W's expected effects;
+- in every rebuild, on the committed view of the base commit B with W's expected effects (§13);
+- in P8/P9 and CP6, on the committed view of Kp, which P3 and CP5 prove to be P with exactly E;
+- in the working-tree round trip, on HEAD's committed basis (§15.1 step 2).
+
+The selection is:
 
 ```text
 startable = projected.startable_works(phase_id)
@@ -472,7 +543,7 @@ selection = none        when startable is empty
 | none | none startable | valid; `canonical_first_work = null` |
 | A | none startable | refused by the live `_require_startable_entry` before `_open`, as today |
 
-The rule applies to review-v1 invocations only; `tests/helpers.simple_entry`, which relies on the legacy acceptance of an explicit entry among equals, is unaffected. The adapter recomputes the selection on the committed view (§15.3 P9) and never decides it.
+The rule applies to review-v1 invocations only; `tests/helpers.simple_entry`, which relies on the legacy acceptance of an explicit entry among equals, is unaffected. The adapter recomputes the selection on the committed view (§15.3 P9) and never decides it. The live `_require_startable_entry` and `_require_unique_entry` still run on the working tree before `_open`, as live admissibility checks (§5.6 step 6). At the freeze, the working-tree compatibility check (§7.4) makes the working tree and the committed basis give the same selection, so a frozen Candidate never rests on a selection the committed basis does not give.
 
 ### 7.8 The writer hand-off: `CanonicalPlanningWriterInput`
 
@@ -482,7 +553,7 @@ The rule applies to review-v1 invocations only; `tests/helpers.simple_entry`, wh
 
 **Source record.** W is computed from the Candidate record in its canonical form, never from an in-memory mapping that merely digests to the same `candidate_hash`:
 
-- before the snapshot is written (the freeze, §7.6): `serialize.canonical_data` of the Candidate record — the record whose canonical text becomes the snapshot's `material`;
+- before the snapshot is written (the freeze, §7.6): `serialize.canonical_data` of the Candidate record — the record whose canonical text becomes the snapshot's `material`. W reads no part of `canonical_first_work`, which the writer does not take (below). At the freeze, W is therefore computed from the record before the R9 selection is added to it, since §7.7 evaluates the selection on the effects W gives; adding the selection changes no W;
 - afterwards (the actual registration, the pre-Kp proof, C-2(Kp), recovery, the committed planning proof, a fresh clone): the snapshot's `material` as the P1 strict reader returns it — `ReviewStore.read_candidate_snapshot` in the working tree, `serialize.parse_canonical` over the committed blob (§18.8).
 
 The two are the same data in the same key order: `parse_canonical` accepts only the canonical rendering of the record it returns (`review/serialize.py:135-173`; **Measured**, §31). So the hand-off before the write and after the read is the same W.
@@ -565,7 +636,7 @@ Decisions on each candidate input (task §18):
 | projection schema / version | `projection_semantics_version` |
 | review kind | `review_kind` |
 | Git persistence semantics | `git_persistence` |
-| checkout semantics of Review paths (attributes, line endings) | `checkout_capability`: the capability contract of §14.5 (Frozen P1 R6 §6 / R11 §10 name attributes and line-ending conversion as bound Git semantics). Which of its two forms a repository uses is not bound: both reproduce the canonical bytes exactly |
+| checkout semantics of Review paths (attributes, line endings) | `checkout_capability`: the capability contract of §14.5 (Frozen P1 R6 §6 / R11 §10 name attributes and line-ending conversion as bound Git semantics), whose one accepted form is form L (P2-READY-004) |
 | timestamps, lock IDs, provider job handles, mutation `updated_at`, runtime material | never |
 
 ### 8.1 Loader identity
@@ -673,6 +744,13 @@ The TaskInput (P1 schema) at `.workline/review/task-inputs/<task_id>.yaml`: `tas
 - the operation binding holds (§11.5); Candidate, Context and Policy are current (§13);
 - the `review` argument's `reviewer_identity` and `reviewer_version` equal the accepted descriptor's, else `StopError` code `review_reviewer_mismatch` and no call.
 
+A failed check stops with no call and the planning mutation pending (P2-READY-005):
+- the first → `ReconcileRequired` (reason `review_chain_invalid`);
+- the second → the P1 `review_not_persisted` STOP;
+- the third or fourth → `ReconcileRequired` (reason `review_task_invalid`);
+- the fifth → `ReconcileRequired` (reason `review_binding_moved`), or by currency: stale before a Receipt (§13.2), or a Candidate mismatch (`review_candidate_mismatch`, §13 item 4);
+- the last → `review_reviewer_mismatch`.
+
 The task object is rebuilt from the stored TaskInput, never from memory. So the external launch happens only after Candidate, TaskInput and the accepted generation are persisted in local Git (Frozen P1 R3 §3, §10). The same rules hold when a recovery planning mutation launches the task after runtime loss (§12.7): the callback then receives exactly the original `task_id`, `task_slot`, `task_kind`, `review_kind`, request envelope, `request_digest`, `candidate_hash`, `review_context_hash` and `effective_policy_hash`, and runs only for the accepted `reviewer_identity` and `reviewer_version`. No provider job handle is needed: the reviewer is synchronous.
 
 ### 10.4 Return validation, failures, retry
@@ -687,8 +765,8 @@ The task object is rebuilt from the stored TaskInput, never from memory. So the 
 | valid report | settled through generation 2 (§10.5) |
 | next run while generation 1 is still the latest | the same `task_id` is launched again from the stored TaskInput — by the resumed planning mutation, or after runtime loss by a recovery planning mutation (§12.7); no new task ID is ever reserved for it (Frozen P1 R2 §5, R3 §4) |
 | duplicate: generation 2 already settles the task with the same `result_digest` | `gate.validate_settlement` returns the descriptor; idempotent (P1 behaviour; the P2 launch rule of §10.3 never launches a settled task, so the flow itself cannot produce one) |
-| conflict: a different `result_digest` for a settled task | `review_callback_conflict` (P1), reconcile |
-| unknown: a task the Run never accepted, or another reviewer | `review_callback_unknown` (P1) |
+| conflict: a different `result_digest` for a settled task | `review_callback_conflict` (P1 `ValidationError`); nothing settled; the planning mutation pending |
+| unknown: a task the Run never accepted, or another reviewer | `review_callback_unknown` (P1 `ValidationError`); nothing settled; the planning mutation pending |
 
 A result held only in process memory is lost on a crash and the same task is launched again; the runtime copy (§10.5) is never used to skip the reviewer.
 
@@ -788,7 +866,7 @@ Every path is known before the mutation begins (§6.3), so no generation mutatio
 
 ### 11.5 Operation binding (branch and base across mutations)
 
-**Frozen.** At the end of the freeze the planning mutation records the note `review_binding = {branch: <full ref of HEAD's branch>, head: <HEAD commit>}`. "The binding holds" means: HEAD is on exactly that branch (full ref) and HEAD's history holds `head` (`gitcmd.descends_from`). It is checked before each generation mutation starts, before each reviewer launch, at the use check, and before the planning mutation records each of its post-Review stages (registration, Kp, Consumption, Km, publication). Not holding → `ReconcileRequired`, nothing replayed, recorded, committed or pushed; returning to the branch continues. Inside each mutation the live rules apply unchanged: a generation mutation's `create_file` stage carries `decided_on`, and its commit names that branch (`_bind_decision`).
+**Frozen.** At the end of the freeze the planning mutation records the note `review_binding = {branch: <full ref of HEAD's branch>, head: <HEAD commit>}`. "The binding holds" means: HEAD is on exactly that branch (full ref) and HEAD's history holds `head` (`gitcmd.descends_from`). It is checked before each generation mutation starts, before each reviewer launch, at the use check, and before the planning mutation records each of its post-Review stages (registration, Kp, Consumption, Km, publication). Not holding → `ReconcileRequired` (reason `review_binding_moved`), nothing replayed, recorded, committed or pushed; returning to the branch continues. Inside each mutation the live rules apply unchanged: a generation mutation's `create_file` stage carries `decided_on`, and its commit names that branch (`_bind_decision`).
 
 ### 11.6 Content, commits and the transition state machine
 
@@ -810,9 +888,9 @@ G1 accept -> G2 settle -> G3 seal                    sealed: the Receipt is used
 G1 accept -> G2 settle -> G3 seal -> G4 invalidate   unsealed again: the Receipt superseded; terminal
 ```
 
-Generation 3 is the only seal, and generation 4 is the last generation a P2 Run ever has: no P2 path writes generation 5, seals again, or starts generation 4 once a registration stage is recorded (§11.10, §13.4). A transition started in any other state, a generation whose number the helper computes differently from this table, or a chain of any other shape is `ReconcileRequired`.
+Generation 3 is the only seal, and generation 4 is the last generation a P2 Run ever has: no P2 path writes generation 5, seals again, or starts generation 4 once a registration stage is recorded (§11.10, §13.4). A transition started in any other state, a generation whose number the helper computes differently from this table, or a chain of any other shape is `ReconcileRequired` (reason `review_chain_invalid`).
 
-Before recording the stage: `gate.require_committable` and the Git persistence preflight (§14.3, the checkout capability of §14.5 included) on its paths. Then `apply()`, then Git stage `review-generation-commit`: exactly one `git_commit` of the stage's paths with the planning commit primitive (§15.2), message `chore(workline): record review generation <N> of <run_id>`, commit-only, never a push. Then `gate.require_persisted(paths)` and the blob check (HEAD blob == canonical bytes, mode `100644`). Only then `complete()`. Generation commits stay local until a push from that branch carries them as history (they add no registration, so the publication barrier never concerns them, §18.7); the reviewer launch needs only the local Git boundary (Frozen P1 R3 §10: remote-less Projects remain valid).
+Before recording the stage: `gate.require_committable` and the Git persistence preflight (§14.3, the checkout capability of §14.5 included) on its paths. Then `apply()`, then Git stage `review-generation-commit`: exactly one `git_commit` of the stage's paths with the planning commit primitive (§15.2), message `chore(workline): record review generation <N> of <run_id>`, commit-only, never a push. Then `gate.require_persisted(paths)` and the blob check (HEAD blob == canonical bytes, mode `100644`); a failure is the P1 `review_not_persisted` STOP, as at the use check (§17 item 6), with the generation mutation pending. Only then `complete()`. Generation commits stay local until a push from that branch carries them as history (they add no registration, so the publication barrier never concerns them, §18.7); the reviewer launch needs only the local Git boundary (Frozen P1 R3 §10: remote-less Projects remain valid).
 
 #### 11.6.1 Generation 4 and the Supersession
 
@@ -846,14 +924,18 @@ A generation mutation is complete after its commit and persistence proof. Its ru
 **Frozen.**
 
 ```text
-1. live entry checks up to the request identity; the canonical-input preflight (§5.6); the same-request and
-   marker checks (§5.3); the remaining live entry checks
+1. §5.6 steps 1-6: the argument, platform and Git version checks; the live checks up to the request identity;
+   the canonical-input preflight; the same-request and marker checks (§5.3); the remaining live acceptance
+   checks, under the live interrupted-entry rule
 2. a pending review-v1 planning mutation for the slot -> resumed by its exact recorded invocation (live `_open`),
-   with or without recovery_of_review_run_id; none -> canonical recovery discovery (§12.2), before anything is begun:
+   with or without recovery_of_review_run_id; while it has recorded no effect and started no generation
+   mutation, it completes its setup by the pre-freeze resume setup (§12.9); none -> canonical recovery
+   discovery (§12.2), before anything is begun:
      exactly one recoverable Run              -> a recovery planning mutation is begun; it binds its recovered
                                                  reservations before anything else (§12.4, §12.5)
      no recoverable Run, nothing incomplete   -> a planning mutation for a new Run is begun (§12.8)
-     several recoverable, or any incomplete   -> ReconcileRequired, nothing begun
+     several recoverable, or any incomplete   -> ReconcileRequired (review_recovery_ambiguous,
+                                                 review_recovery_incomplete), nothing begun
 3. when the planning mutation has reserved or recovered a Run:
      pending = gate.pending_generation_mutations(store, run_id)
      none                                          -> continue
@@ -866,10 +948,13 @@ A generation mutation is complete after its commit and persistence proof. Its ru
                                                                             latest when that gate already holds exactly
                                                                             its recorded bytes, and its transition the
                                                                             one §11.6 allows there (else
-                                                                            ReconcileRequired); then apply, Git stage,
-                                                                            persistence proof, complete()
-     exactly one bound to anything else            -> ReconcileRequired (conflicting owner)
-     more than one                                 -> ReconcileRequired (the helper's review_generation_conflict)
+                                                                            ReconcileRequired, reason
+                                                                            review_chain_invalid); then apply, Git
+                                                                            stage, persistence proof, complete()
+     exactly one bound to anything else            -> ReconcileRequired (review_generation_owner_conflict: a
+                                                      conflicting owner)
+     more than one                                 -> ReconcileRequired (review_generation_owner_conflict: the
+                                                      condition the helper reports as review_generation_conflict)
 4. the validated chain decides what the planning mutation does next:
      no chain                              -> the freeze (§14.4), then generation mutation 1 (a new Run only)
      latest 1                              -> the reviewer launch (§10.3; stale -> terminal, §13.2), then
@@ -879,7 +964,7 @@ A generation mutation is complete after its commit and persistence proof. Its ru
      latest 3, no registration stage       -> the use check (§17); stale -> generation mutation 4 (§13.3)
      latest 3, a registration stage        -> the registration flow from its record (§15.1)
      latest 4                              -> terminal stale (§13.3), nothing evaluated again; with a registration
-                                              stage recorded -> ReconcileRequired
+                                              stage recorded -> ReconcileRequired (review_chain_invalid)
 5. only for the generation mutation step 4 names does gate.next_generation_scope compute N+1
 ```
 
@@ -894,7 +979,7 @@ The planning mutation is resumed first, its pending generation mutation second, 
 
 ### 11.10 Generation mutations and the registration never coexist
 
-The planning mutation records no effect before the use check, and generation mutations — generation mutation 4 included — exist only before its first registration stage is recorded. Once a registration stage is recorded, a pending generation mutation of its Run is a conflict (`ReconcileRequired`), and generation mutation 4 is never started (§13.4).
+The planning mutation records no effect before the use check, and generation mutations — generation mutation 4 included — exist only before its first registration stage is recorded. Once a registration stage is recorded, a pending generation mutation of its Run is a conflict (`ReconcileRequired`, reason `review_generation_owner_conflict`), and generation mutation 4 is never started (§13.4).
 
 ### 11.11 The planning mutation disappears
 
@@ -917,7 +1002,7 @@ The planning mutation records no effect before the use check, and generation mut
 
 | state | condition | behaviour |
 | --- | --- | --- |
-| may be abandoned | no generation mutation of its Run has started (no gate chain for the Run, no pending generation mutation bound to it) — for a recovery planning mutation, none started by it (§12.4) — no effect recorded, and the live path would abandon it too: a Roadmap creation begun or resumed, a Phase entry begun by this run (a resumed Phase entry is never abandoned, `skills/roadmap` Phase entry) | a STOP abandons it (live `abandon_on_stop`): every pre-Review refusal (§7.6, §7.7, §14), a Context that cannot be computed, a reservation or note failure |
+| may be abandoned | no effect recorded and no generation mutation started, whether this run began it or resumed it, a Phase entry included (P2-READY-002). "Started" is decided per kind. A new Run: a gate chain exists for its Run, or a pending generation mutation is bound to it. A recovery planning mutation: a pending generation mutation is bound to it, or its Run's chain has a generation after the one recorded with its binding (§12.5) | a STOP of any class abandons it (live `abandon_on_stop`): every pre-Review refusal (§7.4, §7.6, §7.7, §14), every refusal of the pre-freeze resume setup (§12.9), a Context that cannot be computed, a reservation or note failure. The live rule that a resumed Phase entry is never abandoned (`skills/roadmap` Phase entry, `roadmap.py:823-828`) keeps an expansion whose reserved IDs and recorded effects abandoning would strand. A review-v1 planning mutation in this state has recorded no effect, and its reservations and notes were never canonical, so review-v1 abandons it; legacy Phase entry keeps the live rule |
 | must remain pending | from the start of generation mutation 1 — for a recovery planning mutation, from the start of its first generation mutation — until a terminal outcome | any STOP (reviewer failure, invalid report, binding moved, proof failure, reconcile) leaves it pending; the next invocation with the same request resumes it |
 | completed without registration | `not_authorized` (§19.1); `stale` before a Receipt exists (§13.2); `stale` after the Receipt, only once generation 4 and the Supersession are committed and proven persisted (§13.3) | `complete()` with no effect recorded; `ReviewedPlanningResult` returned |
 | completed with registration | publication done (remote-less: C-2(Km) passed, §18.2) and the live structure postcheck passed | `complete()`; `ReviewedPlanningResult(status registered)` |
@@ -930,13 +1015,13 @@ The way out of an operational failure is to run the same request again with a wo
 
 **Frozen.** The runtime planning mutation is not clone-safe; the Review Run it started is. Runtime loss — a fresh clone, or `.workline/runtime/**` removed — takes the planning mutation's record, its reservations and notes, the runtime report copies and every pending generation mutation. It never takes the committed Run records. Frozen P1 R2 §5, R3 §4 and R12 §4 require that the same logical accepted task then continues under its own `task_id` after exact reconstruction, and that no replacement task ID is allocated for it. So a review-v1 invocation whose slot has no pending review-v1 planning mutation first runs canonical recovery discovery (§12.2) and continues the one recoverable Run (§12.4); only when there is none does it start a new Run (§12.8). Round 1's rule "runtime loss requires a fresh Candidate and a new Run" is withdrawn. Nothing the writer needs is lost with the runtime: W comes from the committed snapshot (§7.8).
 
-Normal retry stays separate: while the planning mutation's record exists, the same request resumes it by its exact invocation (§5.3, §11.8), and discovery never runs.
+Normal retry stays separate: while the planning mutation's record exists, the same request resumes it by its exact invocation (§5.3, §11.8), and discovery does not run at the entry. A resumed mutation that has not recorded its discovery outcome or its recovered binding runs discovery again only inside its pre-freeze resume setup, and only before its first generation mutation (§12.9).
 
 "The same logical invocation" is exact: the same planning kind and the same `operation_identity` — `<operation>:<request_digest>` (§6.2), which binds the exact request or design semantics. Nothing else identifies it: not a name, a display number, a timestamp, a branch, an enumeration order or a Run ID's position among others.
 
 ### 12.2 Canonical recovery discovery
 
-**Frozen.** Run under the lock, after the live entry checks, the canonical-input preflight (§5.6) and §5.3, only when the slot has no pending review-v1 planning mutation, and before any planning mutation is begun or any ID reserved. It reads HEAD's committed objects and the working tree through the P1 reader; no runtime record takes part.
+**Frozen.** Run under the lock at §5.6 step 7, only when the slot has no pending review-v1 planning mutation, and before any planning mutation is begun or any ID reserved. It runs after the live entry checks, the canonical-input preflight, §5.3 and the remaining live acceptance checks, so only for an admissible operation (P2-READY-003). The pre-freeze resume setup runs the same steps for a pending planning mutation that has not recorded their outcome (§12.9), and there too it begins nothing. It reads HEAD's committed objects and the working tree through the P1 reader; no runtime record takes part.
 
 1. **Readability.** §14.6 over the working tree; a failure → `review_namespace_unreadable`, nothing begun.
 2. **Matching Runs.** Every Run whose generation 1 — added anywhere in HEAD's history (read as in §18.7: `git log --full-history --no-renames --diff-merges=combined --diff-filter=A --name-only -z HEAD -- .workline/review/gates/`, each generation-1 blob parsed by the P1 reader) or present in the working tree (`ReviewStore.run_ids()`, `read_gate(run, 1)`) — carries this invocation's `review_kind` and `operation_identity`. No other Run is read further.
@@ -950,7 +1035,7 @@ Normal retry stays separate: while the planning mutation's record exists, the sa
 | c | latest generation 2, not authorizing (§10.6: some required task settled `failed`, or `obligation_digest` is not the digest of the empty obligations record) | terminal `not_authorized` |
 | d | named in the `set_aside_runs` of another matching Run's committed request envelope | `set_aside` |
 | e | reconstruction (§12.3) fails | `ReconcileRequired` (reason `review_recovery_incomplete`), nothing begun |
-| f | latest generation 1, or latest generation 2 authorizing | currency (§13) on HEAD, with the Candidate rebuilt from this invocation, the snapshot's reserved IDs and HEAD's committed declared base: current → **recoverable**; stale → obsolete, reason = the §13 reason code; any other difference (§13 item 3) → `ReconcileRequired` (reason `review_recovery_incomplete`), nothing begun |
+| f | latest generation 1, or latest generation 2 authorizing | currency (§13) on HEAD, in its order: the Context, the Policy, the declared base on HEAD's committed view compared with the snapshot's, then — only with the declared base equal — the Candidate rebuilt from this invocation, the snapshot's reserved IDs, that declared base and the R9 selection on HEAD's committed basis (§7.7): current → **recoverable**; stale → obsolete, reason = the §13 reason code; any other difference (§13 item 4) → `ReconcileRequired` (reason `review_recovery_incomplete`), nothing begun |
 | g | latest generation 3 (sealed, not in row b) | **recoverable**; its currency is decided by the recovered use check (§17), which invalidates it when stale (§13.3) |
 
 An unavailable Context in row f is the `review_context_unavailable` STOP (§8), never a stale reason.
@@ -988,22 +1073,26 @@ A failure is row e: missing or mismatching accepted material is never answered w
 **Frozen.**
 
 - **Invocation.** The review-v1 invocation of §5.2 plus exactly one key: `"recovery_of_review_run_id": <the recovered Run ID>`. It is begun through the live `_open` with that invocation, after the canonical-input preflight passed on the recovering caller's request identity (§5.6), so it has its own new mutation ID; it never takes the lost mutation's ID and never claims that mutation's records. §5.3 accepts it; §18.5 treats it as a planning mutation.
-- **Binding.** Right after `_open` returns — `_open` records only the live pre-existing-dirty snapshot note — and before any reservation, any other note and any effect, §12.2 steps 3–4 are evaluated again for its Run under the lock (the Run must still be the one recoverable Run), and the recovered reservations are bound (§12.5) in one durable save. A resumed recovery planning mutation checks again that its bound reservations are exactly the canonical ones.
+- **Binding.** Right after `_open` returns — `_open` records only the live pre-existing-dirty snapshot note — and before any reservation, any other note and any effect, §12.2 steps 3–4 are evaluated again for its Run under the lock. The Run must still be the one recoverable Run; otherwise `ReconcileRequired` (reason `review_discovery_changed`), and the mutation is abandoned. The recovered reservations are then bound (§12.5), in one durable save with the note `recovery_binding`. On a resume:
+  - a recovery planning mutation without a recorded binding binds now, by the pre-freeze resume setup (§12.9);
+  - one with a recorded binding checks again that its bound reservations are exactly the canonical ones — otherwise `ReconcileRequired` (reason `review_recovery_reservation_conflict`).
 - **Remaining setup.** The reservations the Run still needs (§12.6), with the entity scope extended by the bound domain IDs and the file scope by the Consumption path, as §14.4 steps 1 and 4 extend them; then §14.4 steps 5–6: `gate.require_committable`, the Git persistence preflight with the checkout capability, dirty overlap on the registration paths + Run record paths + Consumption path, the publication barrier on HEAD with a push destination, and the note `review_binding` = the current branch and HEAD, which holds every committed record of the Run (§12.3). The Candidate, Context and Policy are never rebuilt for storage: the Run's committed records are them.
 - **Continuation.** By the Run's chain (§11.8 step 4): latest 1 → the reviewer launch of the same task (§10.3), then generation mutation 2; latest 2 → currency, then generation mutation 3; latest 3 → the use check (§17), then the registration, or the invalidation when stale (§13.3). The registration writes from W computed from the Run's committed Candidate snapshot (§7.8) — the W an uninterrupted run would have used; the recovering invocation's caller objects serve only its entry checks and its identity.
 - **Generation mutations** it starts bind `planning_mutation_id` = the recovery planning mutation, with the Run's own `review_run_id`, `candidate_hash`, `review_context_hash`, `effective_policy_hash`, obligation digest and Receipt ID (§11.2). Frozen P1 R3 §9 lists what the owning mutation binds; it does not require every generation of a Run to be written by one mutation, and gate records carry no mutation ID. Generation numbering continues from the validated chain (`gate.next_generation_scope`, unchanged).
-- **Lifecycle.** A recovery planning mutation begun by this run is abandoned on a STOP while it has recorded no effect and started no generation mutation (live `abandon_on_stop`; a resumed Phase entry is never abandoned); nothing canonical changes, and the next same-request invocation discovers again. From its first generation mutation on it remains pending until a terminal outcome (§12 table), and it is resumed like any planning mutation, by its exact recorded invocation.
+- **Lifecycle.** A recovery planning mutation is abandoned on a STOP while it has recorded no effect and started no generation mutation, whether this run began it or resumed it (§12 table; live `abandon_on_stop`); nothing canonical changes, and the next same-request invocation discovers again. From its first generation mutation on it remains pending until a terminal outcome (§12 table), and it is resumed like any planning mutation, by its exact recorded invocation.
 - **Never.** It never adopts Kp, Km or any registration commit; it never continues a Run that §12.2 classifies terminal, set aside or incomplete; it never allocates a replacement Run, task, Candidate or domain ID.
 
 ### 12.5 Recovered reservations
 
 **Frozen.** A private, recovery-only helper of the Mutation Controller — a module-level function of `mutation.py`, not a `Mutation` method (§25) — records reservations that already exist canonically. It never generates an ID. Its invariants:
 
-- it is called only by the review-v1 recovery path, only on a recovery planning mutation begun by this run that has no reservation and no effect yet, and only for the Run its invocation names, after §12.2 steps 3–4 hold for that Run;
+- it is called only by the review-v1 recovery path, and only on a pending recovery planning mutation whose invocation names the Run, which:
+  - has recorded no reservation, no effect and no `recovery_binding` note, and has started no generation mutation — whether this process began it or resumed it (§12.9);
+  - and only after canonical recovery discovery (§12.2 steps 1–5), run in this process under the lock, found that Run to be the one recoverable Run for the invocation (P2-READY-002);
 - the key → ID map is taken exactly from the Run's committed Candidate snapshot, under the keys the unchanged registration code reserves (§7.2 / §7.3): RoadmapPlan `roadmap`, `phases:phase:<key>`, `phases:rel:<index>`; PhaseEntryDesign `works:work:<key>`, `works:related:<key>:<i>`, `works:rel:<i>`, `integration:work:integration`, `integration:related:integration:<i>`, `integration:rel:<i>`, `confirmation:work:confirmation`, `confirmation:related:confirmation:<i>`, `confirmation:rel:0` (a Phase entry Work carries no `derivation_detail`, so no `:der:` key exists, `create.py:258-259`); plus the Run key → the Run ID, the task key → the accepted `task_id`, and, when generation 3 exists, the Receipt key → the Receipt's ID;
 - it refuses — `ReconcileRequired`, reason `review_recovery_reservation_conflict`, nothing recorded — a key already reserved with another ID, an ID whose kind is not its key's kind, and a domain ID that already names an entity or a relation in HEAD's committed view or in the working tree;
-- every binding is recorded in one durable save, before any effect; afterwards the unchanged registration code's `reserve_id` calls return exactly these IDs (`mutation.py:391-395`: a key already reserved returns its recorded ID);
-- the map is proven to be the reviewed one: the Candidate rebuilt from the invocation, these IDs and the declared base equals the snapshot's `material` (§13 item 3) — at discovery for generations 1 and 2, at the use check for generation 3; any difference other than the declared base is `ReconcileRequired`.
+- every binding is recorded in one durable save, before any effect, together with the note `recovery_binding = {review_run_id, latest_generation}`: the Run, and its latest generation at binding, from which the mutation tells whether it has started a generation mutation (§12 table). Afterwards the unchanged registration code's `reserve_id` calls return exactly these IDs (`mutation.py:391-395`: a key already reserved returns its recorded ID);
+- the map is proven to be the reviewed one — at discovery for generations 1 and 2, at the use check for generation 3. With the declared base equal (§13 item 3), the Candidate rebuilt from the invocation, these IDs, that declared base and the R9 selection on the committed basis equals the snapshot's `material` (§13 item 4). A difference with the declared base equal is `ReconcileRequired`: `review_recovery_incomplete` at discovery, `review_candidate_mismatch` at the use check.
 
 No public API accepts caller-supplied IDs: the helper takes its IDs only from the committed Candidate snapshot and the Run's committed records.
 
@@ -1037,8 +1126,8 @@ Frozen P1 R2 §2 keeps the keys deterministic. A reservation value that never be
 | generation 3, sealed, no registration commit | recovered: the same Run and Receipt, into the use check (§17): current → the registration under that Receipt; stale → generation 4 and the Supersession, then `stale` (§13.3) |
 | generation 4 | terminal: set aside; a new Run |
 | a registration commit whose Consumption the committed planning proof proves | terminal `consumed`: set aside; what the new invocation means is the live Roadmap rule (Roadmap creation: a second Roadmap; Phase entry: `phase_already_expanded` before discovery) |
-| a registration commit without such a Consumption (Kp only; Consumption only in the working tree; Km whose committed planning proof fails) | `ReconcileRequired`; never recovered, never a new Run; the publication barrier holds (§18.7) |
-| a half-written, uncommitted or rewritten stage, or a generation mutation left pending by a lost planning mutation | `ReconcileRequired`; never a new Run |
+| a registration commit without such a Consumption (Kp only; Consumption only in the working tree; Km whose committed planning proof fails) | Roadmap creation: `ReconcileRequired` (`review_recovery_incomplete`, §12.2 row b); Phase entry: the live `phase_already_expanded` before discovery, because the registration's Works are in the Phase (§5.6 step 6); never recovered, never a new Run; the publication barrier holds (§18.7) |
+| a half-written, uncommitted or rewritten stage, or a generation mutation left pending by a lost planning mutation | `ReconcileRequired` (`review_recovery_incomplete`) for an admissible operation (§5.6 step 6); never a new Run |
 | registration files present only in the working tree (applied by the lost mutation; no registration commit) | generation 3 is recovered only once a person has discarded those files. Until then the call stops with nothing written: Roadmap creation when the recovered-reservation binding refuses the IDs those files already use (`review_recovery_reservation_conflict`, §12.5), Phase entry at the live `phase_already_expanded` precheck before discovery. Then the use check continues |
 
 The table describes one matching Run; with several, §12.2 step 5 decides. "Current" and "stale" are the currency of §13 evaluated on HEAD. An obsolete Run's accepted task is not replaced by the new Run's task: its Candidate is no longer the one the current request means — the authorized base, Context or Policy changed — so the current request is a different logical review. Frozen P1 R3 §4 governs reconstructing the same logical task; §13 governs whether a reconstructed Candidate may still proceed, and a stale one never proceeds (Round 1, P2-CONTRACT-002 and -003).
@@ -1047,9 +1136,45 @@ The table describes one matching Run; with several, §12.2 step 5 decides. "Curr
 
 **Frozen.** A planning mutation for a new Run — the freeze of §14.4, new reserved IDs, a fresh Candidate — is begun only when discovery found no recoverable Run and nothing incomplete. Runtime loss alone never makes a Run eligible for replacement.
 
-Right after it is begun, that planning mutation records the note `recovery_discovery = {set_aside: [{review_run_id, reason}, ...]}` (sorted by Run ID; kept on resume, never recomputed once recorded), and the freeze writes that list into the new Run's request envelope as `set_aside_runs` (§10.2). Once generation 1 is committed the decision is canonical and permanent: row d of §12.2 excludes every Run named there, whatever its currency becomes afterwards. A new Run lost before its generation 1 was committed leaves nothing canonical, and the next invocation discovers again.
+Right after it is begun, that planning mutation records the note `recovery_discovery = {set_aside: [{review_run_id, reason}, ...]}` (sorted by Run ID; kept on resume, never recomputed once recorded; a resumed new-Run planning mutation that has not recorded it establishes it by the pre-freeze resume setup, §12.9), and the freeze writes that list into the new Run's request envelope as `set_aside_runs` (§10.2). Once generation 1 is committed the decision is canonical and permanent: row d of §12.2 excludes every Run named there, whatever its currency becomes afterwards. A new Run lost before its generation 1 was committed leaves nothing canonical, and the next invocation discovers again.
 
 A new Run is eligible when no Run was ever canonically created for the invocation, or when every matching Run ended `not_authorized`, stale before its Receipt (obsolete), invalidated by generation 4, or consumed. It is never eligible merely because the runtime is gone while an accepted and current generation 1, a current authorizing generation 2 or a sealed generation 3 exists.
+
+### 12.9 Pre-freeze resume setup
+
+**Frozen** (P2-READY-002). `_open` makes a planning mutation durable before any review-v1 step runs: `MutationController.begin` saves it (`mutation.py:1693-1711`), and the live pre-existing-dirty note is a second save (`roadmap.py:260`, `gitops.py:63-74`). Each setup step that follows saves on its own: the `recovery_discovery` note (§12.8) or the recovered binding (§12.5), the reservations, and the freeze (§14.4). A crash between two of those saves leaves a pending review-v1 planning mutation whose setup is incomplete. Its next same-request invocation resumes that mutation (§5.3) and completes the setup on it. It never begins a second mutation because the setup is incomplete.
+
+**Scope.** This section governs a resumed review-v1 planning mutation that has recorded no effect and started no generation mutation, as the §12 table defines both. Once it has started a generation mutation or recorded an effect, this section never applies again:
+- its recorded setup is final;
+- canonical recovery discovery is never run again for it;
+- `recovery_discovery` and its recovered binding are never rewritten;
+- §11.8 and §12 govern its resume.
+
+**A new-Run planning mutation** (invocation without `recovery_of_review_run_id`):
+
+1. Without a recorded `recovery_discovery` note, canonical recovery discovery (§12.2 steps 1–5) runs for this invocation exactly as for a fresh invocation, and begins nothing:
+   - no recoverable Run and nothing incomplete → the note is recorded on this mutation from that outcome, and the setup goes on;
+   - exactly one recoverable Run → `ReconcileRequired` (reason `review_discovery_changed`); the durable invocation names a new Run and is never rewritten into a recovery invocation;
+   - several recoverable Runs, or any incomplete matching Run → `ReconcileRequired` with the discovery reason (`review_recovery_ambiguous`, `review_recovery_incomplete`).
+
+   A recorded note is kept and never recomputed (§12.8).
+2. The freeze (§14.4) then runs from its step 1, deterministically.
+   - **Reservations.** The live `reserve_id` returns every reservation already recorded under its key unchanged (`mutation.py:388-401`), and reserves a missing one in the frozen order. A recorded ID of the wrong kind is the live `reserve_id` refusal (`ReconcileRequired`, reason `None`). A recorded key the frozen order does not reserve is `ReconcileRequired` (reason `review_setup_invalid`). No recorded value is ever replaced.
+   - **Every other step** runs in full, as for a mutation this run began: the working-tree compatibility check and the Candidate on the committed basis (§7.4, §7.7), W, the representability check, the Context, the Policy, `gate.require_committable`, the Git persistence preflight with the checkout capability, the Review namespace readability, dirty overlap and, with a push destination, the publication barrier on HEAD.
+   - **`review_binding`** is kept and checked when recorded (§11.5), and recorded when missing.
+
+**A recovery planning mutation** (invocation with `recovery_of_review_run_id`):
+
+1. Without a recorded binding (no `recovery_binding` note), the mutation must hold no reservation; a reservation without a binding is `ReconcileRequired` (reason `review_recovery_reservation_conflict`). Canonical recovery discovery (§12.2 steps 1–5) then runs for this invocation, and begins nothing:
+   - exactly one recoverable Run, and it is the Run the invocation names → the recovered reservations are bound now, into this mutation (§12.5), in one durable save with the note `recovery_binding`;
+   - the named Run is no longer the one recoverable Run (it is terminal, set aside or obsolete now, or another Run is recoverable, or none is) → `ReconcileRequired` (reason `review_discovery_changed`);
+   - several recoverable Runs, or any incomplete matching Run → the discovery reason.
+2. With a recorded binding, every bound key must hold exactly the ID the Run's committed records give (§12.5); otherwise `ReconcileRequired` (reason `review_recovery_reservation_conflict`).
+3. The remaining setup of §12.4 then runs in full: the reservations that never became canonical (§12.6), `gate.require_committable`, the Git persistence preflight with the checkout capability, the Review namespace readability, dirty overlap, the publication barrier on HEAD with a push destination, and `review_binding`.
+
+**A STOP anywhere in this section abandons the mutation** (§12 table). It has recorded no effect and holds nothing canonical. The next same-request invocation finds no pending planning mutation for the slot and runs canonical recovery discovery at §5.6 step 7. So after a `review_discovery_changed` refusal, that next invocation takes the recovery the discovery now gives, or a new Run.
+
+Tests: §28 Q.
 
 ## 13. Currency, staleness and invalidation
 
@@ -1057,20 +1182,23 @@ A new Run is eligible when no Run was ever canonically created for the invocatio
 
 1. the Context recomputed now (§8) digests to the Run's `review_context_hash` — a difference is reason `review_context_changed`;
 2. the Policy recomputed now (§9) digests to the Run's `effective_policy_hash` — a difference is reason `review_policy_changed`;
-3. the Candidate rebuilt from the planning invocation (`request` / `design`), the planning mutation's reserved IDs and the declared base computed on the committed view of B (§7.4) digests to the Run's `candidate_hash` and equals the stored snapshot's `material` — a different declared base is reason `review_declared_base_changed`; any other difference (reserved IDs or planning invocation not reproducing the Candidate) is `ReconcileRequired`, never staleness.
+3. the declared base computed on the committed view of B (§7.4) equals the snapshot Candidate's `declared_base` — a difference is reason `review_declared_base_changed`, classified by the stale and base rules of §13.1–§13.4, and never also as an R9 or Candidate mismatch;
+4. only when 1–3 are equal: the Candidate rebuilt from the planning invocation (`request` / `design`), the planning mutation's reserved IDs, that declared base and the R9 selection recomputed on the committed basis of B (§7.7: B's committed view with W's expected effects) digests to the Run's `candidate_hash` and equals the stored snapshot's `material`. Any difference — reserved IDs, the planning invocation or the R9 selection not reproducing the Candidate — is `ReconcileRequired`, never staleness. Its reason is `review_candidate_mismatch`, except at canonical recovery discovery (`review_recovery_incomplete`, §12.2 row f) and in C-2(Kp) (`review_persisted_proof_failed`, P12).
+
+This order holds at every point that rebuilds a Candidate (P2-READY-001): recovery discovery, the reviewer launch, the starts of generation mutations 2 and 3, the use check, the pre-Kp currency proof, C-2(Kp) (P12 before P8 and P9, §15.3) and the committed planning proof (CP7 before CP6, §18.8). So one committed lifecycle change is classified once, as a declared-base difference, and never also as an R9 mismatch.
 
 The declared base is read from the committed view of B, never from the working tree, so the currency that authorizes a registration is the currency of the exact commit the registration is committed on. `review_kind`, `operation_identity`, `target_identity` and `authorized_operation_stage` are compared wherever a Receipt exists (§17 item 4, §15.6, §15.3 P12). No P3 Review-validity fast path exists; P2 never re-reviews inside the same planning operation.
 
 ### 13.1 Where currency is evaluated
 
-| point | base B | a difference means |
-| --- | --- | --- |
-| right before the reviewer launch (§10.3) | HEAD | stale before a Receipt (§13.2) |
-| right before generation mutation 2 or 3 starts | HEAD | stale before a Receipt (§13.2) |
-| canonical recovery discovery, for a matching Run at generation 1 or 2 (§12.2 row f) | HEAD | the Run is obsolete and is not continued; when no matching Run is recoverable, a new Run is begun that records it in `set_aside_runs` (§12.2 step 5, §12.8); nothing is written for the old Run |
-| the use check (latest generation 3, no registration stage recorded, §17) | HEAD, recorded as `use_check_head` when the use check passes | stale after the Receipt: invalidation (§13.3) |
-| the pre-Kp currency proof (registration stages recorded, Kp not made, §15.6) | P, which HEAD must be | `ReconcileRequired` (§13.4) |
-| C-2(Kp) item P12 (§15.3) | Kp's parent P | `ReconcileRequired` (§13.4, §15.5) |
+| point | base B | a stale difference (items 1–3) means | a Candidate mismatch (item 4) means |
+| --- | --- | --- | --- |
+| right before the reviewer launch (§10.3) | HEAD | stale before a Receipt (§13.2) | `ReconcileRequired` (`review_candidate_mismatch`), pending |
+| right before generation mutation 2 or 3 starts | HEAD | stale before a Receipt (§13.2) | `ReconcileRequired` (`review_candidate_mismatch`), pending |
+| canonical recovery discovery, for a matching Run at generation 1 or 2 (§12.2 row f) | HEAD | the Run is obsolete and is not continued; when no matching Run is recoverable, a new Run is begun that records it in `set_aside_runs` (§12.2 step 5, §12.8); nothing is written for the old Run | `ReconcileRequired` (`review_recovery_incomplete`), nothing begun |
+| the use check (latest generation 3, no registration stage recorded, §17) | HEAD, recorded as `use_check_head` when the use check passes | stale after the Receipt: invalidation (§13.3) | `ReconcileRequired` (`review_candidate_mismatch`), pending; nothing invalidated |
+| the pre-Kp currency proof (registration stages recorded, Kp not made, §15.6) | P, which HEAD must be | `ReconcileRequired` (`review_registration_currency_changed`, §13.4) | `ReconcileRequired` (`review_candidate_mismatch`) |
+| C-2(Kp) item P12 (§15.3) | Kp's parent P | `ReconcileRequired` (`review_persisted_proof_failed`, §13.4, §15.5) | the same |
 
 Once C-2(Kp) has passed, the authorization is spent on the proven Kp: the Consumption records it, and Km and the publication are proven by exact metadata proofs and the committed planning proof (§18.2, §18.8) and by the publication barrier (§18.7), not by currency.
 
@@ -1102,7 +1230,7 @@ Invalidation exists only in this window. The use check is the last currency eval
 
 Once the first registration stage is recorded, the planning mutation never ends `stale` and never starts generation mutation 4: domain registration exists locally, so it ends registered or stays in reconciliation. A currency difference then is:
 
-- at the pre-Kp currency proof: `ReconcileRequired` (reason `review_registration_currency_changed`, or `review_registration_base_moved` for the base rules of §15.6); no Kp is recorded or made, no Consumption is written, nothing is pushed; the planning mutation stays pending with its registration in the working tree, and the same request continues once the difference is gone (the authority text restored, for example);
+- at the pre-Kp currency proof: `ReconcileRequired` (reason `review_registration_currency_changed`, `review_candidate_mismatch` for a Candidate mismatch with the declared base equal (§13 item 4), or `review_registration_base_moved` for the base rules of §15.6); no Kp is recorded or made, no Consumption is written, nothing is pushed; the planning mutation stays pending with its registration in the working tree, and the same request continues once the difference is gone (the authority text restored, for example);
 - at C-2(Kp): `ReconcileRequired` (reason `review_persisted_proof_failed`) with the consequences of §15.5: no Consumption, and the publication barrier holds for every commit whose history holds Kp.
 
 The registration is never undone, and Kp is never reset, rebased or amended.
@@ -1112,12 +1240,12 @@ The registration is never undone, and Kp is never reset, rebased or amended.
 | change | detected by | before a Receipt | after the Receipt, before the registration | after the registration began |
 | --- | --- | --- | --- | --- |
 | a different request or design (the caller passes another plan) | live same-request / `_require_resumable` | `reconcile_required`, record untouched | same | same |
-| declared base: lifecycle or state of a named existing Phase or Work, the Phase's or Roadmap's lifecycle or state, a Phase dependency's state — as committed | Candidate rebuild on the committed view | terminal `stale` (§13.2) | generation 4 + Supersession, then terminal `stale` (§13.3) | `ReconcileRequired` (§13.4) |
+| declared base: lifecycle or state of a named existing Phase or Work, the Phase's or Roadmap's lifecycle or state, a Phase dependency's state — as committed | §13 item 3 on the committed view, before any R9 or Candidate comparison | terminal `stale` (§13.2) | generation 4 + Supersession, then terminal `stale` (§13.3) | `ReconcileRequired` (§13.4) |
 | Workline implementation content | Context (`loader_identity`) | terminal `stale` | generation 4 + Supersession, then `stale` | `ReconcileRequired` |
 | authority text (`registry.md`, a listed Skill) | Context (`authority`) | terminal `stale` | generation 4 + Supersession, then `stale` | `ReconcileRequired` |
 | Effective Policy | policy hash | terminal `stale` | generation 4 + Supersession, then `stale` | `ReconcileRequired` |
-| reserved IDs or planning invocation not reproducing the Run's Candidate | rebuild | `reconcile_required` | `reconcile_required` | `ReconcileRequired` |
-| a Run record changed | `ReviewStore` / `create_file` classification / blob check | `reconcile_required` | `reconcile_required` | `ReconcileRequired` |
+| with the declared base equal: reserved IDs, the planning invocation or the R9 selection on the committed basis not reproducing the Run's Candidate | rebuild (§13 item 4) | `ReconcileRequired` (`review_candidate_mismatch`) | same | same before Kp; `review_persisted_proof_failed` in C-2(Kp) |
+| a Run record changed | the P1 reader (`review_record_*`); the live `create_file` classification (`ReconcileRequired`, reason `None`); the blob check (`review_not_persisted`, §17 item 6; `review_receipt_invalid` in the pre-Kp proof, §15.6 item 3) | a STOP, the planning mutation pending | same | same |
 | HEAD moved after the use check | §15.6, §15.3 P2 | — | the use check runs again on the new HEAD | a commit touching a planning-owned path, or a history not holding `use_check_head`: `ReconcileRequired` (`review_registration_base_moved`); otherwise currency on the new P decides |
 
 What can change, and when:
@@ -1154,8 +1282,9 @@ These are exactly the paths the registration stages write (`ops.owned_canonical_
 ```text
 1  RoadmapPlan: reserve `roadmap` (live) and the Phase and relation IDs through `decide_phases` (live; records
    nothing); PhaseEntryDesign: reserve every stage ID under the register_works keys (§7.3); extend the entity scope
-2  build the Candidate (declared base on the committed view of HEAD, §7.4) and W from its canonical record
-   (§7.8); representability check (§7.6); R9 (§7.7)
+2  build the Candidate on the committed basis of HEAD: the declared base on HEAD's committed view (§7.4); W
+   from the canonical record (§7.8); the expected effects and the projected view (§7.6); the R9 selection
+   (§7.7); the working-tree compatibility check (§7.4); the representability check (§7.6)
 3  Context (§8), Policy (§9), evidence (§10.6); the request envelope's set_aside_runs from the recovery_discovery note
 4  reserve Run, task, Receipt, Consumption IDs (§6.3); extend the file scope with the Consumption path
 5  gate.require_committable (every Review path the Run can write: snapshot, task input, gates 1-4, Receipt,
@@ -1166,9 +1295,9 @@ These are exactly the paths the registration stages write (`ops.owned_canonical_
 7  start generation mutation 1
 ```
 
-Everything in this order runs after `_open`; a refusal of the canonical-input preflight comes before `_open` and begins nothing, so there is nothing to abandon (§5.6). Before generation mutation 1 has started, steps 1–6 are refusals: a STOP anywhere in them abandons the planning mutation (§12), and a resume runs them again deterministically (every reservation returns the recorded ID; the note, once recorded, is kept). Once generation mutation 1 has started, a resume never runs steps 5–6 again and never abandons: steps 1–3 are recomputed only as the currency evaluation of §13, and the recorded `review_binding` is checked, never re-recorded. The checkout capability and the transform attributes are evaluated again before every Review-writing and every Git stage (§14.3).
+Everything in this order runs after `_open`; a refusal of the canonical-input preflight comes before `_open` and begins nothing, so there is nothing to abandon (§5.6). Before generation mutation 1 has started, steps 1–6 are refusals: a STOP anywhere in them abandons the planning mutation, whether this run began it or resumed it (§12). A resume runs them again deterministically, by the pre-freeze resume setup (§12.9): every recorded reservation is returned unchanged, a missing `recovery_discovery` note is established by discovery, and a recorded `review_binding` is kept and checked. Once generation mutation 1 has started, a resume never runs steps 5–6 again and never abandons: steps 1–3 are recomputed only as the currency evaluation of §13, and the recorded `review_binding` is checked, never re-recorded. The checkout capability and the transform attributes are evaluated again before every Review-writing and every Git stage (§14.3).
 
-A recovery planning mutation (§12.4) never runs steps 2, 3 and 7 and never reserves a canonical ID anew. In place of steps 1 and 4 it binds the canonical reservations (§12.5), reserves only the IDs that never became canonical (§12.6), and extends the entity and file scope as steps 1 and 4 do; then it runs steps 5–6 for the recovered Run and continues the Run by its chain.
+A recovery planning mutation (§12.4) never runs steps 2, 3 and 7 and never reserves a canonical ID anew. In place of steps 1 and 4 it binds the canonical reservations (§12.5; on a resume without a recorded binding, by §12.9), reserves only the IDs that never became canonical (§12.6), and extends the entity and file scope as steps 1 and 4 do; then it runs steps 5–6 for the recovered Run and continues the Run by its chain.
 
 The publication barrier at step 5 keeps a new registration from being built on a history that no Workline push may publish: when HEAD's history already holds a registration commit that the committed planning proof does not prove (§18.7, §18.8), the call stops with `review_publication_barrier` before any Review record. A remote-less Project publishes nothing and skips it.
 
@@ -1179,29 +1308,32 @@ The publication barrier at step 5 keeps a new registration from being built on a
 **Measured** (§31; Git for Windows 2.54 with system `core.autocrlf=true`):
 
 - with no attribute rule a fresh clone checks out an LF-only Review record as CRLF while `git status` stays clean, and the P1 reader refuses it (`review_record_noncanonical`);
-- a committed `.gitattributes` rule `.workline/review/** eol=lf -filter -ident -working-tree-encoding`, or the same with `-text` for `eol=lf`, keeps the fresh clone's bytes LF, also under a global attributes file asking `*.yaml eol=crlf` and under `core.autocrlf=false` with `core.eol=crlf`;
+- a committed `.gitattributes` rule `.workline/review/** eol=lf -filter -ident -working-tree-encoding` keeps the fresh clone's bytes LF, also under a global attributes file asking `*.yaml eol=crlf` and under `core.autocrlf=false` with `core.eol=crlf`. Round 1 measured the same with `-text` in place of `eol=lf`; `-text` is no longer an accepted form (below);
 - a rule only in the origin's `.git/info/attributes` is not carried by a clone; a clone-local `.git/info/attributes` rule `eol=crlf` overrides the committed rule; a subsequent commit dropping the rule loses the guarantee for clones of that commit;
-- `git check-attr --source=<commit>` alone still reads `.git/info/attributes`; the committed evaluation below reads the committed rule alone; `check-attr` answers for a path that does not exist yet.
+- `git check-attr --source=<commit>` alone still reads `.git/info/attributes`; the committed evaluation below reads the committed rule alone; `check-attr` answers for a path that does not exist yet;
+- (final readiness repair) `git check-attr` prints `text: unset` both for a real `-text` and for the literal value `text=unset`, which Git's conversion treats as an unspecified `text`. Under the committed rule `.workline/review/** text=unset -filter -ident -working-tree-encoding`, both evaluations print exactly the tuple round 1 accepted as form B, and a fresh clone made with `core.autocrlf=true` checks the LF record out as CRLF;
+- (final readiness repair) every committed rule that prints exactly form L keeps the fresh clone's bytes LF. That includes the literal values `text=unspecified`, `filter=unset`, `ident=unset` and `working-tree-encoding=unset`: Git reports an encoding error for the last and leaves the bytes unchanged. A repository whose broader rules set `text` (`* text=auto`) prints `text: auto` for Review paths until the Review rule adds `!text`, which returns `text` to unspecified.
 
-The capability holds for a path exactly when each of the two evaluations below reports, for `text eol filter ident working-tree-encoding`, one of these two exact value tuples:
+The capability holds for a path exactly when each of the two evaluations below reports, for `text eol filter ident working-tree-encoding`, exactly this value tuple, form L — the one accepted form (P2-READY-004):
 
 ```text
-form L   text: unspecified   eol: lf            filter: unset   ident: unset   working-tree-encoding: unset
-form B   text: unset         eol: unspecified   filter: unset   ident: unset   working-tree-encoding: unset
+form L   text: unspecified   eol: lf   filter: unset   ident: unset   working-tree-encoding: unset
 ```
 
 - **committed evaluation** — the committed `.gitattributes` files of HEAD's commit alone: `git check-attr --source=<HEAD commit>` with `GIT_ATTR_NOSYSTEM=1`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=<an empty file>`, `-c core.attributesFile=<an empty file>` and `--git-dir=<a fresh, empty bare directory under .workline/runtime/review/attr-eval/<nonce>/ whose objects/info/alternates names this repository's object directory>`, removed afterwards; no `info/attributes`, system or global source takes part. It is what a fresh clone of that commit applies whatever its own configuration: a committed `unset` or `eol=lf` outranks every global and system source, and no clone receives another repository's `info/attributes`;
 - **effective evaluation** — plain `git check-attr` in this repository, every source included: what the next checkout here applies.
 
-Anything else → `StopError` code `review_checkout_unsafe`: `unspecified` where a form names `unset` or `lf`, `eol: crlf`, `text: auto` or `set`, a set `filter`, `ident` or `working-tree-encoding`. A question Git cannot answer → `StopError` code `review_checkout_unknown`. Unspecified is never safe: the measured failure had every attribute unspecified while the committed blob was LF.
+Anything else → `StopError` code `review_checkout_unsafe`: `text: unset` (a real `-text` or the literal `text=unset`), `text: auto` or `set`, `eol: unspecified` or `crlf`, `unspecified` where form L names `unset`, a set `filter`, `ident` or `working-tree-encoding`. A question Git cannot answer → `StopError` code `review_checkout_unknown`. An unspecified `eol`, `filter`, `ident` or `working-tree-encoding` is never safe: the measured failure had every attribute unspecified while the committed blob was LF.
+
+**Form B is withdrawn** (P2-READY-004). Round 1 also accepted `text: unset` with `eol: unspecified` (form B), which is how `check-attr` reports a real `-text`. It reports the literal value `text=unset` the same way, and Git converts that value like an unspecified `text`. So form B cannot positively prove LF bytes in a fresh clone (**Measured**, above). P2 v1 accepts form L alone. A real `-text` also keeps LF bytes, but the frozen check cannot tell it from the literal value, so it is refused like every form other than form L: a reading that only looks safe is never proof. Every value form L names is one only its own safe cases produce — `eol: lf` only from `eol=lf` — or one whose lookalikes leave the bytes unchanged (Measured, above).
 
 A commit P2 makes carries only its own paths (`git commit --only`), so it carries HEAD's committed `.gitattributes` unchanged: the committed evaluation of HEAD is the evaluation of the commit that stores the record.
 
 Where it is checked: at the freeze (§14.4 step 5) for every Review path the Run can write and every Review record path committed at HEAD (`git ls-tree -r --name-only <HEAD> -- .workline/review/`); and for each stage's own Review paths before that stage is recorded and before its Git stage is recorded (§11.6, §15.1). At the freeze a failure abandons the planning mutation with nothing written; after generation 1, the planning mutation stays pending and continues once the rule is back.
 
-Workline never writes `.gitattributes` or `info/attributes`: making the capability available is the Project's own configuration decision, as its ignore configuration is (`gate.require_committable`). A Project that uses review-v1 planning commits, for example, `.workline/review/** eol=lf -filter -ident -working-tree-encoding`.
+Workline never writes `.gitattributes` or `info/attributes`: making the capability available is the Project's own configuration decision, as its ignore configuration is (`gate.require_committable`). A Project that uses review-v1 planning commits, for example, `.workline/review/** eol=lf -filter -ident -working-tree-encoding`; where a broader rule sets `text`, `.workline/review/** !text eol=lf -filter -ident -working-tree-encoding` (**Measured**, §31).
 
-The Context binds the capability contract (`checkout_capability: review-v1-planning-checkout-v1`, §8): Frozen P1 R6 §6 and R11 §10 make attributes and line-ending conversion bound Git semantics, and R1 §4 has the Git persistence proof show that the committed path reproduces the canonical bytes under them. Which form a repository uses is not bound: both reproduce the canonical bytes exactly, and every P2 proof and the publication barrier read raw blobs (§15.2, §18.7), never checked-out bytes.
+The Context binds the capability contract (`checkout_capability: review-v1-planning-checkout-v1`, §8): Frozen P1 R6 §6 and R11 §10 make attributes and line-ending conversion bound Git semantics, and R1 §4 has the Git persistence proof show that the committed path reproduces the canonical bytes under them. The capability has one form, form L, and every P2 proof and the publication barrier read raw blobs (§15.2, §18.7), never checked-out bytes.
 
 Legacy invocations evaluate nothing here and write no Review record.
 
@@ -1225,7 +1357,8 @@ Why: it proves what Git stored rather than predicting it. Direction B would need
 1  registration stages, live and unchanged — roadmap, phases | works, integration, confirmation —
    fed from W (§7.8), never from the caller's plan or design; each preceded by the display base check
    (§15.7), with their projected refusals, postchecks and (Phase entry) the live phase structure check
-2  working-tree round trip: ProjectView.load(store) -> normalize_persisted == reviewed;
+2  working-tree round trip: ProjectView.load(store) -> normalize_persisted == reviewed, the registered
+   entities and relations read from the working tree and the R9 selection from HEAD's committed basis (§7.7);
    mismatch -> ValidationError review_roundtrip_mismatch (P1 adapter code), pending
 3  pre-Kp currency proof on P = HEAD (§15.6), the physical projection check of the recorded
    registration included (item 6); Git persistence preflight; ensure_separable(preexisting,
@@ -1262,10 +1395,18 @@ The legacy combined `finalize` stage is never recorded by a review-v1 planning m
 - Consequences: no repository hook runs (**Measured**, §31), no signing program runs, no clean or process filter runs (refused by §14.3), no background maintenance starts.
 - Everything else is the live commit: the commit ID is recorded with `applied` in one durable save (`_make_commit`, `_commit_just_made`), and it is never recognized by its message.
 - Used for every generation commit, Kp and Km; never for a legacy commit.
-- **Base-exact registration commit.** The Kp `git_commit` payload also carries `"base_exact": true`, with `base_head` = P (a full commit ID) and `branch` = `review_binding.branch`. For such a commit `_classify_commit` never takes the independent-advancement path (`_head_advanced_independently`): it is unapplied only while HEAD is exactly `base_head` on the recorded branch, and otherwise applied with an unexpected result (`ReconcileRequired`). The primitive reads HEAD again immediately before `git commit` and STOPs (`ReconcileRequired`, reason `review_registration_base_moved`) when it is not `base_head`; `_commit_just_made` then shows the new commit's one parent. So the ordinary independent-HEAD-advancement rule can never move Kp onto another base. Generation commits and Km keep the live base rules, independent advancement included: they carry Review records only, their bytes are proven exactly (§11.6, §18.2), and M1 bounds Km's parent (§18.2). A legacy `git_commit` payload and its classification are unchanged.
+- **Base-exact registration commit** (wording fixed by P2-READY-006). The Kp `git_commit` payload also carries `"base_exact": true`, with `base_head` = P (a full commit ID) and `branch` = `review_binding.branch`.
+  - **What it changes.** `base_exact` removes one step of the live classification and nothing else: `_classify_commit` (`mutation.py:1949-2016`) never takes its independent-advancement step for such a commit (`_head_advanced_independently`, `mutation.py:2014-2015`).
+  - **The other steps** still decide whether the recorded commit effect is applied, unapplied or a mismatch, as they do for any commit:
+    - a Kp the record holds as applied with its `commit_id` is decided by that ID on the recorded branch: matching while HEAD's history holds it, a mismatch otherwise;
+    - nothing left to commit at its paths is applied (`mutation.py:2009-2011`). A Kp made just before an interruption kept its ID from being saved, and anyone's commit of those files, land here, and are then refused as unowned (below);
+    - HEAD exactly `base_head`, on the recorded branch, is unapplied;
+    - anything else is a mismatch, never unapplied: `ReconcileRequired`, reason `review_registration_base_moved`.
+  - **Making an unapplied Kp.** It is made, or replayed, only while HEAD is exactly `base_head`. The pre-replay currency proof runs first for a recorded Kp classified unapplied (§15.6). The primitive reads HEAD again immediately before `git commit` and STOPs (`ReconcileRequired`, reason `review_registration_base_moved`) when it is not `base_head`. `_commit_just_made` then shows the new commit's one parent. A moved HEAD never shifts Kp onto a new base.
+  - **Other commits.** Generation commits and Km keep the live base rules, independent advancement included: they carry Review records only, their bytes are proven exactly (§11.6, §18.2), and M1 bounds Km's parent (§18.2). A legacy `git_commit` payload and its classification are unchanged.
 - The primitive's identity is the Context's `git_persistence` (Frozen P1 R5 §5–§6, R11 §10, R12 §8: a mechanically suppressed hook mode is bound in the Git semantics identity).
 - Blob check (used by §10.3, §11.6, §15.3, §18.2): the committed blob of a path is read with `git cat-file blob <oid>` as raw bytes (no text decoding, no filters) and compared byte for byte; its mode comes from `git ls-tree -r -z --full-tree`.
-- Kp or Km recorded applied without a commit ID (an interruption between `git commit` and the save) cannot be shown to be the mutation's own. The result is `ReconcileRequired` (reason `review_commit_unowned`), with no backfill in P2, the live treatment of an unidentified commit (`rules/git` Commit / push).
+- Kp or Km recorded applied without a commit ID cannot be shown to be the mutation's own. This covers an interruption between `git commit` and the save, and anyone's commit of those files, which the live nothing-left-to-commit step classifies as applied. The result is `ReconcileRequired` (reason `review_commit_unowned`), with no backfill in P2, the live treatment of an unidentified commit (`rules/git` Commit / push).
 
 ### 15.3 Persisted proof over Kp — C-2(Kp)
 
@@ -1286,6 +1427,8 @@ The legacy combined `finalize` stage is never recorded by a review-v1 planning m
 | P11 | nothing published before this proof | the planning mutation holds no `git_push` effect; the planning commit primitive runs no hook; and no Workline push of any operation can carry Kp unless the committed planning proof proves Kp, its Consumption and Km for the commit being published (§18.7, §18.8) |
 | P12 | authorized pre-state | full currency (§13) on P: the declared base computed on the committed view of P (P5's P view), the Candidate rebuilt from it (digest == the Run's `candidate_hash`, record == the snapshot's `material`), the Context and the Policy recomputed now (== `review_context_hash`, `effective_policy_hash`); `review_kind`, `operation_identity`, `target_identity` and `authorized_operation_stage` recomputed == the Receipt's; P's tree holds the Run's snapshot, task input, gates 1–3 and Receipt with the canonical bytes (blob check), and no gate 4, no Supersession of the Receipt and no Consumption for it |
 
+**Order** (P2-READY-001). P12's declared-base comparison (§13 item 3) is evaluated before every R9 comparison — the projection identity of P8, which carries the selection, and P9. So a declared-base difference is reported as P12 and never as an R9 mismatch, and an R9 difference is reported only with the declared base equal. Every item fails with the same reason, `review_persisted_proof_failed`; the order decides only which item the STOP names.
+
 This covers the task's eleven requirements: 1 = P3, 2 = P3 + P4, 3 = P3 modes, 4 = P6, 5 = P8 created IDs, 6 = P3 + P6, 7 = P5, 8 = P8, 9 = P9, 10 = P1 + P2, 11 = P11 + §18. Together, P2 + P12 prove the authorized pre-state, P3 the exact physical result and P5–P9 its exact meaning: authorized pre-state + authorized transition = exact Kp result, physically and semantically, each proven on its own (Frozen P1 R8 §6–§7, R9 §8). Nothing is substituted by a path list, working-tree bytes, the request identity, `ProjectView.with_effects`, a semantic match, or the fact that P descends from `review_binding.head`.
 
 P1–P12 are this operation's proof of its own registration. The committed substance of C-2(Kp) — the Run's authorization at P, P3's exact physical projection, P5–P9 and P12's declared base — is proven again, from committed objects alone, by the committed planning proof (§18.8) before any Workline push publishes a history holding Kp. P3 and CP5 are one check: the same E, computed by the same function from the same committed inputs, compared by the same comparison (§15.7), so the operation's proof and the cross-operation proof cannot disagree about Kp's bytes. What only the operation can prove stays with it: that Kp is its own commit (P1), that its record is exactly E (P4), its runtime notes (P2's `use_check_head` and `base_head`), and the currency of the Context and Policy at the time of the registration (P10, P12).
@@ -1305,11 +1448,11 @@ It writes them into a fresh directory `.workline/runtime/review/proofs/<nonce>/`
 - No second parser: the loader parses nothing itself. Tests use this loader and the production readers, never a different parser.
 - Why raw blobs: checkout conversion (`core.autocrlf`, eol attributes) changes only line ends, which the production reader normalizes. Content-changing checkout filters are refused on planning-owned paths (§14.3). So a raw-blob reading is what any conforming checkout reads. The reader's normalization is for meaning only: the physical comparison of §15.7 compares raw blob bytes exactly, so a line end the reader normalizes is still a physical mismatch there.
 - **Measured** (§31): for a live Roadmap creation plus Phase entry, the materialized reading equals the working-tree reading, all 9 canonical files are mode `100644`, and structure validation is clean.
-- The same loader gives the committed view of a base commit (§3) to every currency evaluation (§13), the pre-Kp currency proof (§15.6) and P12, and it materializes P, into a directory of its own, as the base of the expected physical projection (§15.7); it is read by nothing that decides lifecycle (§22).
+- The same loader gives the committed view of a base commit (§3) — `ProjectView` as of that exact commit, the only committed reader P2 has — to the freeze (the declared base, the working-tree compatibility check and the committed basis, §7.4, §7.6, §7.7), to recovery discovery (§12.2), to every currency evaluation (§13), the pre-Kp currency proof (§15.6) and P12, and it materializes P, into a directory of its own, as the base of the expected physical projection (§15.7); it is read by nothing that decides lifecycle (§22).
 
 ### 15.5 Proof failure after Kp exists
 
-**Frozen.** STOP (`ReconcileRequired`). The planning mutation stays pending; no Consumption is written, and the planning mutation records no push. Kp remains a local, operation-owned commit that no Consumption proves, and the publication barrier (§18.7) refuses every Workline push — of this operation or of any other — whose history holds it. The barrier is computed from committed objects alone, so it survives a crash, the lock's release, another operation, runtime cleanup, runtime-record loss and a fresh clone. Workline never resets, rebases or amends Kp. Every retry runs the same proof over the same Kp. No invalidation follows (§13.4), and a Supersession would not clear the barrier: only the committed planning proof of Kp, its Consumption and Km does (§18.8) — never the mere presence of a Consumption.
+**Frozen.** STOP (`ReconcileRequired`, reason `review_persisted_proof_failed`). The planning mutation stays pending; no Consumption is written, and the planning mutation records no push. Kp remains a local, operation-owned commit that no Consumption proves, and the publication barrier (§18.7) refuses every Workline push — of this operation or of any other — whose history holds it. The barrier is computed from committed objects alone, so it survives a crash, the lock's release, another operation, runtime cleanup, runtime-record loss and a fresh clone. Workline never resets, rebases or amends Kp. Every retry runs the same proof over the same Kp. No invalidation follows (§13.4), and a Supersession would not clear the barrier: only the committed planning proof of Kp, its Consumption and Km does (§18.8) — never the mere presence of a Consumption.
 
 A person can still push Kp with Git by hand; Workline cannot prevent that and never treats it as proof. The Consumption is written only after C-2(Kp) passes over the local objects; the barrier never reads the destination; and a push classification that finds the destination already holding a commit means only that nothing is pushed for it (§18.7). Which history the branch holds from then on is a person's reconciliation.
 
@@ -1317,16 +1460,16 @@ The preflight (§14.3), the representability check (§7.6), the contained commit
 
 ### 15.6 Pre-Kp currency proof
 
-**Frozen.** Run immediately before the Kp stage is recorded (§15.1 step 3), with P = HEAD, and — when a resume finds the Kp stage recorded and its `git_commit` unapplied — immediately before `_open` replays it, with P = the recorded `base_head`, through the `refuse_recorded` hook of `_open` (composed after the live `refuse_invalid_phase_writes` / `refuse_invalid_work_writes`; the hook runs on a resumed mutation before `mutation.apply()`, `roadmap.py:233-264`). PASS requires every item:
+**Frozen.** Run immediately before the Kp stage is recorded (§15.1 step 3), with P = HEAD, and — when a resume finds the Kp stage recorded and its `git_commit` classified unapplied (§15.2) — immediately before `_open` replays it, with P = the recorded `base_head`, through the `refuse_recorded` hook of `_open` (composed after the live `refuse_invalid_phase_writes` / `refuse_invalid_work_writes`; the hook runs on a resumed mutation before `mutation.apply()`, `roadmap.py:233-264`). The hook classifies the recorded Kp first. A Kp classified a mismatch is refused before any replay (`ReconcileRequired`, reason `review_registration_base_moved`). A Kp classified applied is never replayed; C-2(Kp) decides it, and without a recorded `commit_id` it is `review_commit_unowned` (§15.2). PASS requires every item:
 
 1. HEAD is P; the binding holds (§11.5);
 2. P == `use_check_head`, or P descends from `use_check_head` and `gitcmd.commits_touching(use_check_head, P, planning-owned paths) == []`;
 3. the Run's records are committed at P and unchanged (`gate.require_persisted` + blob check), and read back: latest generation 3, sealed, issuing the reserved Receipt; no Supersession of it; no Consumption for it;
 4. `review_kind`, `operation_identity`, `target_identity` and `authorized_operation_stage` recomputed == the Receipt's;
-5. currency (§13) on P: Context, Policy, and the Candidate with the declared base on the committed view of P;
+5. currency (§13) on P, in its order: Context, Policy, the declared base on the committed view of P, then — with the declared base equal — the Candidate rebuilt with the R9 selection on the committed basis of P;
 6. the physical projection on P: the record check of §15.7 — the recorded registration effects are exactly the expected physical projection E of the Run's Candidate on P.
 
-It writes nothing. A failure of 1–2 → `ReconcileRequired` (reason `review_registration_base_moved`); of 3–4 → `ReconcileRequired` (reason `review_receipt_invalid`); of 5 → `ReconcileRequired` (reason `review_registration_currency_changed`); of 6, or E unavailable (§15.7) → `ReconcileRequired` (reason `review_registration_projection_mismatch`). In every case no Kp is recorded or made, no Consumption is written and nothing is pushed; the planning mutation stays pending with its registration in the working tree (§13.4).
+It writes nothing. A failure of 1–2 → `ReconcileRequired` (reason `review_registration_base_moved`); of 3–4 → `ReconcileRequired` (reason `review_receipt_invalid`); of 5, a stale difference (§13 items 1–3) → `ReconcileRequired` (reason `review_registration_currency_changed`), a Candidate mismatch (§13 item 4) → `ReconcileRequired` (reason `review_candidate_mismatch`); of 6, or E unavailable (§15.7) → `ReconcileRequired` (reason `review_registration_projection_mismatch`). In every case no Kp is recorded or made, no Consumption is written and nothing is pushed; the planning mutation stays pending with its registration in the working tree (§13.4).
 
 With W as the only writer input (§7.8), item 6 never meets two legitimate representations of one Candidate: a caller's mapping order does not reach the writer. It stays mandatory as the proof that the implementation fed the writer W and nothing else, and that no builder drifted.
 
@@ -1340,17 +1483,24 @@ Why not `P == use_check_head` alone: a Workline operation whose declared scope i
 
 ```text
 E = project_expected(candidate, reserved, base=P)        # the kind's adapter (§20)
-  parent:   P, a full commit ID
-  entries:  one per path the registration writes, sorted by path (bytewise):
-    path       canonical relative path
-    status     A  P's tree holds no entry at path
-               M  P's tree holds a regular file at path
-    old_mode   000000 (A) | P's mode, which must be 100644 (M)
-    old_blob   the zero object ID (A) | P's blob ID (M)
-    new_mode   100644
+  parent:   P, a full lowercase hexadecimal commit ID
+  entries:  one per path the registration writes, sorted by path (bytewise over its UTF-8 bytes):
+    path       canonical relative path, text
+    status     "A"  P's tree holds no entry at path
+               "M"  P's tree holds a regular file at path
+    old_mode   "000000" (A) | P's mode as Git writes it, which must be "100644" (M)
+    old_blob   the all-zero object ID (A) | P's blob ID (M)
+    new_mode   "100644"
     content    the exact bytes the writer's own computation produces for path
     new_blob   the object ID of content as a blob (git hash-object --no-filters -t blob --stdin, nothing written)
 ```
+
+Every scalar of E except `content` is text of an exact form (P2-READY-018):
+- **modes** are the six-character octal text `git diff-tree --raw` prints, never an integer (`000000` has no integer form);
+- **object IDs** are full-length lowercase hexadecimal text in the repository's object format — 40 characters for SHA-1, 64 for SHA-256, the length of P's own ID, the forms `gitcmd` accepts (`gitcmd.py:17-18`). The all-zero object ID is that many `0` characters;
+- **each status** is one uppercase letter.
+
+These are the fields of the `review-planning-delta` record (§16.1).
 
 **The computation.** Deterministic, from committed clone-safe inputs only: the Run's committed Candidate snapshot, through W (§7.8), Kp's exact parent P, and the running implementation's support for the adapter identity and projection semantics version the Run names (§6.2). No recorded effect, note or other runtime record takes part, so it is the same computation for the planning mutation, for another operation's push, after runtime loss and in a fresh clone.
 
@@ -1375,11 +1525,11 @@ By construction:
 
 **The display base check.** The writer allocates display numbers from the working tree; E allocates them on P. So immediately before each registration stage is recorded — the first one at the use check (§17 item 9) — the `*.md` entries directly under each entity directory whose count allocates display numbers for the kind (RoadmapPlan: `.workline/roadmaps/` and `.workline/phases/`; PhaseEntryDesign: `.workline/works/`) must be exactly HEAD's entries there plus the entity files the planning mutation's recorded stages wrote there. Otherwise `StopError` code `dirty_overlap`: nothing is recorded, the planning mutation stays pending, and once the person commits or removes the entry the same request continues. So no registration is recorded with display numbers no base can reproduce. A change that still slips in — an actor outside Workline under the lock, or a person's commit adding or removing an entity file of that kind after the registration began — is refused by pre-Kp proof item 6 before Kp exists.
 
-**Availability.** E is unavailable when the running implementation does not provide the adapter identity the Run's Context names, does not support the Candidate's projection semantics version, or cannot complete a step (a file of P unreadable or malformed, a ledger missing, an entry the loader refuses). Unknown is never proof: the pre-Kp proof and C-2(Kp) stop with `ReconcileRequired`, and the committed planning proof fails CP5, so the publication barrier holds (§18.7) and no Workline push publishes the history.
+**Availability.** E is unavailable when the running implementation does not provide the adapter identity the Run's Context names, does not support the Candidate's projection semantics version, or cannot complete a step (a file of P unreadable or malformed, a ledger missing, an entry the loader refuses). Unknown is never proof: the pre-Kp proof and C-2(Kp) stop with `ReconcileRequired` (`review_registration_projection_mismatch`, `review_persisted_proof_failed`), and the committed planning proof fails CP5, so the publication barrier holds (§18.7) and no Workline push publishes the history.
 
 **Implementation upgrades.** An implementation proves a registration only by reproducing E and the semantic projection exactly. A Workline version whose package digest (`loader_identity`) differs from the recorded one proves an old registration when it provides the Run's adapter identity and projection semantics version and those reproduce every byte of E and the same semantic projection, with every other CP item passing. If it produces one different expected byte anywhere, CP5 fails and the barrier holds for every history holding that registration. A change to W (§7.8), a renderer, a display allocation or the planned-write computation that a planning adapter uses therefore changes that adapter's output: it is a new adapter version, never the old one under its old name, and a version that still has to publish histories holding such registrations keeps providing the adapter version they name; no loader-identity or semantic argument substitutes for the byte comparison.
 
-**`registration_delta_digest`.** Derived from E, never from whatever Kp holds: the `review-planning-delta` record of §16.1 with `parent` P, `commit` Kp and E's entries (`path`, `status`, `old_mode`, `new_mode`, `old_blob`, `new_blob`). The planning mutation computes it only after P3 has proven Kp's delta to be E (§15.1 steps 5–6), and CP9 recomputes it from E. A delta that is not E has no digest a Consumption may carry, and a Consumption carrying the digest of a delta that is not E fails CP5 and CP9.
+**`registration_delta_digest`.** Derived from E, never from whatever Kp holds: the `review-planning-delta` record of §16.1 with `parent` P, `commit` Kp and E's entries (`path`, `status`, `old_mode`, `new_mode`, `old_blob`, `new_blob`), in the exact text forms above. The planning mutation computes it only after P3 has proven Kp's delta to be E (§15.1 steps 5–6), and CP9 recomputes it from E. A delta that is not E has no digest a Consumption may carry, and a Consumption carrying the digest of a delta that is not E fails CP5 and CP9.
 
 ## 16. Planning Consumption (C-2) and planning uniqueness
 
@@ -1413,9 +1563,8 @@ persisted_result:
   registration_commit           # Kp, full ID
   registration_parent           # P, full ID
   branch                        # full ref
-  registration_delta_digest     # serialize.digest({schema: review-planning-delta, version: 1, parent: P, commit: Kp,
-                                #   entries: [{path, status, old_mode, new_mode, old_blob, new_blob}] sorted by path}),
-                                #   the entries being the expected physical projection E, proven to be Kp's delta (§15.7)
+  registration_delta_digest     # serialize.digest of the review-planning-delta record below, whose entries are the
+                                #   expected physical projection E, proven to be Kp's delta (§15.7)
   semantic_projection_digest    # Projection.identity() of the normalized persisted projection (== the reviewed one)
   adapter_identity
   loader_identity
@@ -1435,6 +1584,26 @@ persisted_result:
 ```
 
 Every list holds scalars or mappings: the canonical Review serializer does not nest sequences (`yamlish.py:133`).
+
+**The `review-planning-delta` record** (P2-READY-018) is canonical data with exactly these fields and types:
+
+```text
+schema:    "review-planning-delta"                 text
+version:   1                                       integer
+parent:    P                                       text, full lowercase hexadecimal commit ID
+commit:    Kp                                      text, full lowercase hexadecimal commit ID
+entries:   E's entries, sorted by path (bytewise)  a sequence of mappings, each with exactly:
+  path:      text, the canonical relative path
+  status:    text, "A" or "M"
+  old_mode:  text, six octal characters: "000000" for "A", otherwise P's mode, "100644"
+  new_mode:  text, "100644"
+  old_blob:  text, full lowercase hexadecimal object ID: the all-zero ID for "A", otherwise P's blob ID
+  new_blob:  text, full lowercase hexadecimal object ID
+```
+
+Object IDs have the length of the repository's object format — the length of P's own ID: 40 for SHA-1, 64 for SHA-256. The all-zero ID is that many `0` characters; nothing assumes SHA-1.
+
+`registration_delta_digest = serialize.digest(record)`. It digests E, never Kp's actual delta (§15.7), and CP9 recomputes it the same way. The types are part of the identity: **Measured** (§31), the digest of the record changes when a mode is an integer instead of its text.
 
 ### 16.2 Reading and validation
 
@@ -1509,11 +1678,11 @@ Receipt  !=  Consumption  !=  registration commit (Kp)  !=  publication
 4. `operation_identity`, `target_identity`, `review_kind` and `authorized_operation_stage` equal the recomputed ones, and the Run is the planning mutation's reservation — for a recovery planning mutation, the Run its recovery bound (§12.5);
 5. the binding holds (§11.5);
 6. the Run's records are committed at HEAD and unchanged (`gate.require_persisted` + blob check), so every history that holds the registration commit holds the Run's Candidate snapshot (§18.7);
-7. currency (§13) on HEAD: Context, Policy, and the Candidate with the declared base on the committed view of HEAD;
+7. currency (§13) on HEAD, in its order: Context, Policy, the declared base on HEAD's committed view, then — with the declared base equal — the Candidate rebuilt with the R9 selection on HEAD's committed basis;
 8. no registration path differs from HEAD (`gitcmd.changed_against_head`): a change made after the freeze would otherwise be taken into the registration's own writes;
 9. the display base check (§15.7): the `*.md` entries of every entity directory whose count allocates the registration's display numbers are exactly HEAD's, so the display numbers the writer allocates are the ones the expected physical projection allocates on HEAD, which is Kp's parent P unless a commit changes those entries first (then §15.6 item 6 refuses the registration before Kp).
 
-Failures of 1–4 → `ReconcileRequired` (reason `review_receipt_invalid`). A failure of 5 → `ReconcileRequired`. A failure of 6 → the P1 `review_not_persisted` STOP, the planning mutation pending. A stale difference in 7 → invalidation (§13.3): generation 4 and the Supersession, then terminal `stale`; any other difference in 7 → `ReconcileRequired` (§13 item 3), and an unavailable Context → the `review_context_unavailable` STOP (§8); these two invalidate nothing. A failure of 8 or 9 → `StopError` code `dirty_overlap`; nothing is written, the planning mutation stays pending, and once the person commits or discards the change the same request continues.
+Failures of 1–4 → `ReconcileRequired` (reason `review_receipt_invalid`). A failure of 5 → `ReconcileRequired` (reason `review_binding_moved`). A failure of 6 → the P1 `review_not_persisted` STOP, the planning mutation pending. A stale difference in 7 (§13 items 1–3) → invalidation (§13.3): generation 4 and the Supersession, then terminal `stale`. A Candidate mismatch in 7 (§13 item 4) → `ReconcileRequired` (reason `review_candidate_mismatch`), and an unavailable Context → the `review_context_unavailable` STOP (§8); these two invalidate nothing. A failure of 8 or 9 → `StopError` code `dirty_overlap`; nothing is written, the planning mutation stays pending, and once the person commits or discards the change the same request continues.
 
 On PASS the planning mutation records the note `use_check_head = <HEAD, full commit ID>` and then its first registration stage. Until that stage is recorded, every run evaluates the use check again and records the note again; once it is recorded, the note is never changed and the use check never runs again (§15.6 takes over).
 
@@ -1608,7 +1777,7 @@ The mutation-level validator (`_recorded_publication`, planning branch) names th
 - `gitcmd.commit_changes(Km)` ⊆ `{Consumption path}`;
 - the branch holds Km.
 
-Otherwise it names nothing, and the push is refused (`reconcile_required`). Classification and push are live and unchanged: a dry run of the exact refspec `<Km>:refs/heads/<branch>`, `=` published, `*` / ` ` unpublished, `!` a read-only destination read; never forced, never a branch tip. The publication barrier — the committed planning proof — is evaluated again for Km whenever the dry run shows the push would write, and right before the push (§18.7).
+Otherwise it names nothing, and the push is refused (`ReconcileRequired`, reason `review_publication_invalid`). Classification and push are live and unchanged: a dry run of the exact refspec `<Km>:refs/heads/<branch>`, `=` published, `*` / ` ` unpublished, `!` a read-only destination read; never forced, never a branch tip. The publication barrier — the committed planning proof — is evaluated again for Km whenever the dry run shows the push would write, and right before the push (§18.7).
 
 ### 18.5 Discriminator
 
@@ -1617,9 +1786,9 @@ Otherwise it names nothing, and the push is refused (`reconcile_required`). Clas
 | durable invocation | publication rule |
 | --- | --- |
 | no `review_contract`, no `publication_contract`, operation not `review-generation` | current-combined: the live `_recorded_publication`, unchanged (R5 §12.3.1 case A) |
-| `review_contract == review-v1-planning-v1` and `publication_contract == review-v1-planning-publication-v1` and operation in {`roadmap-create`, `phase-entry`}, with or without `recovery_of_review_run_id` | planning publication (§18.4); a combined commit + push pair in such a mutation is refused |
-| operation `review-generation` | publishes nothing: a recorded `git_push` is refused, and P2 never records one there |
-| any other presence, value or combination | fail closed (`reconcile_required`), never current-combined |
+| `review_contract == review-v1-planning-v1` and `publication_contract == review-v1-planning-publication-v1` and operation in {`roadmap-create`, `phase-entry`}, with or without `recovery_of_review_run_id` | planning publication (§18.4); a combined commit + push pair in such a mutation is refused (`ReconcileRequired`, reason `review_publication_contract_invalid`) |
+| operation `review-generation` | publishes nothing: a recorded `git_push` is refused (`review_publication_contract_invalid`), and P2 never records one there |
+| any other presence, value or combination | fail closed (`ReconcileRequired`, reason `review_publication_contract_invalid`), never current-combined |
 
 Legacy mutations carry no marker and get exactly the live rule. R5's `review-v1-split-v1` value is not recognized by P2; P3 adds it for START under R5.
 
@@ -1641,6 +1810,12 @@ The publication barrier (§18.7) is not a publication contract and is not select
 4. a Run whose registration paths are added in C's history is a *registered Run* of C.
 
 "Added in C's history" is read with `git log --full-history --no-renames --diff-merges=combined --diff-filter=A --name-only -z <C> -- <directory>` (**Measured**, §31: it lists a side-branch commit that adds a path and a merge that itself adds one, and lists an ordinary merge as adding nothing; without `--diff-merges=combined` the adding merge is missed), and each blob with `git cat-file blob <commit>:<path>`. A path that a subsequent commit deleted or reverted is still found: the barrier reads the history, not only C's tree. The snapshot is always in the history of Workline's own Kp: the Run's records must be committed at the commit Kp is made on (§17 item 6, §15.6 item 3, P12). Only a person who first removes the Run's records from the branch history and then commits the registration files by hand leaves the barrier nothing to read — manual Git, which Workline does not control and never treats as a registration it made.
+
+**Fast path and Git version** (P2-READY-027).
+- **The first read.** The barrier first reads `git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/`. It is empty exactly when no commit in C's history changed anything under that directory. Then no snapshot was ever added there, C has no planning Run and no registered Run, and the barrier is clear.
+- **Measured** (§31): the read lists a commit for a side-branch addition brought in by an ordinary merge, an evil merge that adds a path, an addition deleted afterwards, and a root commit holding a snapshot; it lists nothing for a history that never touched the directory.
+- **Every Git answers it.** Every Git the live baseline runs on answers this read, so a history that never held a planning snapshot is published as before, on any Git.
+- **When it lists a commit,** the steps above and the committed planning proof run, and they need the P2 minimum Git (§5.7). On an older Git, or one whose version text does not parse, the barrier holds (`review_publication_barrier`, the failing item naming the Git version). A fast-path read Git cannot answer holds it too. Unknown is never a clear barrier.
 
 **Rule.** The barrier is clear for C exactly when the committed planning proof (§18.8) proves every registered Run of C for C. Otherwise it holds: `StopError` code `review_publication_barrier`, naming the Run's `candidate_hash`, its registration commit and the first proof item that failed. The existence of a Consumption, of Km or of a `publication_proof` note proves nothing, and Kp or Km being at the destination proves nothing: every property they stand for is re-proven, never trusted. A second commit adding one of the registration paths — a cherry-pick of Kp, or a person deleting and re-adding the files — keeps the barrier holding until a person reconciles: which commit is the registration is never guessed from content. A blob that cannot be read or parsed, a planning snapshot whose content does not yield its registration paths, an expected physical projection the running implementation cannot compute (§15.7), or a Git question that cannot be answered is the barrier holding, never a clear barrier.
 
@@ -1666,7 +1841,7 @@ The barrier is a pure function of the objects reachable from C and of the runnin
 
 **Remote-less Projects** record and make no push, so the barrier is never evaluated there; C-2(Km) (§18.2) completes the operation (§12).
 
-**Legacy.** In a history that holds no planning Candidate snapshot — every Project that never ran a review-v1 planning invocation — step 1 finds nothing and the barrier refuses nothing: every legacy outcome is unchanged. It is not a Review gate on the legacy operation: it asks nothing of the operation itself (no Review, no Receipt, no activation), only that what it publishes carries no review-v1 registration the committed planning proof cannot prove, so HUMAN-1 = A holds.
+**Legacy.** In a history that holds no planning Candidate snapshot — every Project that never ran a review-v1 planning invocation — the fast path finds nothing, whatever the running Git's version, and the barrier refuses nothing: every legacy outcome is unchanged. It is not a Review gate on the legacy operation: it asks nothing of the operation itself (no Review, no Receipt, no activation), only that what it publishes carries no review-v1 registration the committed planning proof cannot prove, so HUMAN-1 = A holds.
 
 | state of a planning Run | barrier |
 | --- | --- |
@@ -1710,12 +1885,14 @@ The registration (Kp) — two independent requirements, physical (CP5) and seman
 | CP6 | semantic, on the committed views of P and K (§15.4): `validate_structure(K view) == []`; K's entities are P's plus exactly the Candidate's reserved new entities; K's roadmap relations and Related are P's plus exactly the Candidate's new ones, appended in registration order, records identical; `normalize_persisted(load_persisted(result identity, K view))`, with the adapter the Context names, equals the Candidate's projection (projection identity; kind and semantics version equal); PhaseEntryDesign: the R9 selection on the K view is the Candidate's `canonical_first_work` |
 | CP7 | authorized pre-state: the declared base computed on P's committed view equals the Candidate's declared base (§7.4) |
 
+**Order** (P2-READY-001). CP7 is evaluated before CP6. A declared base that differs on P fails CP7; only with CP7 passing are CP6's R9 selection, and the projection identity that carries it, compared. So the barrier's STOP names CP7 for a declared-base difference, and never an R9 mismatch for it. The items are evaluated in the order CP1–CP5, CP7, CP6, CP8–CP13.
+
 The Consumption:
 
 | # | condition |
 | --- | --- |
 | CP8 | C's tree holds exactly one Consumption naming R's Receipt; it is a Planning Consumption (version 2) that reads back; `RECEIPT_CONSUMPTION_BINDING` holds with the Receipt; `review_run_id`, `review_generation` (3), `review_kind`, `authorized_candidate_hash`, `operation_identity` and `target_identity` are the Run's |
-| CP9 | every `persisted_result` claim is re-proven: `contract` is the constant; `request_digest` is the digest part of the Run's `operation_identity`; `registration_commit` is K and `registration_parent` is P; `branch` is a full branch ref (form only: history may travel between branches); `registration_delta_digest` is the digest of E's `review-planning-delta` record with parent P and commit K (§15.7, §16.1), never of K's actual delta; `semantic_projection_digest` is recomputed from CP6's projection; `adapter_identity` and `loader_identity` equal the Context's in the Run's request envelope; the per-kind IDs equal the Candidate's reserved IDs in the Candidate's order, and `canonical_first_work_id` equals CP6's selection |
+| CP9 | every `persisted_result` claim is re-proven: `contract` is the constant; `request_digest` is the digest part of the Run's `operation_identity`; `registration_commit` is K and `registration_parent` is P; `branch` is a full branch ref (form only: history may travel between branches); `registration_delta_digest` is the digest of E's `review-planning-delta` record with parent P and commit K, in the exact text forms of §16.1 (§15.7), never of K's actual delta; `semantic_projection_digest` is recomputed from CP6's projection; `adapter_identity` and `loader_identity` equal the Context's in the Run's request envelope; the per-kind IDs equal the Candidate's reserved IDs in the Candidate's order, and `canonical_first_work_id` equals CP6's selection |
 | CP10 | uniqueness in C's tree (Frozen P1 R4 §1, §7; §16.3): no other Consumption names the Receipt, no other Planning Consumption names K, and no other Planning Consumption has R's (`review_kind`, `target_identity`) |
 
 The metadata commit (Km):
@@ -1736,7 +1913,7 @@ Against the list the independent review required: the exact planning Candidate a
 
 A registration a person makes by hand passes the proof only if its bytes are exactly the expected physical projection on its exact parent, its meaning is exactly the authorized content on the authorized base, and it is bound to a valid, unsuperseded, uniquely consumed Receipt. Publishing such a history publishes exactly what the Review authorized, byte for byte; it is still never adopted as a planning mutation's own commit. A hand-made or foreign Kp that the reader interprets identically but whose bytes differ — a reordered or re-quoted frontmatter key, CRLF, a blank line, a re-formatted ledger — keeps the barrier holding.
 
-**Cost.** The proof runs for each registered Run in the published history, at each push that would write and at the freeze or recovery setup of a review-v1 call with a push destination. It is deterministic and bounded by those Runs' records, two committed views and one materialized projection base each. A Project that never ran a review-v1 planning invocation has no registered Run and pays one path-limited history read.
+**Cost.** The proof runs for each registered Run in the published history, at each push that would write and at the freeze or recovery setup of a review-v1 call with a push destination. It is deterministic and bounded by those Runs' records, two committed views and one materialized projection base each. A Project that never ran a review-v1 planning invocation has no registered Run and pays one path-limited history read: the fast path of §18.7, which every Git the live baseline runs on answers.
 
 ## 19. Terminal review outcomes
 
@@ -1816,16 +1993,16 @@ One hand-off: W is computed by one function from one Candidate record, and the r
 | --- | --- | --- |
 | `adapter_identity` / `loader_identity` | §6.2 / §8.1 | same |
 | `normalize_candidate` | §7.2 content as `Projection(reviewed_artifact, roadmap-plan-projection-v1)` | §7.3 content as `Projection(reviewed_artifact, phase-entry-design-projection-v1)` |
-| `project_expected` | the expected physical projection E on the base commit it is given (§15.7) — P for the pre-Kp proof, C-2(Kp) and CP5 — built from W (§7.8), never from recorded effects, which are compared with it (P4); returned as a `ProjectionSet` of the reviewed artifact and an authorized transition whose content is E's `{parent, entries: [{path, status, old_mode, new_mode, old_blob, new_blob}]}`. The display numbers are the ones the writer allocates under the lock (Frozen P1 R8 §11), reproduced on P and held equal to the writer's by the display base check and the record check. At the freeze the same W and builders predict the working tree (§7.6) | same, three stages |
+| `project_expected` | the expected physical projection E on the base commit it is given (§15.7) — P for the pre-Kp proof, C-2(Kp) and CP5 — built from W (§7.8), never from recorded effects, which are compared with it (P4); returned as a `ProjectionSet` of the reviewed artifact and an authorized transition whose content is E's `{parent, entries: [{path, status, old_mode, new_mode, old_blob, new_blob}]}`. The display numbers are the ones the writer allocates under the lock (Frozen P1 R8 §11), reproduced on P and held equal to the writer's by the display base check and the record check. At the freeze the same W, builders and planned-write computation give the committed basis of HEAD (§7.6) | same, three stages |
 | reserved IDs | `ReservedIds`: roadmap, `key → Phase ID`, `index → relation ID` | `key → Work ID`, integration, confirmation, relation and Related IDs |
 | expected scope | E: the registration paths (§14.1) with their transitions, modes and exact bytes | same |
 | persisted scope | Kp's whole delta (`git diff-tree -r -z --no-renames --no-abbrev --raw P Kp`), compared with E by §15.7 (P3, CP5) | same |
 | `load_persisted` | the Roadmap by ID, Phases by reserved ID in declared order, relations by reserved ID in declared order; a missing one is a mismatch | Works by reserved ID; Related and roadmap relations by reserved ID; each Work's `phase_id`, `origin`, `work_kind` and `confirmation_target` |
-| `normalize_persisted` | §7.2 shape from `Entity.name` / `Entity.section`; a relation with extra fields is a mismatch | §7.3 shape; `condition` from `Relation.extra`, any other extra field is a mismatch; `canonical_first_work` from `startable_works` + `planned_next_preference` on the loaded view, mapped back to its key |
+| `normalize_persisted` | §7.2 shape from `Entity.name` / `Entity.section`; a relation with extra fields is a mismatch | §7.3 shape; `condition` from `Relation.extra`, any other extra field is a mismatch; `canonical_first_work` from `startable_works` + `planned_next_preference` on the committed basis its caller names (§7.7) — the loaded view itself at the freeze, in P8/P9 and in CP6, HEAD's committed basis in the working-tree round trip — mapped back to its key |
 | committed result loading | §15.4 | §15.4 |
 | equality | two independent requirements: physical — Kp's delta is E (P3, CP5); semantic — projection identity with P5–P8, P10 and P12 (CP6, CP7) | same + P9 |
 
-The same `normalize_persisted` runs at three points with three names: the representability check (§7.6, on the projection), the working-tree round trip (§15.1 step 2), and the persisted proof (§15.3, over the committed result).
+The same `normalize_persisted` runs at three points with three names: the representability check (§7.6, on the committed basis), the working-tree round trip (§15.1 step 2), and the persisted proof (§15.3, over the committed result). The adapter's responsibilities are those of the P1 protocol, whose exact Python names are an implementation detail (`review/adapter.py:83-111`): the view its R9 selection is computed on is an input its caller gives, and only the working-tree round trip gives one other than the loaded view.
 
 `project_expected` and `normalize_persisted` serve two proof dimensions and are never collapsed into one. E proves bytes, paths and modes; the persisted semantic projection proves meaning, identity and, for Phase entry, the R9 selection. A byte-perfect Kp whose meaning differs fails the semantic side, and a meaning-perfect Kp whose bytes differ fails the physical side (Frozen P1 R8 §7, R9 §8).
 
@@ -1847,8 +2024,8 @@ Baseline conditions for rows 1–38: the runtime record is intact, HEAD is on th
 
 | # | window | behaviour of the next same-request run |
 | --- | --- | --- |
-| 1 | planning mutation begun, domain IDs reserved, freeze incomplete | resume; freeze recomputed deterministically (same reservations). A STOP here abandons the planning mutation (§12) |
-| 2 | Run / task / Receipt / Consumption IDs reserved, `review_binding` noted, no generation mutation yet | resume; generation 1 starts; a STOP here still abandons (no generation mutation has started) |
+| 1 | planning mutation begun, domain IDs reserved, freeze incomplete | resume; freeze recomputed deterministically by the pre-freeze resume setup (§12.9: the same reservations). A STOP here abandons the planning mutation, begun or resumed (§12) |
+| 2 | Run / task / Receipt / Consumption IDs reserved, `review_binding` noted, no generation mutation yet | resume; the pre-freeze resume setup runs §14.4 steps 1–6 again with the recorded reservations and binding; generation 1 starts; a STOP here still abandons, begun or resumed (no generation mutation has started) |
 | 3 | generation 1 begun, no effect recorded | resume planning; the pending generation mutation is abandoned; N = 1 computed again; a new generation 1 starts (no fork: nothing physical exists) |
 | 4 | Candidate snapshot / task input / gate 1 recorded, some applied | resume generation 1; replay (`create_file` applied_matching skipped, unapplied created, mismatch → reconcile); commit; persistence proof; complete |
 | 5 | generation 1 committed, not completed | resume generation 1: commit matched by its ID; persistence proof; complete |
@@ -1865,17 +2042,17 @@ Baseline conditions for rows 1–38: the runtime record is intact, HEAD is on th
 | 16 | generation 4 committed (completed or not), planning mutation not completed | resume planning; a pending generation mutation 4 is finished first (row 15); the chain ends at generation 4 with its Supersession → terminal `stale` with nothing evaluated again; `complete()` |
 | 17 | use check passed and noted, registration stage not recorded | the use check runs again and notes `use_check_head` again; a registration path changed since the freeze, or an entity file added or removed in a display-allocating directory (§17 item 9), stops it with `dirty_overlap`, nothing written |
 | 18 | registration effects partially applied | resume; `_open` projects and replays (live `refuse_invalid_phase_writes` / `refuse_invalid_work_writes` first); the subsequent stages continue from their records, and a stage not yet recorded only after the display base check (§15.7); the use check never runs again and `stale` is no longer an outcome (§13.4) |
-| 19 | registration fully applied, round trip / pre-Kp proof not run, Kp not recorded | resume; the round trip runs; the pre-Kp currency proof on P = HEAD (§15.6), its physical projection item included: pass → Kp recorded with `base_head` = P and `base_exact`, and made; failure → `ReconcileRequired`, nothing committed, no Consumption, pending |
+| 19 | registration fully applied, round trip / pre-Kp proof not run, Kp not recorded | resume; the round trip runs; the pre-Kp currency proof on P = HEAD (§15.6), its physical projection item included: pass → Kp recorded with `base_head` = P and `base_exact`, and made; failure → `ReconcileRequired` with its §15.6 reason, nothing committed, no Consumption, pending |
 | 20 | HEAD advanced after the use check (a disjoint-scope operation's commit in a crash window, or a person's) | the pre-Kp currency proof decides on the new HEAD: P descends from `use_check_head`, no commit since touched a planning-owned path, and currency holds on P → Kp is made on P; otherwise `ReconcileRequired` (`review_registration_base_moved` / `review_registration_currency_changed`), nothing committed |
-| 21 | Kp recorded, not made | `_open`'s `refuse_recorded` runs the pre-Kp currency proof with P = the recorded `base_head` first: HEAD == P and the proof passes → the replay makes Kp on exactly P; otherwise `ReconcileRequired`, Kp not made (`base_exact`: never the independent-advancement rule) |
-| 22 | Kp made, `commit_id` not saved | reconcile (`review_commit_unowned`, §15.2); Kp can never be proven, so the publication barrier holds for every history holding it (row 25) |
+| 21 | Kp recorded, not made | `_open`'s `refuse_recorded` classifies the recorded Kp first (§15.2). Unapplied (HEAD == P on the recorded branch) → the pre-Kp currency proof with P = the recorded `base_head`: it passes → the replay makes Kp on exactly P; it fails → `ReconcileRequired` with its reason, Kp not made. A mismatch (HEAD moved, the registration files not committed) → `ReconcileRequired` (`review_registration_base_moved`), Kp not made. `base_exact`: never the independent-advancement rule |
+| 22 | Kp made, `commit_id` not saved | the live nothing-left-to-commit step classifies it applied, without an ID → reconcile (`review_commit_unowned`, §15.2); Kp can never be proven, so the publication barrier holds for every history holding it (row 25) |
 | 23 | Kp made, `commit_id` saved, C-2(Kp) not run | the proof runs over the recorded Kp (P1–P12); the barrier holds for every history holding Kp until the committed planning proof proves Kp, its Consumption and Km for the commit being published (§18.7) |
 | 24 | C-2(Kp) failed | reconcile (§15.5); no Consumption; every retry repeats the same proof; no generation 4; the barrier holds for every history holding Kp; no reset, rebase or amend |
 | 25 | another Workline operation attempts a push while Kp is unproven (rows 22–24, 26–28) | `review_publication_barrier` (§18.7): its current-combined stage is not recorded (the mutation stays pending with its domain effects applied), or its recorded push is not classified unapplied / not applied; nothing is pushed and the destination never receives Kp; it continues once Km exists, the committed planning proof passes and Km is published (its commit then fast-forwards over Km, or is classified already published) — or, when Kp can no longer be proven, after a person reconciles the branch history |
 | 26 | C-2(Kp) passed, Consumption not recorded | the proof runs again (the recorded Consumption effect is the operation's checkpoint); Consumption recorded |
 | 27 | Consumption recorded, not applied (a single immutable create: absent or exact) | `_open` replay creates it; exact bytes already present → matching; anything else → reconcile |
 | 28 | Consumption applied, Km not recorded / not made | Km recorded / made (live base rules, M1 bounding its parent); a Km without a saved ID → `review_commit_unowned` |
-| 29 | Km made, C-2(Km) not run or failed | C-2(Km) — M1–M6 — runs; failure → reconcile, no push, and the barrier holds for every history holding Kp |
+| 29 | Km made, C-2(Km) not run or failed | C-2(Km) — M1–M6 — runs; failure → reconcile (`review_metadata_commit_mismatch`), no push, and the barrier holds for every history holding Kp |
 | 30 | C-2(Km) passed, `publication_proof` not noted | C-2(Km) runs again (the note is never assumed); note recorded |
 | 31 | Km local, publication pending (note recorded, push stage not recorded) | C-2(Km) re-run; the barrier (the committed planning proof of every registered Run in Km's history) is evaluated; push stage recorded. The barrier holds only while that proof fails for some registered Run of Km's history — another Run's unproven registration commit: then `review_publication_barrier`, pending. Another operation's push from Km or a descendant may publish Km meanwhile, where the proof passes |
 | 32 | push stage recorded, not applied | `_open` replay: planning validator (§18.4), dry run, barrier, exact push |
@@ -1902,12 +2079,12 @@ Baseline conditions for rows 1–38: the runtime record is intact, HEAD is on th
 | L8 | generation 4 committed | no (terminal) | — | no | yes | none | yes | set aside (`invalidated`), and a new Run |
 | L9 | a half-written, applied-but-uncommitted or rewritten generation stage, or a generation mutation left pending | no | no | no | no | none (nothing registered) | yes | `ReconcileRequired` (`review_recovery_incomplete`); never hidden by a new Run; once a person has reconciled the records, discovery reads the Run's committed state again |
 | L10 | registration applied to the working tree only (generation 3 committed, no registration commit) | yes | settled | yes | no | none (no registration commit) | yes | the call stops with nothing written — Roadmap creation at the recovered-reservation binding (`review_recovery_reservation_conflict`, §12.5), Phase entry at the live `phase_already_expanded` precheck — until a person discards the uncommitted files; then as L7 |
-| L11 | Kp made, C-2(Kp) not run | no | — | no | no | holds | no | `ReconcileRequired` (§12.2 row b): the operation's C-2(Kp) can never run again (Kp's ID lived only in the lost record, §15.2), so no Consumption is written; no recovery adopts Kp, the committed planning proof fails for want of a Consumption (CP8), and a person reconciles the branch history |
+| L11 | Kp made, C-2(Kp) not run | no | — | no | no | holds | no | Roadmap creation: `ReconcileRequired` (`review_recovery_incomplete`, §12.2 row b); Phase entry: the live `phase_already_expanded` before discovery (§5.6 step 6). The operation's C-2(Kp) can never run again (Kp's ID lived only in the lost record, §15.2), so no Consumption is written; no recovery adopts Kp, the committed planning proof fails for want of a Consumption (CP8), and a person reconciles the branch history |
 | L12 | C-2(Kp) passed, Consumption not recorded | no | — | no | no | holds | no | as L11 |
-| L13 | Consumption written (working tree), Km not made | no | — | no | no | holds (no committed Consumption) | no | `ReconcileRequired`; the uncommitted Consumption also fails clean persistence (§12.3) |
-| L14 | Km made, C-2(Km) not run or not noted | no | — | no | only if the proof passes (then per the live Roadmap rules) | decided by the committed planning proof at each push | where the proof passes | the proof passes: terminal `consumed`, and the next Workline push from the branch publishes Km; it fails: `ReconcileRequired`, and the barrier holds |
+| L13 | Consumption written (working tree), Km not made | no | — | no | no | holds (no committed Consumption) | no | Roadmap creation: `ReconcileRequired` (`review_recovery_incomplete`), the uncommitted Consumption also failing clean persistence (§12.3); Phase entry: `phase_already_expanded` before discovery |
+| L14 | Km made, C-2(Km) not run or not noted | no | — | no | only if the proof passes (then per the live Roadmap rules) | decided by the committed planning proof at each push | where the proof passes | Roadmap creation: the proof passes → terminal `consumed` (the same request is then a new Run, a second Roadmap as in legacy), and the next Workline push from the branch publishes Km; it fails → `ReconcileRequired` (`review_recovery_incomplete`), and the barrier holds. Phase entry: `phase_already_expanded` before discovery; the barrier decides every push as for Roadmap creation |
 | L15 | C-2(Km) passed, push not made | no | — | no | as L14 | as L14: the lost `publication_proof` note is never assumed; every push re-runs the proof over the same immutable objects | where the proof passes | as L14 |
-| L16 | Km published | no | — | no | per the live Roadmap rules | re-run at each subsequent push; passes | yes | terminal `consumed` |
+| L16 | Km published | no | — | no | per the live Roadmap rules | re-run at each subsequent push; passes | yes | terminal `consumed` (Phase entry: `phase_already_expanded` before discovery) |
 | L17 | fresh clone, safe checkout semantics (the checked-out commit holds the committed rule, no clone-local override) | per its committed state | per its committed state | per its committed state | per its committed state | the same answer from the same objects | as the barrier says | every Review record checks out as its canonical LF bytes (**Measured**, §14.5); discovery and recovery read them as in L1–L16 |
 | L18 | fresh clone, unsafe checkout semantics (no committed rule at the checked-out commit, or a clone-local `info/attributes` override) | no | no | no | no | unaffected (it reads raw blobs) | as the barrier says | a review-v1 call stops at discovery's first step with `review_namespace_unreadable` (§12.2 step 1) or, at the freeze or the recovery setup, with `review_checkout_unsafe`; nothing is normalized (P1 unchanged); legacy operations are unaffected |
 
@@ -1917,7 +2094,7 @@ A new Run never makes an unproven registration commit publishable: the barrier r
 
 | # | condition | behaviour |
 | --- | --- | --- |
-| O1 | branch changed | reconcile (binding §11.5, live `_require_decided_branch` / `_require_finalized_branch`); checking out the bound branch continues |
+| O1 | branch changed | reconcile (binding §11.5: `review_binding_moved`; live `_require_decided_branch` / `_require_finalized_branch`, reason `None`); checking out the bound branch continues |
 | O2 | remote moved | live push classification: destination holds Km → matching; another history → reconcile, never forced; a push that would write is also held to the barrier |
 | O3 | canonical Review record tampered | reconcile: `create_file` applied_mismatch, `ReviewStore` refusal, a blob / M4 / P12 mismatch, or a committed planning proof failure; never re-reviewed or repaired |
 | O4 | pre-existing dirty path | refused at the freeze or the recovery setup with `dirty_overlap`, the planning mutation abandoned, nothing written (§14.2); a change after the freeze on a written path → live own-bytes reconcile |
@@ -1925,10 +2102,26 @@ A new Run never makes an unproven registration commit publishable: the barrier r
 | O6 | checkout capability missing or lost | at the freeze or recovery setup: `review_checkout_unsafe`, planning abandoned, nothing written; after the first generation mutation (the rule removed while pending): the next Review-writing or Git stage stops, the planning mutation stays pending, and continues once the rule is back |
 | O7 | several recoverable matching Runs | `ReconcileRequired` (`review_recovery_ambiguous`), nothing begun; no Run is chosen by age, ID order or position |
 | O8 | a legacy invocation of the same request after runtime loss | the live path, unchanged: discovery never runs for a legacy invocation |
-| O9 | a Kp — the planning mutation's own or anyone's — whose bytes are not the expected physical projection although its meaning is the reviewed one | the planning mutation's own: C-2(Kp) P3 fails, `ReconcileRequired`, no Consumption (§15.5); anyone's: never adopted; for every history holding it the barrier holds (CP5), before and after runtime loss and in a fresh clone |
+| O9 | a Kp — the planning mutation's own or anyone's — whose bytes are not the expected physical projection although its meaning is the reviewed one | the planning mutation's own: C-2(Kp) P3 fails, `ReconcileRequired` (`review_persisted_proof_failed`), no Consumption (§15.5); anyone's: never adopted; for every history holding it the barrier holds (CP5), before and after runtime loss and in a fresh clone |
 | O10 | a review-v1 caller value the canonical form cannot carry (a float, a tuple, a non-text or empty mapping key, a sequence inside a sequence, a lone surrogate) | `review_candidate_unrepresentable` from the canonical-input preflight before `_open`: no planning mutation, reservation, Review record, domain effect or runtime file; a pending planning mutation of the slot untouched; before recovery discovery, so a recoverable Run stays as it is (§5.6) |
 
-Variants at any row: a different request or design → `reconcile_required` (live); a legacy invocation against a review-v1 record, or the reverse → `reconcile_required` (§5.3); a pending generation mutation bound to another planning mutation → reconcile (§11.8); structure changed by an independent operation while pending → the live projected refusal (`postcheck_failed`) before replay; the parent Roadmap held while a Phase entry is pending → the live Phase-entry precheck STOP, continued after resume; that hold committed after the use check → the pre-Kp currency proof decides (a declared-base difference is `ReconcileRequired`, §13.4).
+Variants at any row: a different request or design → `reconcile_required` (live); a legacy invocation against a review-v1 record, or the reverse → `reconcile_required` (`review_marker_mismatch`, §5.3); a pending generation mutation bound to another planning mutation → reconcile (`review_generation_owner_conflict`, §11.8); structure changed by an independent operation while pending → the live projected refusal (`postcheck_failed`) before replay; the parent Roadmap held while a Phase entry is pending → the live Phase-entry precheck STOP, continued after resume; that hold committed after the use check → the pre-Kp currency proof decides (a declared-base difference is `ReconcileRequired`, §13.4).
+
+### 21.4 Windows and conditions of the final readiness repair
+
+**Frozen** (P2-READY-001..004, P2-READY-027). The rows below are keyed R1–R9; "none of its own" means no canonical Run begun by that mutation.
+
+| # | window | pending mutation | canonical Run | same mutation resumed | discovery run again | abandoned | ReconcileRequired | Review record written | domain effect | push permitted | outcome |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| R1 | crash after `_open` (`MutationController.begin` saved), before the `recovery_discovery` note; new Run | yes, without the note | none of its own; matching Runs untouched | yes (§5.3) | yes (§12.9) | only on a STOP of the setup | only when discovery answers differently: `review_discovery_changed` (a Run became recoverable), `review_recovery_ambiguous`, `review_recovery_incomplete` | none before generation 1 | none | yes: nothing of it is committed | the note recorded on the same mutation, then the freeze (§28 Q-A); after `review_discovery_changed`, the next invocation recovers the Run (§28 Q-C) |
+| R2 | crash after the `recovery_discovery` note, before the first reservation | yes | none of its own | yes | no: the note is kept | only on a STOP | no | none | none | yes | the freeze from its step 1 |
+| R3 | crash after some reservations, before the Candidate or generation 1 | yes | none of its own | yes | no | only on a STOP | only a recorded key the order does not reserve (`review_setup_invalid`) or a wrong-kind ID (live `reserve_id`, reason `None`) | none | none | yes | the recorded reservations reused, the missing ones reserved in order (§28 Q-B) |
+| R4 | resumed recovery planning mutation before its recovered binding | yes, with `recovery_of_review_run_id`, without `recovery_binding` | yes: the named Run | yes | yes (§12.9) | only on a STOP | `review_discovery_changed` when the Run is no longer the one recoverable Run; `review_recovery_reservation_conflict` for a reservation without a binding | none written by it | none | yes | bound into the same mutation, then its setup (§28 Q-D) |
+| R5 | a STOP in a resumed setup before generation 1 | yes, then abandoned | as R1–R4 | yes | as R1–R4 | yes: begun or resumed, a Phase entry included | as its cause | none | none | yes | the next same-request invocation starts again at §5.6 step 5 (§28 Q-E) |
+| R6 | no pending mutation; the Phase already expanded (a consumed Run, or a registration commit, in history) | no | yes: historical | — | no | — | no: `StopError` `phase_already_expanded` | none | none | as the barrier says (§18.7) | the live refusal before discovery (§28 R-A) |
+| R7 | the working tree and HEAD give a different declared base, Work set of the Phase or R9 selection at the freeze | yes, begun or resumed | none of its own | — | — | yes | no: `ValidationError` `review_base_uncommitted` | none | none | yes | commit or discard the change and run again (§28 P-B, P-C) |
+| R8 | the committed or effective attributes are not form L: `-text` (the former form B), `text=unset`, no rule, `eol=crlf`, a set `filter`, `ident` or `working-tree-encoding` | at the freeze or the recovery setup: yes; after generation 1: yes, and it stays | — | — | — | at the freeze or the recovery setup: yes; after generation 1: no (§21.3 O6) | no: `StopError` `review_checkout_unsafe` (`review_checkout_unknown` when Git cannot answer) | none | none | yes | commit a form-L rule and run again (§28 J) |
+| R9 | Git older than 2.40.0, or a version text that does not parse | review-v1: none begun (stopped before the lock); a pending one untouched | untouched | — | no | no | no: `StopError` `review_git_unsupported` | none | none | a legacy push: yes when the published history never touched the candidate-snapshot directory, otherwise the barrier holds | run with a supported Git (§28 S) |
 
 Nothing in the matrix is the P3 Work-terminal recovery contract.
 
@@ -1939,9 +2132,9 @@ Nothing in the matrix is the P3 Work-terminal recovery contract.
 1. `state.py`, `ProjectView`, `validate_structure`, Phase selection, Work selection, startability and Roadmap progression never read a Receipt, Consumption, gate generation, Supersession, snapshot or task input. `state.py` stays byte-identical, and the existing pin `test_review_authority` (no "review" in `state.py`) holds.
 2. A review-v1 planning operation takes authorization only from its own Run's records. Recovery discovery reads the invocation's matching Runs only to classify them (§12.2); the uniqueness indexes (§16.3) and the publication barrier (§18.7) read other Runs' records only for their own refusals.
 3. There is no cross-operation Review precondition. For example, "Phase entry requires the Roadmap to possess Receipt X" is prohibited: a PhaseEntryDesign Review reviews its own design, whatever the Roadmap's history. The publication barrier (§18.7) is not such a precondition: it asks no operation for a Review or a Receipt, and only keeps a review-v1 registration the committed planning proof cannot prove out of what a push publishes. Recovery discovery (§12.2) reads only the invocation's own matching Runs.
-4. The R9 canonical first Work is computed from `ProjectView`, never from a Review record.
+4. The R9 canonical first Work is computed from `ProjectView` on the committed basis (§7.7), never from a Review record and never from the working tree.
 5. A broken Review record stops a review-v1 planning operation that relies on it. It cannot reinterpret lifecycle history, because nothing that derives lifecycle reads it.
-6. The committed-result loader (§15.4) feeds only the proofs, the currency evaluations (§13) and the base of the expected physical projection (§15.7); its `ProjectView` and the projection's scratch directory are never used to decide lifecycle or progression.
+6. The committed-result loader (§15.4) feeds only the freeze's committed basis and working-tree compatibility check (§7.4, §7.6), recovery discovery (§12.2), the proofs, the currency evaluations (§13) and the base of the expected physical projection (§15.7); its `ProjectView` and the projection's scratch directory are never used to decide lifecycle or progression.
 7. A review-v1 Roadmap creation or Phase entry writes no event, so the lifecycle it leaves is identical to a legacy call's (Measured, reconnaissance probes 2, 5, 8).
 8. The publication barrier (§18.7) reads Review records and history only to decide whether a push may publish. It derives no lifecycle and changes no lifecycle fact: a legacy operation it holds back has applied exactly the effects it would have applied, and only its commit and push wait.
 9. Generation 4 and the Supersession (§13.3) are authorization records only: invalidating a Receipt changes no Work, Phase or Roadmap state, and nothing that derives lifecycle reads them.
@@ -1969,7 +2162,7 @@ Every seam is closed.
 | --- | --- |
 | R1 §2–§8 layout, immutable create | no new directory. Planning Consumption v2 in `consumptions/`, the Supersession in `supersessions/`; runtime material in `.workline/runtime/review/` (proofs, reports, no-hooks, attr-eval), allowed by R1 §3 |
 | R1 §3 runtime data is never authorization; what decides consumability or reconstructs an accepted task must come from canonical records plus canonical Git state | the publication barrier, the committed planning proof, recovery discovery and reconstruction, the currency evaluations and every proof read committed objects; nothing in `.workline/runtime/` decides (§12, §13, §18.7, §18.8) |
-| R1 §4 "Git persistence proof separately proves the committed path reproduces those bytes under the Git semantics bound by R6" | blob checks at every generation commit, M4, P3 and P4 (§15.7), P12; and the checkout capability (§14.5), which proves positively that the committed path reproduces the canonical bytes in this working tree and in a fresh clone; the strict reader (P1-REV-007) is unchanged |
+| R1 §4 "Git persistence proof separately proves the committed path reproduces those bytes under the Git semantics bound by R6" | blob checks at every generation commit, M4, P3 and P4 (§15.7), P12; and the checkout capability (§14.5), which proves positively, by form L alone (P2-READY-004), that the committed path reproduces the canonical bytes in this working tree and in a fresh clone; the strict reader (P1-REV-007) is unchanged |
 | R1 §13 committability | `gate.require_committable` at the freeze and per writer |
 | R2 §2–§4 | keys §6.2; reservations §6.3; a recovered Run keeps its keys and canonical IDs; a value that never became canonical is reserved anew under the same key (§12.6) |
 | R2 §5: "A later clone resumes the same logical accepted task only when canonical task input reconstructs an exact request/Candidate whose digests and bound adapter identities match the accepted record. It never silently allocates a replacement task ID for missing accepted material." | recovery discovery and reconstruction (§12.2, §12.3); the same `task_id` is launched again (§12.7); missing or mismatching material → `ReconcileRequired`, never a new task |
@@ -2026,13 +2219,15 @@ No frozen P1 document needs repair for this contract. P2-CONTRACT-004 in particu
 | new result type | `ReviewedPlanningResult` (`workline.roadmap_review`) |
 | `Mutation` public methods | unchanged set (pin `test_project_start_recovery.py:978-991`) |
 | `MutationController` public methods | unchanged set (same pin) |
+| `ReconcileRequired` (`errors.py:38-42`) | gains one keyword-only attribute, `reason` (text or `None`, default `None`), stored as `.reason` (P2-READY-005). `.code` stays `reconcile_required`, and every existing construction keeps working with `reason` `None`. P2 sets `reason` on every `ReconcileRequired` it raises (§25.1), and tests assert `.reason`, never a substitute code |
 | `EFFECT_KINDS`, `INTENT_VERSION` | unchanged (pins `test_decision_branch_binding.py:676`, `test_cancel_decision_resume.py:367`) |
 | effect payloads | `git_commit` gains the durable `mode` field (§15.2) and, for Kp only, `base_exact: true`; a planning `git_push` gains `commit` (§18.4); `validate_effect` accepts `mode` only as `review-v1-planning-local-v1`, `base_exact` only as `true` together with that `mode`, a full-ID `base_head` and a `branch`, and `commit` only as a full commit ID; legacy payloads are unchanged |
 | `gitops.finalize` | unchanged signature and stages; before recording a stage that holds a push it evaluates the publication barrier on HEAD (§18.7), which refuses nothing in a history without a planning registration commit |
-| new STOP codes | `review_publication_barrier` (any push, only when the published history holds a planning registration commit the committed planning proof does not prove); review-v1 only: `review_checkout_unsafe`, `review_checkout_unknown`, `review_namespace_unreadable`, `review_base_uncommitted`; `ReconcileRequired` reasons `review_registration_base_moved`, `review_registration_currency_changed`, `review_recovery_incomplete`, `review_recovery_ambiguous`, `review_recovery_reservation_conflict`, `review_registration_projection_mismatch` |
+| codes and reasons | every STOP code and `ReconcileRequired` reason P2 uses, with its carrier, where it is raised and the state it leaves: the catalogue of §25.1. Only `review_publication_barrier` concerns legacy operations, and only when a published history holds a planning Candidate snapshot (§18.7) |
+| Git version | an explicit review-v1 invocation on a Git older than 2.40.0, or with a version text that does not parse, stops with `review_git_unsupported` before the lock (§5.7); legacy invocations are unchanged |
 | planning invocation | one additional key, `recovery_of_review_run_id`, only on a recovery planning mutation (§12.4); the request identity and the two markers unchanged |
 | request envelope | gains `set_aside_runs` (§10.2) |
-| recovered reservations | a private module-level helper of `mutation.py` (§12.5); no `Mutation` method, no public API accepting IDs |
+| recovered reservations | a private module-level helper of `mutation.py` (§12.5), also callable on a resumed recovery planning mutation that has not bound yet (§12.9); no `Mutation` method, no public API accepting IDs |
 | `register_phases`, `register_works` | unchanged signatures, stage names and keys; the review-v1 path pre-reserves under their keys |
 | `phase_create.decide_phases`, `MutationController._planned_write` | unchanged behaviour and signatures; their effect building and planned-write computation become pure functions they call themselves, shared with the expected physical projection (§15.7, §20) |
 | `rm.validate_structure` call order in Phase entry | unchanged: the review-v1 checks call `workline.validate` from `workline.roadmap_review`, never through `rm.validate_structure` (pin `test_phase_entry_contract.py:529-555`) |
@@ -2042,36 +2237,108 @@ No frozen P1 document needs repair for this contract. P2-CONTRACT-004 in particu
 | entry parameters | no parameter name contains `foreign` or `allow` (pin `test_project_context.py:478`) |
 | Review P1 record classes | unchanged; Consumption gains version 2 alongside version 1 |
 
-No `Mutation` or `MutationController` method is added. New behaviour lives in module-level helpers (`gitops`, `gitcmd`), the new modules, and private functions of `mutation.py`.
+No `Mutation` or `MutationController` method is added. New behaviour lives in module-level helpers (`gitops`, `gitcmd`), the new modules, private functions of `mutation.py`, and the one `reason` attribute of `ReconcileRequired`.
+
+### 25.1 Error and reason catalogue
+
+**Frozen** (P2-READY-005). The carrier of each meaning is fixed:
+- a `StopError`, or its subclass `ValidationError`, carries its meaning in `code`;
+- a `ReconcileRequired` keeps `code == "reconcile_required"` and carries its P2 meaning in `reason`;
+- a `ReconcileRequired` that live code raises on the review-v1 path keeps `reason` `None` and its live message, as in legacy — the same-request mismatch, a scope overlap in `MutationController.open`, a `reserve_id` kind mismatch, the live branch binding, a live replay or push-classification mismatch;
+- the stale reasons are not exceptions: they are the `detail` of a `stale` result, the `reason` of a Supersession and of a generation-4 invocation, and a set-aside `reason` (§10.2, §11.6.1, §19.2).
+
+Every code and reason the contract uses is in this table, and every `ReconcileRequired` P2 raises names one reason of it.
+
+| code or reason | carrier | raised at | state it leaves |
+| --- | --- | --- | --- |
+| `review_contract_invalid` | `ValidationError` code | §5.1, before the lock | nothing read or written |
+| `review_create_unsupported` | `StopError` code | §5.4, before the lock | nothing begun |
+| `review_git_unsupported` | `StopError` code | §5.7, before the lock | nothing begun; a pending planning mutation untouched |
+| `review_candidate_unrepresentable` | `ValidationError` code | the preflight before `_open` (§5.6); §7.6 after `_open` — the detail says which | before `_open`: nothing begun; after: the planning mutation abandoned |
+| `review_base_uncommitted` | `ValidationError` code | the working-tree compatibility check at the freeze (§7.4) | the planning mutation abandoned |
+| `review_entry_not_canonical`, `review_entry_ambiguous` | `StopError` code | §7.7, at the freeze | the planning mutation abandoned |
+| `review_context_unavailable` | `StopError` code | §8: at discovery, at the freeze, at every recomputation | discovery: nothing begun; freeze: abandoned; afterwards: pending |
+| `review_reviewer_failed`, `review_report_invalid`, `review_reviewer_mismatch` | `StopError` code | §10.3, §10.4 | pending; nothing settled |
+| `review_git_transform` | `StopError` code | §14.3 | freeze: abandoned; afterwards: pending |
+| `review_checkout_unsafe`, `review_checkout_unknown` | `StopError` code | §14.5 | freeze or recovery setup: abandoned; afterwards: pending |
+| `review_namespace_unreadable` | `StopError` code | §14.6 | discovery: nothing begun; freeze or recovery setup: abandoned |
+| `review_hooks_path_invalid` | `StopError` code | §15.2, before a Git stage | pending |
+| `review_publication_barrier` | `StopError` code | §18.7 | freeze or recovery setup: abandoned; `gitops.finalize`: the stage not recorded, the mutation pending with its domain effects applied; a push point: nothing pushed |
+| `review_marker_mismatch` | `ReconcileRequired` reason | §5.3, before `_open` | the pending record untouched |
+| `review_recovery_incomplete` | `ReconcileRequired` reason | §12.2 step 3, rows b, e and f; §12.9 | nothing begun; in §12.9 the mutation abandoned |
+| `review_recovery_ambiguous` | `ReconcileRequired` reason | §12.2 step 5; §12.9 | the same |
+| `review_discovery_changed` | `ReconcileRequired` reason | §12.4 binding; §12.9 | the planning mutation abandoned; the next invocation discovers again |
+| `review_recovery_reservation_conflict` | `ReconcileRequired` reason | §12.4, §12.5, §12.9 | the recovery planning mutation abandoned (before its first generation mutation) |
+| `review_setup_invalid` | `ReconcileRequired` reason | §12.9 | the planning mutation abandoned |
+| `review_binding_moved` | `ReconcileRequired` reason | §11.5, §10.3, §17 item 5 | pending; nothing replayed, recorded, committed or pushed |
+| `review_chain_invalid` | `ReconcileRequired` reason | §10.3, §11.6, §11.8 steps 3–4 | pending |
+| `review_task_invalid` | `ReconcileRequired` reason | §10.3: provenance or envelope digests of the accepted task | pending; no reviewer call |
+| `review_generation_owner_conflict` | `ReconcileRequired` reason | §11.8 step 3, §11.10 | pending |
+| `review_candidate_mismatch` | `ReconcileRequired` reason | §13 item 4 at the reviewer launch, at the starts of generation mutations 2 and 3, at the use check and in the pre-Kp proof; §7.1 | pending |
+| `review_receipt_invalid` | `ReconcileRequired` reason | §17 items 1–4; §15.6 items 3–4 | pending |
+| `review_registration_base_moved` | `ReconcileRequired` reason | §15.2 (a Kp classified a mismatch; HEAD read again before `git commit`); §15.6 items 1–2 | pending; no Kp made |
+| `review_registration_currency_changed` | `ReconcileRequired` reason | §15.6 item 5, a stale difference | pending; no Kp made |
+| `review_registration_projection_mismatch` | `ReconcileRequired` reason | §15.6 item 6 | pending; no Kp made |
+| `review_commit_unowned` | `ReconcileRequired` reason | §15.2 | pending; the barrier holds for Kp |
+| `review_persisted_proof_failed` | `ReconcileRequired` reason | §15.3 | pending; no Consumption; the barrier holds |
+| `review_metadata_commit_mismatch` | `ReconcileRequired` reason | §18.2 | pending; no push; Km local |
+| `review_publication_invalid` | `ReconcileRequired` reason | §18.4 | pending; nothing pushed |
+| `review_publication_contract_invalid` | `ReconcileRequired` reason | §18.5 | pending; nothing pushed |
+| `review_context_changed`, `review_policy_changed`, `review_declared_base_changed` | no exception: a stale reason | §13 items 1–3 | terminal `stale` (§13.2, §13.3), or set aside at discovery (§12.2 row f) |
+| `invalidated`, `consumed`, `not_authorized`, `set_aside` | no exception: a set-aside reason | §12.2 | recorded in the next Run's `set_aside_runs` |
+| `validation_failed`, `postcheck_failed`, `structure_invalid` | `ValidationError` code (live, meaning unchanged) | the live refusals; the preflight's `validate_condition` (§5.6); §7.6 step 3 | before `_open`: nothing begun; at the freeze: abandoned; after generation 1: pending |
+| `dirty_overlap` | `StopError` code (live, meaning unchanged) | §14.2, §11.4, §17 items 8–9, the display base check (§15.7), the Kp and Km finalize check | freeze: abandoned; in a generation mutation: that mutation abandoned; afterwards: pending |
+| `phase_already_expanded`, `ambiguous_startable_candidates`, `phase_blocked`, `spec_violation` | live codes, meaning unchanged | §5.6 steps 2 and 6; §7.7 | before `_open`: nothing begun; at the freeze: abandoned |
+| `review_not_persisted`, `review_persistence_unknown` | `StopError` code (P1) | `gate.require_persisted` and the blob check (§10.3, §11.6, §17 item 6) | pending |
+| `review_roundtrip_mismatch` | `ValidationError` code (P1) | §15.1 step 2 | pending |
+| `review_callback_unknown`, `review_callback_conflict` | `ValidationError` code (P1) | `gate.validate_settlement` (§10.4) | pending; nothing settled |
+| `review_consumption_conflict` | `ValidationError` code (P1) | §16.3 | pending |
+| `review_generation_conflict`, `review_generation_pending` | `ValidationError` code (P1) | `gate.next_generation_scope`, reached only after §11.8 step 3 resolved every pending generation mutation | pending |
+| `review_path_ignored`, `review_committability_unknown` | `StopError` code (P1) | `gate.require_committable` (§14.4 step 5, §11.6) | freeze: abandoned; afterwards: pending |
+| `review_containment` | `ValidationError` code (P1) | the P1 writers' containment (§11.6) | pending |
+| `review_record_invalid`, `review_record_noncanonical`, `review_record_missing`, `review_record_version`, `review_gate_chain`, `review_namespace_invalid`, `review_projection_invalid`, `review_dependency_invalid`, `review_adapter_unresolved` | `ValidationError` code (P1) | the P1 reader and validators; at §14.6 chained under `review_namespace_unreadable` | as `review_namespace_unreadable` at §14.6; pending elsewhere after generation 1 |
 
 ## 26. Authority changes the implementation makes
 
-When the implementation lands, it changes canonical authority as follows. Under `rules/human-confirmation` this is a Workline common-rule change, and the approval of this contract is what it rests on (reconnaissance Q17).
+When the implementation lands, it changes canonical authority as follows. Under `rules/human-confirmation` this is a Workline common-rule change, and the approval of this contract is what it rests on (reconnaissance Q17). This contract edits no authority file; the implementation edits exactly the three files below (P2-READY-024).
+
+Each rule has one normative owner, the authority that already owns its subject:
+
+- `registry.md` `rules/git` owns the Git-operation rules: Operation Owner, Commit / push, Push destination. It has no Scope section and no per-operation write-scope list. Its Operation Owner text speaks of an operation's planned write scope in general (`registry.md:64`), and the per-operation lists are the Roadmap Skill's;
+- `skills/roadmap` owns the planning operation: the opt-in, the entry order, the orchestration of Review inside the operation, recovery orchestration, and the planning mutation's write scope;
+- `skills/review` owns what Review records, the policy and the proofs mean. It owns no top-level planning mutation and no Git rule (`skills/review` Authority boundary).
+
+Where a `rules/git` rule is part of the planning flow or of what a proof means, the Skill names that rule and does not restate it as its own. `rules/git` stays normative for the Git rules. `skills/roadmap` references them and owns the planning orchestration; `skills/review` references them and owns the meaning of the records and the proofs.
 
 ### 26.1 `registry.md` `rules/git`
 
 1. Operation Owner: a review-v1 planning operation owns one planning mutation and the generation mutations it starts; resume order and conflicts as §11.8 and §11.12. After runtime loss it may begin a recovery planning mutation that continues exactly one canonical Run found by recovery discovery, never a foreign mutation's record (§12).
 2. Commit / push: review-v1 planning commits use the contained planning commit primitive (§15.2). Review-v1 planning refuses `dirty_overlap` on its planning-owned paths before its first Review record (§14.2).
-3. Push destination: for a mutation whose durable invocation names `review-v1-planning-publication-v1`, a push is its own stage publishing the exact commit named in its payload, recorded only after C-2(Km) — the committed planning proof included — has passed (§18.2, §18.4, §18.8). The current-combined rule is unchanged for every other mutation.
-4. Scope: a review-v1 planning mutation also declares the Review record path it writes (the Consumption path), beside its static ledger set.
-5. Success on publication: a review-v1 planning operation succeeds only once its registration is published (remote-less: once C-2(Km) has passed); one that ends `not_authorized` or `stale` registers nothing, publishes nothing, and leaves its generation commits (for `stale` after the seal, generation 4 and the Supersession too) as local history that the next push from that branch carries.
-6. Push destination, for every operation: no push publishes a commit whose history holds a review-v1 planning registration commit unless the committed planning proof proves that registration's Run for that commit (§18.7, §18.8). It is evaluated before a stage holding a push is recorded, when a recorded push would write, and right before the push; a push the destination already holds is not refused, and nothing about the destination is read as proof.
-7. Commit / push: the review-v1 registration commit is made only on its recorded parent (`base_exact`), never through the independent-advancement rule (§15.2).
-8. Review-v1 planning requires the checkout capability for Review paths and a canonically readable Review namespace (§14.5, §14.6); Workline never edits `.gitattributes` or `info/attributes`.
-9. Commit / push: the review-v1 registration commit carries exactly the expected physical projection on its parent — the canonical writer's bytes, whole ledgers included (§15.7); a registration commit with the same meaning in other bytes is never published by Workline, whoever made it.
+3. Commit / push: the review-v1 registration commit is made only on its recorded parent (`base_exact`). `base_exact` removes the independent-advancement step of the commit classification and nothing else (§15.2).
+4. Commit / push: the review-v1 registration commit carries exactly the expected physical projection on its parent — the canonical writer's bytes, whole ledgers included (§15.7). Workline never publishes a registration commit with the same meaning in other bytes, whoever made it.
+5. Push destination: for a mutation whose durable invocation names `review-v1-planning-publication-v1`, a push is its own stage publishing the exact commit named in its payload, recorded only after C-2(Km) — the committed planning proof included — has passed (§18.2, §18.4, §18.8). The current-combined rule is unchanged for every other mutation.
+6. Push destination, for every operation: no push publishes a commit whose history holds a review-v1 planning registration commit unless the committed planning proof proves that registration's Run for that commit (§18.7, §18.8).
+   - It is evaluated before a stage holding a push is recorded, when a recorded push would write, and right before the push.
+   - A push the destination already holds is not refused, and nothing about the destination is read as proof.
+   - A history in which no commit touched `.workline/review/candidate-snapshots/` is cleared by the fast-path read, which every Git answers (§18.7).
+7. Success on publication: a review-v1 planning operation succeeds only once its registration is published (remote-less: once C-2(Km) has passed). One that ends `not_authorized` or `stale` registers nothing and publishes nothing. It leaves its generation commits as local history that the next push from that branch carries — for `stale` after the seal, generation 4 and the Supersession too.
+8. Git version: review-v1 planning and the committed planning proof require Git 2.40.0 or newer (§5.7). On an older Git, a review-v1 invocation stops before the lock (`review_git_unsupported`), and the barrier holds for every history the fast path does not clear. Legacy operations need no newer Git than today.
 
 ### 26.2 `skills/roadmap`
 
-- the opt-in (§5);
+- the opt-in (§5), with the Git version gate, which names the `rules/git` minimum (§5.7);
+- the review-v1 entry order and the canonical-input preflight before `_open` (§5.6): the live acceptance checks, `phase_already_expanded` included and under the live interrupted-entry rule, come before canonical recovery discovery;
 - the review-v1 flows of Roadmap creation and Phase entry (§14.4, §15.1);
-- the R9 canonical self-selection rule, owned here (§7.7);
+- the R9 canonical self-selection rule, owned here, on the committed basis, and the working-tree compatibility check (§7.4, §7.7);
 - the terminal outcomes (§19), with stale before and after the seal (§13.2–§13.3);
-- the currency rules: the declared base on the committed view, the use check with `use_check_head`, the pre-Kp currency proof and the reconcile-only rule once the registration began (§13, §15.6, §17);
-- runtime-loss recovery: discovery, the recovery planning mutation, recovered reservations and new-Run eligibility (§12.1–§12.8);
-- the canonical-input preflight before `_open`, and the review-v1 entry order (§5.6);
+- the currency rules (§13, §15.6, §17): the declared base on the committed view, compared before the rest of the Candidate; the use check with `use_check_head`; the pre-Kp currency proof; and the reconcile-only rule once the registration began;
+- runtime-loss recovery orchestration (§12.1–§12.9): discovery, the recovery planning mutation, recovered reservations, new-Run eligibility and the pre-freeze resume setup;
+- the pre-generation-1 abandonment rule (§12): before its first generation mutation, a review-v1 planning mutation is abandoned on every STOP, begun or resumed, a Phase entry included. The Skill's rule that a resumed Phase entry is never abandoned stays for legacy Phase entry;
+- the write scope. The Skill's static write-scope paragraph ("各Roadmap operationが宣言する予定write scope", now `skills/roadmap/SKILL.md:466-476`) gains one stated exception: a review-v1 planning mutation also declares its Consumption path, `.workline/review/consumptions/<consumption_id>.yaml`, which depends on the reserved Consumption ID (§14.4 step 4, §12.4). The generation mutations it starts declare the scope `skills/review` gives each transition (§11.3);
 - the review-v1 writer hand-off: after the freeze the registration writes from W, computed from the canonical Candidate, never from the caller's plan or design (§7.8);
 - the display base check before each registration stage (§15.7, §17 item 9);
-- the operation binding (§11.5).
+- the operation binding (§11.5);
+- the planning operation's STOP codes and `ReconcileRequired` reasons (§25.1), with `ReconcileRequired` carrying its reason in `reason`.
 
 ### 26.3 `skills/review`
 
@@ -2080,14 +2347,14 @@ When the implementation lands, it changes canonical authority as follows. Under 
 - the static policy record, verbatim (§9);
 - the reviewer interface (§10);
 - adjudication (§10.6);
-- Planning Consumption v2 and uniqueness (§16);
-- the planning transition state machine and generation 4 with its Supersession (§11.6);
-- the planning publication contract (§18), with the publication barrier every Workline push is held to and the committed planning proof that alone clears it, the exact physical projection of Kp included (§15.7, §18.7, §18.8);
+- Planning Consumption v2 and uniqueness (§16), with the exact types of the `review-planning-delta` record (§16.1);
+- the planning transition state machine, the records and initial write scope of each transition, and generation 4 with its Supersession (§11.3, §11.6);
+- what the planning publication contract, the committed planning proof and the exact physical projection of Kp prove, and what they never take as proof (§15.7, §18, §18.8). Where the barrier applies, and the shape of the push stage, are `rules/git`'s (§26.1 items 5–6), which the Skill names;
 - the recovery classification of a Run and `set_aside_runs` (§12.2, §12.3, §10.2);
-- the checkout capability and the namespace readability precondition (§14.5, §14.6);
+- the checkout capability, form L alone, and the namespace readability, as the precondition for writing a Review record (§14.5, §14.6); Workline never edits `.gitattributes` or `info/attributes`;
 - the P2 scope of "適用範囲". Work terminal gating stays NOT ACTIVATED.
 
-`skills/phase-create` and `skills/create` are unchanged: their registration cores are called exactly as today.
+No other Skill changes. `skills/phase-create` and `skills/create` are unchanged: their registration cores are called exactly as today. `skills/start` and every other operation's Skill keep following `rules/git` for their pushes (for example `skills/create/SKILL.md:49`), where the barrier rule of §26.1 item 6 lives.
 
 ## 27. Implementation surface map
 
@@ -2095,28 +2362,29 @@ When the implementation lands, it changes canonical authority as follows. Under 
 | --- | --- | --- | --- |
 | `src/workline/review/planning.py` (new) | identifiers; `PlanningReview`, task, report and finding types; record builders (Candidate, Context, policy, request envelope, report, adjudication, obligations, coverage, report set, evidence, invalidation evidence); stale reason codes; report validation; loader identity; authority digests | §5.1, §6, §7.1, §8, §9, §10, §11.6.1 | A, B, C, D |
 | `src/workline/review/committed.py` (new) | committed Review reading: paths added in a commit's history (`--full-history --diff-merges=combined --diff-filter=A`), raw blobs at a commit, parsed by the unchanged P1 serializer and record classes (and the v2 Consumption reader) | §15.3 P12, §18.7 | E, G |
-| `src/workline/review/publication.py` (new) | the publication barrier and the committed planning proof: `barrier_problems(repo, commit)` over committed objects, CP1–CP13, with CP5 and CP6 through the adapter the Run's Context names and never a renderer of its own | §15.7, §18.7, §18.8 | G, K, M |
+| `src/workline/review/publication.py` (new) | the publication barrier and the committed planning proof: `barrier_problems(repo, commit)` over committed objects, CP1–CP13, with CP5 and CP6 through the adapter the Run's Context names and never a renderer of its own; CP7 before CP6; the fast path and the Git version rule of the barrier (P2-READY-001, -027) | §5.7, §15.7, §18.7, §18.8 | G, K, M, P, S |
 | `src/workline/review/recovery.py` (new, Review-owned reads only) | recovery discovery reads: matching Runs from history and working tree, clean persistence, reconstruction, classification rows a–g; it records nothing and starts no mutation | §12.2, §12.3 | L |
-| `src/workline/review/checkout.py` (new) | the checkout capability: committed and effective attribute evaluation, the two forms; namespace readability | §14.5, §14.6 | J |
+| `src/workline/review/checkout.py` (new) | the checkout capability: committed and effective attribute evaluation, form L alone (P2-READY-004); namespace readability | §14.5, §14.6 | J |
 | `src/workline/review/records.py` | Planning Consumption v2 (reader and builder) beside v1 | §16.1–§16.2 | F |
 | `src/workline/review/store.py` | v2 reading; registration-commit and target indexes | §16.3 | F |
 | `src/workline/review/validate.py` | v2 validation, planning binding, uniqueness indexes | §16.2–§16.3 | F, H |
 | `src/workline/review/paths.py` | runtime subpaths `proofs/`, `reports/`, `no-hooks/`, `attr-eval/` | §10.5, §14.5, §15.2, §15.4 | E, J |
-| `src/workline/roadmap_review.py` (new, Roadmap-owned) | the review-v1 flow: the canonical-input preflight (§5.6), a pure function over the request identity that uses only `validate_condition` and the P1 serializer; recovery orchestration (discovery call before `_open`, the recovery planning mutation, its binding and continuation), freeze, generation mutations 1–4, reviewer call, currency on committed views, use check and `use_check_head`, registration hand-off, pre-Kp currency proof (and its `refuse_recorded` hook), Kp / Km, proofs, Consumption, publication, terminal outcomes; W (`CanonicalPlanningWriterInput`, §7.8), the one Candidate-to-writer-input function every consumer takes; both adapters, with the expected physical projection (`project_expected`, §15.7), its comparison and record check, and the display base check; `ReviewedPlanningResult` | §5.6, §7, §11–§21 | A–O |
-| `src/workline/committed_view.py` (new) | committed-result loader: materialization from raw blobs and `ProjectView.load`; delta reading; the materialized base of the expected physical projection | §15.3–§15.4, §15.7 | E, M |
+| `src/workline/roadmap_review.py` (new, Roadmap-owned) | the review-v1 flow: the canonical-input preflight (§5.6), a pure function over the request identity that uses only `validate_condition` and the P1 serializer; the review-v1 entry order with the live interrupted-entry rule (§5.6) and the Git version gate (§5.7); recovery orchestration (discovery call before `_open`, the recovery planning mutation, its binding and continuation, the pre-freeze resume setup, §12.9), the pre-generation-1 abandonment rule (§12), freeze with the committed basis and the working-tree compatibility check (§7.4, §7.6, §7.7), generation mutations 1–4, reviewer call, currency on committed views in the order of §13, use check and `use_check_head`, registration hand-off, pre-Kp currency proof (and its `refuse_recorded` hook), Kp / Km, proofs, Consumption, publication, terminal outcomes; W (`CanonicalPlanningWriterInput`, §7.8), the one Candidate-to-writer-input function every consumer takes; both adapters, with the expected physical projection (`project_expected`, §15.7), its comparison and record check, and the display base check; `ReviewedPlanningResult`; every `ReconcileRequired` it raises carries its §25.1 reason | §5.6, §5.7, §7, §11–§21, §25.1 | A–S |
+| `src/workline/committed_view.py` (new) | committed-result loader: materialization from raw blobs and `ProjectView.load` — `ProjectView` as of an exact commit, for the freeze's committed basis and working-tree compatibility check as for every proof; delta reading; the materialized base of the expected physical projection | §7.4, §7.6, §15.3–§15.4, §15.7 | E, M, P |
 | `src/workline/roadmap.py` | `review=` keyword; on the review-v1 path, the canonical-input preflight called right after the request identity is computed and before the same-request check and `_open` (§5.6); marker check at the entry (§5.3); the registration of `_create_roadmap` / `_expand_phase` separated from the legacy `_finalize` without changing legacy behaviour; the Roadmap-file rendering of `_create_roadmap` and the stage-input derivation of `_create_roadmap` / `_expand_phase` extracted as pure functions the legacy path itself calls, with no behaviour change (§7.8, §20); review-v1 branch, whose registration takes W | §5, §7.8, §15.1, §15.7 | A, B, I, M, N, O |
 | `src/workline/phase_create.py` | the effect building of `decide_phases` extracted as a pure function that `decide_phases` calls, with identical output (§20) | §15.7, §20 | M |
-| `src/workline/gitcmd.py` | a bytes runner; `tree_entries`, `read_blob`, `commit_delta`, `check_attributes` (effective, and committed through the isolated evaluation directory), `added_paths`, `blob_at`; contained `add` / `commit` | §14.3, §14.5, §15.2–§15.4, §18.7 | E, G, J |
+| `src/workline/gitcmd.py` | a bytes runner; `tree_entries`, `read_blob`, `commit_delta`, `check_attributes` (effective, and committed through the isolated evaluation directory), `added_paths`, `blob_at`; contained `add` / `commit`; the running Git's version (`git --version`); the fast-path read `rev-list --full-history -n 1` | §5.7, §14.3, §14.5, §15.2–§15.4, §18.7 | E, G, J, S |
 | `src/workline/gitops.py` | `review_commit_effect`, `review_publication_effect`, attribute preflight helper; the publication barrier in `finalize` before a stage holding a push is recorded | §14.3, §15.2, §18.4, §18.7 | E, G |
-| `src/workline/mutation.py` (private functions only) | discriminator + planning publication branch in `_recorded_publication` (invocation threaded through `_classify_recorded` / `_publish`); `mode` in `apply_effect`; `base_exact` in `_classify_commit` and the planning primitive; the publication barrier in `_classify_push` and in `apply_effect` for `git_push`; the recovery-only reservation binding helper (§12.5); the planned-write computation of `write_file` / `add_relation` extracted as a module-level function that `_planned_write` and the expected physical projection share (§15.7, §20); payload validation | §12.5, §15.2, §15.7, §18.4–§18.5, §18.7 | E, G, L, M |
-| `registry.md`, `.claude/skills/roadmap/SKILL.md`, `.claude/skills/review/SKILL.md` | authority text | §26 | C (policy pin) |
+| `src/workline/mutation.py` (private functions only) | discriminator + planning publication branch in `_recorded_publication` (invocation threaded through `_classify_recorded` / `_publish`); `mode` in `apply_effect`; `base_exact` in `_classify_commit` (only its independent-advancement step removed) and the planning primitive; the publication barrier in `_classify_push` and in `apply_effect` for `git_push`; the recovery-only reservation binding helper, callable on a resumed recovery planning mutation that has not bound, saving `recovery_binding` with the binding (§12.5, §12.9); the planned-write computation of `write_file` / `add_relation` extracted as a module-level function that `_planned_write` and the expected physical projection share (§15.7, §20); payload validation | §12.5, §15.2, §15.7, §18.4–§18.5, §18.7 | E, G, L, M |
+| `src/workline/errors.py` | `ReconcileRequired` gains the keyword-only attribute `reason` (default `None`); `code` and every existing construction unchanged (P2-READY-005) | §25, §25.1 | S |
+| `registry.md`, `.claude/skills/roadmap/SKILL.md`, `.claude/skills/review/SKILL.md` | authority text, each rule under its one owner: `rules/git` sections Operation Owner, Commit / push and Push destination; the Roadmap Skill's New Roadmap, Phase entry and write-scope paragraphs; the Review Skill (P2-READY-024) | §26 | C (policy pin), S |
 | `tests/test_review_planning_*.py` (new) | the test contract | §28 | — |
 
 Expected not to change: `state.py` (no helper is needed), `store.py`, `validate.py` (`validate_structure`, `validate_project`), `start.py` and every START Work-terminal path, `create.py` and `phase_create.py` behaviour (at most a pure helper extracted with identical output), `ops.py`, `oplock.py`, `ids.py`, `implementation.py`, `cli.py` (Roadmap has no CLI), `review/gate.py`, `review/adapter.py`, `review/projections.py`, `review/closure.py`, `review/fsafe.py`, `review/serialize.py`, the P1 `GateGeneration`, `Receipt` and `Supersession` classes (generation 4 and the Supersession use them as they are), P3 activation code (none exists), and every unrelated operation — whose only new behaviour is the publication barrier on its push, inert without a review-v1 planning registration commit.
 
 ## 28. Test contract
 
-Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, through production code paths. A happy path alone is insufficient (Frozen P1 R12 §14). Section J and the round-1 items of B, D, E and G are the tests of the round-1 repairs; sections K and L are the tests of the round-2 repairs; section M is the test of the round-3 repair; section N is the test of the round-4 repair; section O is the test of the round-5 repair (§33).
+Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, through production code paths. A happy path alone is insufficient (Frozen P1 R12 §14). Section J and the round-1 items of B, D, E and G are the tests of the round-1 repairs; sections K and L are the tests of the round-2 repairs; section M is the test of the round-3 repair; section N is the test of the round-4 repair; section O is the test of the round-5 repair; sections P, Q, R and S, and the P2-READY-004 items of J, are the tests of the final readiness repair (§33).
 
 **A. Applicability**
 
@@ -2206,7 +2474,12 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 - The same with a current-combined stage recorded before Kp existed and its commit made on Kp by the independent-advancement rule → refused at classification (the dry run shows a write) and, with the classification patched, at application; nothing pushed; completed once Km is at the destination (classified already published).
 - Retry after proof: once Km is committed and the committed planning proof passes, pushes from Km and its descendants pass; a commit between Kp and Km is never pushed by its own push.
 - Kp proof failure keeps every subsequent Workline push of a history holding Kp refused — legacy and review-v1 — across a process crash, a deleted `.workline/runtime/`, runtime-record loss and a fresh clone.
-- Runtime-record loss with Kp unproven → the barrier holds for good; nothing lifts or bypasses it: the same review-v1 request stops at discovery with `review_recovery_incomplete` (§12.2 row b); another review-v1 call with a push destination stops at its freeze with `review_publication_barrier`; a legacy Roadmap creation registers and its own push is refused; Phase entry: `phase_already_expanded`.
+- Runtime-record loss with Kp unproven → the barrier holds for good; nothing lifts or bypasses it:
+  - the same review-v1 Roadmap creation stops at discovery with `review_recovery_incomplete` (§12.2 row b);
+  - the same review-v1 Phase entry stops before discovery with the live `phase_already_expanded`, since its Works are in the Phase (§5.6 step 6);
+  - another review-v1 call with a push destination stops at its freeze with `review_publication_barrier`;
+  - a legacy Roadmap creation registers, and its own push is refused;
+  - a legacy Phase entry of that Phase gets `phase_already_expanded`.
 - A manual external push is detected but never accepted as proof: a person pushes Kp before C-2(Kp); the barrier still finds the unproven Kp in the history of every Workline push that would carry it, whatever the destination holds, so a legacy push of a descendant is still refused; the planning resume still runs C-2(Kp) over local objects; with C-2(Kp) made to fail, no Consumption is written although Kp is at the destination; and a push classified as already published writes nothing and is read as nothing more.
 - A person's commit of the working-tree registration after a crash begins the barrier; the planning mutation classifies its Kp applied without an ID → `review_commit_unowned`.
 - History does not hide Kp: a subsequent commit that deletes the Candidate snapshot or reverts the registration files → the barrier still holds; a merge bringing in a side branch with Kp → found; an evil merge adding a reserved path → found.
@@ -2234,7 +2507,17 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 **J. Checkout capability (P2-CONTRACT-004)**
 
 - `core.autocrlf=true` with no attribute rule → `review_checkout_unsafe` at the freeze, before any Review record; the planning mutation abandoned; nothing written.
-- Positive: a committed form-L rule and a committed form-B rule each give the capability; a review-v1 run completes under `core.autocrlf=true`.
+- Positive: the committed rule `.workline/review/** eol=lf -filter -ident -working-tree-encoding`, whose two evaluations print `text: unspecified` and the rest of form L, gives the capability, and a review-v1 run completes under `core.autocrlf=true`; `* text=auto` above it with `!text` added to the Review rule gives form L too.
+- *P2-READY-004.* Each of these is refused at the freeze with `review_checkout_unsafe`, nothing written:
+  - no rule;
+  - `eol=crlf`;
+  - a set `filter`, `ident` or `working-tree-encoding`;
+  - a real `-text` — the former form B, refused under P2 v1 although it keeps LF bytes, because the frozen check cannot tell it from the next case;
+  - the literal `text=unset`, whose fresh clone under `core.autocrlf=true` checks the record out as CRLF;
+  - `* text=auto` without `!text` (`text: auto`).
+- A fresh clone of a form-L commit made with `core.autocrlf=true` keeps every Review record's bytes LF.
+- A global attributes file (`core.attributesFile`) and a system attributes file, each asking `*.yaml eol=crlf`: the committed evaluation ignores both, the effective evaluation still prints form L (the committed rule outranks them), and the fresh clone keeps LF. A clone-local `.git/info/attributes` override fails the effective evaluation (below).
+- No statement, record or test accepts form B.
 - A fresh clone, made under `core.autocrlf=true` and again under a global attributes file asking `*.yaml eol=crlf`, of a Project whose committed rule is in place keeps every Review record's physical bytes LF; `ReviewStore` reads each; `validate_project` is clean; a new review-v1 call there passes §14.5 and §14.6.
 - Existing Review records of earlier Runs remain readable in that clone.
 - Unsafe semantics are never silently normalized: a CRLF record (checked out before the rule, or under a clone-local `info/attributes` `eol=crlf`) → the P1 reader refuses it (`review_record_noncanonical`), the call stops with `review_namespace_unreadable` at discovery's readability step (§12.2 step 1, §14.6), and no byte is rewritten or normalized.
@@ -2273,9 +2556,9 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 - A new Run is allocated only when no recoverable canonical Run exists: none ever created, or every matching Run terminal or obsolete. An obsolete (stale) generation 1 is set aside and recorded in `set_aside_runs`, and it is never recovered afterwards, even when its currency returns.
 - A stale-before-Receipt completion with the runtime intact, then the same request → the old Run is recovered if current again, or set aside as obsolete and a new Run begun.
 - Registration files only in the working tree (generation 3, runtime lost) → the call stops with nothing written: Roadmap creation at the recovered-reservation binding (`review_recovery_reservation_conflict`), Phase entry at `phase_already_expanded`; once the files are discarded, recovery continues from the use check.
-- Runtime loss after Kp, before any Consumption was committed → the same request stops at discovery with `review_recovery_incomplete`; no new Run; the barrier holds.
+- Runtime loss after Kp, before any Consumption was committed → the same Roadmap creation stops at discovery with `review_recovery_incomplete`, and the same Phase entry stops before discovery with `phase_already_expanded` (§5.6 step 6); no new Run; the barrier holds.
 - A generation mutation left pending by a lost planning mutation (only the planning mutation's record removed) → `review_recovery_incomplete`.
-- Normal retry is untouched: with the planning mutation's record present, the same request resumes it and discovery never runs. A pending recovery planning mutation is resumed by its exact invocation. A legacy invocation of the same request never runs discovery.
+- Normal retry is untouched: with the planning mutation's record present, the same request resumes it, and discovery does not run at the entry (only the pre-freeze resume setup of a mutation that has not recorded its discovery outcome runs it, §28 Q). A pending recovery planning mutation is resumed by its exact invocation. A legacy invocation of the same request never runs discovery.
 - §5.3 with the recovery key: a pending recovery record against a legacy invocation → reconcile; the key without the marker pair, or any other extra key → reconcile.
 
 **M. Exact physical projection (P2-CONTRACT-006, round 3)**
@@ -2331,6 +2614,68 @@ For every refusal below, the test captures the mutation namespace (`.workline/ru
 - **Semantic condition validation.** A condition with an unsupported `kind` gets the live `validation_failed` refusal before `_open`, with nothing begun.
 - **No second serializer.** The preflight calls only `validate_condition` and the P1 `serialize` functions: a test that patches `serialize.canonical_data` sees the preflight change with it.
 
+**P. Committed R9 basis (P2-READY-001)**
+
+- **A — Equal bases.** The working tree equals HEAD on every declared-base and R9 input. The Candidate's `canonical_first_work`, frozen on HEAD's committed basis, equals the selection of the pre-Kp proof on P, of P9 on the committed Kp view, and of CP6 in a fresh clone.
+- **B — Uncommitted lifecycle.** An uncommitted `events/events.jsonl` change alters the Phase's lifecycle (a `phase_resumed` of a held Phase, present only in the working tree) or a predecessor Work's completion. review-v1 refuses at the freeze with `review_base_uncommitted`: before any Review record, the planning mutation abandoned, nothing written.
+- **C — Uncommitted relation.** An uncommitted `relations/roadmap.yaml` change alters a compared fact — a `requires_completion` into the Phase from an unfinished Phase, or a relation that changes the R9 selection. The same refusal. For Phase entry that ledger is also a registration path, so a change that alters no compared fact is refused by `dirty_overlap` at §14.4 step 5 (§14.2).
+- **D — Irrelevant change.** An uncommitted change that alters no compared fact — an event of another Roadmap, an unrelated file — is not refused. The Candidate is exactly the one HEAD gives, and the run completes. No whole-working-tree cleanliness is required.
+- **E — Declared base first.** A committed lifecycle change of a declared-base fact after generation 1, 2 or 3 — the Phase held, a predecessor completed — that also changes the R9 selection is classified by the declared base, never as an R9 or Candidate mismatch:
+  - stale before a Receipt;
+  - generation 4 at the use check;
+  - `review_registration_currency_changed` at the pre-Kp proof;
+  - P12 in C-2(Kp);
+  - CP7 in the committed planning proof.
+- **F — Mismatch with an equal base.** The declared base is equal, and a fixture makes the R9 reconstruction differ (a patched selection). The result is `ReconcileRequired` with its point's reason:
+  - `review_candidate_mismatch` at the use check and at the pre-Kp proof;
+  - `review_recovery_incomplete` at discovery;
+  - P8/P9 in C-2(Kp) (`review_persisted_proof_failed`);
+  - CP6 at the barrier.
+- **Round-trip basis.** The working-tree round trip (§15.1 step 2) takes its R9 selection from HEAD's committed basis: an uncommitted lifecycle event added after the freeze does not change it.
+
+**Q. Pre-freeze resume setup (P2-READY-002)**
+
+- **A — Crash after `begin`.** A fixture ends the process right after `MutationController.begin`, before the `recovery_discovery` note. The same request resumes that mutation, runs discovery again, records the note and completes the setup. No second planning mutation exists.
+- **B — Some reservations saved.** The same with some reservations recorded and no generation 1. Every recorded reservation is reused unchanged, and the missing ones are reserved in the frozen order. A recorded key the order does not reserve → `review_setup_invalid`.
+- **C — A Run becomes recoverable.** A new-Run planning mutation is interrupted before its note while a matching Run becomes recoverable (fixture). `ReconcileRequired` with reason `review_discovery_changed`; the invocation is never rewritten; the mutation is abandoned. The next same-request invocation begins a recovery planning mutation for that Run.
+- **D — Recovery before binding.** A recovery planning mutation is interrupted before its recovered binding. The same request resumes it, re-proves the Run by discovery, and binds into that same mutation with the note `recovery_binding`. A reservation present without a binding → `review_recovery_reservation_conflict`; the Run no longer the one recoverable Run → `review_discovery_changed`.
+- **E — STOP before generation 1.** A STOP during a resumed setup before generation 1 — `dirty_overlap` at step 5, or `review_checkout_unsafe` — abandons the mutation, which has no effect; a resumed Phase entry included. Legacy Phase entry keeps the live rule: a resumed legacy Phase entry is not abandoned.
+- **F — After generation 1.** Once generation 1 exists, discovery is not run again, `recovery_discovery` and the recovered binding are never rewritten, and a STOP leaves the planning mutation pending.
+- **No bypass.** Every resumed setup still runs the checkout capability, dirty overlap, the Context, the Policy, the publication barrier and the Review namespace readability. A fixture that fails each one stops the resumed setup exactly as it stops a begun one.
+
+**R. Phase-entry order (P2-READY-003)**
+
+- **A — Already expanded.** No pending mutation, the Phase already expanded, a consumed Run of it in history → `phase_already_expanded`. Discovery does not read the Run, and no recovery planning mutation is begun.
+- **B — Incomplete Run.** No pending mutation, the operation admissible, a matching incomplete Run → `review_recovery_incomplete`.
+- **C — Ambiguous Runs.** No pending mutation, the operation admissible, two recoverable Runs → `review_recovery_ambiguous`.
+- **D — Own applied stages.** A pending review-v1 Phase-entry mutation of this very request, with its own registration stages applied, is resumed under the live interrupted-entry rule. It is never refused as `phase_already_expanded`; the unique-entry check is skipped for it, and the explicit entry's startability is checked.
+- **E — Roadmap creation.** It has no remaining live acceptance checks, and discovery runs as before.
+- **Earlier refusals.** A different pending request for the slot, a pending legacy record and a marker mismatch are refused at step 5 as before, ahead of every step 6 check.
+
+**S. Readiness LOW fold-ins (P2-READY-005, -006, -018, -024, -027)**
+
+- **Reason attribute.** Every `ReconcileRequired` P2 raises has `code == "reconcile_required"` and a `reason` from the catalogue (§25.1). A live `ReconcileRequired` on the same path has `reason` `None`. One built by existing code without `reason` still has `code` `reconcile_required` and `reason` `None`. Tests assert `.reason`.
+- **Catalogue.** Every code and reason the contract names appears in §25.1, and every `ReconcileRequired` P2 raises names one of its reasons.
+- **`base_exact`.**
+  - A recorded Kp classified unapplied, with HEAD == `base_head`, is made after the pre-replay proof.
+  - HEAD advanced by an independent commit → a mismatch, `review_registration_base_moved`, never the independent-advancement path.
+  - A Kp made with its ID not saved, and a person's commit of the registration files, both classify as applied without an ID → `review_commit_unowned`.
+  - A Kp recorded applied with its ID is decided by that ID.
+  - A legacy commit's classification is unchanged, independent advancement included.
+- **Delta record.** Every scalar of the `review-planning-delta` record has its §16.1 type:
+  - the modes are the texts `"000000"` and `"100644"`;
+  - the object IDs are full-length lowercase hexadecimal text; in a SHA-256 fixture repository they are 64 characters, and the zero ID is 64 `0` characters.
+
+  A record with integer modes digests differently and fails CP9.
+- **Authority text.**
+  - `rules/git` carries the Git-operation rules of §26.1 and no write-scope list.
+  - `skills/roadmap` carries the planning operation of §26.2; its write-scope paragraph names the Consumption path as the one exception to its static set.
+  - `skills/review` carries §26.3, and names `rules/git` for the barrier and the push stage instead of restating them.
+- **Minimum Git.**
+  - An explicit review-v1 invocation on a Git reporting a version below 2.40.0 (fixture: a patched version reader), or with an unparseable version, stops with `review_git_unsupported` before the lock: nothing written, a pending mutation untouched.
+  - A legacy invocation on the same Git registers as today.
+  - Its push proceeds when the published history never touched the candidate-snapshot directory, and is held otherwise (`review_publication_barrier`, the item naming the Git version).
+
 ## 29. Incidental live findings outside P2
 
 1. **Review records under checkout line-ending conversion (P1 layer).** **Measured** (§31): with this machine's system `core.autocrlf=true` and no attribute rule, a fresh clone checks out an LF-only Review record as CRLF while `git status` stays clean, and `serialize.parse_canonical` refuses it (`review_record_noncanonical`). For every Review record P2 writes, the checkout capability (§14.5) closes this: P2 writes Review records only where the committed attributes make every fresh clone reproduce the canonical bytes, proves it before writing, and refuses otherwise. No other path writes Review records at the baseline (P3 is not active). The P1 reader and the P1 documents are unchanged; this is recorded so that P3 and any subsequent Review writer carry the same precondition.
@@ -2349,7 +2694,7 @@ For every refusal below, the test captures the mutation namespace (`.workline/ru
 
 ## 30. Quality gates applied to this document
 
-Searched, case-insensitively, after the round-5 repair, for `TBD`, `TODO`, `maybe`, `either`, `alternative`, `open`, `later`, `implementation decides`, `could`, `option`:
+Searched, case-insensitively, after the final readiness repair round 1, for `TBD`, `TODO`, `maybe`, `either`, `alternative`, `open`, `later`, `implementation decides`, `could`, `option`:
 
 Outside this section:
 
@@ -2396,6 +2741,21 @@ Round-5 search, over `before any Review record`, `before any domain effect`, `ab
 - The Mutation Controller catches serializer errors: no such statement. The boundary is before `_open` (§5.6, §27).
 - §7.6 moved or weakened: no such statement. It still runs after `_open` and the reservations, over the Candidate and W as built (§7.6, §5.6).
 
+Final readiness repair round 1 search. It covered `form B`, `-text`, `text: unset`, `ProjectView.load(store).with_effects`, `canonical_first_work`, `recovery_discovery`, `begun by this run`, `resumed Phase`, `never abandoned`, `phase_already_expanded`, `review_recovery_incomplete`, `base_exact`, `registration_delta_digest`, `old_mode`, `new_mode`, `reason`, `Git version`, `minimum Git`, `write scope` and `rules/git`, looking for the superseded statements:
+
+- **Form B accepted: no such statement.** §14.5 accepts form L alone.
+  - `form B` occurs only where it is withdrawn or recorded as history (§1, §4, §14.5, §21.4, §28 J, §31, §33.1, §33.6).
+  - `-text` and `text: unset` occur only as refused readings, and in round 1's evidence, marked as no longer accepted. The one other `-text` is a CRLF fixture of §28 M, which concerns domain files.
+- **R9 on the working tree: no such statement.** `ProjectView.load(store).with_effects` occurs only in the working-tree compatibility check, for comparison (§7.4), and in §33.6's description of the defect. Every R9 selection is on the committed basis (§7.7, §13, §15.1, §15.3, §18.8, §20), where the Candidate's `canonical_first_work` is computed.
+- **Discovery never run for an incomplete setup, or the binding helper only on a mutation this run began: no such statement.** `begun by this run` does not occur. §5.3, §12.1, §12.4, §12.5, §12.8 and §12.9 give the pre-freeze resume setup: `recovery_discovery` is kept once recorded, and established on resume when missing.
+- **A resumed review-v1 planning mutation never abandoned before generation 1: no such statement.** `never abandoned` occurs only for the legacy Phase-entry rule, which review-v1 does not keep in that state (§12, §26.2), and in §33.6's description of the defect.
+- **Discovery before `phase_already_expanded`: no such statement.** Every order statement puts the remaining live acceptance checks first (§5.6, §11.8, §12.2, §12.7, §21, §28). `review_recovery_incomplete` after runtime loss past Kp is scoped to Roadmap creation.
+- **`base_exact` as "otherwise applied": no such statement.** §15.2 and §15.6 state the classification steps, and §21.1 rows 21–22 follow them.
+- **Untyped delta scalars: no such statement.** `registration_delta_digest`, `old_mode` and `new_mode` occur with the text forms of §15.7 and §16.1.
+- **A `ReconcileRequired` P2 raises without its reason: no such statement in a normative section.** Every such `ReconcileRequired` names a reason of §25.1. Elsewhere, `reason` occurs in its ordinary sense, for the stale and set-aside reasons, and for live refusals, whose `reason` is `None`.
+- **A Scope section of `rules/git`: no such statement.** §26 says it has none. `write scope` occurs for the Roadmap Skill's write-scope paragraph, and for the scopes of the planning and generation mutations.
+- **An unstated Git version: no such statement.** §5.7 fixes 2.40.0, and `Git version` and `minimum Git` occur only with that value.
+
 ## 31. Evidence
 
 Probes are plain scripts (no pytest), run outside the repository; those that use Workline code run against the clone's `src` (`PYTHONPATH`) and assert that `workline` was imported from that tree. The round-1 probes build throw-away repositories only. Environment: Windows 11, Git for Windows 2.54.0.windows.1 with system `core.autocrlf=true`.
@@ -2406,12 +2766,18 @@ Probes are plain scripts (no pytest), run outside the repository; those that use
 | hook suppression | does `-c core.hooksPath=<empty or absent dir>` suppress repository hooks for `git commit --only`? | default: a failing `pre-commit` hook ran and refused the commit; with an empty directory and with an absent directory: no hook ran, the commit was made |
 | `committed_reload_probe.py` | does the production `ProjectView` read a commit's canonical files materialized from raw blobs exactly as it reads the working tree? | live Roadmap creation + Phase entry: 9 canonical files, all `100644`, committed reading == working-tree reading, `validate_structure` clean |
 | reconnaissance probes 1–8 | accepted evidence (reconnaissance §18) | Direction A mechanics (probe 8), pre-reservation (probes 2, 5), reader loss (probe 1), projection equality (probe 4), lifecycle neutrality (probes 2, 5, 8) |
-| checkout probe, part 1 (round 1) | which attribute conditions keep a Review record's bytes through a fresh clone under `core.autocrlf=true`, and can they be read from committed attributes alone, before the file exists? | no rule: clone CRLF, the P1 reader refuses (`review_record_noncanonical`), `git status` clean; committed `eol=lf -filter -ident -working-tree-encoding`: LF, accepted; committed `-text -filter -ident -working-tree-encoding`: LF, accepted; a rule only in the origin's `info/attributes`: clone CRLF, refused; committed `eol=lf` against a global `*.yaml eol=crlf`: LF, accepted; the global rule alone: CRLF, refused; `check-attr --source=HEAD` still reads `info/attributes`; the empty bare evaluation directory with alternates, `GIT_ATTR_NOSYSTEM`, and empty global configuration and attributes reads the committed rule alone (form L, form B, or all unspecified without a rule); `check-attr` answers for a path that does not exist |
-| checkout probe, part 2 (round 1) | do clone-local sources or core settings override a committed rule? | a clone-local `info/attributes` `eol=crlf` overrides committed `eol=lf` after a re-checkout: CRLF, refused, `git status` clean, the effective evaluation shows `eol: crlf`; committed `eol=lf` and committed `-text` keep LF under `core.autocrlf=false` with `core.eol=crlf`; a subsequent commit dropping the rule: a fresh clone of it CRLF, refused |
+| checkout probe, part 1 (round 1) | which attribute conditions keep a Review record's bytes through a fresh clone under `core.autocrlf=true`, and can they be read from committed attributes alone, before the file exists? | no rule: clone CRLF, the P1 reader refuses (`review_record_noncanonical`), `git status` clean; committed `eol=lf -filter -ident -working-tree-encoding`: LF, accepted; committed `-text -filter -ident -working-tree-encoding`: LF, accepted in round 1 as form B, no longer an accepted form since the final readiness repair (§14.5); a rule only in the origin's `info/attributes`: clone CRLF, refused; committed `eol=lf` against a global `*.yaml eol=crlf`: LF, accepted; the global rule alone: CRLF, refused; `check-attr --source=HEAD` still reads `info/attributes`; the empty bare evaluation directory with alternates, `GIT_ATTR_NOSYSTEM`, and empty global configuration and attributes reads the committed rule alone (form L, the former form B, or all unspecified without a rule); `check-attr` answers for a path that does not exist |
+| checkout probe, part 2 (round 1) | do clone-local sources or core settings override a committed rule? | a clone-local `info/attributes` `eol=crlf` overrides committed `eol=lf` after a re-checkout: CRLF, refused, `git status` clean, the effective evaluation shows `eol: crlf`; committed `eol=lf` and committed `-text` (no longer an accepted form, §14.5) keep LF under `core.autocrlf=false` with `core.eol=crlf`; a subsequent commit dropping the rule: a fresh clone of it CRLF, refused |
 | add-detection probe (round 1) | which `git log` form lists exactly the commits that add a path — present in the commit, absent from every parent — across merges? | the default form misses a merge that itself adds a path; `--full-history --no-renames --diff-merges=combined --diff-filter=A --name-only` lists the side-branch commit adding a path and the adding merge, and lists an ordinary merge as adding nothing |
 | physical projection probe (round 3) | does the production reader give the same meaning to physically different registration bytes, and does the writer's whole-ledger re-render canonicalize a ledger? | the writer's own `durable_write_text` puts exactly the canonical UTF-8 / LF bytes on disk; a Work entity file with CRLF line ends, reordered frontmatter keys, no blank line after the frontmatter, an extra trailing blank line or a quoted `display` scalar is read by `ProjectStore.read_entity` with the same meta, name and section as the canonical bytes; a `roadmap.yaml` with CRLF line ends, reordered record keys or an extra top-level key is read by `read_relation_file` as the same records, and `render_relations` of those records plus one more gives the same bytes in every case |
 | writer-input probe (round 4) | does a Related condition's key insertion order reach the ledger bytes, and what does the Candidate's canonical form do with it? | `validate_condition` accepts `{"pattern": ..., "kind": ...}` and `{"kind": ..., "pattern": ...}`, and further keys with a nested mapping; the live writer (`_registration_effects`, `render_relations`) writes each condition in its insertion order at every depth, so the two ledgers differ while `read_relation_file` reads them as the same records; `serialize.canonical_data` and `parse_canonical` give both the same key order, ascending at every depth, and the same digest, and the writer fed that form writes identical bytes for both; `design_identity` keeps the caller's order and compares equal under Python equality, `json.dumps(sort_keys=True)` and `serialize.digest`; a tuple value: the live writer refuses it (`unsupported scalar type: tuple`) and the canonical form makes it a list; a float: both refuse |
 | canonical-input probe (round 5) | where does each unusual condition value fail — in the durable planning invocation or in the P1 canonical form — and what does legacy Phase entry leave behind? | Through `design_identity`, `json.dumps(..., sort_keys=True)`, `yamlish.dump` and the UTF-8 write: a float or NaN, an empty mapping key and a sequence inside a sequence fail `yamlish.dump` (`_save`); integer, boolean and tuple keys fail `json.dumps(..., sort_keys=True)`; a lone surrogate, in a condition or in a Work name, fails the UTF-8 write; a tuple value and an integer key inside a sequence item pass but are changed (a list, a text key). Through the P1 form the same values are refused — `canonical_data` refuses floats and non-text keys, `canonical_bytes` refuses empty keys, nested sequences and surrogates, and a tuple fails value equality — while nested mappings in any order, extra scalar / list / mapping entries, sequences of mappings and an empty key inside a sequence item pass both ways and read back. Legacy end to end: float, empty key, nested sequence → `YamlishError`, no record; integer key → `TypeError`, no record; lone surrogate → `UnicodeEncodeError`, no record, a temporary file left; tuple → `YamlishError`, a pending mutation with no effect left; a valid nested mapping with extra entries registers |
+| checkout forms probe (final readiness repair) | which committed rules print each attribute tuple, and what does a fresh clone made with `core.autocrlf=true` check out for each? | the form-L rule `eol=lf -filter -ident -working-tree-encoding`: both evaluations form L, clone LF; a real `-text`: the former form-B tuple, clone LF; the literal `text=unset`: the former form-B tuple, clone CRLF; no rule, and `eol=crlf`: clone CRLF; `* text=auto` above the form-L rule: `text: auto`; with `!text` added: form L, clone LF; the literal values `text=unspecified`, `filter=unset`, `ident=unset` and `working-tree-encoding=unset` under `eol=lf`: form L printed, clone LF (Git reports an encoding error for the last and writes the bytes unchanged); `filter=lfs`: `filter: lfs`; a global attributes file `*.yaml eol=crlf` beside the committed form-L rule: both evaluations form L, clone LF |
+| barrier fast-path probe (final readiness repair) | is `git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/` empty exactly when nothing was ever added there? | empty for a history that never touched the directory (other Review paths present); a commit listed for a side-branch addition brought in by an ordinary merge, for an evil merge adding a path, for an addition deleted afterwards, and for a root commit holding a snapshot; the add-history read of §18.7 lists the adding commit in each |
+| delta types probe (final readiness repair) | does the scalar type of a mode change the `review-planning-delta` digest? | `canonical_data` keeps text modes exactly; the digest of the record with text modes differs from the digest with integer modes; `000000` has no integer form |
+| Git version check (final readiness repair) | which release introduced each Git feature P2 needs? | the release notes installed with Git for Windows 2.54.0: `check-attr` reads `.gitattributes` from a tree-ish since 2.40.0, `log --diff-merges=<how>` since 2.31.0, `GIT_CONFIG_GLOBAL` since 2.32.0, the final leg of SHA-256 support in 2.29.0; `git check-attr -h` of 2.54 lists `--source` and `--stdin -z` |
+
+The final readiness repair ran these four. Everything else it relies on is Live code, cited where used: `roadmap._enter_phase_locked`, `_pending_phase_entry`, `_require_resumable`, `_require_unique_entry`, `_require_startable_entry`, `_open`, `MutationController.begin` / `open`, `Mutation.reserve_id`, `abandon_on_stop`, `gitops.ensure_separable_before_effects`, `_classify_commit`, `state.startable_works`, `ProjectView`, `errors.ReconcileRequired`, the P1 exception classes of `review/*.py`, `review/adapter.py`. Beside those, the Final Implementation Readiness Check of `a6adf81` supplies one measurement. It observed that an uncommitted `phase_resumed` of a held Phase lets the live preconditions pass while the R9 selection differs between the working tree and HEAD (P2-READY-001).
 
 Round 2 ran no new probe: what it relies on is Live code, cited where used (`mutation.py:391-395`, `gate.next_generation_scope`, `ReviewStore.provenance_problems`, and P1 `validate._candidate_snapshots` / `_task_inputs`, which treat an unreferenced snapshot or task input as a legal orphan), together with the round-1 add-detection probe for history reads.
 
@@ -2425,9 +2791,9 @@ Kept outside the repository with the reconnaissance evidence: `D:\AIproject\work
 
 ## 32. HUMAN, architecture, checkpoint
 
-HUMAN: **None.** HUMAN-1 is resolved (A). Every choice made here, the round-1 to round-5 repairs included, is an engineering choice bounded by live code and frozen text, and each has its reason stated in its section.
+HUMAN: **None.** HUMAN-1 is resolved (A). Every choice made here, the round-1 to round-5 repairs and the final readiness repair included, is an engineering choice bounded by live code and frozen text, and each has its reason stated in its section.
 
-Architecture: Candidate 7 **RETAIN**; architecture reopen **No**; architecture blocker **None**. C-2, C-3 and C-4 close, and P2-CONTRACT-001..008 are repaired, inside Candidate 7's responsibility split: Review stays a subordinate gate, the Roadmap operation stays the only top-level owner (recovery orchestration included; Review only reads and validates), Roadmap and CREATE stay the rendering authorities whose own builders the physical projection reuses and whose stage-input derivation W reuses, lifecycle stays event-derived, and the publication barrier is a publication rule over committed objects, not a Review gate on any operation.
+Architecture: Candidate 7 **RETAIN**; architecture reopen **No**; architecture blocker **None**. C-2, C-3 and C-4 close, P2-CONTRACT-001..008 are repaired, and P2-READY-001..004 are closed, inside Candidate 7's responsibility split: Review stays a subordinate gate, the Roadmap operation stays the only top-level owner (recovery orchestration included; Review only reads and validates), Roadmap and CREATE stay the rendering authorities whose own builders the physical projection reuses and whose stage-input derivation W reuses, lifecycle stays event-derived, and the publication barrier is a publication rule over committed objects, not a Review gate on any operation.
 
 ```text
 Contract baseline:              cdb152312006f6ac25533962d942ed77e2d98bd4
@@ -2436,6 +2802,8 @@ Round-2 contract under repair:  3a8b9cf0496b230ebcb773f5905d98f529b6b313
 Round-3 contract under repair:  459f431c9715c5db0c50691d63f42d90b0c70513
 Round-4 contract under repair:  bbdd93d38c48eddb86ce2200e27a4cc1f774a7bb
 Round-5 contract under repair:  bd2e70da24bdb44b51ad7f9f9ee795e1625050c4
+Final readiness repair round 1
+  contract under repair:        a6adf8106daf2a1d3f764798dc64a00d35fe12f7
 P1 accepted checkpoint:         b78be1ccd778ceb2ecd97b90e2f71744bd1b3bc5
 HUMAN-1:                        RESOLVED — A, per-invocation opt-in (review=PlanningReview)
 C-1 .. C-6:                     CLOSED BY P2 CONTRACT (C-6 rewritten in round 2)
@@ -2444,6 +2812,17 @@ P2-CONTRACT-005:                CLOSED (round 2) (§33)
 P2-CONTRACT-006:                CLOSED (round 3) (§33)
 P2-CONTRACT-007:                CLOSED (round 4) (§33)
 P2-CONTRACT-008:                CLOSED (round 5) (§33)
+P2-CONTRACT-004:                CLOSED AGAIN BY READINESS REPAIR (form L only) (§33.6)
+P2-READY-001 .. 004:            CLOSED (final readiness repair round 1) (§33.6)
+P2-READY-005, -006, -018, -024, -027:
+                                RESOLVED (final readiness repair round 1) (§33.6)
+R9 basis:                       the committed basis at the freeze and in every rebuild; the working-tree
+                                compatibility check at the freeze; the declared base compared first (§7, §13)
+Pre-freeze resume:              setup completed on the same pending mutation; discovery run again only where its
+                                outcome is unrecorded; abandoned on a STOP before generation 1, begun or resumed (§12.9)
+Phase-entry order:              the live acceptance checks, phase_already_expanded included, before canonical
+                                recovery discovery (§5.6)
+Minimum Git:                    2.40.0 (§5.7)
 Generation contract:            Direction A — roadmap-owned generation mutations, R2/R3 unchanged;
                                 G1 accept -> G2 settle -> G3 seal [-> G4 invalidate + Supersession]
 Persisted-proof contract:       Direction A — Kp -> C-2(Kp) -> Consumption v2 -> Km -> C-2(Km) -> push Km
@@ -2460,12 +2839,12 @@ C-2(Km):                        reproducible over committed objects (committed p
 Publication barrier:            clears only when the committed planning proof passes, for every Workline push (§18.7)
 Runtime-loss recovery:          the same Run and task via canonical discovery; a new Run only when none is
                                 recoverable; incomplete or ambiguous -> ReconcileRequired (§12)
-Checkout capability:            committed + effective attributes, form L or form B (§14.5)
+Checkout capability:            committed + effective attributes, form L only (§14.5)
 Lifecycle separation:           PASS
 P1 frozen contract repair:      not required
-P2 Integration Contract:        FROZEN / ROUND 5 REPAIRED
+P2 Integration Contract:        FROZEN / FINAL READINESS REPAIR ROUND 1
 P2 implementation:              NOT STARTED
-P2 accepted for implementation: NO (pending independent contract re-review)
+P2 accepted for implementation: NO (pending independent Final Implementation Readiness Re-check)
 Candidate 7:                    RETAIN
 Architecture reopen:            No
 Architecture blocker:           None
@@ -2473,7 +2852,7 @@ HUMAN:                          None
 P3:                             NOT STARTED
 Outstanding HIGH:               0
 Outstanding MID:                0
-Status:                         READY_FOR_P2_CONTRACT_REVIEW
+Status:                         READY_FOR_P2_FINAL_READINESS_RECHECK
 ```
 
 ## 33. Repair dispositions
@@ -2487,7 +2866,7 @@ The independent contract review of `2f8771a` raised four HIGH findings. Each was
 | P2-CONTRACT-001 — unproven Kp published by another Workline operation | "No push before proof" held only for the planning mutation's own record. Every Workline push publishes its commit with the history it was made on (`mutation._recorded_publication`), and a disjoint-scope operation (a Roadmap hold: event log only) can run in a crash window after Kp and push a descendant of Kp; the frozen §15.5 named that path itself | the publication barrier: no Workline push of any operation publishes a history holding a planning registration commit that no committed Planning Consumption binds; computed from committed objects; checked before every push stage is recorded, when a recorded push would write, and right before every push; Kp proof failure keeps it; a Supersession never clears it | §18.7, §15.5, §17, §21.1 rows 22–25, 36, §21.2 L11–L13 |
 | P2-CONTRACT-002 — stale sealed Receipt left valid | staleness after the seal ended the planning mutation with generation 3 and its Receipt canonically sealed, unsuperseded and unconsumed, against Frozen P1 R3 §8 | stale after the Receipt → generation 4 (`open`) + Supersession in one stage under the same serialization, persisted before the planning mutation ends; stale before a Receipt writes nothing (no Supersession without a Receipt); the state machine G1 → G2 → G3 [→ G4] replaces the fixed 1/2/3 sequence; invalidation only while no registration stage is recorded, so it never meets a Kp | §11.2, §11.3, §11.6, §11.6.1, §13.2–§13.3, §19.2, §21.1 rows 12–16 |
 | P2-CONTRACT-003 — full currency not re-proven at the registration boundary | currency was evaluated at the use check on the working tree; afterwards only the loader identity was re-checked; C-2(Kp) required only that P descend from `review_binding.head`; the live independent-advancement rule (`mutation._head_advanced_independently`) let Kp be made on a moved HEAD | the declared base read from the committed view of the exact base commit; `use_check_head` noted at the use check; the pre-Kp currency proof right before Kp is recorded and right before a recorded Kp is replayed; a base-exact Kp on its recorded parent P; C-2(Kp) proves full currency on P (P2, P12); after the registration began a difference is `ReconcileRequired`, never `stale`, with no Consumption and no publication | §7.4, §13, §15.1–§15.3, §15.6, §17, §21.1 rows 19–24 |
-| P2-CONTRACT-004 — checkout conversion makes Review records unreadable | measured: under `core.autocrlf=true` without an attribute rule, a fresh clone checks out Review records as CRLF (`git status` clean) and the P1 reader refuses them; the repository commits no rule; the contract relied on P2 never reading old records, yet P2 reads the namespace through `ReviewStore` indexes | the checkout capability: the committed and the effective attributes of every Review path must be exactly form L or form B (measured), before the first Review record and before every Review-writing and Git stage; every existing record must read canonically; the capability contract bound in the Context; the P1 reader and P1 documents unchanged | §5.4, §8, §14.3, §14.5, §14.6, §21.2 L17–L18, §21.3 O6 |
+| P2-CONTRACT-004 — checkout conversion makes Review records unreadable | measured: under `core.autocrlf=true` without an attribute rule, a fresh clone checks out Review records as CRLF (`git status` clean) and the P1 reader refuses them; the repository commits no rule; the contract relied on P2 never reading old records, yet P2 reads the namespace through `ReviewStore` indexes | the checkout capability: the committed and the effective attributes of every Review path must be exactly form L or form B (measured; form B withdrawn by the final readiness repair, §33.6), before the first Review record and before every Review-writing and Git stage; every existing record must read canonically; the capability contract bound in the Context; the P1 reader and P1 documents unchanged | §5.4, §8, §14.3, §14.5, §14.6, §21.2 L17–L18, §21.3 O6 |
 
 Dependent changes, each required by one of the four: the Context gains `checkout_capability` (004, §8); the evidence record gains two checks (004, §10.6); the generation invocation gains the `invalidate` transition and `invalidation_reason` (002, §11.2); the declared base is read from the committed view, with `review_base_uncommitted` at the freeze (003, §7.4); the `use_check_head` note, the Kp `base_exact` field and the pre-replay proof (003, §15.2, §15.6, §17); the freeze evaluates the barrier on HEAD with a push destination (001, §14.4); the Run records gain gate 4 and the Supersession (002, §3, §14.2, §18.2 M4); new codes and reasons (§25); authority text, surface map and tests (§26–§28). Planning Consumption v2 is unchanged (§16.5).
 
@@ -2628,6 +3007,36 @@ Preserved:
 
 No frozen P1 document was edited or needs repair.
 
+### 33.6 Final readiness repair round 1 (on `a6adf81`)
+
+The Final Implementation Readiness Check of `a6adf81` found four blockers, P2-READY-001..004. The independent reclassification made P2-READY-004 HIGH: it makes the positive proof of P2-CONTRACT-004 unsound. Each blocker was checked against the live code and the frozen P1 texts before it was repaired, and four probes measured what the repairs rest on (§31). The repair also fixes the five durable or authority-facing LOW items listed below.
+
+| finding | failure, confirmed against live code | repair | sections |
+| --- | --- | --- | --- |
+| P2-READY-001 (MID) — the R9 basis was the working tree at the freeze, and the committed views in the proofs | §7.6 and §7.7 evaluated the R9 selection on `ProjectView.load(store).with_effects(...)`, the working tree. The declared base, every rebuild, P9, P12 and CP6 used committed views. R9 reads the Phase's lifecycle and the predecessors' states from `events/events.jsonl` (`state.py:303-320`), which no dirty-overlap check covers. So an uncommitted `phase_resumed` or `work_completed` gave a Candidate whose selection the committed proofs did not reproduce. It ended as a pending mutation stuck after generation 1, or as a Kp failing P9 behind a permanent barrier | the committed basis — HEAD's, or a rebuild's B's, committed view with W's expected effects — is the only basis of the R9 selection and of the freeze's projected checks. The freeze runs the working-tree compatibility check (`review_base_uncommitted`, one meaning). Every rebuild compares the declared base first, and the rest only with it equal (`review_candidate_mismatch`). CP7 comes before CP6, and P12 before P8/P9 | §3, §7.1, §7.4, §7.6, §7.7, §7.8, §12.2, §12.5, §13, §13.1, §13.5, §15.1, §15.3, §15.4, §15.6, §17, §18.8, §20, §22, §28 P |
+| P2-READY-002 (MID) — no rule for a planning mutation interrupted before its first review-v1 save | `_open` saves twice before any review-v1 step (`mutation.py:1693-1711`, `roadmap.py:260`); the discovery note and the recovered binding are saves of their own after those. On resume "nothing of §12 runs", the binding helper ran only on a mutation this run began, and a resumed Phase entry was never abandoned. So a Phase entry stayed pending for good, blocking START and every operation that declares its ledgers | the pre-freeze resume setup (§12.9). The same mutation completes its setup, and discovery runs again only where its outcome is unrecorded. A new Run to which discovery now answers "a recoverable Run exists" is `review_discovery_changed`, and is never rewritten. Recorded reservations are reused, and a recovery binds on resume. The helper's precondition no longer depends on the process that began the mutation, and the `recovery_binding` note is added. Before generation 1, a review-v1 planning mutation is abandoned on every STOP, begun or resumed. Legacy is unchanged | §3, §4, §5.3, §11.8, §12, §12.1, §12.4, §12.5, §12.8, §12.9, §14.4, §21.1, §21.4, §28 Q |
+| P2-READY-003 (MID) — the entry order contradicted itself | §5.6 step 4 ran discovery before the remaining live checks. §11.8, §12.2, §12.7, §21 and §28 put `phase_already_expanded` first — the round-5 text; `bd2e70d` had discovery after the live entry checks | one order (§5.6): the argument, platform and Git version checks; the live checks up to the identity; the preflight; the same-request and marker checks; the remaining live acceptance checks, under the live interrupted-entry rule; discovery only with no pending planning mutation; `_open`; setup. Outcomes that assumed discovery for an already expanded Phase are scoped to Roadmap creation | §5.3, §5.6, §11.8, §12.2, §12.7, §21.2, §28 G, L, R |
+| P2-READY-004 (HIGH) — form B cannot positively prove LF bytes | `git check-attr` prints `text: unset` both for a real `-text` and for the literal `text=unset`, which Git converts like an unspecified `text`. Under the literal rule both evaluations printed form B, and a fresh clone under `core.autocrlf=true` got CRLF (**Measured**). P2-CONTRACT-004's positive fresh-clone proof was unsound | form B is withdrawn, and form L is the one accepted form. `-text` and `text=unset` are refused, with every other reading that is not form L. The measured `-text` evidence is marked as no longer accepted. `!text` is given for repositories with a broader `text` rule (Measured). P2-CONTRACT-004 is closed again | §3, §4, §8, §14.5, §21.4, §24, §28 J, §31, §33.1 |
+| P2-READY-005 (LOW, folded in) — no reason carrier | `ReconcileRequired` has a fixed `code` and only a message (`errors.py:38-42`) | the keyword-only attribute `reason`, with `code` unchanged. Every `ReconcileRequired` P2 raises names a reason, listed in the catalogue of §25.1 | §5.3, §10.3, §10.4, §11.5, §11.6, §11.8, §11.10, §13, §13.1, §13.5, §17, §18.4, §18.5, §21.3, §25, §25.1, §27, §28 S |
+| P2-READY-006 (LOW, folded in) — `base_exact` wording | "otherwise applied with an unexpected result", read literally, classified every Kp that was made as a mismatch, and left the pre-replay trigger undefined | `base_exact` removes only the independent-advancement step (`mutation.py:2014-2015`); the other steps decide as they do for any commit. The pre-replay proof runs for a Kp classified unapplied; a mismatch is `review_registration_base_moved` | §15.2, §15.6, §21.1 rows 21–22, §28 S |
+| P2-READY-018 (LOW, folded in) — delta scalar types | the `review-planning-delta` record left modes and object IDs untyped, and the digest differs between text and integer modes (**Measured**) | modes are text of six octal characters; object IDs are full lowercase hexadecimal text in the repository's object format; status is `A` or `M` | §15.7, §16.1, §18.8 CP9, §28 S |
+| P2-READY-024 (LOW, folded in) — authority routing | §26.1 item 4 put the write-scope rule in `rules/git`, which has no Scope section; the static write-scope paragraph is the Roadmap Skill's (`skills/roadmap/SKILL.md:466-476`). Several rules had two owners | one owner per rule: `rules/git` for the Git-operation rules; `skills/roadmap` for the planning operation and its write scope, with one stated exception for the Consumption path; `skills/review` for the meaning of records and proofs, now including the checkout capability | §26, §27, §28 S |
+| P2-READY-027 (LOW, folded in) — minimum Git | no minimum Git version was stated. The barrier's add-history read needs `--diff-merges` (2.31.0), and the checkout evaluation needs `check-attr --source` (2.40.0) | Git 2.40.0, with `review_git_unsupported` before the lock. The barrier's fast path is answered by every Git, so legacy histories are unaffected; for any other history the barrier holds on an older Git | §2, §5.4, §5.6, §5.7, §18.7, §21.4, §25, §26.1, §27, §28 S |
+
+Dependent changes: the status line and the header; the §1 baseline row; the quality gates, evidence, checkpoint and cross-finding sections (§30, §31, §32, §34.6).
+
+The other LOW findings of the readiness check are not repaired here. P2-READY-007..017, -019..023, -025, -026 and -028 stay implementation notes, unchanged by this repair, except that the catalogue of §25.1 now lists each code's states.
+
+Preserved:
+- P2-CONTRACT-001, -002, -003, -005, -006, -007 and -008 stay closed; §34.6 checks each against this repair.
+- Candidate 7 RETAIN; architecture reopen No; HUMAN-1 = A.
+- Legacy planning unchanged by default: a legacy invocation runs no preflight, no discovery, no R9 of its own and no Git version gate, and in a history without a planning snapshot the barrier's fast path clears it on any Git.
+- Review is a subordinate gate and never a lifecycle controller; the Roadmap operation stays the top-level owner.
+- Planning Consumption v2; G1 → G2 → G3 [→ G4 + Supersession]; Kp → C-2(Kp) → Consumption → Km → C-2(Km) → publication; W and E; semantic and physical proof, each required on its own.
+- P3 not started; `state.py` reads no Review metadata.
+
+No frozen P1 document was edited or needs repair.
+
 ## 34. Cross-finding consistency
 
 ### 34.1 Round-1 questions, answered for the final contract
@@ -2712,3 +3121,36 @@ Lifecycle: W is writer input only and is read by nothing that decides lifecycle 
 | 007 canonical writer input | kept: the preflight judges the caller's values by the same P1 canonical form, key order is never a refusal, and W is still built from the canonical Candidate alone |
 
 Lifecycle: the preflight reads no Project state and decides no lifecycle. Review gains no authority: the preflight belongs to the Roadmap-owned entry, and the P1 serializer only defines the canonical representation it is measured against.
+
+### 34.6 Final readiness repair check against P2-CONTRACT-001 to -008
+
+| closed finding | what the final readiness repair changes there |
+| --- | --- |
+| 001 C-2(Km) and the barrier | nothing weakened. The barrier gains a fast path that clears only a history that never touched the candidate-snapshot directory — where step 1 found nothing before. It holds on a Git too old to run the committed planning proof. CP7 is evaluated before CP6 |
+| 002 generation 4 and the Supersession | nothing: a declared-base change after the seal is invalidated by §13.3 as before, now reached by §13 item 3 before any R9 comparison |
+| 003 base and currency | refined, never weakened. Every rebuild compares the declared base first, and the rest of the Candidate — the R9 selection on the committed basis included — only with it equal. The base rules of §15.6 are unchanged, and the freeze now also proves that the working tree gives the declared base HEAD gives |
+| 004 checkout capability | closed again: form L alone. Every committed rule that prints form L keeps LF bytes in a fresh clone (**Measured**), the P1 strict reader is unchanged, and nothing is normalized |
+| 005 runtime-loss recovery | completed. A recovery planning mutation interrupted before its binding binds on resume (§12.9), and a new-Run mutation interrupted before its discovery note records it on resume. Discovery never runs for a mutation that has started a generation mutation. The same Run and the same task are continued as before |
+| 006 exact physical projection | nothing weakened: E, the record check, P3 and CP5 are unchanged, and the `review-planning-delta` record now fixes the scalar types its digest always depended on |
+| 007 canonical writer input | kept: W is still the one writer input. At the freeze it is computed before the R9 selection is added to the Candidate, and it never reads that selection |
+| 008 canonical-input preflight | kept: the preflight still runs right after the request identity is computed (§5.6 step 4), before the same-request check, and only the order after that check is made single |
+
+**The four repairs together.** A review-v1 Phase entry now runs in this order:
+1. the argument, platform and Git version checks;
+2. the live checks up to the request identity;
+3. the canonical-input preflight;
+4. the same-request and marker checks;
+5. the remaining live acceptance checks, under the live interrupted-entry rule;
+6. with a pending planning mutation of this request, `_open` resumes it and the pre-freeze resume setup completes its setup; with none, canonical recovery discovery runs, then `_open`;
+7. the freeze on the committed basis, with the working-tree compatibility check;
+8. generation 1 and the Review flow.
+
+The joint properties:
+- The R9 selection is never taken from the working tree.
+- The pre-freeze resume setup runs every freeze check in full: the checkout capability, dirty overlap, the Context, the Policy, the publication barrier and the Review namespace readability.
+- Admissibility is decided before discovery, and the setup runs after `_open`. So discovery never runs for an inadmissible operation, and runs once per invocation at most.
+- The form-L rule is checked at every freeze, including the one the setup runs again, and at every Review-writing and Git stage.
+- `review_git_unsupported` comes before all of them, before the lock.
+- The checkout repair leaves the P1 strict reader, and its canonical bytes, unchanged.
+
+Lifecycle: the committed basis and the working-tree compatibility check are read by nothing that decides lifecycle (§22 items 4 and 6). The pre-freeze resume setup changes no lifecycle fact, and the reason attribute is an exception field only. Review gains no authority: the entry order, the setup and the R9 basis belong to the Roadmap operation, and `skills/review` keeps only the meaning of records and proofs (§26).
