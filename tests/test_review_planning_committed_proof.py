@@ -259,6 +259,28 @@ class CP9Tests(_ProvenCase):
         self.assertIsNotNone(publication.barrier_problem(self.repo, km))
 
 
+class ForgedConsumptionExampleTests(_ProvenCase):
+    """§28 K's examples of a schema-valid forged Consumption that must not clear the barrier."""
+
+    def test_the_right_fields_over_a_kp_whose_delta_carries_an_extra_path(self) -> None:
+        kp = self.registration_on(self.reg.parent, {**self.blobs(), "notes.txt": b"one more path\n"})
+        first = self.chain(self.store, self.run_id).generations[0]
+        context = ReviewStore(self.store).read_task_input(first.accepted_tasks[0]["task_id"]).request_envelope["context"]
+        expected = rr.expected_projection(self.store, self.reg.material, context, self.reg.parent)
+        forged = self.consumption_text(registration_commit=kp, registration_delta_digest=expected.delta_digest(kp))
+        km = plumb_commit(self.store, kp, {self.reg.consumption_path: forged}, "a hand-made metadata commit")
+        self.assert_fails(km, "CP5")
+        self.assert_push_refused(km)
+
+    def test_a_second_consumption_of_the_receipt_in_the_history(self) -> None:
+        second = replace(self.reg.consumption, consumption_id="rcs_" + OTHER_ID)
+        commit = plumb_commit(self.store, self.reg.km,
+                              {review_paths.consumption_rel(second.consumption_id): self.consumption_text(second)})
+        self.assert_fails(commit, "CP8")
+        self.assertIn("2 Consumptions of the Receipt", publication.barrier_problem(self.repo, commit))
+        self.assert_push_refused(commit)
+
+
 class CP10Tests(_ProvenCase):
     def test_another_planning_consumption_names_the_registration_commit(self) -> None:
         second = replace(self.reg.consumption, consumption_id="rcs_" + OTHER_ID, receipt_id="rcp_" + OTHER_ID)
