@@ -559,6 +559,39 @@ class CrossOperationBarrierTests(_PublishCase):
         self.assertEqual([], self.pending(self.store))
 
 
+class AnotherRunsUnprovenKpTests(_PublishCase):
+    """§21.1 row 31: the barrier holds the planning push only while some registered Run of Km's history is unproven."""
+
+    def test_another_runs_unproven_registration_commit_holds_the_planning_push(self) -> None:
+        main_plan = plan("Main Roadmap", relations=False)
+        # sealed, then the process dies before the use check (a merge between Kp and Km would fail M1)
+        with crash_at(rr, "_use_check"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store, self.reviewer, main_plan)
+        # a second clone registers another Run and loses its process before C-2(Kp): its Kp is unproven
+        side = self.fresh_clone(self.remote_path(), "side")
+        git(side.root, "remote", "set-url", "origin", str(self.remote_path()))
+        self.enter(side.root)
+        with crash_at(rr, "_c2_kp"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(side, Reviewer(), plan("Side Roadmap", relations=False))
+        side_kp = self.head(side)
+        # a person merges that history into the branch before this Run's use check
+        self.enter(self.store.root)
+        git(self.store.root, "fetch", "-q", str(side.root), "main:refs/heads/side")
+        git(self.store.root, "-c", "user.name=Person", "-c", "user.email=person@example.invalid",
+            "merge", "-q", "--no-ff", "--no-edit", "side")
+        with self.assertRaises(StopError) as raised:
+            self.reviewed_roadmap(self.store, self.reviewer, main_plan)
+        self.assertEqual("review_publication_barrier", raised.exception.code)
+        self.assertIn(side_kp, str(raised.exception), "the other Run's registration commit")
+        record = self.planning_record()
+        self.assertEqual([], self.pushes_recorded(), "the push stage is not recorded")
+        self.assertTrue(any(e["stage"] == rr.STAGE_KM and e.get("applied") for e in record["effects"]), "Km is made")
+        self.assertIn(rr.NOTE_PUBLICATION_PROOF, record["notes"], "C-2(Km) passed for this Run")
+        self.nothing_published()
+
+
 class RetryAfterProofTests(_PublishCase):
     def test_pushes_from_km_and_its_descendants_pass_once_the_proof_passes(self) -> None:
         self.crash(gitcmd, "push")
@@ -619,6 +652,16 @@ class ProofFailureTests(_PublishCase):
                 self.hold_other()
         self.assert_barrier(self.hold_other)
         self.assert_barrier(self.hold_other)
+        self.nothing_published()
+        # the review-v1 side, after the crash: every planning retry is refused and publishes nothing
+        for _ in range(2):
+            with self.assertRaises(ReconcileRequired) as raised:
+                self.run_plan()
+            # the fixture left other bytes in the registration file than the mutation wrote: the live replay refuses
+            self.assertIsNone(raised.exception.reason)
+            self.assertIn("applied with unexpected result", str(raised.exception))
+        self.assertEqual([], self.pushes_recorded())
+        self.assertEqual(self.kp, self.registration_adders()[0])
         self.nothing_published()
 
     def test_across_runtime_record_loss(self) -> None:
