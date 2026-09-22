@@ -87,6 +87,12 @@ class _CheckoutCase(PlanningTestCase):
 
 
 class NoRuleTests(_CheckoutCase):
+    def test_core_autocrlf_with_no_attributes_file_at_all_is_refused_at_the_freeze(self) -> None:
+        store = self.new_project()  # no .gitattributes anywhere
+        self.assertFalse((store.root / ".gitattributes").exists())
+        git(store.root, "config", "core.autocrlf", "true")
+        self.assertIn("root .gitattributes", str(self.refused_at_the_freeze(store)))
+
     def test_core_autocrlf_with_no_rule_is_refused_at_the_freeze(self) -> None:
         store = self.planning_project(attributes="* text=auto\n")
         git(store.root, "config", "core.autocrlf", "true")
@@ -139,6 +145,15 @@ class LiteralLookalikeTests(_CheckoutCase):
         store = self.planning_project("nulbyte", attributes=b"\0\n" + CANONICAL_RULE.encode() + b"\n")
         self.assertEqual({name: "unspecified" for name in checkout.ATTRIBUTES}, self.evaluations(store)["committed"])
         self.assertIn("NUL", str(self.refused_at_the_freeze(store)))
+
+
+class FormBTests(_CheckoutCase):
+    FORM_B = {"text": "unset", "eol": "unspecified", "filter": "unset", "ident": "unset", "working-tree-encoding": "unset"}
+
+    def test_form_b_is_printed_and_refused(self) -> None:
+        store = self.planning_project(attributes="* text=auto\n.workline/review/** -text -filter -ident -working-tree-encoding\n")
+        self.assertEqual({"committed": self.FORM_B, "effective": self.FORM_B}, self.evaluations(store))
+        self.refused_at_the_freeze(store)
 
 
 class DeeperOverrideTests(_CheckoutCase):
@@ -374,6 +389,29 @@ class FreshCloneTests(_CheckoutCase):
         self.assertEqual("review_namespace_unreadable", raised.exception.code)
         self.assertEqual("review_record_noncanonical", raised.exception.__cause__.code)
         self.assertEqual(crlf, (clone.root / record).read_bytes(), "no byte rewritten")
+
+
+class CheckedOutBeforeTheRuleTests(_CheckoutCase):
+    def test_a_record_checked_out_before_the_rule_is_refused_and_never_normalized(self) -> None:
+        source = self.planning_project()
+        self.reviewed_roadmap(source)
+        self.commit_attributes(source, "* text=auto\n", message="the Review rule removed")
+        clone = self.fresh_clone(source.root, "clone", "core.autocrlf=true")  # checked out with no Review rule
+        record = review_records(clone)[0]
+        crlf = (clone.root / record).read_bytes()
+        self.assertIn(b"\r\n", crlf, "the checkout converted the record")
+        self.commit_attributes(source, "* text=auto\n" + CANONICAL_RULE + "\n", message="the Review rule back")
+        git(clone.root, "pull", "-q", "--ff-only")  # the rule arrives; the unchanged record is not checked out again
+        self.assertTrue(blob_at(clone, "HEAD", ".gitattributes").endswith(CANONICAL_RULE.encode("utf-8") + b"\n"),
+                        "HEAD's committed root .gitattributes ends with the canonical rule again")
+        self.assertEqual(crlf, (clone.root / record).read_bytes())
+        git(clone.root, "remote", "remove", "origin")
+        self.enter(clone.root)
+        with self.assertRaises(StopError) as raised:
+            self.reviewed_roadmap(clone, Reviewer(), plan("Another Roadmap"))
+        self.assertEqual("review_namespace_unreadable", raised.exception.code)
+        self.assertEqual("review_record_noncanonical", raised.exception.__cause__.code)
+        self.assertEqual(crlf, (clone.root / record).read_bytes(), "no byte rewritten or normalized")
 
 
 class RuleRemovedTests(_CheckoutCase):
