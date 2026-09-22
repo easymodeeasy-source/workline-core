@@ -15,6 +15,7 @@ from planning_helpers import (
 from workline import gitcmd
 from workline import mutation as mutation_module
 from workline import roadmap as rm
+from workline import yamlish
 from workline.errors import ReconcileRequired, StopError
 from workline.review import planning, publication, records, serialize
 from workline.review import paths as review_paths
@@ -22,6 +23,29 @@ from workline.review.store import ReviewStore
 
 ROADMAP_YAML = ".workline/relations/roadmap.yaml"
 RELATED_YAML = ".workline/relations/related.yaml"
+
+
+def entity_variants(text: str) -> dict[str, str]:
+    """The same entity meaning in other bytes (each **Measured** as read with the same meaning, contract §31)."""
+    lines = text.split("\n")
+    first, second = lines[1], lines[2]
+    return {
+        "reordered frontmatter keys": text.replace(first + "\n" + second, second + "\n" + first, 1),
+        "a quoted scalar": text.replace(second, second.replace(": ", ': "', 1) + '"', 1),
+        "no blank line after the frontmatter": text.replace("---\n\n", "---\n", 1),
+        "an extra trailing blank line": text + "\n",
+    }
+
+
+def ledger_variants(text: str) -> dict[str, str]:
+    """The same ledger records in other bytes."""
+    first_record = text.split("  - ", 2)[1]
+    record_lines = first_record.rstrip("\n").split("\n")
+    reordered = "\n".join([record_lines[0]] + list(reversed(record_lines[1:]))) + "\n"
+    return {
+        "record keys reordered": text.replace(first_record, reordered, 1),
+        "an extra top-level key": text + "extra: kept\n",
+    }
 
 
 class _ProjectionCase(PlanningTestCase):
@@ -124,20 +148,12 @@ class ParserEquivalentTests(_ProjectionCase):
     """C, D, E, F, G, H: other bytes with the same meaning, or one wrong byte: CP5 fails, the barrier holds."""
 
     def test_c_parser_equivalent_entity_bytes(self) -> None:
-        path = self.roadmap_path()
-        text = blob_at(self.store, self.reg.kp, path).decode("utf-8")
-        lines = text.split("\n")
-        id_line, display_line = lines[1], lines[2]
-        variants = {
-            "reordered frontmatter keys": text.replace(id_line + "\n" + display_line, display_line + "\n" + id_line, 1),
-            "a quoted scalar": text.replace(display_line, display_line.replace(": ", ': "', 1) + '"', 1),
-            "no blank line after the frontmatter": text.replace("---\n\n", "---\n", 1),
-            "an extra trailing blank line": text + "\n",
-        }
-        for described, variant in variants.items():
-            with self.subTest(described):
-                self.assertNotEqual(text, variant)
-                self.assert_physical_only(*self.hand_made({path: variant.encode("utf-8")}))
+        for path in (self.roadmap_path(), rr.entity_paths(self.material)[1]):  # the Roadmap file, a Phase file
+            text = blob_at(self.store, self.reg.kp, path).decode("utf-8")
+            for described, variant in entity_variants(text).items():
+                with self.subTest(path=path, variant=described):
+                    self.assertNotEqual(text, variant)
+                    self.assert_physical_only(*self.hand_made({path: variant.encode("utf-8")}))
 
     def test_c_the_planning_mutations_own_proof_fails_at_p3(self) -> None:
         with noncanonical_registration():
@@ -147,21 +163,23 @@ class ParserEquivalentTests(_ProjectionCase):
         self.assertIn("C-2(Kp) P3 fails", str(raised.exception))
 
     def test_d_crlf(self) -> None:
+        from workline.review import checkout
+
+        attributes = (self.store.root / ".gitattributes").read_bytes()
+        for name in ("require_checkout_capability", "require_committed_evaluation", "require_effective_evaluation"):
+            patcher = mock.patch.object(checkout, name, side_effect=AssertionError(f"checkout.{name} used"))
+            patcher.start()
+            self.addCleanup(patcher.stop)
         for path in (self.roadmap_path(), ROADMAP_YAML):
             with self.subTest(path):
                 data = blob_at(self.store, self.reg.kp, path)
                 self.assert_physical_only(*self.hand_made({path: data.replace(b"\n", b"\r\n")}))
+        self.assertEqual(attributes, (self.store.root / ".gitattributes").read_bytes(), "the Review rule is not changed")
+        self.assertFalse((self.store.root / ".git" / "info" / "attributes").exists())
 
     def test_e_ledger_layout(self) -> None:
         text = blob_at(self.store, self.reg.kp, ROADMAP_YAML).decode("utf-8")
-        first_record = text.split("  - ", 2)[1]
-        record_lines = first_record.rstrip("\n").split("\n")
-        reordered = "\n".join([record_lines[0]] + list(reversed(record_lines[1:]))) + "\n"
-        variants = {
-            "record keys reordered": text.replace(first_record, reordered, 1),
-            "an extra top-level key": text + "extra: kept\n",
-        }
-        for described, variant in variants.items():
+        for described, variant in ledger_variants(text).items():
             with self.subTest(described):
                 self.assertNotEqual(text, variant)
                 self.assert_physical_only(*self.hand_made({ROADMAP_YAML: variant.encode("utf-8")}))
@@ -184,6 +202,54 @@ class ParserEquivalentTests(_ProjectionCase):
         display_line = text.split("\n")[2]
         self.assertTrue(display_line.startswith("display: R-"))
         self.assert_physical_only(*self.hand_made({path: text.replace(display_line, "display: R-09", 1).encode("utf-8")}))
+
+
+class PhaseEntryProjectionTests(_ProjectionCase):
+    """The same, for a review-v1 Phase entry's Work files and whole related.yaml."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        # a legacy Phase entry first, so P's related.yaml already holds records
+        rm.enter_phase(self.store, self.earlier.phase_ids["a"],
+                       design(related={"w1": (rr.RelatedSpec("must_read", "docs/e.md"),)}))
+        condition = {"kind": "path_glob", "pattern": "src/*.py"}
+        the_design = design(related={"w1": (rr.RelatedSpec("must_read", "docs/a.md"),),
+                                     "w2": (rr.RelatedSpec("conditional_must_read", "src/x.py", condition),)})
+        self.result = self.reviewed_entry(self.store, self.result.registration.phase_ids["a"], Reviewer(), the_design)
+        self.reg = registered(self.store, self.result)
+        self.material = self.reg.material
+        self.context = self.context_of(self.result.review_run_id)
+        self.expected = rr.expected_projection(self.store, self.material, self.context, self.reg.parent)
+
+    def test_c_parser_equivalent_work_file_bytes(self) -> None:
+        path = [p for p in rr.entity_paths(self.material) if "/works/" in p][0]
+        text = blob_at(self.store, self.reg.kp, path).decode("utf-8")
+        for described, variant in entity_variants(text).items():
+            with self.subTest(described):
+                self.assertNotEqual(text, variant)
+                self.assert_physical_only(*self.hand_made({path: variant.encode("utf-8")}))
+
+    def test_e_related_ledger_layout(self) -> None:
+        text = blob_at(self.store, self.reg.kp, RELATED_YAML).decode("utf-8")
+        for described, variant in ledger_variants(text).items():
+            with self.subTest(described):
+                self.assertNotEqual(text, variant)
+                self.assert_physical_only(*self.hand_made({RELATED_YAML: variant.encode("utf-8")}))
+
+    def test_o_another_related_ledger_on_another_base(self) -> None:
+        data = yamlish.load(blob_at(self.store, self.reg.parent, RELATED_YAML).decode("utf-8"))
+        self.assertTrue(data["relations"], "P's related.yaml holds records")
+        data["relations"].append({**data["relations"][0], "id": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV", "to": "docs/other.md"})
+        other_parent = plumb_commit(self.store, self.reg.parent, {RELATED_YAML: yamlish.dump(data)}, "another legitimate base")
+        other = rr.expected_projection(self.store, self.material, self.context, other_parent)
+        mine = {e.path: e for e in self.expected.entries}
+        theirs = {e.path: e for e in other.entries}
+        self.assertNotEqual(mine[RELATED_YAML].content, theirs[RELATED_YAML].content, "each base gets its own ledger")
+        self.assertIsNone(rr.delta_problem(self.repo, self.expected, self.reg.kp))
+        kp_there = plumb_commit(self.store, other_parent, {e.path: e.content for e in other.entries})
+        self.assertIsNone(rr.delta_problem(self.repo, other, kp_there), "a Kp made on the other base passes its own E")
+        self.assertIsNotNone(rr.delta_problem(self.repo, self.expected, kp_there), "and fails against this base's E")
+        self.assertIsNotNone(rr.delta_problem(self.repo, other, self.reg.kp), "and the reverse")
 
 
 class SemanticOnlyTests(_ProjectionCase):
@@ -369,6 +435,22 @@ class BaseSensitivityTests(_ProjectionCase):
         kp_there = plumb_commit(self.store, other_parent, self.reg.registration_blobs(self.store))
         self.assertIsNotNone(rr.delta_problem(self.repo, other, kp_there), "Kp's bytes fail against the other P's projection")
 
+    def test_o_a_base_with_other_relation_records(self) -> None:
+        data = yamlish.load(blob_at(self.store, self.reg.parent, ROADMAP_YAML).decode("utf-8"))
+        phases = self.earlier.phase_ids
+        data["relations"].append({"id": "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV", "type": "requires_completion",
+                                  "from": phases["a"], "to": phases["b"]})
+        other_parent = plumb_commit(self.store, self.reg.parent, {ROADMAP_YAML: yamlish.dump(data)}, "a base with another record")
+        other = rr.expected_projection(self.store, self.material, self.context, other_parent)
+        mine = {e.path: e for e in self.expected.entries}
+        theirs = {e.path: e for e in other.entries}
+        self.assertNotEqual(mine[ROADMAP_YAML].content, theirs[ROADMAP_YAML].content, "the other records are kept")
+        self.assertIn(b"rel_01ARZ3NDEKTSV4RRFFQ69G5FAV", theirs[ROADMAP_YAML].content)
+        kp_there = plumb_commit(self.store, other_parent, {e.path: e.content for e in other.entries})
+        self.assertIsNone(rr.delta_problem(self.repo, other, kp_there), "a Kp made on the other base passes its own E")
+        self.assertIsNotNone(rr.delta_problem(self.repo, self.expected, kp_there), "and fails against this base's E")
+        self.assertIsNotNone(rr.delta_problem(self.repo, other, self.reg.kp), "and the reverse")
+
 
 class DisplayBaseTests(PlanningTestCase):
     """Display numbers are allocated by counting entity files: the entries must be HEAD's plus the operation's own."""
@@ -439,6 +521,26 @@ class DisplayBaseTests(PlanningTestCase):
         extra.unlink()
         self.assert_registered_as_e()
 
+    def test_a_deleted_entity_file_before_a_later_registration_stage(self) -> None:
+        with crash_at(rm, "register_phases"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+        loose = self.store.root / self.loose
+        kept = loose.read_bytes()
+        loose.unlink()
+        self.assert_refused_with_nothing_recorded("phases")
+        loose.write_bytes(kept)
+        self.assert_registered_as_e()
+
+    def test_an_untracked_entity_file_committed_at_the_use_check_lets_the_run_continue(self) -> None:
+        with crash_at(rr, "_use_check"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(self.store)
+        extra = self.untracked_roadmap()
+        self.assert_refused_with_nothing_recorded()
+        self.commit_all(self.store, "a person commits the Roadmap file", extra.relative_to(self.store.root).as_posix())
+        self.assert_registered_as_e()
+
     def test_a_persons_commit_adding_an_entity_file_after_the_registration_began(self) -> None:
         with crash_at(rm, "register_phases"):
             with self.assertRaises(Crash):
@@ -485,6 +587,20 @@ class OneMechanismTests(PlanningTestCase):
                 self.reviewed_roadmap(store)
         self.assertEqual("review_persisted_proof_failed", c2.exception.reason)
         self.assertIn("P3", str(c2.exception))
+        # P4, the record check, reads the same E: it holds for this record, and fails once the projection changes
+        from workline.mutation import Mutation, MutationController
+
+        (record,) = [r for r in self.pending(store) if r["invocation"].get("operation") == "roadmap-create"]
+        mutation = Mutation(MutationController(store), record, resumed=True)
+        (run_id,) = run_ids(store)
+        chain = self.chain(store, run_id)
+        material = ReviewStore(store).read_candidate_snapshot(chain.generations[0].candidate_hash).material
+        context = ReviewStore(store).read_task_input(chain.generations[0].accepted_tasks[0]["task_id"]).request_envelope["context"]
+        parent = [e for e in record["effects"] if e["stage"] == rr.STAGE_KP][0]["payload"]["base_head"]
+        self.assertIsNone(rr.record_problem(mutation, rr.expected_projection(store, material, context, parent), rr.ROADMAP_STAGES))
+        with self._one_more_byte():
+            self.assertIsNotNone(rr.record_problem(mutation, rr.expected_projection(store, material, context, parent),
+                                                   rr.ROADMAP_STAGES))
         result = self.reviewed_roadmap(store)
         found = registered(store, result)
         with self._one_more_byte():
