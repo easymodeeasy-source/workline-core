@@ -16,7 +16,7 @@ from workline import yamlish
 from workline.errors import ReconcileRequired, StopError
 from workline.mutation import MutationController, WriteScope
 from workline.oplock import project_operation
-from workline.review import gate, planning, recovery
+from workline.review import gate, planning, recovery, serialize
 from workline.review import paths as review_paths
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore
@@ -94,7 +94,13 @@ class Generation1Tests(_RecoveryCase):
         (gen,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == planning.OPERATION_GENERATION]
         self.assertEqual(recovering["mutation_id"], gen["invocation"]["planning_mutation_id"])
         self.assertEqual(2, gen["invocation"]["generation"])
+        receipt_key = gate.review_receipt_key(run_id, planning.SEAL_GENERATION)
+        new_receipt = recovering["reserved_ids"][receipt_key]  # the same key, a new ID
+        self.assertNotEqual(lost_receipt, new_receipt)
+        new_consumption = recovering["reserved_ids"][gate.review_consumption_key(new_receipt)]
+        self.assertNotEqual(lost_consumption, new_consumption)
         result = self.run_plan(reviewer)
+        self.assertEqual((new_receipt, new_consumption), (result.receipt_id, result.consumption_id))
         self.assertEqual(("registered", run_id), (result.status, result.review_run_id))
         self.assertEqual(recovering["mutation_id"], result.mutation_id)
         # the lost runtime-only reservations are never reused; the canonical ones (Run, task, domain) are bound
@@ -104,15 +110,26 @@ class Generation1Tests(_RecoveryCase):
 
     def test_from_a_fresh_clone(self) -> None:
         self.crash(rr, "_launch_and_settle")
+        lost = self.lost()
         run_id = self.only_run()
         task_id = self.chain(self.store, run_id).generations[0].accepted_tasks[0]["task_id"]
+        stored = ReviewStore(self.store).read_task_input(task_id)
         clone = self.fresh_clone(self.store.root, "clone")
         git(clone.root, "remote", "remove", "origin")
         self.enter(clone.root)
         reviewer = Reviewer()
+        with crash_at(rr, "_finish_generation", when=lambda n, store, gen: gen.invocation.get("generation") == 2):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(clone, reviewer)
+        (recovering,) = [r for r in self.pending(clone) if r["invocation"].get("operation") == "roadmap-create"]
+        self.assertEqual(run_id, recovering["invocation"][planning.MARKER_RECOVERY])
+        self.assertNotEqual(lost["mutation_id"], recovering["mutation_id"])
+        self.assertEqual(planning.task_from_input(stored, planning.KIND_ROADMAP), reviewer.tasks[0], "exactly the original task")
+        (gen,) = [r for r in self.pending(clone) if r["invocation"].get("operation") == planning.OPERATION_GENERATION]
+        self.assertEqual((recovering["mutation_id"], 2), (gen["invocation"]["planning_mutation_id"], gen["invocation"]["generation"]))
         result = self.reviewed_roadmap(clone, reviewer)
-        self.assertEqual("registered", result.status)
-        self.assertEqual(run_id, result.review_run_id)
+        self.assertEqual(("registered", run_id, recovering["mutation_id"]),
+                         (result.status, result.review_run_id, result.mutation_id))
         self.assertEqual([task_id], [task.task_id for task in reviewer.tasks])
 
     def test_a_missing_task_input_is_incomplete(self) -> None:
@@ -130,9 +147,11 @@ class Generation1Tests(_RecoveryCase):
         task_id = self.chain(self.store, run_id).generations[0].accepted_tasks[0]["task_id"]
         self.runtime_gone(self.store)
         path = self.store.root / review_paths.task_input_rel(task_id)
-        path.write_text(path.read_text(encoding="utf-8").replace("request_digest: ", "request_digest: 0", 1),
-                        encoding="utf-8", newline="\n")
-        self.assert_incomplete(reasons=("review_recovery_incomplete",), stop_codes=("review_namespace_unreadable",))
+        record, _ = serialize.parse_canonical(path.read_bytes(), "the task input")
+        wrong = "0" * 64 if record["request_digest"] != "0" * 64 else "1" * 64
+        path.write_text(serialize.canonical_text({**record, "request_digest": wrong}), encoding="utf-8", newline="\n")
+        ReviewStore(self.store).read_task_input(task_id)  # well-formed: only the digest is wrong
+        self.assert_incomplete(reasons=("review_recovery_incomplete",))
 
     def test_a_candidate_snapshot_mismatch_fails_closed(self) -> None:
         self.crash(rr, "_launch_and_settle")
@@ -296,6 +315,29 @@ class DomainReservationTests(_RecoveryCase):
         self.assertEqual(content["integration"]["id"], result.registration.integration_id)
         related = [r.id for r in ProjectStore(self.store.root).read_related()]
         self.assertEqual([item["id"] for item in content["works"][0]["related"]], related)
+
+    def test_an_id_used_only_in_heads_committed_view_is_a_conflict(self) -> None:
+        self.crash(rr, "_use_check")
+        material = snapshot_material(self.store, self.only_run())
+        self.runtime_gone(self.store)
+        relation = planning.candidate_content(material)["relations"][0]
+        ledger = self.store.root / ".workline" / "relations" / "roadmap.yaml"
+        before = ledger.read_bytes() if ledger.exists() else None
+        data = yamlish.load(before.decode("utf-8")) if before else {"relations": []}
+        data["relations"].append({"id": relation["id"], "type": "planned_next", "from": relation["from"], "to": relation["to"]})
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(yamlish.dump(data), encoding="utf-8", newline="\n")
+        self.commit_all(self.store, "a person commits a relation under the reserved ID", ".workline/relations/roadmap.yaml")
+        if before is None:
+            ledger.unlink()
+        else:
+            ledger.write_bytes(before)  # the working tree no longer holds it: HEAD's committed view alone does
+        self.assertNotIn(relation["id"], {r.id for r in ProjectStore(self.store.root).read_roadmap_relations()})
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.run_plan(Reviewer(raises=AssertionError("no reviewer call")))
+        self.assertEqual("review_recovery_reservation_conflict", raised.exception.reason)
+        self.assertIn(relation["id"], str(raised.exception))
+        self.assertEqual([], self.planning_records(), "the recovery planning mutation abandoned")
 
     def _recovery_mutation(self, run_id: str):
         invocation = {"operation": planning.OPERATION_ROADMAP, "name": "n", "request": {}, **planning.invocation_markers(),
@@ -467,9 +509,12 @@ class WorkingTreeRegistrationTests(_RecoveryCase):
                 self.reviewed_entry(self.store, phase_id)
         run_id = self.only_run()
         self.runtime_gone(self.store)
+        before = {k: v for k, v in self.snapshot_state(self.store).items() if "/runtime/" not in k}
         with self.assertRaises(StopError) as raised:
             self.reviewed_entry(self.store, phase_id)
         self.assertEqual("phase_already_expanded", raised.exception.code)
+        self.assertEqual(before, {k: v for k, v in self.snapshot_state(self.store).items() if "/runtime/" not in k},
+                         "nothing written")
         git(self.store.root, "checkout", "--", ".workline/relations/roadmap.yaml")
         raw_git(self.store.root, "clean", "-q", "-f", "--", ".workline/works")
         result = self.reviewed_entry(self.store, phase_id, Reviewer(raises=AssertionError("no reviewer call")))
