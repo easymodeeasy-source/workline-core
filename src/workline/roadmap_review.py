@@ -1721,7 +1721,34 @@ def _reserved_run_id(op: _Op, mutation: Mutation) -> str | None:
     return None if target is None else mutation.reserved(gate.review_run_key(op.kind.review_kind, target))
 
 
+def _abandon_idle_generation(op: _Op, mutation: Mutation) -> None:
+    """§11.8 step 3 for a generation mutation that recorded nothing: it is abandoned, and nothing physical exists.
+
+    Only a pending generation mutation bound to this planning mutation and its
+    Run, with no recorded effect, is abandoned here; anything else is left to
+    the resolution of :func:`resolve_pending_generation`, which refuses it.
+    """
+    run_id = _reserved_run_id(op, mutation)
+    if run_id is None:
+        return
+    pending = gate.pending_generation_mutations(op.store, run_id)
+    if len(pending) != 1:
+        return
+    record = pending[0]
+    invocation = record.get("invocation") or {}
+    if (
+        record.get("owner") == OWNER
+        and invocation.get("operation") == planning.OPERATION_GENERATION
+        and invocation.get("planning_mutation_id") == mutation.id
+        and invocation.get("review_run_id") == run_id
+        and not record.get("effects")
+    ):
+        MutationController(op.store).open(OWNER, invocation, WriteScope.from_record(record.get("write_scope") or {})).abandon()
+
+
 def _run(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> ReviewedPlanningResult:
+    if not mutation.effects:
+        _abandon_idle_generation(op, mutation)
     if not mutation.effects and not _generation_started(op, mutation):
         # Before its first generation mutation a review-v1 planning mutation holds nothing canonical:
         # every STOP of its setup abandons it, begun or resumed, a Phase entry included.
@@ -2495,14 +2522,17 @@ def _registration_flow(op: _Op, mutation: Mutation, destination: Any, run: _Run,
         normal, integration_id, confirmation_id, _ = rm._register_phase_expansion(
             store, mutation, w.stages, before_stage=before_stage
         )
-    # step 2 - the working-tree round trip, the R9 selection from HEAD's committed basis
+    # step 2 - the working-tree round trip, the R9 selection from HEAD's committed basis. It is compared on the
+    # declared base the Candidate states: a committed declared-base change since the use check is the pre-Kp
+    # currency proof's to classify (step 3), as a declared-base difference, never as an R9 mismatch (§13, §21.1 row 20).
     if not mutation.has_stage(STAGE_KP):
-        basis = project_on(store, material, head_now).view if material["review_kind"] == planning.KIND_PHASE_ENTRY else None
-        if semantic_projection(material, ProjectView.load(store), basis) != reviewed_projection(material):
-            raise ValidationError(
-                "what the Project now holds is not what Review authorized (working-tree round trip)",
-                code="review_roundtrip_mismatch",
-            )
+        if _declared_base_holds(store, material, head_now):
+            basis = project_on(store, material, head_now).view if material["review_kind"] == planning.KIND_PHASE_ENTRY else None
+            if semantic_projection(material, ProjectView.load(store), basis) != reviewed_projection(material):
+                raise ValidationError(
+                    "what the Project now holds is not what Review authorized (working-tree round trip)",
+                    code="review_roundtrip_mismatch",
+                )
         # step 3 - the pre-Kp currency proof on P = HEAD, then Kp with nothing in between
         parent = gitcmd.head_commit(store.root) or ""
         _pre_kp_proof(op, mutation, run, chain, parent)
@@ -2587,6 +2617,15 @@ def _registration_flow(op: _Op, mutation: Mutation, destination: Any, run: _Run,
         op, mutation, run, STATUS_REGISTERED, detail="registered", receipt_id=run.receipt_id,
         consumption_id=run.consumption_id, registration=registration, chain=chain,
     )
+
+
+def _declared_base_holds(store: ProjectStore, material: dict[str, Any], head: str) -> bool:
+    """Whether HEAD's committed view gives the Candidate's declared base; anything unreadable gives no."""
+    try:
+        found = declared_base(committed_view(store, head), planning.candidate_content(material))
+    except (_NotInBase, CommittedReadError, ValidationError):
+        return False
+    return serialize.canonical_data(found) == material["declared_base"]
 
 
 def _registration_message(op: _Op, store: ProjectStore, material: dict[str, Any]) -> str:

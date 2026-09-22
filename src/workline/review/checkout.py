@@ -180,11 +180,18 @@ def require_committed_evaluation(store: ProjectStore, head: str, relatives: list
     objects = _objects_directory(store.root)
     if objects is None:
         raise _unknown("Git cannot name this repository's object directory")
+    found_format = gitcmd.run_git(store.root, "rev-parse", "--show-object-format", check=False)
+    object_format = found_format.stdout.strip() if found_format.ok else ""
+    if not object_format:
+        raise _unknown("Git cannot name this repository's object format")
     scratch = store.root / paths.RUNTIME_ATTR_EVAL_DIR / secrets.token_hex(8)
     try:
         scratch.mkdir(parents=True, exist_ok=False)
         bare = scratch / "eval.git"
-        created = gitcmd.run_git(None, "init", "--bare", "--quiet", "--template=", str(bare), check=False)
+        # the borrowed objects are read only by a repository of the same object format (SHA-1 or SHA-256)
+        created = gitcmd.run_git(
+            None, "init", "--bare", "--quiet", "--template=", f"--object-format={object_format}", str(bare), check=False
+        )
         if not created.ok:
             raise _unknown(f"Git cannot create the evaluation directory: {created.stderr.strip()}")
         alternates = bare / "objects" / "info" / "alternates"
