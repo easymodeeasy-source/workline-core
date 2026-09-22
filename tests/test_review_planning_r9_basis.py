@@ -243,11 +243,30 @@ class MismatchWithAnEqualBaseTests(_BasisCase):
             with self.assertRaises(ReconcileRequired) as raised:
                 self.entry()
         self.assertEqual("review_persisted_proof_failed", raised.exception.reason)
-        self.assertIn("P6-P9", str(raised.exception))
+        self.assertIn("C-2(Kp) P9 fails", str(raised.exception))
         result = self.entry()
         found = registered(self.store, result)
         with wrong:
             self.assertIn("CP6 fails", publication.barrier_problem(self.store.root, found.km))
+
+    def test_f_p8_when_the_projection_identity_carries_another_selection(self) -> None:
+        with crash_at(rr, "_c2_kp"):
+            with self.assertRaises(Crash):
+                self.entry()
+        real = rr.semantic_projection
+
+        def other_selection(material, view, selection_view=None):
+            found = real(material, view, selection_view)
+            content = dict(found.content)
+            content["canonical_first_work"] = {"key": "other", "id": "w_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+            return type(found)(found.kind, found.semantics_version, content)
+
+        with mock.patch.object(rr, "semantic_projection", other_selection):
+            with self.assertRaises(ReconcileRequired) as raised:
+                self.entry()
+        self.assertEqual("review_persisted_proof_failed", raised.exception.reason)
+        self.assertIn("C-2(Kp) P8 fails", str(raised.exception))
+        self.assertFalse(ReviewStore(self.store).consumption_ids())
 
 
 class RoundTripBasisTests(_BasisCase):

@@ -1533,17 +1533,21 @@ def selected_first_work_id(material: dict[str, Any], view: ProjectView) -> str |
     return selection.work_id if selection.kind == "unique" else None
 
 
-def semantic_problem(material: dict[str, Any], before: ProjectView, after: ProjectView) -> str | None:
-    """P6-P9 / CP6: ``after`` is ``before`` plus exactly the Candidate's registration, meaning the reviewed Candidate."""
+def semantic_problem(material: dict[str, Any], before: ProjectView, after: ProjectView) -> tuple[str, str] | None:
+    """P6-P9 / CP6: ``after`` is ``before`` plus exactly the Candidate's registration, meaning the reviewed Candidate.
+
+    Returns the first item that fails, in the order P6, P7, P8, P9 (``skills/review``), with its detail; CP6 is all
+    four as one item.
+    """
     content = planning.candidate_content(material)
     own = _candidate_entity_ids(content)
     for kind_name in ("roadmaps", "phases", "works"):
         new = set(getattr(after, kind_name)) - set(getattr(before, kind_name))
         if not set(getattr(before, kind_name)) <= set(getattr(after, kind_name)):
-            return f"{kind_name} of the parent are missing after the registration"
+            return "P6", f"{kind_name} of the parent are missing after the registration"
         expected = {entity_id for entity_id in own if entity_id in _ids_of_kind(content, kind_name)}
         if new != expected:
-            return f"the registration's new {kind_name} are not exactly the Candidate's reserved ones"
+            return "P6", f"the registration's new {kind_name} are not exactly the Candidate's reserved ones"
     roadmap, related = _expected_new_relations(material)
     for described, found_before, found_after, wanted in (
         ("roadmap relations", before.roadmap_relations, after.roadmap_relations, roadmap),
@@ -1552,13 +1556,15 @@ def semantic_problem(material: dict[str, Any], before: ProjectView, after: Proje
         records_before = [relation.to_record() for relation in found_before]
         records_after = [relation.to_record() for relation in found_after]
         if records_after != records_before + wanted:
-            return f"the {described} are not the parent's followed by exactly the Candidate's, in registration order"
+            return "P6", f"the {described} are not the parent's followed by exactly the Candidate's, in registration order"
+    if validate_structure(after):
+        return "P7", "the registration commit's structure does not validate"
     if semantic_projection(material, after) != reviewed_projection(material):
-        return "the persisted semantic projection is not the reviewed Candidate's"
+        return "P8", "the persisted semantic projection is not the reviewed Candidate's"
     if material["review_kind"] == planning.KIND_PHASE_ENTRY:
         first = content.get("canonical_first_work")
         if selected_first_work_id(material, after) != (None if first is None else first["id"]):
-            return "the R9 selection on the registration is not the reviewed canonical first Work"
+            return "P9", "the R9 selection on the registration is not the reviewed canonical first Work"
     return None
 
 
@@ -2781,11 +2787,9 @@ def _c2_kp(op: _Op, mutation: Mutation, run: _Run, chain: Any, material: dict[st
             raise _proof_failed("P12", f"{parent} holds a Consumption of the Receipt")
     except ValidationError as exc:
         raise _proof_failed("P12", str(exc)) from exc
-    problem = semantic_problem(material, view_p, view_kp)
-    if problem is not None:
-        raise _proof_failed("P6-P9", problem)
-    if validate_structure(view_kp):
-        raise _proof_failed("P7", "the registration commit's structure does not validate")
+    failed = semantic_problem(material, view_p, view_kp)
+    if failed is not None:
+        raise _proof_failed(*failed)
     if not isinstance(context, dict) or context.get("loader_identity") != planning.context_record(
         store.workline_root(), material["review_kind"]
     )["loader_identity"] or context.get("adapter_identity") != planning.KINDS[material["review_kind"]].adapter_identity:

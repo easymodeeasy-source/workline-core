@@ -176,7 +176,6 @@ def _guard(item: str, action):
 def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> None:
     from .. import roadmap_review as rr
     from ..committed_view import committed_view
-    from ..validate import validate_structure
     from .validate import GATE_RECEIPT_BINDING, RECEIPT_CONSUMPTION_BINDING
 
     store = ProjectStore(repo)
@@ -270,9 +269,8 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
     progress.append("CP6")
     # CP6 - semantic, on the committed views of P and K
     view_registration = _guard("CP6", lambda: committed_view(store, registration))
-    problem = rr.semantic_problem(material, view_parent, view_registration)
-    _require(problem is None, "CP6", problem or "")
-    _require(not validate_structure(view_registration), "CP6", "the registration commit's structure does not validate")
+    failed = rr.semantic_problem(material, view_parent, view_registration)
+    _require(failed is None, "CP6", failed[1] if failed else "")
     selection_id = rr.selected_first_work_id(material, view_registration)
 
     progress.append("CP8")
