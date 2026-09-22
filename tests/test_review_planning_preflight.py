@@ -30,13 +30,8 @@ class _PreflightCase(PlanningTestCase):
 
     @staticmethod
     def entries(store) -> dict:
-        """Every file under .workline, and every directory outside the runtime area.
-
-        The live execution lock records its holder through the runtime temporary
-        directory, so after a runtime loss it recreates ``.workline/runtime/`` and
-        an empty ``tmp/`` before any review-v1 step runs; their files are compared.
-        """
-        return {k: v for k, v in state_entries(store).items() if v is not None or not k.startswith(".workline/runtime")}
+        """Every entry under .workline, directories included (the execution lock aside): entry for entry, byte for byte."""
+        return state_entries(store)
 
     def assert_refused_with_nothing_begun(self, the_design) -> ValidationError:
         before = self.entries(self.store)
@@ -64,6 +59,8 @@ class RefusalTests(_PreflightCase):
             "a boolean key": {**BASE, True: "x"},
             "a tuple key": {**BASE, ("a",): "x"},
             "an integer key in a sequence item": {**BASE, "items": [{1: "x"}]},
+            "a boolean key in a sequence item": {**BASE, "items": [{True: "x"}]},
+            "a tuple key in a sequence item": {**BASE, "items": [{("a",): "x"}]},
         }.items():
             with self.subTest(described):
                 error = self.assert_refused_with_nothing_begun(design(related=conditional(cond)))

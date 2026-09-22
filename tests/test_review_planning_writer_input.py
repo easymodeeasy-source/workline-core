@@ -12,7 +12,7 @@ from planning_helpers import (
 )
 from workline import roadmap as rm
 from workline.errors import ReconcileRequired, ValidationError
-from workline.review import planning, publication
+from workline.review import planning, publication, serialize
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore
 
@@ -126,8 +126,12 @@ class CallerObjectTests(_WriterCase):
         found = registered(store, resumed)
         related = blob_at(store, found.kp, RELATED_YAML).decode("utf-8")
         self.assertLess(related.index("kind: path_glob"), related.index("pattern: "), "the Candidate's bytes")
-        self.assertEqual(repr(rr.writer_input(found.material)),
-                         repr(rr.writer_input(snapshot_material(store, resumed.review_run_id))))
+        # W is the Candidate's: its condition mapping is in the Candidate's (canonical) key order, never the caller's
+        w = rr.writer_input(snapshot_material(store, resumed.review_run_id))
+        (spec,) = [spec for spec in w.stages.normal_specs.values() if spec.related]
+        self.assertEqual(["kind", "pattern"], list(spec.related[0].condition))
+        self.assertNotEqual(list(caller_condition), list(spec.related[0].condition))
+        self.assertEqual(serialize.canonical_data(caller_condition), spec.related[0].condition, "equal as a value")
 
     def test_g_legacy_keeps_the_callers_order(self) -> None:
         store = self.planning_project()
