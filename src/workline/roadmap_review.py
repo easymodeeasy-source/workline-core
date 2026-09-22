@@ -52,7 +52,7 @@ from .mutation import (
 )
 from .phase_create import PhaseRelationSpec, PhaseSpec, phase_registration_effects, resolve_phase_relations
 from .review import checkout, committed, gate, paths as review_paths, planning, records, serialize
-from .review.fsafe import immutable_create_supported
+from .review import fsafe
 from .review.planning import (
     PlanningReview,
     PlanningReviewFinding,
@@ -144,7 +144,7 @@ def require_entry_gate(review: object) -> PlanningReview:
     is left exactly as it is.
     """
     checked = planning.validate_planning_review(review)
-    if not immutable_create_supported():
+    if not fsafe.immutable_create_supported():
         raise StopError(
             "review-v1 planning writes immutable Review records, which this platform cannot keep inside the "
             "Project; nothing was begun (the legacy path is unaffected)",

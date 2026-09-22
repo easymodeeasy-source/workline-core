@@ -9,8 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import hashlib
 import re
 import subprocess
+from typing import Any
 
 from .errors import GitError
 
@@ -543,6 +545,34 @@ def _path_text(raw: bytes) -> str:
     return raw.decode("utf-8", "surrogateescape")
 
 
+# Within one process, what Git answers about an object named by its full ID is reused for that same ID:
+# the objects behind a commit or blob ID cannot change. Only answers are kept - a question Git could not
+# answer is asked again - nothing is shared across processes, and nothing named by a ref (HEAD, a branch)
+# is kept, since what a ref names can move.
+_OBJECT_ANSWERS: dict[tuple, Any] = {}
+_OBJECT_ANSWERS_LIMIT = 50000
+
+
+def _remembered(key: tuple, compute):
+    if key in _OBJECT_ANSWERS:
+        return _OBJECT_ANSWERS[key]
+    answer = compute()
+    if answer is not None:
+        if len(_OBJECT_ANSWERS) >= _OBJECT_ANSWERS_LIMIT:
+            _OBJECT_ANSWERS.clear()
+        _OBJECT_ANSWERS[key] = answer
+    return answer
+
+
+def forget_object_answers() -> None:
+    """Drop every in-process answer about immutable objects (tests that patch Git's answers call this)."""
+    _OBJECT_ANSWERS.clear()
+
+
+def _immutable(name: str) -> bool:
+    return _FULL_ID.fullmatch(name) is not None
+
+
 @dataclass(frozen=True)
 class TreeEntry:
     """One ``git ls-tree`` entry: the mode as Git prints it, the object type and ID, the full path."""
@@ -557,6 +587,15 @@ def tree_entries(
     repo: Path, commit: str, paths: "list[str] | tuple[str, ...]" = (), *, recursive: bool = True, trees: bool = False
 ) -> list[TreeEntry] | None:
     """The entries of ``commit``'s tree (``git ls-tree -z --full-tree``); None when undeterminable."""
+    if _immutable(commit):
+        return _remembered(
+            ("tree", str(repo), commit, tuple(paths), recursive, trees),
+            lambda: _tree_entries(repo, commit, paths, recursive, trees),
+        )
+    return _tree_entries(repo, commit, paths, recursive, trees)
+
+
+def _tree_entries(repo: Path, commit: str, paths: "list[str] | tuple[str, ...]", recursive: bool, trees: bool) -> list[TreeEntry] | None:
     args = ["ls-tree", "-z", "--full-tree"]
     if recursive:
         args.append("-r")
@@ -586,23 +625,32 @@ def tree_entries(
 
 def read_blob(repo: Path, oid: str) -> bytes | None:
     """The raw bytes of blob ``oid`` (``git cat-file blob``); None when it cannot be read."""
-    result = run_git_bytes(repo, "cat-file", "blob", oid)
-    return result.stdout if result.ok else None
+    def read() -> bytes | None:
+        result = run_git_bytes(repo, "cat-file", "blob", oid)
+        return result.stdout if result.ok else None
+
+    return _remembered(("blob", str(repo), oid), read) if _immutable(oid) else read()
 
 
 def blob_at(repo: Path, commit: str, path: str) -> bytes | None:
     """The raw bytes ``commit`` holds at ``path`` (``git cat-file blob <commit>:<path>``); None when it holds none."""
-    result = run_git_bytes(repo, "cat-file", "blob", f"{commit}:{path}")
-    return result.stdout if result.ok else None
+    def read() -> bytes | None:
+        result = run_git_bytes(repo, "cat-file", "blob", f"{commit}:{path}")
+        return result.stdout if result.ok else None
+
+    return _remembered(("blob_at", str(repo), commit, path), read) if _immutable(commit) else read()
 
 
 def hash_blob(repo: Path, data: bytes) -> str | None:
     """The object ID ``data`` has as a blob (``git hash-object --no-filters -t blob --stdin``); nothing is written."""
-    result = run_git_bytes(repo, "hash-object", "--no-filters", "-t", "blob", "--stdin", input=data)
-    if not result.ok:
-        return None
-    oid = result.stdout.decode("ascii", "replace").strip()
-    return oid if _FULL_ID.fullmatch(oid) else None
+    def compute() -> str | None:
+        result = run_git_bytes(repo, "hash-object", "--no-filters", "-t", "blob", "--stdin", input=data)
+        if not result.ok:
+            return None
+        oid = result.stdout.decode("ascii", "replace").strip()
+        return oid if _FULL_ID.fullmatch(oid) else None
+
+    return _remembered(("hash", str(repo), hashlib.sha256(data).hexdigest(), len(data)), compute)
 
 
 @dataclass(frozen=True)
@@ -619,6 +667,12 @@ class DeltaEntry:
 
 def commit_delta(repo: Path, parent: str, commit: str) -> list[DeltaEntry] | None:
     """Every path ``commit`` changes against ``parent``, with modes, blobs and status; None when undeterminable."""
+    if _immutable(parent) and _immutable(commit):
+        return _remembered(("delta", str(repo), parent, commit), lambda: _commit_delta(repo, parent, commit))
+    return _commit_delta(repo, parent, commit)
+
+
+def _commit_delta(repo: Path, parent: str, commit: str) -> list[DeltaEntry] | None:
     result = run_git_bytes(repo, "diff-tree", "-r", "-z", "--no-renames", "--no-abbrev", "--raw", parent, commit)
     if not result.ok:
         return None
@@ -655,6 +709,12 @@ def added_paths(repo: Path, commit: str, paths: "list[str] | tuple[str, ...]") -
     ``git log --full-history --no-renames --diff-merges=combined --diff-filter=A --name-only -z``.
     This is the one spelling the add-history read has; no other is ever run.
     """
+    if _immutable(commit):
+        return _remembered(("added", str(repo), commit, tuple(paths)), lambda: _added_paths(repo, commit, paths))
+    return _added_paths(repo, commit, paths)
+
+
+def _added_paths(repo: Path, commit: str, paths: "list[str] | tuple[str, ...]") -> list[tuple[str, list[str]]] | None:
     result = run_git_bytes(
         repo, "log", "--full-history", "--no-renames", "--diff-merges=combined", "--diff-filter=A", "--name-only",
         "-z", "--format=%x01%H%x02", commit, "--", *paths,
@@ -684,10 +744,13 @@ def history_touches(repo: Path, commit: str, directory: str) -> bool | None:
     ``git rev-list --full-history -n 1 <commit> -- <directory>``: empty exactly
     when no commit in the history changed anything there.
     """
-    result = run_git(repo, "rev-list", "--full-history", "-n", "1", commit, "--", directory, check=False)
-    if not result.ok:
-        return None
-    return bool(result.stdout.strip())
+    def read() -> bool | None:
+        result = run_git(repo, "rev-list", "--full-history", "-n", "1", commit, "--", directory, check=False)
+        if not result.ok:
+            return None
+        return bool(result.stdout.strip())
+
+    return _remembered(("touches", str(repo), commit, directory), read) if _immutable(commit) else read()
 
 
 def check_attributes(

@@ -1,0 +1,230 @@
+"""Shared fixtures for the review-v1 planning (P2) tests: fixture Projects, scripted reviewers, crash points.
+
+Every Project here is a real Workline Project (``helpers.WorklineTestCase``)
+whose root ``.gitattributes`` carries the canonical Review-attribute rule as
+its last attribute rule, committed by the test itself - Workline never writes
+it. Nothing here shortcuts production code: the flows run through
+``create_roadmap`` / ``enter_phase`` with ``review=PlanningReview(...)``.
+"""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from pathlib import Path
+import shutil
+from typing import Any, Iterator
+from unittest import mock
+
+from helpers import WorklineTestCase, git
+from workline import gitcmd
+from workline import roadmap as rm
+from workline import roadmap_review as rr
+from workline.mutation import MutationController
+from workline.phase_create import PhaseRelationSpec, PhaseSpec
+from workline.review import paths as review_paths
+from workline.review import planning, serialize
+from workline.review.planning import PlanningReview, PlanningReviewFinding, PlanningReviewReport
+from workline.review.store import ReviewStore
+from workline.store import ProjectStore
+
+CANONICAL_RULE = ".workline/review/** !text eol=lf -filter -ident -working-tree-encoding"
+
+
+class Crash(Exception):
+    """A simulated process death: not a StopError, so nothing is abandoned on its way out."""
+
+
+class Reviewer:
+    """A scripted synchronous reviewer that records every task it receives."""
+
+    def __init__(
+        self,
+        status: str = "completed",
+        findings: tuple[PlanningReviewFinding, ...] = (),
+        *,
+        identity: str = "test-reviewer",
+        version: str = "1",
+        raises: BaseException | None = None,
+        returns: Any = None,
+    ) -> None:
+        self.status = status
+        self.findings = findings
+        self.identity = identity
+        self.version = version
+        self.raises = raises
+        self.returns = returns
+        self.tasks: list[Any] = []
+
+    def __call__(self, task: Any) -> Any:
+        self.tasks.append(task)
+        if self.raises is not None:
+            raise self.raises
+        if self.returns is not None:
+            return self.returns(task) if callable(self.returns) else self.returns
+        return PlanningReviewReport(task.task_id, self.identity, self.version, self.status, tuple(self.findings))
+
+    def review(self) -> PlanningReview:
+        return PlanningReview(self, self.identity, self.version)
+
+
+def plan(name: str = "Planned Roadmap", *, relations: bool = True, scope: str | None = None) -> rm.RoadmapPlan:
+    return rm.RoadmapPlan(
+        name,
+        "計画の背景",
+        "達成したい状態",
+        {"a": PhaseSpec("Phase A", "A が成立する"), "b": PhaseSpec("Phase B", "B が成立する")},
+        (PhaseRelationSpec("planned_next", "a", "b"),) if relations else (),
+        scope=scope,
+    )
+
+
+def design(
+    *,
+    works: dict[str, str] | None = None,
+    related: dict[str, tuple] | None = None,
+    confirmation: bool = True,
+    planned_next: tuple = (("w1", "w2"),),
+    requires_completion: tuple = (),
+    entry: str | None = None,
+    integration_related: tuple = (),
+) -> rm.PhaseEntryDesign:
+    works = works if works is not None else {"w1": "W1 が成立する", "w2": "W2 が成立する"}
+    related = related or {}
+    return rm.PhaseEntryDesign(
+        {key: rm.WorkDesign(key.upper(), desired, tuple(related.get(key, ()))) for key, desired in works.items()},
+        rm.WorkDesign("Integration", "全Workの統合確認が取れている", tuple(integration_related)),
+        rm.WorkDesign("Confirmation", "人間が成果を確認した") if confirmation else None,
+        planned_next=planned_next,
+        requires_completion=requires_completion,
+        entry=entry,
+    )
+
+
+def condition(first: str = "pattern") -> dict[str, Any]:
+    """A path_glob condition built in either key insertion order."""
+    if first == "pattern":
+        return {"pattern": "src/*.py", "kind": "path_glob"}
+    return {"kind": "path_glob", "pattern": "src/*.py"}
+
+
+class PlanningTestCase(WorklineTestCase):
+    """A Workline test case with review-v1 planning fixtures."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        gitcmd.forget_object_answers()
+
+    # projects --------------------------------------------------------------
+    def planning_project(
+        self, name: str = "proj", *, remote: bool = False, attributes: str | None = None
+    ) -> ProjectStore:
+        """A Project whose root ``.gitattributes`` ends with the canonical rule, committed (and pushed)."""
+        store = self.new_project(name, remote=remote)
+        text = attributes if attributes is not None else "* text=auto\n" + CANONICAL_RULE + "\n"
+        self.commit_attributes(store, text)
+        if remote:
+            git(store.root, "push", "origin", "main")
+        return store
+
+    def commit_attributes(self, store: ProjectStore, text: str | bytes, *, message: str = "attributes") -> None:
+        target = store.root / ".gitattributes"
+        if isinstance(text, bytes):
+            target.write_bytes(text)
+        else:
+            target.write_text(text, encoding="utf-8", newline="\n")
+        git(store.root, "add", ".gitattributes")
+        git(store.root, "commit", "-m", message)
+
+    def commit_all(self, store: ProjectStore, message: str, *paths: str) -> str:
+        git(store.root, "add", "--", *(paths or (".",)))
+        git(store.root, "commit", "-m", message)
+        return self.head(store)
+
+    # flows -----------------------------------------------------------------
+    def reviewed_roadmap(self, store: ProjectStore, reviewer: Reviewer | None = None, the_plan: rm.RoadmapPlan | None = None):
+        return rm.create_roadmap(store, the_plan or plan(), review=(reviewer or Reviewer()).review())
+
+    def reviewed_entry(self, store: ProjectStore, phase_id: str, reviewer: Reviewer | None = None, the_design=None):
+        return rm.enter_phase(store, phase_id, the_design or design(), review=(reviewer or Reviewer()).review())
+
+    def roadmap_and_phase(self, store: ProjectStore, *, reviewed: bool = False) -> tuple[str, str]:
+        """A Roadmap with Phases a -> b; returns (roadmap_id, phase a)."""
+        if reviewed:
+            result = self.reviewed_roadmap(store)
+            return result.registration.roadmap_id, result.registration.phase_ids["a"]
+        result = rm.create_roadmap(store, plan())
+        return result.roadmap_id, result.phase_ids["a"]
+
+    # reading -----------------------------------------------------------------
+    def head(self, store: ProjectStore) -> str:
+        return gitcmd.head_commit(store.root) or ""
+
+    def subjects(self, store: ProjectStore, count: int = 30) -> list[str]:
+        return git(store.root, "log", f"-{count}", "--format=%s").splitlines()
+
+    def pending(self, store: ProjectStore) -> list[dict[str, Any]]:
+        return MutationController(store).list_pending()
+
+    def chain(self, store: ProjectStore, run_id: str):
+        return ReviewStore(store).gate_chain(run_id)
+
+    def runtime_gone(self, store: ProjectStore) -> None:
+        """Runtime loss: ``.workline/runtime/**`` removed."""
+        shutil.rmtree(store.root / ".workline" / "runtime")
+
+    def remote_head(self, name: str = "proj") -> str | None:
+        found = git(self.tmp, "--git-dir", str(self.remote_path(name)), "rev-parse", "--verify", "--quiet", "refs/heads/main", check=False)
+        return found.strip() or None
+
+    def fresh_clone(self, source: Path, name: str, *config: str) -> ProjectStore:
+        """A normal new clone of ``source`` (its committed attributes as the only in-tree source)."""
+        target = self.tmp / name
+        args = []
+        for item in config:
+            args += ["-c", item]
+        git(self.tmp, *args, "clone", "-q", str(source), str(target))
+        return ProjectStore(target)
+
+    def snapshot_state(self, store: ProjectStore) -> dict[str, bytes]:
+        """Every file under ``.workline`` (runtime included), for byte-for-byte before/after comparisons."""
+        found: dict[str, bytes] = {}
+        base = store.root / ".workline"
+        for path in sorted(base.rglob("*")):
+            relative = path.relative_to(store.root).as_posix()
+            if path.is_file() and "/locks/" not in relative:
+                found[relative] = path.read_bytes()
+        return found
+
+
+@contextmanager
+def crash_at(target: Any, name: str, *, after: bool = False, when: Any = None) -> Iterator[mock.MagicMock]:
+    """Raise :class:`Crash` when ``target.name`` is called (before it runs, or right after it returns)."""
+    original = getattr(target, name)
+    calls = {"n": 0}
+
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if when is not None and not when(calls["n"], *args, **kwargs):
+            return original(*args, **kwargs)
+        if not after:
+            raise Crash(f"crash before {name}")
+        original(*args, **kwargs)
+        raise Crash(f"crash after {name}")
+
+    with mock.patch.object(target, name, wrapper) as patched:
+        yield patched
+
+
+def run_ids(store: ProjectStore) -> tuple[str, ...]:
+    return ReviewStore(store).run_ids()
+
+
+def snapshot_material(store: ProjectStore, run_id: str) -> dict[str, Any]:
+    chain = ReviewStore(store).gate_chain(run_id)
+    return ReviewStore(store).read_candidate_snapshot(chain.generations[0].candidate_hash).material
+
+
+__all__ = [
+    "CANONICAL_RULE", "Crash", "PlanningTestCase", "Reviewer", "condition", "crash_at", "design", "plan",
+    "planning", "review_paths", "rr", "run_ids", "serialize", "snapshot_material",
+]
