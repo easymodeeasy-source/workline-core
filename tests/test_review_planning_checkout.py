@@ -125,6 +125,9 @@ class LiteralLookalikeTests(_CheckoutCase):
         store = self.planning_project(f"p{abs(hash(rule)) % 100000}", attributes=rule + "\n")
         if printed is not None:
             self.assertEqual({"committed": printed, "effective": printed}, self.evaluations(store))
+        with self.assertRaises(StopError) as layer_1:
+            checkout.require_raw_source(store.root, self.head(store))
+        self.assertEqual("review_checkout_unsafe", layer_1.exception.code)
         self.refused_at_the_freeze(store)
 
     def test_b_a_literal_filter(self) -> None:
@@ -167,8 +170,11 @@ class DeeperOverrideTests(_CheckoutCase):
         target.write_text(text, encoding="utf-8", newline="\n")
         git(store.root, "add", "-f", "--", relative)
         git(store.root, "commit", "-q", "-m", "a deeper attributes file")
+        evaluations = self.evaluations(store)
         if printed is not None:
-            self.assertEqual(printed, self.evaluations(store)["committed"])
+            self.assertEqual({"committed": printed, "effective": printed}, evaluations)
+        else:  # the case variant: the committed evaluation does not read it
+            self.assertEqual(FORM_L, evaluations["committed"])
         with self.assertRaises(StopError) as layer_2:
             checkout.require_no_deeper_attributes(store.root, self.head(store))
         self.assertEqual("review_checkout_unsafe", layer_2.exception.code)
@@ -198,6 +204,9 @@ class RuleAfterTests(_CheckoutCase):
             with self.subTest(after):
                 store = self.planning_project(f"g{abs(hash(after)) % 100000}", attributes=CANONICAL_RULE + "\n" + after + "\n")
                 self.assertEqual(printed, self.evaluations(store)["committed"])
+                with self.assertRaises(StopError) as layer_1:
+                    checkout.require_raw_source(store.root, self.head(store))
+                self.assertIn("last attribute rule", str(layer_1.exception))
                 self.refused_at_the_freeze(store)
 
     def test_h_comments_and_blank_lines_after_it(self) -> None:

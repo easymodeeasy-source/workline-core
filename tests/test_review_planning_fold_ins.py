@@ -193,6 +193,7 @@ def _contract_uses() -> set[str]:
         used |= set(re.findall(pattern, text))
     for group in re.findall(r"`(?:ReconcileRequired|StopError)` \(([^)]*)\)", text):
         used |= set(re.findall(r"`([a-z_]+)`", group))
+    used |= set(re.findall(r"`([a-z_]+)` \((?:P1 )?`(?:StopError|ValidationError|ReconcileRequired)`", text))
     return used
 
 
@@ -245,7 +246,7 @@ class ReasonAttributeTests(PlanningTestCase):
                           "invalidated", "consumed", "not_authorized", "set_aside"}, other)
         used = _contract_uses()
         self.assertTrue(used >= {"review_publication_barrier", "review_registration_base_moved", "review_checkout_unsafe",
-                                 "review_recovery_incomplete", "dirty_overlap"})
+                                 "review_recovery_incomplete", "dirty_overlap", "review_callback_conflict"})
         self.assertEqual(set(), used - reasons - codes - other, "a code or reason the contract uses outside §25.1")
 
 
@@ -433,12 +434,11 @@ class GitMinimumTests(PlanningTestCase):
         self.assertEqual(before, path.read_bytes())
 
     def test_b_2_39_stops_before_the_lock_and_writes_nothing(self) -> None:
-        from workline import oplock
-
         phase_id = rm.create_roadmap(self.store, plan("A Roadmap To Enter")).phase_ids["a"]
         before = state_entries(self.store)
         head = self.head(self.store)
-        with version((2, 39, 5)), mock.patch.object(oplock, "project_operation", side_effect=AssertionError("the lock")):
+        # the reference roadmap.py takes the lock through (it imports project_operation by name)
+        with version((2, 39, 5)), mock.patch.object(rm, "project_operation", side_effect=AssertionError("the lock")):
             for call in (lambda: self.reviewed_roadmap(self.store),
                          lambda: self.reviewed_entry(self.store, phase_id, Reviewer())):
                 with self.assertRaises(StopError) as raised:
@@ -634,6 +634,7 @@ class AuthorityTextTests(unittest.TestCase):
             "R9のcanonical self-selection", "`review_base_uncommitted`", "`use_check_head`", "pre-Kp currency proof",
             "CanonicalPlanningWriterInput", "display base check", "`review_binding`", "recovery planning mutation",
             "`recovery_binding`", "pre-freeze resume setup", "`review_setup_invalid`", "`reason`",
+            "**terminal**: `registered`", "`not_authorized`", "**abandon**: 最初のgeneration mutationを開始するまで",
         ):
             with self.subTest(phrase):
                 self.assertIn(phrase, section)
@@ -650,6 +651,7 @@ class AuthorityTextTests(unittest.TestCase):
             "invalidate", "committed planning proof", "expected physical projection", "`set_aside_runs`",
             "## Checkout capability", "form L", ".workline/review/** !text eol=lf -filter -ident -working-tree-encoding",
             "subordinate", "NOT ACTIVATED",
+            "callerが渡したmapping（Relatedのcondition等）は、P1 serializerのkey順", "`review_candidate_unrepresentable` で拒否し",
         ):
             with self.subTest(phrase):
                 self.assertIn(phrase, skill)

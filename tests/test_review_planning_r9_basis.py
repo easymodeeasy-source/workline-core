@@ -17,6 +17,7 @@ from workline.create import WorkSpec, create_standalone_work
 from workline.errors import ReconcileRequired, SpecViolation, StopError, ValidationError
 from workline.phase_create import PhaseRelationSpec, PhaseSpec
 from workline.review import planning, publication, serialize
+from workline.mutation import MutationController
 from workline.review.store import ReviewStore
 
 EVENT_LOG = ".workline/events/events.jsonl"
@@ -79,17 +80,37 @@ class EqualBasesTests(_BasisCase):
         self.assertIsNone(publication.committed_planning_proof(clone.root, found.km, run), "CP6 in a fresh clone")
 
 
+def refused_at_the_freeze_and_abandoned(test: PlanningTestCase, store, call) -> ValidationError:
+    """``call`` begins a Phase-entry planning mutation whose freeze refuses with ``review_base_uncommitted``: before
+    any Review record, that mutation abandoned, nothing written outside the runtime area."""
+    before = {k: v for k, v in state_entries(store).items() if "/runtime/" not in k}
+    begun: list[str] = []
+    real_begin = MutationController.begin
+
+    def begin(self_, owner, invocation, scope):
+        mutation = real_begin(self_, owner, invocation, scope)
+        if invocation.get("operation") == "phase-entry":
+            begun.append(mutation.id)
+        return mutation
+
+    with mock.patch.object(MutationController, "begin", begin):
+        with test.assertRaises(ValidationError) as raised:
+            call()
+    test.assertEqual("review_base_uncommitted", raised.exception.code)
+    test.assertEqual((), run_ids(store), "before any Review record")
+    (mutation_id,) = begun
+    intent = MutationController(store).intent_path(mutation_id)
+    test.assertTrue(intent.exists())
+    test.assertEqual("abandoned", yamlish.load(intent.read_text(encoding="utf-8"))["status"], "the planning mutation abandoned")
+    test.assertEqual([], [r for r in test.pending(store) if r["invocation"].get("operation") == "phase-entry"])
+    test.assertEqual(before, {k: v for k, v in state_entries(store).items() if "/runtime/" not in k}, "nothing written")
+    return raised.exception
+
+
 class UncommittedTests(_BasisCase):
     def assert_refused_uncommitted(self) -> None:
-        before = {k: v for k, v in state_entries(self.store).items() if "/runtime/" not in k}
         reviewer = Reviewer()
-        with self.assertRaises(ValidationError) as raised:
-            self.entry(reviewer=reviewer)
-        self.assertEqual("review_base_uncommitted", raised.exception.code)
-        self.assertEqual((), run_ids(self.store), "before any Review record")
-        self.assertEqual([], [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"],
-                         "the planning mutation abandoned")
-        self.assertEqual(before, {k: v for k, v in state_entries(self.store).items() if "/runtime/" not in k}, "nothing written")
+        refused_at_the_freeze_and_abandoned(self, self.store, lambda: self.entry(reviewer=reviewer))
         self.assertEqual([], reviewer.tasks)
 
     def test_b_an_uncommitted_resume_of_the_held_phase(self) -> None:
@@ -132,10 +153,9 @@ class UncommittedTests(_BasisCase):
         self.assertEqual(1, len(into_b))
         self.assertNotIn(into_b[0], [r.id for r in working.roadmap_relations])
         self.assertNotIn(committed.phase_state(phase_a), ("complete", "cancelled", "plan_excluded"), "a is unfinished")
-        with self.assertRaises(ValidationError) as raised:
-            self.reviewed_entry(store, phase_b, Reviewer(), design())
-        self.assertEqual("review_base_uncommitted", raised.exception.code)
-        self.assertEqual((), run_ids(store))
+        reviewer = Reviewer()
+        refused_at_the_freeze_and_abandoned(self, store, lambda: self.reviewed_entry(store, phase_b, reviewer, design()))
+        self.assertEqual([], reviewer.tasks)
 
     def test_c_a_ledger_change_of_no_compared_fact_is_the_dirty_overlap(self) -> None:
         ledger = self.store.root / ROADMAP_YAML

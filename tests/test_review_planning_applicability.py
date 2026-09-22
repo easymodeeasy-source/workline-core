@@ -217,12 +217,33 @@ class MarkerTests(PlanningTestCase):
     def test_phase_entry_markers_both_directions(self) -> None:
         store = self.planning_project()
         _, phase_id = self.roadmap_and_phase(store)
+
+        def pending_entry() -> Path:
+            (record,) = [r for r in self.pending(store) if r["invocation"].get("operation") == "phase-entry"]
+            return store.mutations / f"{record['mutation_id']}.yaml"
+
+        # a legacy record against a review-v1 invocation
         with crash_at(rm, "_finalize"):
             with self.assertRaises(Crash):
                 rm.enter_phase(store, phase_id, design())
+        path = pending_entry()
+        before = path.read_bytes()
         with self.assertRaises(ReconcileRequired) as raised:
             self.reviewed_entry(store, phase_id)
-        self.assertEqual("review_marker_mismatch", raised.exception.reason)
+        self.assertEqual(("reconcile_required", "review_marker_mismatch"), (raised.exception.code, raised.exception.reason))
+        self.assertEqual(before, path.read_bytes(), "no silent upgrade; the record untouched")
+        rm.enter_phase(store, phase_id, design())  # the legacy entry resumes and completes
+        # a review-v1 record against a legacy invocation
+        other_phase = rm.create_roadmap(store, plan("Second Roadmap")).phase_ids["a"]
+        with crash_at(rr, "_accept"):
+            with self.assertRaises(Crash):
+                self.reviewed_entry(store, other_phase)
+        path = pending_entry()
+        before = path.read_bytes()
+        with self.assertRaises(ReconcileRequired) as raised:
+            rm.enter_phase(store, other_phase, design())
+        self.assertEqual(("reconcile_required", "review_marker_mismatch"), (raised.exception.code, raised.exception.reason))
+        self.assertEqual(before, path.read_bytes(), "no silent downgrade; the record untouched")
 
     def test_unknown_marker_values_fail_closed(self) -> None:
         records = [
@@ -251,6 +272,7 @@ class MarkerTests(PlanningTestCase):
 class ReviewArgumentTests(PlanningTestCase):
     def test_invalid_review_arguments_write_nothing(self) -> None:
         store = self.planning_project()
+        _, phase_id = self.roadmap_and_phase(store)
         before = self.snapshot_state(store)
         reviewer = Reviewer()
         invalid = [
@@ -266,8 +288,9 @@ class ReviewArgumentTests(PlanningTestCase):
                 with self.assertRaises(ValidationError) as raised:
                     rm.create_roadmap(store, plan(), review=value)
                 self.assertEqual("review_contract_invalid", raised.exception.code)
-                with self.assertRaises(ValidationError):
-                    rm.enter_phase(store, "p_01ARZ3NDEKTSV4RRFFQ69G5FAV", design(), review=value)
+                with self.assertRaises(ValidationError) as entry:
+                    rm.enter_phase(store, phase_id, design(), review=value)
+                self.assertEqual("review_contract_invalid", entry.exception.code)
         self.assertEqual(before, self.snapshot_state(store))
         self.assertEqual([], self.pending(store))
 

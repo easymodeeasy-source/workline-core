@@ -303,6 +303,30 @@ class IndependentAdvanceTests(_CurrencyCase):
             self.run_plan()
         self.assertEqual("review_registration_currency_changed", raised.exception.reason)
 
+    def test_a_history_that_no_longer_holds_use_check_head_before_kp_is_recorded(self) -> None:
+        # A person rewrites the branch while the planning run is between its registration stages and the pre-Kp
+        # proof (on a resume, the live decided_on check of the recorded registration refuses such a history first):
+        # the pre-Kp proof's item 2 finds P no descendant of use_check_head.
+        rewritten: list[str] = []
+        real = rr._declared_base_holds
+
+        def rewrite_then_check(store, material, head):
+            if not rewritten:
+                rewritten.append(self.head(self.store))
+                git(self.store.root, "reset", "-q", "--soft", "HEAD~1")
+                git(self.store.root, "commit", "-q", "-m", "the same tree, rewritten")
+            return real(store, material, head)
+
+        with mock.patch.object(rr, "_declared_base_holds", rewrite_then_check):
+            with self.assertRaises(ReconcileRequired) as raised:
+                self.run_plan()
+        (use_check_head,) = rewritten
+        self.assertEqual(git(self.store.root, "rev-parse", use_check_head + "^{tree}").strip(),
+                         git(self.store.root, "rev-parse", "HEAD^{tree}").strip(), "the same tree, another history")
+        self.assertEqual("review_registration_base_moved", raised.exception.reason)
+        self.assertIn(f"is not use_check_head {use_check_head}", str(raised.exception), "the pre-Kp proof's item 2")
+        self.no_kp_no_consumption()
+
     def test_a_history_that_no_longer_holds_use_check_head(self) -> None:
         self.crash(mutation_module, "_make_planning_commit",
                    when=lambda n, store, payload, paths: payload.get("base_exact") is True)
@@ -549,6 +573,8 @@ class R9Tests(PlanningTestCase):
     def test_entry_a_unique_a(self) -> None:
         result = self._entry(design(entry="w1"))
         self.assertEqual(result.registration.work_ids["w1"], result.registration.entry_work_id)
+        self.assertEqual({"key": "w1", "id": result.registration.work_ids["w1"]},
+                         planning.candidate_content(self._material(result))["canonical_first_work"])
 
     def test_entry_b_unique_a(self) -> None:
         with self.assertRaises(StopError) as raised:
@@ -593,8 +619,9 @@ class R9Tests(PlanningTestCase):
 
     def test_entry_a_none_startable_is_the_live_refusal(self) -> None:
         other = rm.enter_phase(self.store, self._phase_b(), design(works={"z": "Z"}, planned_next=(), confirmation=False))
-        with self.assertRaises(SpecViolation):
+        with self.assertRaises(SpecViolation) as raised:
             self._entry(design(works={"w1": "W1"}, planned_next=(), requires_completion=((other.work_ids["z"], "w1"),), entry="w1"))
+        self.assertIn("cannot be started by this expansion", str(raised.exception))
         self.assertEqual([], self.pending(self.store))
 
     def _phase_b(self) -> str:

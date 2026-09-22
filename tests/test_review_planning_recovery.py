@@ -7,7 +7,8 @@ from unittest import mock
 
 from helpers import git
 from planning_helpers import (
-    Crash, PlanningTestCase, Reviewer, crash_at, design, plan, raw_git, rr, run_ids, snapshot_material,
+    Crash, PlanningTestCase, Reviewer, blob_at, crash_at, design, move_branch, plan, plumb_commit, raw_git, rr, run_ids,
+    snapshot_material,
 )
 from workline import ids
 from workline import mutation as mutation_module
@@ -59,6 +60,18 @@ class _RecoveryCase(PlanningTestCase):
     def only_run(self) -> str:
         (run_id,) = run_ids(self.store)
         return run_id
+
+    def replace_head_commit(self, changes: dict) -> str:
+        """HEAD's own commit made again with ``changes`` (``None`` leaves a path out): a history as if written so."""
+        head = self.head(self.store)
+        parent = git(self.store.root, "rev-parse", "HEAD~1").strip()
+        paths = git(self.store.root, "diff-tree", "--no-commit-id", "-r", "--name-only", "--no-renames", head).split()
+        files = {path: blob_at(self.store, head, path) for path in paths}
+        files.update(changes)
+        subject = git(self.store.root, "log", "-1", "--format=%s", head).strip()
+        commit = plumb_commit(self.store, parent, {path: data for path, data in files.items() if data is not None}, subject)
+        move_branch(self.store, commit)
+        return commit
 
     def recovered_invocation_spy(self):
         seen: list[dict] = []
@@ -131,6 +144,10 @@ class Generation1Tests(_RecoveryCase):
         self.assertEqual(("registered", run_id, recovering["mutation_id"]),
                          (result.status, result.review_run_id, result.mutation_id))
         self.assertEqual([task_id], [task.task_id for task in reviewer.tasks])
+        lost_receipt = lost["reserved_ids"][gate.review_receipt_key(run_id, planning.SEAL_GENERATION)]
+        lost_consumption = lost["reserved_ids"][gate.review_consumption_key(lost_receipt)]
+        self.assertNotIn(result.receipt_id, (lost_receipt, lost_consumption))
+        self.assertNotIn(result.consumption_id, (lost_receipt, lost_consumption))
 
     def test_a_missing_task_input_is_incomplete(self) -> None:
         self.crash(rr, "_launch_and_settle")
@@ -145,13 +162,23 @@ class Generation1Tests(_RecoveryCase):
         self.crash(rr, "_launch_and_settle")
         run_id = self.only_run()
         task_id = self.chain(self.store, run_id).generations[0].accepted_tasks[0]["task_id"]
-        self.runtime_gone(self.store)
-        path = self.store.root / review_paths.task_input_rel(task_id)
-        record, _ = serialize.parse_canonical(path.read_bytes(), "the task input")
+        relative = review_paths.task_input_rel(task_id)
+        record, _ = serialize.parse_canonical(blob_at(self.store, "HEAD", relative), "the task input")
         wrong = "0" * 64 if record["request_digest"] != "0" * 64 else "1" * 64
-        path.write_text(serialize.canonical_text({**record, "request_digest": wrong}), encoding="utf-8", newline="\n")
-        ReviewStore(self.store).read_task_input(task_id)  # well-formed: only the digest is wrong
-        self.assert_incomplete(reasons=("review_recovery_incomplete",))
+        # generation 1's own commit adds the task input with another digest: clean persistence holds, reconstruction not
+        self.replace_head_commit({relative: serialize.canonical_text({**record, "request_digest": wrong})})
+        self.runtime_gone(self.store)
+        ReviewStore(self.store).read_task_input(task_id)  # well-formed
+        before = run_ids(self.store)
+        reviewer = Reviewer()
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.run_plan(reviewer)
+        self.assertEqual("review_recovery_incomplete", raised.exception.reason)
+        for clean_persistence in ("only in the working tree", "no longer in HEAD's tree", "not committed as"):
+            self.assertNotIn(clean_persistence, str(raised.exception))
+        self.assertEqual(before, run_ids(self.store), "no new Run")
+        self.assertEqual([], reviewer.tasks, "no new task")
+        self.assertEqual([], self.planning_records(), "nothing begun")
 
     def test_a_candidate_snapshot_mismatch_fails_closed(self) -> None:
         self.crash(rr, "_launch_and_settle")
@@ -384,7 +411,40 @@ class HalfWrittenTests(_RecoveryCase):
         self.assertEqual(before, run_ids(self.store), "a new Run never hides it")
         self.assertEqual([], self.planning_records())
 
-    def test_gate_1_without_its_task_input(self) -> None:
+    def _refused_by(self, *phrases: str) -> None:
+        before = run_ids(self.store)
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.run_plan()
+        self.assertEqual("review_recovery_incomplete", raised.exception.reason)
+        for phrase in phrases:
+            self.assertIn(phrase, str(raised.exception))
+        self.assertEqual(before, run_ids(self.store), "a new Run never hides it")
+        self.assertEqual([], self.planning_records())
+
+    def test_a_committed_gate_1_without_its_task_input(self) -> None:
+        self.crash(rr, "_launch_and_settle")
+        task_id = self.chain(self.store, self.only_run()).generations[0].accepted_tasks[0]["task_id"]
+        self.replace_head_commit({review_paths.task_input_rel(task_id): None})
+        self.runtime_gone(self.store)
+        self._refused_by("generation 1 of Review Run", "is not whole")
+
+    def test_a_committed_gate_3_without_its_receipt(self) -> None:
+        self.crash(rr, "_use_check")
+        receipt_id = self.chain(self.store, self.only_run()).generations[2].receipt_id
+        self.replace_head_commit({review_paths.receipt_rel(receipt_id): None})
+        self.runtime_gone(self.store)
+        self._refused_by("has no Receipt")
+
+    def test_a_committed_generation_4_without_its_supersession(self) -> None:
+        self.crash(rr, "_use_check")
+        with _changed_authority():
+            result = self.run_plan()
+        self.assertEqual("stale", result.status)
+        self.replace_head_commit({review_paths.supersession_rel(result.receipt_id): None})
+        self.runtime_gone(self.store)
+        self._refused_by("has no Supersession")
+
+    def test_gate_1_without_its_task_input_uncommitted(self) -> None:
         self.crash(mutation_module, "_make_planning_commit", when=_generation_commit(1))
         self.runtime_gone(self.store)
         (task_input,) = (self.store.root / ".workline" / "review" / "task-inputs").glob("*.yaml")
@@ -396,14 +456,14 @@ class HalfWrittenTests(_RecoveryCase):
         self.runtime_gone(self.store)
         self._refused()
 
-    def test_gate_3_without_its_receipt(self) -> None:
+    def test_gate_3_without_its_receipt_uncommitted(self) -> None:
         self.crash(mutation_module, "_make_planning_commit", when=_generation_commit(3))
         self.runtime_gone(self.store)
         (receipt,) = (self.store.root / ".workline" / "review" / "receipts").glob("*.yaml")
         receipt.unlink()
         self._refused()
 
-    def test_generation_4_without_its_supersession(self) -> None:
+    def test_generation_4_without_its_supersession_uncommitted(self) -> None:
         self.crash(rr, "_use_check")
         with _changed_authority(), crash_at(mutation_module, "_make_planning_commit", when=_generation_commit(4)):
             with self.assertRaises(Crash):

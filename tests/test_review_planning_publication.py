@@ -245,9 +245,24 @@ class WindowTests(_PublishCase):
 
     def test_row_31_note_recorded_push_stage_not_recorded(self) -> None:
         self.crash(gitops, "review_publication_effect")
-        self.assertIn(rr.NOTE_PUBLICATION_PROOF, self.planning_record()["notes"])
+        note = self.planning_record()["notes"][rr.NOTE_PUBLICATION_PROOF]
         self.assertEqual([], self.pushes_recorded())
-        self.assert_published(self.run_plan())
+        proofs: list[str] = []
+        barriers: list[str] = []
+        real_c2, real_clear = rr._c2_km, publication.require_barrier_clear
+
+        def c2(*args, **kwargs):
+            proofs.append("C-2(Km)")
+            return real_c2(*args, **kwargs)
+
+        def clear(repo, commit):
+            barriers.append(commit)
+            return real_clear(repo, commit)
+
+        with mock.patch.object(rr, "_c2_km", c2), mock.patch.object(publication, "require_barrier_clear", clear):
+            self.assert_published(self.run_plan())
+        self.assertEqual(["C-2(Km)"], proofs, "C-2(Km) runs again: the recorded note is never assumed")
+        self.assertIn(note["metadata_commit"], barriers, "the barrier is evaluated for Km before its push stage")
 
     def test_row_32_push_recorded_not_applied(self) -> None:
         self.crash(gitcmd, "push")
@@ -541,8 +556,20 @@ class CrossOperationBarrierTests(_PublishCase):
             pushed.append(refspec)
             return real_push(repo, remote, refspec)
 
-        with mock.patch.object(gitcmd, "push", spy):
+        refused_at: list[str] = []
+        real_classify = MutationController._classify_push
+
+        def classify(self_, payload, found):
+            try:
+                return real_classify(self_, payload, found)
+            except StopError as exc:
+                refused_at.append(exc.code)
+                raise
+
+        with mock.patch.object(gitcmd, "push", spy), mock.patch.object(MutationController, "_classify_push", classify):
             self.assert_barrier(self.hold_other)  # its commit is made on Kp, and the dry run shows a write
+        self.assertEqual(["review_publication_barrier"], refused_at, "refused at classification")
+        with mock.patch.object(gitcmd, "push", spy):
             (hold,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "roadmap-hold"]
             hold_commit = [e for e in hold["effects"] if e["kind"] == "git_commit"][0]["commit_id"]
             self.assertEqual(kp, git(self.store.root, "rev-parse", f"{hold_commit}~1").strip(), "made on Kp")

@@ -49,6 +49,7 @@ class ChainTests(PlanningTestCase):
         with self.assertRaises(ValidationError) as raised:
             ReviewStore(store).gate_chain(run_id)
         self.assertEqual("review_gate_chain", raised.exception.code)
+        self.assertIn("sealed with unsettled accepted task", str(raised.exception))
 
 
 class ReceiptAtTheUseCheckTests(PlanningTestCase):

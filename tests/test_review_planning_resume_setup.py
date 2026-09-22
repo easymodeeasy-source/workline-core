@@ -149,9 +149,9 @@ class RecoverableMeanwhileTests(_SetupCase):
         self.assertEqual("review_discovery_changed", raised.exception.reason)
         self.assert_abandoned(new_run["mutation_id"])
         intent = MutationController(self.store).intent_path(new_run["mutation_id"])
-        if intent.exists():
-            self.assertEqual(new_run["invocation"], yamlish.load(intent.read_text(encoding="utf-8"))["invocation"],
-                             "the invocation is never rewritten into a recovery")
+        self.assertTrue(intent.exists(), "the abandoned record is kept")
+        self.assertEqual(new_run["invocation"], yamlish.load(intent.read_text(encoding="utf-8"))["invocation"],
+                         "the invocation is never rewritten into a recovery")
         result = self.call()
         self.assertEqual(("registered", run_id), (result.status, result.review_run_id))
 
@@ -264,26 +264,51 @@ class AfterGeneration1Tests(_SetupCase):
 
 
 class RecoveryAfterGeneration1Tests(_SetupCase):
-    def test_f_a_recovery_mutation_keeps_its_binding_and_a_stop_leaves_it_pending(self) -> None:
+    """§12 table, §12.4 Lifecycle: a recovery planning mutation is abandoned on a STOP while it has recorded no effect
+    and started no generation mutation - its Run's generation 1 existing counts for nothing - and from its first
+    generation mutation on it remains pending, its recovered binding never rewritten, no discovery run again."""
+
+    def recovered(self) -> None:
         with crash_at(rr, "_launch_and_settle"):
             with self.assertRaises(Crash):
                 self.call()
+        (self.run_id,) = run_ids(self.store)
         self.runtime_gone(self.store)
-        with crash_at(rr, "_launch_and_settle"):
+
+    def test_f_before_its_first_generation_mutation_a_stop_abandons_it(self) -> None:
+        self.recovered()
+        recovering = self.crash_after_begin()
+        self.assertEqual(self.run_id, recovering["invocation"][planning.MARKER_RECOVERY])
+        failing = Reviewer(raises=RuntimeError("the reviewer failed"))
+        with self.assertRaises(StopError) as raised:
+            self.call(failing)
+        self.assertEqual("review_reviewer_failed", raised.exception.code)
+        self.assertEqual(1, len(failing.tasks), "bound, set up, and the task launched")
+        self.assert_abandoned(recovering["mutation_id"])
+        self.assertEqual(1, self.chain(self.store, self.run_id).latest.generation, "nothing canonical changed")
+        working = Reviewer()
+        result = self.call(working)  # the next invocation discovers again and recovers the same Run
+        self.assertEqual(("registered", self.run_id), (result.status, result.review_run_id))
+        self.assertNotEqual(recovering["mutation_id"], result.mutation_id)
+        self.assertEqual(failing.tasks, working.tasks, "the same task, launched again")
+
+    def test_f_from_its_first_generation_mutation_a_stop_leaves_it_pending(self) -> None:
+        self.recovered()
+        with crash_at(rr, "_finish_generation", when=lambda n, store, gen: gen.invocation.get("generation") == 2):
             with self.assertRaises(Crash):
-                self.call()  # the recovery planning mutation binds the Run and reaches the reviewer launch
+                self.call()
         before = self.record()
         self.assertIn(planning.MARKER_RECOVERY, before["invocation"])
         self.assertIn(rr.NOTE_RECOVERY_BINDING, before["notes"])
+        self.commit_attributes(self.store, "* text=auto\n")  # the checkout capability lost after it started
         with mock.patch.object(recovery, "discover", side_effect=AssertionError("discovery ran")):
             with self.assertRaises(StopError) as raised:
-                self.call(Reviewer(raises=RuntimeError("the reviewer failed")))
-        self.assertEqual("review_reviewer_failed", raised.exception.code)
+                self.call()
+        self.assertEqual("review_checkout_unsafe", raised.exception.code)
         after = self.record()
         self.assertEqual(before["mutation_id"], after["mutation_id"])
         self.assertEqual(before["invocation"], after["invocation"])
         self.assertEqual(before["notes"][rr.NOTE_RECOVERY_BINDING], after["notes"][rr.NOTE_RECOVERY_BINDING])
-        self.assertEqual(before["notes"].get(rr.NOTE_DISCOVERY), after["notes"].get(rr.NOTE_DISCOVERY))
         self.assertEqual(before["reserved_ids"], after["reserved_ids"])
         self.assertEqual("pending", after["status"])
 
@@ -329,6 +354,87 @@ class NoBypassTests(_SetupCase):
             other.parent.mkdir(parents=True, exist_ok=True)
             other.write_bytes(b"not: canonical\r\n")
         self.both_stop(unreadable, "review_namespace_unreadable")
+
+
+class NoBypassRecoveryTests(_SetupCase):
+    """The same for a recovery planning mutation: its resumed setup (discovery, binding, §12.4 remaining setup) runs
+    every check, and a failing one stops it exactly as it stops a begun recovery, which is abandoned too."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.call()
+        (self.run_id,) = run_ids(self.store)
+        self.runtime_gone(self.store)
+
+    def both_stop(self, prepare, code: str, patches=()) -> None:
+        resumed = self.crash_after_begin()
+        self.assertEqual(self.run_id, resumed["invocation"][planning.MARKER_RECOVERY])
+        prepare()
+        codes = []
+        for _ in ("resumed", "begun"):
+            with contextlib.ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch())
+                with self.assertRaises(StopError) as raised:
+                    self.call()
+            codes.append(raised.exception.code)
+            self.assertEqual([], [r for r in self.pending(self.store) if r["invocation"].get("operation") == self.operation],
+                             "abandoned, or nothing begun")
+        self.assertEqual([code, code], codes, "resumed, then begun")
+        self.assert_abandoned(resumed["mutation_id"])
+        self.assertEqual(1, self.chain(self.store, self.run_id).latest.generation, "nothing canonical changed")
+
+    def test_the_checkout_capability(self) -> None:
+        self.both_stop(lambda: self.commit_attributes(self.store, "* text=auto\n"), "review_checkout_unsafe")
+
+    def test_the_dirty_overlap(self) -> None:
+        ledger = self.store.root / ROADMAP_YAML
+        self.both_stop(lambda: ledger.write_bytes(ledger.read_bytes() + b"\n"), "dirty_overlap")
+
+    def test_the_context(self) -> None:
+        unavailable = lambda: mock.patch.object(planning, "context_record", side_effect=StopError(
+            "the Context cannot be computed", code="review_context_unavailable"))
+        self.both_stop(lambda: None, "review_context_unavailable", patches=(unavailable,))
+
+    def test_the_policy(self) -> None:
+        unavailable = lambda: mock.patch.object(planning, "policy_hash", side_effect=StopError(
+            "the Policy cannot be computed (fixture)", code="review_context_unavailable"))
+        self.both_stop(lambda: None, "review_context_unavailable", patches=(unavailable,))
+
+    def test_the_review_namespace_readability(self) -> None:
+        def unreadable() -> None:
+            other = self.store.root / review_paths.receipt_rel("rcp_01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            other.parent.mkdir(parents=True, exist_ok=True)
+            other.write_bytes(b"not: canonical\r\n")
+        self.both_stop(unreadable, "review_namespace_unreadable")
+
+
+class NoBypassRecoveryBarrierTests(PlanningTestCase):
+    def test_the_publication_barrier(self) -> None:
+        store = self.planning_project(remote=True)
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(store)  # the Run to recover
+        (run_id,) = run_ids(store)
+        self.runtime_gone(store)
+        with crash_at(rr, "_c2_kp"):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(store, Reviewer(), plan("Unproven"))  # another Run's Kp, left unproven
+        self.runtime_gone(store)
+        with crash_at(MutationController, "begin", after=True, when=_begun(planning.OPERATION_ROADMAP)):
+            with self.assertRaises(Crash):
+                self.reviewed_roadmap(store)
+        (resumed,) = [r for r in self.pending(store) if r["invocation"].get("operation") == planning.OPERATION_ROADMAP]
+        self.assertEqual(run_id, resumed["invocation"][planning.MARKER_RECOVERY])
+        codes = []
+        for _ in ("resumed", "begun"):
+            with self.assertRaises(StopError) as raised:
+                self.reviewed_roadmap(store)
+            codes.append(raised.exception.code)
+        self.assertEqual(["review_publication_barrier"] * 2, codes)
+        self.assertEqual([], [r for r in self.pending(store) if r["invocation"].get("operation") == planning.OPERATION_ROADMAP])
 
 
 class NoBypassBarrierTests(PlanningTestCase):

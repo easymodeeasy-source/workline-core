@@ -152,6 +152,7 @@ class ScopeAndSnapshotTests(_GenerationCase):
         self.assertEqual([], extended)
         # the dirty snapshot was noted when the generation mutation began, before its first effect
         self.assertIn("preexisting_dirty", gen["notes"])
+        self.assert_invocation(gen, "accept", 1, None, None)
 
     def pending_generation(self) -> dict:
         (gen,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "review-generation"]
@@ -168,6 +169,26 @@ class ScopeAndSnapshotTests(_GenerationCase):
             set(gen["write_scope"]["files"]),
         )
         self.assertEqual("seal", gen["invocation"]["transition"])
+        self.assertEqual([], gen["write_scope"]["entities"])
+        self.assert_invocation(gen, "seal", 3, receipt_id, None)
+
+    def assert_invocation(self, gen: dict, transition: str, generation: int, receipt_id, reason) -> None:
+        """§11.2: exactly these keys, and the values that bind the parent, the Run and the transition."""
+        invocation = gen["invocation"]
+        self.assertEqual(
+            {"operation", "review_contract", "planning_mutation_id", "review_kind", "review_run_id", "generation",
+             "transition", "candidate_hash", "review_context_hash", "effective_policy_hash", "obligation_digest",
+             "receipt_id", "invalidation_reason"},
+            set(invocation),
+        )
+        (planning_record,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "roadmap-create"]
+        self.assertEqual(
+            ("review-generation", "review-v1-planning-v1", planning_record["mutation_id"], "roadmap-plan-v1",
+             generation, transition, receipt_id, reason),
+            (invocation["operation"], invocation["review_contract"], invocation["planning_mutation_id"],
+             invocation["review_kind"], invocation["generation"], invocation["transition"], invocation["receipt_id"],
+             invocation["invalidation_reason"]),
+        )
 
     def test_settle_scope(self) -> None:
         self.crash(rr, "_finish_generation", when=lambda n, store, gen: gen.invocation.get("generation") == 2)
@@ -177,6 +198,7 @@ class ScopeAndSnapshotTests(_GenerationCase):
         self.assertEqual({review_paths.gate_rel(run_id, 2), review_paths.serialization_token_rel(run_id)},
                          set(gen["write_scope"]["files"]))
         self.assertEqual([], gen["write_scope"]["entities"])
+        self.assert_invocation(gen, "settle", 2, None, None)
 
     def test_invalidation_scope_and_its_one_stage(self) -> None:
         self.crash(rr, "_use_check")
@@ -197,6 +219,7 @@ class ScopeAndSnapshotTests(_GenerationCase):
         self.assertEqual([review_paths.gate_rel(run_id, 4), review_paths.supersession_rel(receipt_id)],
                          [e["payload"]["path"] for e in files])
         self.assertEqual(1, len({e["stage"] for e in files}), "one stage")
+        self.assert_invocation(gen, "invalidate", 4, receipt_id, planning.STALE_CONTEXT)
 
     def test_no_generation_mutation_ever_extends_its_scope(self) -> None:
         extended: list[int] = []
@@ -288,8 +311,10 @@ class _InvalidationCase(_GenerationCase):
                      "effective_policy_hash", "coverage_digest", "raw_report_set_digest", "adjudication_digest",
                      "obligation_digest", "accepted_tasks", "settled_tasks"):
             self.assertEqual(getattr(third, name), getattr(fourth, name), name)
-        self.assertEqual(
-            serialize.digest(planning.invalidation_evidence_record(third.receipt_id, reason)), fourth.evidence_digest
+        self.assertEqual(  # §11.6.1, the literal record
+            serialize.digest({"schema": "review-planning-invalidation-evidence", "version": 1,
+                              "superseded_receipt_id": third.receipt_id, "reason": reason}),
+            fourth.evidence_digest,
         )
         self.assertEqual(("open", None, None), (fourth.status, fourth.receipt_id, fourth.authorized_operation_stage))
         supersession = review.read_supersession(third.receipt_id)

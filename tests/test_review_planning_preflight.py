@@ -66,6 +66,17 @@ class RefusalTests(_PreflightCase):
                 error = self.assert_refused_with_nothing_begun(design(related=conditional(cond)))
                 self.assertNotIsInstance(error, TypeError)
 
+    def test_values_the_canonical_form_cannot_carry_inside_a_nested_mapping(self) -> None:
+        for described, cond in {
+            "a float": {**BASE, "nested": {"x": 1.5}},
+            "a tuple": {**BASE, "nested": {"x": ("a", "b")}},
+            "a non-text key": {**BASE, "nested": {1: "x"}},
+            "an empty key": {**BASE, "nested": {"": "x"}},
+            "a sequence inside a sequence": {**BASE, "nested": {"x": [["a"]]}},
+        }.items():
+            with self.subTest(described):
+                self.assert_refused_with_nothing_begun(design(related=conditional(cond)))
+
     def test_d_an_empty_key_directly_in_a_condition(self) -> None:
         self.assert_refused_with_nothing_begun(design(related=conditional({**BASE, "": "x"})))
 

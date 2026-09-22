@@ -144,6 +144,11 @@ class EarlierRefusalsTests(_EntryCase):
     """A different request, a pending legacy record and a marker mismatch are refused at step 5, ahead of step 6."""
 
     def test_a_different_pending_request_for_the_slot(self) -> None:
+        # where nothing is pending, a design with no normal Work is refused by a step-6 check
+        with self.assertRaises(StopError) as alone:
+            self.entry(design(works={}))
+        self.assertNotEqual("reconcile_required", alone.exception.code, "a step-6 refusal")
+        self.assertEqual([], self.planning_records())
         with crash_at(rm, "register_works", when=lambda n, mutation, stage, specs, relations: stage == "integration"):
             with self.assertRaises(Crash):
                 self.entry(design())
@@ -151,6 +156,11 @@ class EarlierRefusalsTests(_EntryCase):
         with self.assertRaises(ReconcileRequired) as raised:
             self.entry(design(works={"w1": "another W1", "w2": "W2 が成立する"}))
         self.assertIsNone(raised.exception.reason, "the live same-request refusal, not phase_already_expanded")
+        self.assertEqual(record, self.planning_records()[0])
+        # a design step 6 refuses on its own (no normal Work, shown above) meets the step-5 refusal first
+        with self.assertRaises(ReconcileRequired) as first:
+            self.entry(design(works={}))
+        self.assertIsNone(first.exception.reason, "the step-5 refusal, ahead of step 6")
         self.assertEqual(record, self.planning_records()[0])
 
     def test_a_pending_legacy_record(self) -> None:
