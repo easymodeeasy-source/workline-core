@@ -1,6 +1,6 @@
 # Review System P2 — Planning Review Gates: Integration Contract
 
-Status: `CONTRACT FROZEN / ROUND 4 REPAIRED (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT CONTRACT RE-REVIEW`
+Status: `CONTRACT FROZEN / ROUND 5 REPAIRED (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT CONTRACT RE-REVIEW`
 
 Runtime authority is unchanged by this document: `registry.md`, the registry-routed canonical Skills, and the live implementation and tests. This is a non-normative contract checkpoint. It freezes how P2 connects RoadmapPlan Review and PhaseEntryDesign Review to the landed P1 Review Core and to the live Roadmap operation, so that the P2 implementation is left with no choice to make. It starts no implementation and edits no authority; §26 states the authority text the implementation changes under the approval of this contract.
 
@@ -13,7 +13,7 @@ P2 scope:               1. RoadmapPlan Review
                         2. PhaseEntryDesign Review
                         3. semantic round-trip integration
 C-1 .. C-6:             CLOSED BY P2 CONTRACT (§23)
-P2-CONTRACT-001 .. 007: CLOSED (round 1: 001-004; round 2: 001, 005; round 3: 006; round 4: 007; §33); cross-finding pass §34
+P2-CONTRACT-001 .. 008: CLOSED (round 1: 001-004; round 2: 001, 005; round 3: 006; round 4: 007; round 5: 008; §33); cross-finding pass §34
 P3:                     NOT STARTED, and nothing here activates it
 ```
 
@@ -41,6 +41,7 @@ Where the accepted reconnaissance listed contract directions, this document name
 | round-2 repair baseline = contract under repair | `3a8b9cf0496b230ebcb773f5905d98f529b6b313` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 | round-3 repair baseline = contract under repair | `459f431c9715c5db0c50691d63f42d90b0c70513` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 | round-4 repair baseline = contract under repair | `bbdd93d38c48eddb86ce2200e27a4cc1f774a7bb` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
+| round-5 repair baseline = contract under repair | `bd2e70da24bdb44b51ad7f9f9ee795e1625050c4` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 
 Accepted inputs, not reopened here:
 
@@ -90,6 +91,7 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | publication barrier | the rule that no Workline push publishes a history holding a registration commit unless the committed planning proof proves that registration (§18.7, §18.8) |
 | checkout capability | the positive proof that Git reproduces canonical Review bytes in this repository and in a fresh clone (§14.5) |
 | committed planning proof (CP) | the proof, re-run from committed objects alone, that a registered Run's Kp (its exact bytes and its meaning), Consumption and Km are exactly what its Receipt authorized; the durable basis of C-2(Km) and the only thing that clears the publication barrier (§18.8) |
+| canonical-input preflight | the pure check, before `_open`, that the request identity an explicit review-v1 invocation is about to make durable is exact P1 canonical data apart from mapping key order; a refusal begins nothing (§5.6) |
 | canonical planning writer input (W) | `CanonicalPlanningWriterInput`: the exact inputs the live Roadmap, Phase CREATE and Work CREATE writer helpers receive on the review-v1 path, computed from the canonical Candidate record alone; computed, never stored (§7.8) |
 | expected physical projection (E) | every path, add / modify transition, mode and exact byte Kp may carry — whole ledgers included — recomputed from W and Kp's parent P by the writer's own builders and planned-write computation; computed, never stored (§15.7) |
 | display base check | the check, before each registration stage is recorded, that the working-tree entity files whose count allocates the stage's display numbers are exactly HEAD's plus the files the planning mutation's recorded stages wrote (§15.7) |
@@ -117,6 +119,7 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | runtime-loss recovery (P2-CONTRACT-005) | before any new Run is reserved, canonical recovery discovery finds the matching Runs; exactly one recoverable → a recovery planning mutation (`recovery_of_review_run_id`) binds the canonical Run, task, Receipt and domain IDs and continues the same Run and task; none → a new Run that records the set-aside Runs; several, or any matching Run that is incomplete → `ReconcileRequired` | §12.1–§12.8, §21.2 |
 | exact physical projection (P2-CONTRACT-006, round 3) | Kp's delta must be exactly E: the path set, transitions, modes and every byte — whole ledgers included — that the writer's own builders and planned-write computation produce from the committed Candidate snapshot on Kp's exact parent P; one computation and one comparison for the pre-Kp proof, C-2(Kp) and the committed planning proof; semantic equality stays separately required, and each proof is required on its own; `registration_delta_digest` is derived from the proven E | §15.7, §15.3, §15.6, §18.8, §20 |
 | canonical writer input (P2-CONTRACT-007, round 4) | on the review-v1 path the canonical Candidate is the only source of byte-affecting writer input: W is computed from the canonical Candidate record — mappings in the P1 canonical key order, sequences in Candidate order, every entry kept — and feeds the representability check, the actual registration, E, the pre-Kp proof, C-2(Kp), recovery and the committed planning proof; after the freeze the caller's plan or design never reaches a byte-producing helper; legacy is unchanged | §7.8, §7.6, §15.1, §15.7, §20 |
+| canonical-input preflight (P2-CONTRACT-008, round 5) | before `_open`, and before the request identity is compared with any pending record, review-v1 checks the request identity with the live `validate_condition` and the P1 serializer — canonical data equal to the value apart from key order, canonical bytes, read back; a failure is `review_candidate_unrepresentable` (a condition the live validator refuses keeps its live refusal) with nothing begun; the full §7.6 check still runs after `_open`; legacy unchanged | §5.6, §7.6 |
 | registration base (P2-CONTRACT-003) | `use_check_head` noted at the use check; Kp made on exactly its recorded parent P (`base_exact`); P = `use_check_head`, or a descendant through commits that touch no planning-owned path, with full currency on P; C-2(Kp) proves full currency on P's committed view | §13, §15.2, §15.3, §15.6, §17 |
 | checkout capability (P2-CONTRACT-004) | committed and effective attributes of Review paths must be exactly form L or form B; every existing Review record must read canonically; fail closed before the first Review record; P1 reader unchanged; legacy unchanged | §14.5, §14.6 |
 | not authorized | terminal `not_authorized` outcome, nothing registered, planning mutation completed | §19 |
@@ -187,17 +190,81 @@ The check is added to the legacy entry too. It fires only for a pending record t
 
 A review-v1 invocation that finds a pending review-v1 planning mutation for its slot resumes it by that record's exact invocation, with or without the recovery key: that is normal retry, and nothing of §12 runs. Only when the slot has no pending review-v1 planning mutation does the entry run canonical recovery discovery (§12.2), before any planning mutation is begun or any ID reserved.
 
+The canonical-input preflight (§5.6) runs before the live same-request check and before this comparison, on the current caller object, so no comparison ever serializes a caller value the canonical form cannot carry.
+
 ### 5.4 Platform and fail-closed
 
 **Frozen.** `review` given and `workline.review.fsafe.immutable_create_supported()` false (POSIX at the baseline) → `StopError` code `review_create_unsupported` before `project_operation`: no lock, no mutation record, no write. Legacy invocations on POSIX are unchanged.
 
-The checkout capability (§14.5) and the readability of the existing Review namespace (§14.6) are the second applicability condition of an opted-in invocation. They read the repository's attributes and records, so they are checked under the lock — readability first at recovery discovery (§12.2), both at the freeze or the recovery setup (§12.4) — before the first Review record: a failure is `review_checkout_unsafe`, `review_checkout_unknown` or `review_namespace_unreadable`, and the planning mutation is abandoned with nothing written. Legacy invocations check none of this and are unchanged.
+The checkout capability (§14.5) and the readability of the existing Review namespace (§14.6) are the second applicability condition of an opted-in invocation. They read the repository's attributes and records, so they are checked under the lock — readability first at recovery discovery (§12.2), both at the freeze or the recovery setup (§12.4) — before the first Review record: a failure is `review_checkout_unsafe`, `review_checkout_unknown` or `review_namespace_unreadable`, with nothing written. At recovery discovery no planning mutation exists yet, so nothing is begun; at the freeze or the recovery setup the planning mutation is abandoned (§12). Legacy invocations check none of this and are unchanged.
 
 An opted-in invocation never falls back to the legacy path: every inability of the gate — platform, checkout capability, Review namespace, Git persistence preflight, Context unavailable, reviewer failure, proof failure — is a STOP or a terminal review outcome, never an ungated registration.
 
 ### 5.5 What is never read to decide applicability
 
 No Project-global activation state, no Review record, no `project.yaml` key and no prior Run decides whether a call is gated. Only the `review` argument does, and, for resume compatibility, the markers of the slot's own pending records. The publication barrier (§18.7) reads Review records in the published history, but it gates no call: it decides only whether a push may publish that history. Canonical recovery discovery (§12.2) reads the slot's matching Review Runs, but only to decide which Run a call that is already gated continues, never whether it is gated.
+
+### 5.6 Canonical-input preflight
+
+**Frozen.** An explicit review-v1 invocation proves, before anything is begun, that the caller values it is about to make durable can be carried by the frozen canonical form. The request identity I is the value `_open` makes durable in the planning invocation: `roadmap_request_identity(plan)` for a RoadmapPlan (`roadmap.py:459`), `design_identity(design)` for a PhaseEntryDesign (`roadmap.py:786`). Every caller value the Candidate takes is in it: names, desired states, sections, keys, relation references, Related `type` and `to`, and every Related `condition` of the normal Works, the integration and the confirmation.
+
+Before `_open`, the live serialization of I is fragile. `MutationController.open` and `begin` normalize the invocation with `json.loads(json.dumps(invocation, sort_keys=True))` (`mutation.py:1668`, `mutation.py:1703`), and `Mutation._save` renders the record with `yamlish.dump` and writes it as UTF-8 (`mutation.py:379-385`, `durable.py:37-65`). A caller value outside what they carry fails there, with a serializer error, before §7.6 is reached (**Measured**, §31):
+
+- a float, an empty mapping key or a sequence inside a sequence fails in `_save` (`YamlishError`);
+- a lone surrogate fails in the UTF-8 write (`UnicodeEncodeError`) and leaves a runtime temporary file;
+- a non-text key fails in `MutationController.open`'s `json.dumps(..., sort_keys=True)` (`TypeError`);
+- a tuple is silently made a list.
+
+The preflight is a pure function of the caller's object. It reads no Project state, reserves nothing, writes nothing, and uses no serializer but the P1 one. It runs two checks, in this order:
+
+1. **Live condition validation.** Each `condition` of a conditional Related type goes through the live `validate_condition` (`validate.py:48-61`). That function is pure, and it is the rule `validate_related_specs` applies after `_open` (`create.py:116-133`). A refusal is that live refusal, unchanged: `ValidationError` code `validation_failed`, the same message. Only its time moves forward. It checks `kind` and `pattern` and keeps every further entry.
+2. **Canonical representability** of I, with the P1 serializer (`review/serialize.py`) alone. All of these must hold:
+   - `serialize.canonical_data(I)` succeeds: every mapping key is text, and every scalar is text, an integer, a boolean or null. A float (NaN included) and any other type are refused.
+   - `serialize.canonical_data(I) == I` under Python equality. That equality ignores mapping key order at every depth and tells a tuple from a list, so canonicalization may change key order and nothing else.
+   - `serialize.canonical_bytes` of a record holding I succeeds: every key rendered as a mapping key is non-empty, no sequence sits directly inside a sequence, and all text encodes as UTF-8.
+   - `serialize.canonical_roundtrips` of that record holds: the canonical text reads back as the same data.
+
+   A failure → `ValidationError` code `review_candidate_unrepresentable`, with a detail that names the caller value and says the caller input cannot be canonicalized. No serializer exception (`TypeError`, `YamlishError`, `UnicodeEncodeError`) is ever the outcome.
+
+**What passes:**
+
+- **Key order.** Mapping key order is never a refusal. `{"pattern": "src/*.py", "kind": "path_glob"}` and `{"kind": "path_glob", "pattern": "src/*.py"}` both pass, at any depth, and become the same Candidate and the same W (§7.8).
+- **No schema narrowing.** Nested mappings and extra condition entries pass whenever the P1 form carries them exactly.
+- **The P1 serializer decides.** A value the P1 form carries passes wherever it sits. An empty key inside a mapping that is an item of a sequence renders and reads back, so it passes (**Measured**). A value the P1 form does not carry is refused wherever it sits: the whole of I is checked, conditions and names alike.
+
+Passing is exactly what the live invocation serialization needs. For a value that passes, `json.dumps(..., sort_keys=True)` returns the same value in the same (code point) key order the P1 form uses, `yamlish.dump` renders it, it reads back, and the UTF-8 write succeeds (**Measured**, §31). So after the preflight, `_open` cannot fail on the caller's values.
+
+On a refusal nothing exists to undo: no planning mutation (so nothing is abandoned), no reservation, no Review record, no domain effect and no runtime file. A pending planning mutation of the slot stays exactly as it is.
+
+**It is not §7.6.** The preflight proves only that the caller values can be carried. §7.6 still runs after `_open` and the reservations, over the Candidate and W as built: the projected effects, `validate_structure`, the semantic round trip, R9, and the representability of the whole Candidate record. A refusal there abandons the planning mutation (§12). Both checks use `review_candidate_unrepresentable`, and the detail says which one refused: a caller value that cannot be canonicalized (here), or a projected Candidate or persistence mismatch (§7.6).
+
+**Where it runs.** The review-v1 entry order:
+
+```text
+1  §5.1 argument validation; §5.4 platform check                               (before the lock)
+2  the live checks that precede the request identity, unchanged:
+     Roadmap creation: the payload checks, the structure precheck
+     Phase entry:      the structure precheck; the Phase, Roadmap and lifecycle states; the dependencies
+3  the request identity (the live roadmap_request_identity / design_identity), then this preflight
+4  the live same-request check (require_same_request / _require_resumable) and the marker check (§5.3);
+   without a pending review-v1 planning mutation, canonical recovery discovery (§12.2); the remaining
+   live checks (Phase entry: already expanded, Work keys, entry checks)
+5  _open: the pending planning mutation resumed by its exact recorded invocation, or a planning
+   mutation begun (MutationController.begin) for a new Run or a recovery (§12.4)
+6  a new Run: the recovery_discovery note, the reservations, the Candidate and W, the full
+   representability check (§7.6) and the rest of the freeze (§14.4); a recovery: the recovered
+   reservations and its setup (§12.4, §12.5), with W from the committed snapshot (§7.8)
+7  the Review flow
+```
+
+**Resume.** A resumed planning mutation passed the preflight when it was begun. The preflight still runs on the current caller object, because it comes before the comparison that decides whether the pending mutation is this request (step 4):
+
+- an unrepresentable caller → the refusal, with the pending mutation untouched;
+- a representable caller → the live comparison decides, as before.
+
+**Recovery.** Canonical recovery discovery matches Runs by the operation identity digested from I (§6.2, §12.2), so the preflight comes first. An unrepresentable caller is refused before discovery and before any recovery planning mutation, and the canonical Run is left untouched. Once a Run is recovered, the caller's values only prove the identity: the writer takes W from the committed snapshot (§7.8).
+
+**Legacy** invocations run no preflight. They keep their live outcomes, the serializer errors above included (§29 item 7).
 
 ## 6. Identities
 
@@ -341,7 +408,7 @@ canonical_first_work:              # §7.7
 
 These are exactly the reservation keys and orders the unchanged `register_works` uses (`create.py:251-259`); **Measured** (reconnaissance probe 5): the unchanged `_expand_phase` used exactly the pre-reserved IDs.
 
-A condition is recorded as `serialize.canonical_data` gives it: keys in the P1 canonical order at every depth, every entry kept, sequences in their order. Two conditions equal as values are one Candidate value, whatever their key insertion order; a condition whose canonical form would differ from it in anything but key order is refused before Review (§7.6).
+A condition is recorded as `serialize.canonical_data` gives it: keys in the P1 canonical order at every depth, every entry kept, sequences in their order. Two conditions equal as values are one Candidate value, whatever their key insertion order; a condition whose canonical form would differ from it in anything but key order is refused before `_open` by the canonical-input preflight (§5.6).
 
 ### 7.4 Declared base
 
@@ -375,9 +442,9 @@ Display numbers (`R-xx`, `P-xx`, `W-xx`), commit messages, frontmatter layout an
 4. `adapter.normalize_persisted(adapter.load_persisted(result identity, projected))` equals `adapter.normalize_candidate(...)` exactly (projection identity);
 5. PhaseEntryDesign: R9 (§7.7) evaluated on `projected`.
 
-Before step 1, every mapping a caller supplies to the Candidate (a Related condition) must be representable exactly: its canonical form (`serialize.canonical_data`) equal to it under Python equality — which ignores key order and tells a tuple from a list — and renderable (`serialize.canonical_text`). A tuple, which the canonical form would make a list; a float or a non-text key, which it refuses; an empty key or a sequence directly inside a sequence, which the canonical text cannot render → `ValidationError` code `review_candidate_unrepresentable`. Each is a value the canonical form cannot hold as given; the live writer's `yamlish.dump` refuses the tuple and the float as well (**Measured**, §31).
+Every caller value the Candidate takes has passed the canonical-input preflight before `_open` (§5.6), so no caller value the canonical form cannot carry reaches this point. The Candidate record itself — caller values, reserved IDs and declared base together — must still be canonical data that renders and reads back (`serialize.canonical_bytes`, `serialize.canonical_roundtrips`); otherwise `ValidationError` code `review_candidate_unrepresentable`, the detail naming a projected Candidate representability failure.
 
-Failure of 3 → the live refusal (`ValidationError` code `postcheck_failed`); of 4 → `ValidationError` code `review_candidate_unrepresentable`; of 5 → the R9 codes of §7.7. Every one happens before any Review record or domain effect, and the planning mutation is abandoned (§12). Nothing is normalized away to make it pass: a Roadmap name with a trailing space, a `## heading` line injected into a section, a CR or CRLF in any text, U+2028 in a name — every loss the reconnaissance measured (§10.2 there) — is refused here, and a lone CR can therefore never strand a review-v1 run (reconnaissance §17 item 1).
+Failure of 3 → the live refusal (`ValidationError` code `postcheck_failed`); of 4 → `ValidationError` code `review_candidate_unrepresentable`; of 5 → the R9 codes of §7.7. Every one happens after `_open` and before any Review record or domain effect, and the planning mutation is abandoned (§12); a refusal of the canonical-input preflight comes before `_open` and begins nothing (§5.6). Nothing is normalized away to make it pass: a Roadmap name with a trailing space, a `## heading` line injected into a section, a CR or CRLF in any text, U+2028 in a name — every loss the reconnaissance measured (§10.2 there) — is refused here, and a lone CR can therefore never strand a review-v1 run (reconnaissance §17 item 1).
 
 This check predicts the working tree with the same W and the same effect builders the expected physical projection uses (§7.8, §15.7 step 2). It is not the persisted proof, which is over the committed result, physically and semantically (§15.3, §15.7).
 
@@ -409,7 +476,7 @@ The rule applies to review-v1 invocations only; `tests/helpers.simple_entry`, wh
 
 ### 7.8 The writer hand-off: `CanonicalPlanningWriterInput`
 
-**Frozen.** On the review-v1 path the canonical reviewed Candidate is the only source of every byte-affecting registration writer input. The caller's `RoadmapPlan` / `PhaseEntryDesign` validates the invocation (the live payload refusals, §7.6, §7.7), is what the Candidate is built from, and gives the request identity (§6.2). Once the Candidate is frozen, the caller's object never reaches a byte-producing helper again. Legacy invocations are unchanged: they hand the caller's objects to the live writer exactly as today.
+**Frozen.** On the review-v1 path the canonical reviewed Candidate is the only source of every byte-affecting registration writer input. The caller's `RoadmapPlan` / `PhaseEntryDesign` validates the invocation (the canonical-input preflight, §5.6; the live payload refusals, §7.6, §7.7), is what the Candidate is built from, and gives the request identity (§6.2). Once the Candidate is frozen, the caller's object never reaches a byte-producing helper again. Legacy invocations are unchanged: they hand the caller's objects to the live writer exactly as today.
 
 `CanonicalPlanningWriterInput` — W — is the one concept that turns the Candidate back into the exact inputs the live Roadmap, Phase CREATE and Work CREATE writer helpers consume. It is deterministic and computed from the canonical Candidate record alone. It is never stored; it is no Project or Review record, no lifecycle truth and no semantic authority; and nothing a caller supplies after the freeze enters it.
 
@@ -779,7 +846,8 @@ A generation mutation is complete after its commit and persistence proof. Its ru
 **Frozen.**
 
 ```text
-1. live entry checks; same-request and marker checks (§5.3)
+1. live entry checks up to the request identity; the canonical-input preflight (§5.6); the same-request and
+   marker checks (§5.3); the remaining live entry checks
 2. a pending review-v1 planning mutation for the slot -> resumed by its exact recorded invocation (live `_open`),
    with or without recovery_of_review_run_id; none -> canonical recovery discovery (§12.2), before anything is begun:
      exactly one recoverable Run              -> a recovery planning mutation is begun; it binds its recovered
@@ -868,7 +936,7 @@ Normal retry stays separate: while the planning mutation's record exists, the sa
 
 ### 12.2 Canonical recovery discovery
 
-**Frozen.** Run under the lock, after the live entry checks and §5.3, only when the slot has no pending review-v1 planning mutation, and before any planning mutation is begun or any ID reserved. It reads HEAD's committed objects and the working tree through the P1 reader; no runtime record takes part.
+**Frozen.** Run under the lock, after the live entry checks, the canonical-input preflight (§5.6) and §5.3, only when the slot has no pending review-v1 planning mutation, and before any planning mutation is begun or any ID reserved. It reads HEAD's committed objects and the working tree through the P1 reader; no runtime record takes part.
 
 1. **Readability.** §14.6 over the working tree; a failure → `review_namespace_unreadable`, nothing begun.
 2. **Matching Runs.** Every Run whose generation 1 — added anywhere in HEAD's history (read as in §18.7: `git log --full-history --no-renames --diff-merges=combined --diff-filter=A --name-only -z HEAD -- .workline/review/gates/`, each generation-1 blob parsed by the P1 reader) or present in the working tree (`ReviewStore.run_ids()`, `read_gate(run, 1)`) — carries this invocation's `review_kind` and `operation_identity`. No other Run is read further.
@@ -919,7 +987,7 @@ A failure is row e: missing or mismatching accepted material is never answered w
 
 **Frozen.**
 
-- **Invocation.** The review-v1 invocation of §5.2 plus exactly one key: `"recovery_of_review_run_id": <the recovered Run ID>`. It is begun through the live `_open` with that invocation, so it has its own new mutation ID; it never takes the lost mutation's ID and never claims that mutation's records. §5.3 accepts it; §18.5 treats it as a planning mutation.
+- **Invocation.** The review-v1 invocation of §5.2 plus exactly one key: `"recovery_of_review_run_id": <the recovered Run ID>`. It is begun through the live `_open` with that invocation, after the canonical-input preflight passed on the recovering caller's request identity (§5.6), so it has its own new mutation ID; it never takes the lost mutation's ID and never claims that mutation's records. §5.3 accepts it; §18.5 treats it as a planning mutation.
 - **Binding.** Right after `_open` returns — `_open` records only the live pre-existing-dirty snapshot note — and before any reservation, any other note and any effect, §12.2 steps 3–4 are evaluated again for its Run under the lock (the Run must still be the one recoverable Run), and the recovered reservations are bound (§12.5) in one durable save. A resumed recovery planning mutation checks again that its bound reservations are exactly the canonical ones.
 - **Remaining setup.** The reservations the Run still needs (§12.6), with the entity scope extended by the bound domain IDs and the file scope by the Consumption path, as §14.4 steps 1 and 4 extend them; then §14.4 steps 5–6: `gate.require_committable`, the Git persistence preflight with the checkout capability, dirty overlap on the registration paths + Run record paths + Consumption path, the publication barrier on HEAD with a push destination, and the note `review_binding` = the current branch and HEAD, which holds every committed record of the Run (§12.3). The Candidate, Context and Policy are never rebuilt for storage: the Run's committed records are them.
 - **Continuation.** By the Run's chain (§11.8 step 4): latest 1 → the reviewer launch of the same task (§10.3), then generation mutation 2; latest 2 → currency, then generation mutation 3; latest 3 → the use check (§17), then the registration, or the invalidation when stale (§13.3). The registration writes from W computed from the Run's committed Candidate snapshot (§7.8) — the W an uninterrupted run would have used; the recovering invocation's caller objects serve only its entry checks and its identity.
@@ -1098,7 +1166,7 @@ These are exactly the paths the registration stages write (`ops.owned_canonical_
 7  start generation mutation 1
 ```
 
-Before generation mutation 1 has started, steps 1–6 are refusals: a STOP anywhere in them abandons the planning mutation (§12), and a resume runs them again deterministically (every reservation returns the recorded ID; the note, once recorded, is kept). Once generation mutation 1 has started, a resume never runs steps 5–6 again and never abandons: steps 1–3 are recomputed only as the currency evaluation of §13, and the recorded `review_binding` is checked, never re-recorded. The checkout capability and the transform attributes are evaluated again before every Review-writing and every Git stage (§14.3).
+Everything in this order runs after `_open`; a refusal of the canonical-input preflight comes before `_open` and begins nothing, so there is nothing to abandon (§5.6). Before generation mutation 1 has started, steps 1–6 are refusals: a STOP anywhere in them abandons the planning mutation (§12), and a resume runs them again deterministically (every reservation returns the recorded ID; the note, once recorded, is kept). Once generation mutation 1 has started, a resume never runs steps 5–6 again and never abandons: steps 1–3 are recomputed only as the currency evaluation of §13, and the recorded `review_binding` is checked, never re-recorded. The checkout capability and the transform attributes are evaluated again before every Review-writing and every Git stage (§14.3).
 
 A recovery planning mutation (§12.4) never runs steps 2, 3 and 7 and never reserves a canonical ID anew. In place of steps 1 and 4 it binds the canonical reservations (§12.5), reserves only the IDs that never became canonical (§12.6), and extends the entity and file scope as steps 1 and 4 do; then it runs steps 5–6 for the recovered Run and continues the Run by its chain.
 
@@ -1139,7 +1207,7 @@ Legacy invocations evaluate nothing here and write no Review record.
 
 ### 14.6 Existing Review namespace
 
-**Frozen.** At recovery discovery (§12.2 step 1) and again at the freeze, before any Review record, every record already in the Review namespace must read through `ReviewStore` in the working tree: the namespace shape rule of `validate_review` (only the known subdirectories, each a plain directory); `run_ids()` and `gate_chain(id)` for each Run; `receipt_ids()` and `read_receipt`; `consumption_ids()` and `read_consumption`; `superseded_receipt_ids()` and `read_supersession`; `candidate_snapshot_hashes()` and `read_candidate_snapshot`; `task_input_ids()` and `read_task_input`; `read_activation()`. Any failure — a CRLF record checked out before the rule existed (`review_record_noncanonical`), an unknown entry, a malformed record — → `StopError` code `review_namespace_unreadable` with the P1 error chained; the planning mutation is abandoned and nothing is written.
+**Frozen.** At recovery discovery (§12.2 step 1) and again at the freeze, before any Review record, every record already in the Review namespace must read through `ReviewStore` in the working tree: the namespace shape rule of `validate_review` (only the known subdirectories, each a plain directory); `run_ids()` and `gate_chain(id)` for each Run; `receipt_ids()` and `read_receipt`; `consumption_ids()` and `read_consumption`; `superseded_receipt_ids()` and `read_supersession`; `candidate_snapshot_hashes()` and `read_candidate_snapshot`; `task_input_ids()` and `read_task_input`; `read_activation()`. Any failure — a CRLF record checked out before the rule existed (`review_record_noncanonical`), an unknown entry, a malformed record — → `StopError` code `review_namespace_unreadable` with the P1 error chained, and nothing is written: at recovery discovery no planning mutation exists yet, so nothing is begun; at the freeze the planning mutation is abandoned (§12).
 
 This is the unchanged P1 strict reader applied to every existing record before P2 adds one, so P2 adds Review state only to a namespace whose every physical record is canonical. Cross-record findings that `validate_review` also reports — a half-written stage left by a lost runtime (§11.11) — are not refused here. P2 reads other Runs' records in three places only: recovery discovery, which reads the Runs matching the invocation and stops on an incomplete one (§12.2, §12.3); the uniqueness indexes (§16.3), which fail closed on their own; and the publication barrier, which reads registered Runs from committed objects (§18.7). Refusing the findings of any other Run would let one lost runtime disable review-v1 planning for the Project for good.
 
@@ -1858,6 +1926,7 @@ A new Run never makes an unproven registration commit publishable: the barrier r
 | O7 | several recoverable matching Runs | `ReconcileRequired` (`review_recovery_ambiguous`), nothing begun; no Run is chosen by age, ID order or position |
 | O8 | a legacy invocation of the same request after runtime loss | the live path, unchanged: discovery never runs for a legacy invocation |
 | O9 | a Kp — the planning mutation's own or anyone's — whose bytes are not the expected physical projection although its meaning is the reviewed one | the planning mutation's own: C-2(Kp) P3 fails, `ReconcileRequired`, no Consumption (§15.5); anyone's: never adopted; for every history holding it the barrier holds (CP5), before and after runtime loss and in a fresh clone |
+| O10 | a review-v1 caller value the canonical form cannot carry (a float, a tuple, a non-text or empty mapping key, a sequence inside a sequence, a lone surrogate) | `review_candidate_unrepresentable` from the canonical-input preflight before `_open`: no planning mutation, reservation, Review record, domain effect or runtime file; a pending planning mutation of the slot untouched; before recovery discovery, so a recoverable Run stays as it is (§5.6) |
 
 Variants at any row: a different request or design → `reconcile_required` (live); a legacy invocation against a review-v1 record, or the reverse → `reconcile_required` (§5.3); a pending generation mutation bound to another planning mutation → reconcile (§11.8); structure changed by an independent operation while pending → the live projected refusal (`postcheck_failed`) before replay; the parent Roadmap held while a Phase entry is pending → the live Phase-entry precheck STOP, continued after resume; that hold committed after the use check → the pre-Kp currency proof decides (a declared-base difference is `ReconcileRequired`, §13.4).
 
@@ -1930,7 +1999,7 @@ Every seam is closed.
 | R9 §2–§11 (as repaired) | §7.3, §7.7, §15.3 P9, §16, §20 |
 | R9 §4, §11 `entry` is no persisted plan meaning | `entry` is not part of W; the Candidate's `canonical_first_work` stands for its meaning (§7.7, §7.8) |
 | R8 §9, R9 §10 recovery reuses reservations and recorded registration effects | a recorded stage is carried forward from its record; a stage not yet recorded is written from W with the Candidate's reserved IDs, after runtime loss exactly as before it (§7.8, §12.4) |
-| P1 canonical serialization (`review/serialize.py`: mapping keys in ascending code point order at every depth, sequences in their order; `parse_canonical` reads only that rendering) | the Candidate records a caller's mapping in that form, and W hands the writer the same form — from `canonical_data` before the snapshot is written, from the strict reader afterwards: the same data in the same order (§7.3, §7.8) |
+| P1 canonical serialization (`review/serialize.py`: mapping keys in ascending code point order at every depth, sequences in their order; `parse_canonical` reads only that rendering) | the Candidate records a caller's mapping in that form, and W hands the writer the same form — from `canonical_data` before the snapshot is written, from the strict reader afterwards: the same data in the same order (§7.3, §7.8); the canonical-input preflight checks the request identity with the same functions before `_open` and adds no serializer of its own (§5.6) |
 | R11 git_state, completeness | the primitive identity is bound; Evidence completeness `unknown`, never reused |
 | R12 §2 "clone reproduces canonical bytes/digest" | §14.5; tests §28 J |
 | R12 §4 fresh clone / runtime deletion reconstructs the exact Candidate and request and reruns the same `task_id`; negative cases fail closed | §12; tests §28 L |
@@ -1951,6 +2020,7 @@ No frozen P1 document needs repair for this contract. P2-CONTRACT-004 in particu
 | --- | --- |
 | `create_roadmap` | new keyword-only `review=None`; legacy unchanged; review-v1 returns `ReviewedPlanningResult` |
 | `enter_phase` | same |
+| a review-v1 caller value the canonical form cannot carry | `ValidationError(code="review_candidate_unrepresentable")` before `_open`: no planning mutation, reservation, Review record, domain effect or runtime file, and a pending planning mutation untouched (§5.6); a condition the live `validate_condition` refuses keeps its live `validation_failed` refusal, now before `_open`; legacy keeps its live outcome, serializer errors included (§29 item 7) |
 | caller `RoadmapPlan` / `PhaseEntryDesign` | unchanged types; on the review-v1 path they validate the invocation, build the Candidate and give the request identity, and after the freeze the writer receives W (§7.8); the legacy path passes them to the writer as today |
 | `RoadmapResult`, `PhaseEntryResult`, `OperationResult` | unchanged |
 | new result type | `ReviewedPlanningResult` (`workline.roadmap_review`) |
@@ -1998,6 +2068,7 @@ When the implementation lands, it changes canonical authority as follows. Under 
 - the terminal outcomes (§19), with stale before and after the seal (§13.2–§13.3);
 - the currency rules: the declared base on the committed view, the use check with `use_check_head`, the pre-Kp currency proof and the reconcile-only rule once the registration began (§13, §15.6, §17);
 - runtime-loss recovery: discovery, the recovery planning mutation, recovered reservations and new-Run eligibility (§12.1–§12.8);
+- the canonical-input preflight before `_open`, and the review-v1 entry order (§5.6);
 - the review-v1 writer hand-off: after the freeze the registration writes from W, computed from the canonical Candidate, never from the caller's plan or design (§7.8);
 - the display base check before each registration stage (§15.7, §17 item 9);
 - the operation binding (§11.5).
@@ -2031,9 +2102,9 @@ When the implementation lands, it changes canonical authority as follows. Under 
 | `src/workline/review/store.py` | v2 reading; registration-commit and target indexes | §16.3 | F |
 | `src/workline/review/validate.py` | v2 validation, planning binding, uniqueness indexes | §16.2–§16.3 | F, H |
 | `src/workline/review/paths.py` | runtime subpaths `proofs/`, `reports/`, `no-hooks/`, `attr-eval/` | §10.5, §14.5, §15.2, §15.4 | E, J |
-| `src/workline/roadmap_review.py` (new, Roadmap-owned) | the review-v1 flow: recovery orchestration (discovery call before `_open`, the recovery planning mutation, its binding and continuation), freeze, generation mutations 1–4, reviewer call, currency on committed views, use check and `use_check_head`, registration hand-off, pre-Kp currency proof (and its `refuse_recorded` hook), Kp / Km, proofs, Consumption, publication, terminal outcomes; W (`CanonicalPlanningWriterInput`, §7.8), the one Candidate-to-writer-input function every consumer takes; both adapters, with the expected physical projection (`project_expected`, §15.7), its comparison and record check, and the display base check; `ReviewedPlanningResult` | §7, §11–§21 | A–N |
+| `src/workline/roadmap_review.py` (new, Roadmap-owned) | the review-v1 flow: the canonical-input preflight (§5.6), a pure function over the request identity that uses only `validate_condition` and the P1 serializer; recovery orchestration (discovery call before `_open`, the recovery planning mutation, its binding and continuation), freeze, generation mutations 1–4, reviewer call, currency on committed views, use check and `use_check_head`, registration hand-off, pre-Kp currency proof (and its `refuse_recorded` hook), Kp / Km, proofs, Consumption, publication, terminal outcomes; W (`CanonicalPlanningWriterInput`, §7.8), the one Candidate-to-writer-input function every consumer takes; both adapters, with the expected physical projection (`project_expected`, §15.7), its comparison and record check, and the display base check; `ReviewedPlanningResult` | §5.6, §7, §11–§21 | A–O |
 | `src/workline/committed_view.py` (new) | committed-result loader: materialization from raw blobs and `ProjectView.load`; delta reading; the materialized base of the expected physical projection | §15.3–§15.4, §15.7 | E, M |
-| `src/workline/roadmap.py` | `review=` keyword; marker check at the entry (§5.3); the registration of `_create_roadmap` / `_expand_phase` separated from the legacy `_finalize` without changing legacy behaviour; the Roadmap-file rendering of `_create_roadmap` and the stage-input derivation of `_create_roadmap` / `_expand_phase` extracted as pure functions the legacy path itself calls, with no behaviour change (§7.8, §20); review-v1 branch, whose registration takes W | §5, §7.8, §15.1, §15.7 | A, B, I, M, N |
+| `src/workline/roadmap.py` | `review=` keyword; on the review-v1 path, the canonical-input preflight called right after the request identity is computed and before the same-request check and `_open` (§5.6); marker check at the entry (§5.3); the registration of `_create_roadmap` / `_expand_phase` separated from the legacy `_finalize` without changing legacy behaviour; the Roadmap-file rendering of `_create_roadmap` and the stage-input derivation of `_create_roadmap` / `_expand_phase` extracted as pure functions the legacy path itself calls, with no behaviour change (§7.8, §20); review-v1 branch, whose registration takes W | §5, §7.8, §15.1, §15.7 | A, B, I, M, N, O |
 | `src/workline/phase_create.py` | the effect building of `decide_phases` extracted as a pure function that `decide_phases` calls, with identical output (§20) | §15.7, §20 | M |
 | `src/workline/gitcmd.py` | a bytes runner; `tree_entries`, `read_blob`, `commit_delta`, `check_attributes` (effective, and committed through the isolated evaluation directory), `added_paths`, `blob_at`; contained `add` / `commit` | §14.3, §14.5, §15.2–§15.4, §18.7 | E, G, J |
 | `src/workline/gitops.py` | `review_commit_effect`, `review_publication_effect`, attribute preflight helper; the publication barrier in `finalize` before a stage holding a push is recorded | §14.3, §15.2, §18.4, §18.7 | E, G |
@@ -2045,7 +2116,7 @@ Expected not to change: `state.py` (no helper is needed), `store.py`, `validate.
 
 ## 28. Test contract
 
-Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, through production code paths. A happy path alone is insufficient (Frozen P1 R12 §14). Section J and the round-1 items of B, D, E and G are the tests of the round-1 repairs; sections K and L are the tests of the round-2 repairs; section M is the test of the round-3 repair; section N is the test of the round-4 repair (§33).
+Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, through production code paths. A happy path alone is insufficient (Frozen P1 R12 §14). Section J and the round-1 items of B, D, E and G are the tests of the round-1 repairs; sections K and L are the tests of the round-2 repairs; section M is the test of the round-3 repair; section N is the test of the round-4 repair; section O is the test of the round-5 repair (§33).
 
 **A. Applicability**
 
@@ -2238,7 +2309,27 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 - **G — Legacy unchanged.** A legacy Phase entry with the pattern-first condition writes `pattern` before `kind`, byte for byte as at the baseline; no Candidate canonicalization touches the legacy path.
 - **H — Sequences stay ordered.** Reordering two Related entries, or two normal Works, gives a different Candidate (`candidate_hash`), a different W and different bytes: mappings are canonicalized, sequences are not.
 - **I — Record check.** Registration effects produced from W equal E. A fixture that records an effect built from the caller's pattern-first mapping instead is refused by pre-Kp item 6 (`review_registration_projection_mismatch`), and no Kp is made.
-- **J — Representability.** A condition holding a tuple, a float, a non-text key, an empty key or a sequence directly inside a sequence → `review_candidate_unrepresentable` at the freeze, nothing written; the same condition with a list, an integer or a nested mapping instead is accepted and kept.
+- **J — Representability.** A condition holding a tuple, a float, a non-text key, an empty key or a sequence directly inside a sequence → `review_candidate_unrepresentable` from the canonical-input preflight before `_open`, nothing begun (section O); the same condition with a list, an integer or a nested mapping instead is accepted and kept.
+
+**O. Canonical-input preflight (P2-CONTRACT-008, round 5)**
+
+For every refusal below, the test captures the mutation namespace (`.workline/runtime/mutations/`), the runtime temporary directory, the reservations, the Review namespace and the domain files before and after, and asserts them unchanged, entry for entry and byte for byte.
+
+- **A — Float.** A review-v1 Phase entry whose condition carries an extra float entry: `review_candidate_unrepresentable` before `_open`; no new mutation record, no reservation, no Review record, no domain file change.
+- **B — Tuple.** The same with a tuple value, which the canonical form would make a list: the same refusal and the same unchanged state.
+- **C — Non-text key.** An integer, boolean or tuple mapping key, at the top of the condition and inside a sequence item: the same refusal, never the `TypeError` of `json.dumps(..., sort_keys=True)`.
+- **D — Empty key.** An empty key directly in a condition mapping: the same refusal, because the P1 text cannot render it. An empty key inside a mapping that is a sequence item passes, because the P1 form carries it and reads it back (**Measured**, §31).
+- **E — Sequence inside a sequence.** The same refusal.
+- **F — Key order only.** Pattern-first and kind-first conditions both pass the preflight, and give the same Candidate, the same W, the same E and the same result.
+- **G — Valid nested mapping.** Two insertion orders at several depths both pass, with the same Candidate, W and E.
+- **H — Valid extra fields.** Extra scalar, list and nested-mapping entries the P1 form carries pass, and no entry is lost.
+- **I — Legacy unchanged.** The float, tuple, non-text-key, empty-key, nested-sequence and lone-surrogate conditions through the legacy API give exactly the baseline outcomes recorded in §29 item 7, including the pending mutation the tuple strands; the legacy path runs no preflight.
+- **J — No mutation created.** For every refusal of A–E, and for a lone surrogate in a condition or in a Work name, the mutation namespace and the runtime temporary directory are unchanged, entry for entry and byte for byte.
+- **K — Normal retry.** A pending valid review-v1 planning mutation and the same valid caller: the preflight passes, and the planning mutation resumes normally.
+- **L — Invalid caller against a pending mutation.** A pending valid review-v1 planning mutation and a new caller whose condition holds a float: the preflight refusal, with the pending mutation record untouched, byte for byte.
+- **M — Recovery.** A recoverable canonical Run after runtime loss (§12.7) and a valid equivalent caller, with a different key order: the preflight passes and the same Run is recovered. The same Run and an unrepresentable caller: the preflight refusal comes before discovery and before any recovery planning mutation, and the Run's records are untouched.
+- **Semantic condition validation.** A condition with an unsupported `kind` gets the live `validation_failed` refusal before `_open`, with nothing begun.
+- **No second serializer.** The preflight calls only `validate_condition` and the P1 `serialize` functions: a test that patches `serialize.canonical_data` sees the preflight change with it.
 
 ## 29. Incidental live findings outside P2
 
@@ -2248,10 +2339,17 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 4. The late `dirty_overlap` of legacy Roadmap creation and Phase entry (BL-041 residual (4)) remains in the legacy path; review-v1 refuses early (§14.2).
 5. A runtime lost inside a generation stage leaves a half-written stage that `validate_review` reports (Frozen P1 fail closed). P2 never repairs it and never hides it: a matching invocation stops with `ReconcileRequired` (§12.3), and a non-matching one is not refused because of it (§14.6).
 6. `ReviewStore.provenance_problems` compares the accepted descriptor, the task input and the snapshot, but not the task input's `request_digest` against its own envelope, nor the envelope's `candidate` against the snapshot's material. P2 checks both wherever it relies on a task (§10.3, §12.3, CP3). This is not a P1 repair and changes no P1 document.
+7. Live legacy outcomes for caller values the canonical form cannot carry, **Measured** (§31) on legacy Phase entry:
+   - a float, an empty mapping key or a sequence inside a sequence → `YamlishError` from `Mutation._save` inside `MutationController.begin`, nothing recorded;
+   - a non-text key → `TypeError` from `MutationController.open`'s `json.dumps(..., sort_keys=True)`, nothing recorded;
+   - a lone surrogate → `UnicodeEncodeError` from the UTF-8 write, no record, but a temporary file left in `.workline/runtime/tmp/` (`durable_write_text` removes it only after an `OSError`);
+   - a tuple → `begin` records the invocation, whose JSON normalization holds a list, and the next `_save` fails with `YamlishError` (`unsupported scalar type: tuple`). That leaves the Phase-entry mutation pending with no effect recorded: a `YamlishError` is not a `StopError`, so `abandon_on_stop` keeps it.
+
+   P2 changes none of this on the legacy path; the review-v1 path refuses all of them before `_open` (§5.6).
 
 ## 30. Quality gates applied to this document
 
-Searched, case-insensitively, after the round-4 repair, for `TBD`, `TODO`, `maybe`, `either`, `alternative`, `open`, `later`, `implementation decides`, `could`, `option`:
+Searched, case-insensitively, after the round-5 repair, for `TBD`, `TODO`, `maybe`, `either`, `alternative`, `open`, `later`, `implementation decides`, `could`, `option`:
 
 Outside this section:
 
@@ -2259,7 +2357,7 @@ Outside this section:
 - `later`: only inside the verbatim quotations of Frozen P1 R3 §8 in §13.3 and of Frozen P1 R2 §5 in §24;
 - `open`: only as the P1 gate status literal `` `open` `` (also inside `` `status: open` ``), the live function and method names `_open` / `MutationController.open`, and inside the task's own labels "Architecture reopen" / "not reopened". None marks an unresolved item.
 
-Also verified: no unresolved A/B choice (C-3 and C-4 name Direction A with reasons; §15.6 states why the equally strong invariant is chosen over bare equality with `use_check_head`; §18.2 chooses rule B for publication and states why rule A cannot serve); no implementation-defined identity (§6, §12.6); every mutation owner specified (§11.1, §12.4); Receipt / Consumption ordering specified (§17); commit / proof / push ordering specified (§15.1, §18); every recovery window specified (§21.1–§21.3); one projection mechanism for the pre-Kp proof, C-2(Kp) and the committed planning proof, and no second renderer (§15.7, §20); one writer-input function for every review-v1 byte producer (§7.8); no hidden HUMAN choice (§32); no P3 activation (§2, §22); no Review-as-lifecycle authority (§22, §34.1 item 10).
+Also verified: no unresolved A/B choice (C-3 and C-4 name Direction A with reasons; §15.6 states why the equally strong invariant is chosen over bare equality with `use_check_head`; §18.2 chooses rule B for publication and states why rule A cannot serve); no implementation-defined identity (§6, §12.6); every mutation owner specified (§11.1, §12.4); Receipt / Consumption ordering specified (§17); commit / proof / push ordering specified (§15.1, §18); every recovery window specified (§21.1–§21.3); one projection mechanism for the pre-Kp proof, C-2(Kp) and the committed planning proof, and no second renderer (§15.7, §20); one writer-input function for every review-v1 byte producer (§7.8); every caller-value representability refusal before `_open`, and none of them described as an abandonment (§5.6); no hidden HUMAN choice (§32); no P3 activation (§2, §22); no Review-as-lifecycle authority (§22, §34.1 item 10).
 
 Round-1 search for the superseded statements: no statement that another operation may publish Kp (§15.5, §17, §18.7 say the opposite); no statement that staleness ends without invalidation once a Receipt exists (§13.3, §19.2); no fixed three-generation sequence (the state machine of §11.6); no statement that the declared base is not re-evaluated after the use check (§13.4, §15.6, P12); no statement that a fresh clone does not matter (§14.5, §21.2 L17–L18, §29); and the checkpoint line "No push before proof: PASS" is replaced by the cross-operation lines of §32 (`C-2(Km)`, `Publication barrier`).
 
@@ -2288,7 +2386,15 @@ Round-4 search, over `plan`, `design`, `caller`, `WorkSpec`, `rebuilt`, `writer 
 - Writer input is rebuilt from the caller: no such statement. §15.1 step 1 feeds the registration from W, and §15.7 step 2 builds E from W's inputs.
 - `WorkSpec` values are rebuilt from the design after the freeze: no such statement. `WorkSpec`, `RelatedSpec`, `RelationSpec`, `PhaseSpec` and `PhaseRelationSpec` values reach the writer only through W and the one stage-input derivation both paths share (§7.8, §20).
 - The Candidate feeds E while the live writer takes the caller's object: no such statement. The registration and E take the same W (§7.8, §15.7), and the record check stays the defence against drift (§15.6).
-- A condition recorded in the caller's key order: no such statement. §7.3 records it as `serialize.canonical_data` gives it, and §7.6 refuses one the canonical form would change in anything but key order.
+- A condition recorded in the caller's key order: no such statement. §7.3 records it as `serialize.canonical_data` gives it, and the canonical-input preflight refuses before `_open` one the canonical form would change in anything but key order (§5.6).
+
+Round-5 search, over `before any Review record`, `before any domain effect`, `abandon`, `review_candidate_unrepresentable`, `tuple`, `float`, `non-text`, `empty key`, `nested sequence`, `_open`, `MutationController.begin` and `freeze`, for the ordering statements:
+
+- A caller value the canonical form cannot carry is refused only at the freeze: no such statement. §5.6 refuses it before `_open`, and §7.3, §7.6, §28 N-J and §28 O point there.
+- A refusal before `_open` is described as an abandonment: no such statement. §5.4 and §14.6 now say that a readability failure at recovery discovery begins nothing, and §5.6 and §14.4 say the same of the preflight; every remaining "abandoned" concerns a planning mutation that exists (the freeze, the recovery setup, §7.6, §12).
+- A lower-level serializer exception is a review-v1 outcome: no such statement. §5.6 names `TypeError`, `YamlishError` and `UnicodeEncodeError` only as what the live serialization would raise, and §29 item 7 as legacy outcomes.
+- The Mutation Controller catches serializer errors: no such statement. The boundary is before `_open` (§5.6, §27).
+- §7.6 moved or weakened: no such statement. It still runs after `_open` and the reservations, over the Candidate and W as built (§7.6, §5.6).
 
 ## 31. Evidence
 
@@ -2305,8 +2411,11 @@ Probes are plain scripts (no pytest), run outside the repository; those that use
 | add-detection probe (round 1) | which `git log` form lists exactly the commits that add a path — present in the commit, absent from every parent — across merges? | the default form misses a merge that itself adds a path; `--full-history --no-renames --diff-merges=combined --diff-filter=A --name-only` lists the side-branch commit adding a path and the adding merge, and lists an ordinary merge as adding nothing |
 | physical projection probe (round 3) | does the production reader give the same meaning to physically different registration bytes, and does the writer's whole-ledger re-render canonicalize a ledger? | the writer's own `durable_write_text` puts exactly the canonical UTF-8 / LF bytes on disk; a Work entity file with CRLF line ends, reordered frontmatter keys, no blank line after the frontmatter, an extra trailing blank line or a quoted `display` scalar is read by `ProjectStore.read_entity` with the same meta, name and section as the canonical bytes; a `roadmap.yaml` with CRLF line ends, reordered record keys or an extra top-level key is read by `read_relation_file` as the same records, and `render_relations` of those records plus one more gives the same bytes in every case |
 | writer-input probe (round 4) | does a Related condition's key insertion order reach the ledger bytes, and what does the Candidate's canonical form do with it? | `validate_condition` accepts `{"pattern": ..., "kind": ...}` and `{"kind": ..., "pattern": ...}`, and further keys with a nested mapping; the live writer (`_registration_effects`, `render_relations`) writes each condition in its insertion order at every depth, so the two ledgers differ while `read_relation_file` reads them as the same records; `serialize.canonical_data` and `parse_canonical` give both the same key order, ascending at every depth, and the same digest, and the writer fed that form writes identical bytes for both; `design_identity` keeps the caller's order and compares equal under Python equality, `json.dumps(sort_keys=True)` and `serialize.digest`; a tuple value: the live writer refuses it (`unsupported scalar type: tuple`) and the canonical form makes it a list; a float: both refuse |
+| canonical-input probe (round 5) | where does each unusual condition value fail — in the durable planning invocation or in the P1 canonical form — and what does legacy Phase entry leave behind? | Through `design_identity`, `json.dumps(..., sort_keys=True)`, `yamlish.dump` and the UTF-8 write: a float or NaN, an empty mapping key and a sequence inside a sequence fail `yamlish.dump` (`_save`); integer, boolean and tuple keys fail `json.dumps(..., sort_keys=True)`; a lone surrogate, in a condition or in a Work name, fails the UTF-8 write; a tuple value and an integer key inside a sequence item pass but are changed (a list, a text key). Through the P1 form the same values are refused — `canonical_data` refuses floats and non-text keys, `canonical_bytes` refuses empty keys, nested sequences and surrogates, and a tuple fails value equality — while nested mappings in any order, extra scalar / list / mapping entries, sequences of mappings and an empty key inside a sequence item pass both ways and read back. Legacy end to end: float, empty key, nested sequence → `YamlishError`, no record; integer key → `TypeError`, no record; lone surrogate → `UnicodeEncodeError`, no record, a temporary file left; tuple → `YamlishError`, a pending mutation with no effect left; a valid nested mapping with extra entries registers |
 
 Round 2 ran no new probe: what it relies on is Live code, cited where used (`mutation.py:391-395`, `gate.next_generation_scope`, `ReviewStore.provenance_problems`, and P1 `validate._candidate_snapshots` / `_task_inputs`, which treat an unreferenced snapshot or task input as a legal orphan), together with the round-1 add-detection probe for history reads.
+
+Round 5 ran one probe, the canonical-input probe; everything else it relies on is Live code, cited where used (`roadmap.create_roadmap`, `_enter_phase_locked`, `design_identity`, `_require_resumable`, `mutation.same_request`, `MutationController.open` / `begin`, `Mutation._save`, `abandon_on_stop`, `durable_write_text`, `validate.validate_condition`, `create.validate_related_specs`, `yamlish.dump`, `review/serialize.py`).
 
 Round 4 ran one probe, the writer-input probe; everything else it relies on is Live code, cited where used (`validate.validate_condition`, `create.RelatedSpec`, `create._registration_effects`, `store.Relation.to_record`, `yamlish.dump`, `review/serialize.py`, `roadmap.design_identity`, `roadmap._create_roadmap`, `_expand_phase`, and the invocation normalization of `mutation.py`).
 
@@ -2316,9 +2425,9 @@ Kept outside the repository with the reconnaissance evidence: `D:\AIproject\work
 
 ## 32. HUMAN, architecture, checkpoint
 
-HUMAN: **None.** HUMAN-1 is resolved (A). Every choice made here, the round-1 to round-4 repairs included, is an engineering choice bounded by live code and frozen text, and each has its reason stated in its section.
+HUMAN: **None.** HUMAN-1 is resolved (A). Every choice made here, the round-1 to round-5 repairs included, is an engineering choice bounded by live code and frozen text, and each has its reason stated in its section.
 
-Architecture: Candidate 7 **RETAIN**; architecture reopen **No**; architecture blocker **None**. C-2, C-3 and C-4 close, and P2-CONTRACT-001..007 are repaired, inside Candidate 7's responsibility split: Review stays a subordinate gate, the Roadmap operation stays the only top-level owner (recovery orchestration included; Review only reads and validates), Roadmap and CREATE stay the rendering authorities whose own builders the physical projection reuses and whose stage-input derivation W reuses, lifecycle stays event-derived, and the publication barrier is a publication rule over committed objects, not a Review gate on any operation.
+Architecture: Candidate 7 **RETAIN**; architecture reopen **No**; architecture blocker **None**. C-2, C-3 and C-4 close, and P2-CONTRACT-001..008 are repaired, inside Candidate 7's responsibility split: Review stays a subordinate gate, the Roadmap operation stays the only top-level owner (recovery orchestration included; Review only reads and validates), Roadmap and CREATE stay the rendering authorities whose own builders the physical projection reuses and whose stage-input derivation W reuses, lifecycle stays event-derived, and the publication barrier is a publication rule over committed objects, not a Review gate on any operation.
 
 ```text
 Contract baseline:              cdb152312006f6ac25533962d942ed77e2d98bd4
@@ -2326,6 +2435,7 @@ Round-1 contract under repair:  2f8771ae91df580453a0ebc026febe5c5a562cc0
 Round-2 contract under repair:  3a8b9cf0496b230ebcb773f5905d98f529b6b313
 Round-3 contract under repair:  459f431c9715c5db0c50691d63f42d90b0c70513
 Round-4 contract under repair:  bbdd93d38c48eddb86ce2200e27a4cc1f774a7bb
+Round-5 contract under repair:  bd2e70da24bdb44b51ad7f9f9ee795e1625050c4
 P1 accepted checkpoint:         b78be1ccd778ceb2ecd97b90e2f71744bd1b3bc5
 HUMAN-1:                        RESOLVED — A, per-invocation opt-in (review=PlanningReview)
 C-1 .. C-6:                     CLOSED BY P2 CONTRACT (C-6 rewritten in round 2)
@@ -2333,6 +2443,7 @@ P2-CONTRACT-001 .. 004:         CLOSED (round 1; 001 completed in round 2) (§33
 P2-CONTRACT-005:                CLOSED (round 2) (§33)
 P2-CONTRACT-006:                CLOSED (round 3) (§33)
 P2-CONTRACT-007:                CLOSED (round 4) (§33)
+P2-CONTRACT-008:                CLOSED (round 5) (§33)
 Generation contract:            Direction A — roadmap-owned generation mutations, R2/R3 unchanged;
                                 G1 accept -> G2 settle -> G3 seal [-> G4 invalidate + Supersession]
 Persisted-proof contract:       Direction A — Kp -> C-2(Kp) -> Consumption v2 -> Km -> C-2(Km) -> push Km
@@ -2342,6 +2453,8 @@ Physical projection:            Kp == E, the canonical writer's bytes on its exa
                                 separately required (§15.7)
 Writer input:                   W from the canonical Candidate only, for every review-v1 byte producer;
                                 no caller object reaches the writer after the freeze; legacy unchanged (§7.8)
+Canonical input:                review-v1 request identity checked before _open (live validate_condition,
+                                P1 serializer); a refusal begins nothing; full §7.6 still after _open (§5.6)
 C-2(Km):                        reproducible over committed objects (committed planning proof, §18.8);
                                 publication_proof is a runtime marker only
 Publication barrier:            clears only when the committed planning proof passes, for every Workline push (§18.7)
@@ -2350,7 +2463,7 @@ Runtime-loss recovery:          the same Run and task via canonical discovery; a
 Checkout capability:            committed + effective attributes, form L or form B (§14.5)
 Lifecycle separation:           PASS
 P1 frozen contract repair:      not required
-P2 Integration Contract:        FROZEN / ROUND 4 REPAIRED
+P2 Integration Contract:        FROZEN / ROUND 5 REPAIRED
 P2 implementation:              NOT STARTED
 P2 accepted for implementation: NO (pending independent contract re-review)
 Candidate 7:                    RETAIN
@@ -2486,6 +2599,35 @@ Preserved:
 
 No frozen P1 document was edited or needs repair: P2 conforms to R8 §3–§5, §9 and R9 §3–§6, §10 and to the P1 serializer as written (§24).
 
+### 33.5 Round 5 (on `bd2e70d`)
+
+The independent contract re-review of `bd2e70d` closed P2-CONTRACT-007 and raised one MID, P2-CONTRACT-008. It was checked against the live code (`roadmap.py`, `mutation.py`, `durable.py`, `validate.py`, `yamlish.py`, `create.py`, `review/serialize.py`) and measured by the canonical-input probe (§31), before being repaired. Only it is repaired; P2-CONTRACT-001 to -007 stay closed and unchanged.
+
+| finding | failure, confirmed against live code | repair | sections |
+| --- | --- | --- | --- |
+| P2-CONTRACT-008 — the representability refusal of caller values ran after `_open` | §7.6 promised `review_candidate_unrepresentable` before any Review record or domain effect for a condition the canonical form cannot hold, but §7.6 runs after `_open`, and `_open` makes the request identity durable first: `MutationController.open` / `begin` normalize it with `json.dumps(..., sort_keys=True)`, and `Mutation._save` renders it with `yamlish.dump` and writes it as UTF-8. So a float, an empty key, a nested sequence or a lone surrogate failed with a serializer error inside `begin` (a surrogate leaving a temporary file), and a non-text key with a `TypeError` in `MutationController.open`, before §7.6 was reached (**Measured**). The same-request comparison (`same_request`) read an unserializable caller as a different request | The canonical-input preflight (§5.6): a pure check of the request identity, before the same-request comparison, §5.3, recovery discovery and `_open`. It runs the live `validate_condition` (its refusal unchanged), then the P1 serializer alone: canonical data equal to the value apart from key order, canonical bytes, read back. A failure is `review_candidate_unrepresentable` with nothing begun. The review-v1 entry order is frozen; §7.6 keeps its full check after `_open`; a refusal before `_open` is no longer described as an abandonment | §5.6, §3, §4, §5.3, §5.4, §7.3, §7.6, §7.8, §11.8, §12.2, §12.4, §14.4, §14.6, §21.3, §24–§29 |
+
+Dependent changes, each required by it:
+- §5.3 (the preflight before the comparison), §7.3 and §7.6 (the caller-value refusal moved to §5.6; §7.6 keeps the whole Candidate record's representability), §7.8 (the caller object validates through the preflight);
+- the entry order in §11.8 step 1, §12.2's start and §12.4's invocation; §14.4's note that the freeze follows `_open`;
+- §5.4 and §14.6: a readability failure at recovery discovery begins nothing, and only a failure at the freeze or the recovery setup abandons;
+- §21.3 O10; the P1-serialization row of §24; §25's refusal row; the authority text, surface map and tests (§26–§28, with §28 N-J moved to the preflight);
+- §29 item 7 (the measured legacy outcomes, unchanged by P2); quality gates and evidence (§30, §31).
+
+No new code, record, field or schema: the preflight is a pure function over the request identity, using `validate_condition` and the P1 serializer, and the Mutation Controller is not changed for it.
+
+Preserved:
+- **001:** the publication barrier and C-2(Km) are unchanged.
+- **002:** generation 4 and the Supersession are unchanged.
+- **003:** full currency and the base rules are unchanged.
+- **004:** the checkout capability is unchanged; its readability check at recovery discovery now states that nothing is begun there.
+- **005:** same-Run and same-task recovery is unchanged; the recovering caller is preflighted before discovery, and the writer still takes W from the committed snapshot.
+- **006:** the exact physical projection is unchanged.
+- **007:** the canonical Candidate is still the only writer source, and key order is never a refusal: the preflight checks the caller's values against the same P1 canonical form W is built from.
+- Candidate 7 RETAIN; architecture reopen No; HUMAN-1 = A; legacy unchanged (it runs no preflight and keeps its live outcomes); Review is subordinate and never a lifecycle controller; the Roadmap operation owns the preflight and the entry order; P3 is not started; `state.py` reads no Review metadata; POSIX review-v1 still fails closed first (§5.4).
+
+No frozen P1 document was edited or needs repair.
+
 ## 34. Cross-finding consistency
 
 ### 34.1 Round-1 questions, answered for the final contract
@@ -2556,3 +2698,17 @@ Lifecycle: E is computed in a scratch materialization and read by nothing that d
 | 006 exact physical projection | strengthened, never weakened: E and the actual registration now have one input, so Kp == E is the expected outcome of every correct run, and the record check, P3 and CP5 still compare every byte |
 
 Lifecycle: W is writer input only and is read by nothing that decides lifecycle (§22 item 11). Review gains no authority: W belongs to the Roadmap-owned flow, and its derivation is the one `_create_roadmap` and `_expand_phase` already use (§7.8, §20).
+
+### 34.5 Round-5 check of P2-CONTRACT-008 against P2-CONTRACT-001 to -007
+
+| closed finding | what the canonical-input preflight changes there |
+| --- | --- |
+| 001 C-2(Km) and the barrier | nothing: the preflight runs before `_open` and touches no commit, proof or push |
+| 002 generation 4 and the Supersession | nothing |
+| 003 base and currency | nothing: currency, the use check and the pre-Kp proof run after `_open`, as before |
+| 004 checkout capability | nothing weakened: the checkout capability still runs at the freeze and the recovery setup; the wording of a readability failure at discovery is corrected to "nothing begun" |
+| 005 runtime-loss recovery | the recovering caller is preflighted before discovery, so an unrepresentable caller leaves a recoverable Run untouched; a representable one recovers the same Run and task, and the writer takes W from the committed snapshot |
+| 006 exact physical projection | nothing: E, the record check, P3 and CP5 are unchanged |
+| 007 canonical writer input | kept: the preflight judges the caller's values by the same P1 canonical form, key order is never a refusal, and W is still built from the canonical Candidate alone |
+
+Lifecycle: the preflight reads no Project state and decides no lifecycle. Review gains no authority: the preflight belongs to the Roadmap-owned entry, and the P1 serializer only defines the canonical representation it is measured against.
