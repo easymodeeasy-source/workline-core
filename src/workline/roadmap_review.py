@@ -244,10 +244,6 @@ def preflight_phase_entry_request(design: Any, identity: dict[str, Any]) -> None
 
 # --------------------------------------------------------------------------- the Candidate's content
 
-def _optional_text(value: Any) -> str | None:
-    return None if value in (None, "") else value
-
-
 def roadmap_candidate_content(request: dict[str, Any], reserved: dict[str, str]) -> dict[str, Any]:
     """The RoadmapPlan content, from the request identity and the reserved IDs (``skills/review``)."""
     roadmap_id = reserved["roadmap"]
@@ -258,8 +254,10 @@ def roadmap_candidate_content(request: dict[str, Any], reserved: dict[str, str])
             "name": request["name"],
             "background": request["background"],
             "desired_state": request["desired_state"],
-            "scope": _optional_text(request["scope"]),
-            "out_of_scope": _optional_text(request["out_of_scope"]),
+            # null for a caller's None or "", else the stripped text: the request identity records exactly that,
+            # so a blank caller value is "" and the writer keeps its empty section, as legacy does
+            "scope": request["scope"],
+            "out_of_scope": request["out_of_scope"],
         },
         "phases": [
             {"key": phase["key"], "id": phase_ids[phase["key"]], "name": phase["name"], "desired_state": phase["desired_state"]}
@@ -2006,7 +2004,7 @@ def _request_roadmap_stages(request: dict[str, Any]):
     return rm.RoadmapStages(
         request["name"],
         tuple(rm.roadmap_file_sections(request["background"], request["desired_state"],
-                                       _optional_text(request["scope"]), _optional_text(request["out_of_scope"]))),
+                                       request["scope"], request["out_of_scope"])),
         {phase["key"]: PhaseSpec(phase["name"], phase["desired_state"]) for phase in request["phases"]},
         tuple(PhaseRelationSpec(relation["type"], relation["from"], relation["to"]) for relation in request["relations"]),
     )

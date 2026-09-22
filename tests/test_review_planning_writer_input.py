@@ -14,6 +14,7 @@ from workline import roadmap as rm
 from workline.errors import ReconcileRequired, ValidationError
 from workline.review import planning, publication
 from workline.review.store import ReviewStore
+from workline.store import ProjectStore
 
 RELATED_YAML = ".workline/relations/related.yaml"
 CONDITIONAL = "conditional_must_read"
@@ -211,6 +212,34 @@ class RepresentabilityTests(PlanningTestCase):
         related = blob_at(store, registered(store, result).kp, RELATED_YAML).decode("utf-8")
         for kept in ("count: 2", "k: v", "- a", "- b"):
             self.assertIn(kept, related)
+
+
+class OptionalSectionTests(PlanningTestCase):
+    """§7.2 / §7.8: scope and out of scope are null for a caller's None or "", else the stripped text; a section
+    whose Candidate value is not null is written, so a blank caller value keeps legacy's empty section."""
+
+    CASES = (
+        # (scope, out_of_scope) -> the Candidate's (scope, out_of_scope)
+        (("   ", ""), ("", None)),
+        (("  範囲  ", "   "), ("範囲", "")),
+    )
+
+    def body(self, store, roadmap_id: str) -> str:
+        text = (store.root / ProjectStore.entity_rel_path("roadmap", roadmap_id)).read_text(encoding="utf-8")
+        return text.split("---", 2)[2]
+
+    def test_blank_empty_and_padded_values(self) -> None:
+        for index, ((scope, out_of_scope), expected) in enumerate(self.CASES):
+            with self.subTest(scope=scope, out_of_scope=out_of_scope):
+                the_plan = replace(plan(), scope=scope, out_of_scope=out_of_scope)
+                legacy = self.planning_project(f"legacy-{index}")
+                legacy_body = self.body(legacy, rm.create_roadmap(legacy, the_plan).roadmap_id)
+                store = self.planning_project(f"reviewed-{index}")
+                result = self.reviewed_roadmap(store, Reviewer(), the_plan)
+                self.assertEqual("registered", result.status)
+                roadmap = planning.candidate_content(registered(store, result).material)["roadmap"]
+                self.assertEqual(expected, (roadmap["scope"], roadmap["out_of_scope"]))
+                self.assertEqual(legacy_body, self.body(store, result.registration.roadmap_id))
 
 
 if __name__ == "__main__":
