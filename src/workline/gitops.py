@@ -18,7 +18,7 @@ from pathlib import Path
 from . import gitcmd
 from .destination import DEFAULT_REMOTE, PushDestination, ensure_push_destination
 from .errors import StopError
-from .mutation import Effect, Mutation, abandon_on_stop
+from .mutation import PLANNING_COMMIT_MODE, Effect, Mutation, abandon_on_stop
 from .store import RUNTIME_DIR, ProjectStore
 
 __all__ = [
@@ -37,6 +37,9 @@ __all__ = [
     "narrow_preexisting_dirty",
     "preexisting_dirty_snapshot",
     "record_preexisting_dirty",
+    "require_no_planning_transform",
+    "review_commit_effect",
+    "review_publication_effect",
 ]
 
 
@@ -174,13 +177,98 @@ def finalize_effects(
 def finalize(
     mutation: Mutation, stage: str, message: str, paths: list[str], *, destination: PushDestination | None
 ) -> None:
-    """Record and apply the Git stage of ``mutation`` (idempotent on resume)."""
+    """Record and apply the Git stage of ``mutation`` (idempotent on resume).
+
+    A stage that holds a push is recorded only while the publication barrier
+    is clear for HEAD, the parent of the commit it will make (``rules/git``
+    Push destination): otherwise it is not recorded, and the mutation stays
+    pending with its domain effects applied until the barrier clears.
+    """
     store = mutation.store
     if not mutation.has_stage(stage):
         preexisting = record_preexisting_dirty(mutation, store.root)
         ensure_separable(preexisting, paths)
+        if destination is not None:
+            from .review import publication
+
+            publication.require_barrier_clear(store.root, gitcmd.head_commit(store.root))
         mutation.add_effects(stage, finalize_effects(store, message, paths, destination=destination))
     mutation.apply()
+
+
+# --------------------------------------------------------------------------- review-v1 planning commits
+
+def review_commit_effect(
+    store: ProjectStore,
+    message: str,
+    paths: list[str],
+    *,
+    base_head: str | None = None,
+    branch: str | None = None,
+    base_exact: bool = False,
+) -> Effect:
+    """A review-v1 planning commit: the live ``git_commit`` effect, made by the planning commit primitive.
+
+    Generation commits and the metadata commit keep the live base rules: their
+    base and branch are HEAD's when they are recorded. The registration commit
+    is ``base_exact``: made only on its recorded parent ``base_head``, on the
+    bound ``branch``.
+    """
+    repo = store.root
+    effect = Effect.git_commit(
+        message,
+        sorted(set(paths)),
+        base_head if base_head is not None else gitcmd.head_commit(repo),
+        branch if branch is not None else gitcmd.current_branch_ref(repo),
+    )
+    effect.payload["mode"] = PLANNING_COMMIT_MODE
+    if base_exact:
+        effect.payload["base_exact"] = True
+    return effect
+
+
+def review_publication_effect(destination: PushDestination, branch: str, commit: str) -> Effect:
+    """The planning push: the live three keys and the exact commit it publishes."""
+    effect = Effect.git_push(destination.remote, branch, destination.locator)
+    effect.payload["commit"] = commit
+    return effect
+
+
+def require_no_planning_transform(repo: Path, paths: list[str]) -> None:
+    """Git persistence preflight, transform attributes: no filter, ident or re-encoding applies to ``paths``.
+
+    ``git check-attr filter ident working-tree-encoding`` must print
+    ``unspecified`` or ``unset`` for each, and the effective configuration must
+    define no filter driver named ``unset`` or ``unspecified``: a printed word
+    proves no state, and a literal ``filter=unset`` selects a driver so named.
+    Anything else is ``review_git_transform``.
+    """
+    printed = gitcmd.check_attributes(repo, paths, ("filter", "ident", "working-tree-encoding"))
+    if printed is None:
+        raise StopError(
+            "git check-attr cannot say whether a filter, ident or re-encoding applies to the planning paths: STOP",
+            code="review_git_transform",
+        )
+    transformed = sorted(
+        f"{path} {name}: {value}"
+        for path, values in printed.items()
+        for name, value in values.items()
+        if value not in ("unspecified", "unset")
+    )
+    if transformed:
+        raise StopError(
+            "a Git transformation applies to review-v1 planning paths (" + "; ".join(transformed) + "); the committed "
+            "blob could differ from the written bytes: STOP",
+            code="review_git_transform",
+        )
+    drivers = gitcmd.config_names_matching(repo, r"^filter\.(unset|unspecified)\.")
+    if drivers is None or drivers:
+        raise StopError(
+            "a filter driver named unset or unspecified is configured ("
+            + (", ".join(sorted(drivers)) if drivers else "Git cannot say")
+            + "), which a literal attribute value would select: STOP",
+            code="review_git_transform",
+        )
 
 
 def canonical_dirty_paths(store: ProjectStore) -> list[str]:

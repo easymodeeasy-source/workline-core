@@ -447,9 +447,184 @@ def _collapse_related_request(
     return tuple(adds), tuple(removals)
 
 
+# --------------------------------------------------------------------------- review-v1 markers (resume compatibility)
+
+#: The keys of each planning operation's live invocation (``_open`` adds ``operation``).
+_LIVE_INVOCATION_KEYS = {
+    "roadmap-create": frozenset({"operation", "name", "request"}),
+    "phase-entry": frozenset({"operation", "phase_id", "design"}),
+}
+_REVIEW_CONTRACT = "review-v1-planning-v1"
+_PUBLICATION_CONTRACT = "review-v1-planning-publication-v1"
+_MARKER_KEYS = ("review_contract", "publication_contract", "recovery_of_review_run_id")
+
+
+def planning_marker(invocation: dict[str, Any], operation: str) -> str:
+    """What a planning invocation's markers say: ``legacy``, ``review``, ``recovery`` or ``invalid``.
+
+    ``review`` is exactly the frozen pair beside the live invocation; ``recovery``
+    is that pair plus a well-formed ``recovery_of_review_run_id``. Any other
+    presence or value, or any other added key, is ``invalid``.
+    """
+    from .ids import is_valid_id
+
+    extra = set(invocation) - _LIVE_INVOCATION_KEYS[operation]
+    if not extra:
+        return "legacy"
+    pair = (
+        invocation.get("review_contract") == _REVIEW_CONTRACT
+        and invocation.get("publication_contract") == _PUBLICATION_CONTRACT
+    )
+    if pair and extra == {"review_contract", "publication_contract"}:
+        return "review"
+    recovered = invocation.get("recovery_of_review_run_id")
+    if pair and extra == set(_MARKER_KEYS) and isinstance(recovered, str) and is_valid_id(recovered, "review_run"):
+        return "recovery"
+    return "invalid"
+
+
+def require_marker_compatible(pending: list[dict[str, Any]], operation: str, *, review_v1: bool) -> None:
+    """``ReconcileRequired`` (``review_marker_mismatch``) unless every pending record of the slot fits this invocation.
+
+    Run right after the live same-request check and before ``_open``. A legacy
+    invocation is refused only by a pending record that carries a marker - which
+    no legacy run writes, so every legacy outcome is otherwise unchanged. A
+    review-v1 invocation continues only a record carrying the frozen marker pair,
+    with or without the recovery key. The record is left untouched: no silent
+    upgrade, no silent downgrade.
+    """
+    for record in pending:
+        invocation = record.get("invocation") or {}
+        found = planning_marker(invocation, operation)
+        if review_v1 and found in ("review", "recovery"):
+            continue
+        if not review_v1 and (found == "legacy" or not any(key in invocation for key in _MARKER_KEYS)):
+            continue
+        wanted = "a review-v1 planning invocation" if review_v1 else "a legacy invocation"
+        raise ReconcileRequired(
+            f"the unfinished {operation} mutation {record.get('mutation_id')} carries "
+            f"{'no review markers' if found == 'legacy' else 'review markers ' + str({k: invocation.get(k) for k in _MARKER_KEYS if k in invocation})}"
+            f", and this is {wanted}; it is neither upgraded nor downgraded and is left untouched: reconcile required",
+            reason="review_marker_mismatch",
+        )
+
+
+# --------------------------------------------------------------------------- registration stage inputs
+#
+# What ``_create_roadmap`` and ``_expand_phase`` derive from a plan or design -
+# the Roadmap file's sections, the specs, the generated integration and
+# confirmation relations, the confirmation target, the stage order - extracted
+# as pure functions the legacy path itself calls. On the review-v1 path the
+# same functions receive the plan or design value rebuilt from the canonical
+# Candidate (``workline.roadmap_review``), so the registration and its expected
+# physical projection are fed by one derivation.
+
+
+def roadmap_file_sections(
+    background: str, desired_state: str, scope: str | None, out_of_scope: str | None
+) -> list[tuple[str, str]]:
+    """The Roadmap body's sections in the writer's order; an optional section is present unless it is ``None``."""
+    sections = [(ROADMAP_BACKGROUND_HEADING, background), (ROADMAP_DESIRED_HEADING, desired_state)]
+    if scope is not None:
+        sections.append((ROADMAP_SCOPE_HEADING, scope))
+    if out_of_scope is not None:
+        sections.append((ROADMAP_OUT_OF_SCOPE_HEADING, out_of_scope))
+    return sections
+
+
+def roadmap_file_effect(roadmap_id: str, display: str, name: str, sections: list[tuple[str, str]]) -> Effect:
+    """The Roadmap file ``_create_roadmap`` writes: frontmatter and body by the canonical renderers."""
+    meta = {"id": roadmap_id, "display": display, "type": "roadmap"}
+    content = render_entity(meta, render_body(name, sections))
+    return Effect.write_file(ProjectStore.entity_rel_path("roadmap", roadmap_id), content)
+
+
+@dataclass(frozen=True)
+class RoadmapStages:
+    """The inputs the Roadmap creation's registration stages take: ``roadmap``, then ``phases``."""
+
+    name: str
+    sections: tuple[tuple[str, str], ...]
+    phases: dict[str, PhaseSpec]
+    relations: tuple[PhaseRelationSpec, ...]
+
+
+def roadmap_stages(plan: RoadmapPlan) -> RoadmapStages:
+    """What a Roadmap creation registers, derived from ``plan``: a section the caller left empty is absent."""
+    return RoadmapStages(
+        plan.name,
+        tuple(roadmap_file_sections(plan.background, plan.desired_state, plan.scope or None, plan.out_of_scope or None)),
+        plan.phases,
+        tuple(plan.relations),
+    )
+
+
+@dataclass(frozen=True)
+class PhaseEntryStages:
+    """The inputs the Phase entry's registration stages take: ``works``, ``integration``, ``confirmation``."""
+
+    normal_specs: dict[str, WorkSpec]
+    normal_relations: tuple[RelationSpec, ...]
+    integration_spec: WorkSpec
+    confirmation_spec: WorkSpec | None
+
+
+def phase_entry_stages(design: PhaseEntryDesign, phase_id: str, roadmap_id: str) -> PhaseEntryStages:
+    """What a Phase expansion registers, derived from ``design`` (``entry`` is not part of it)."""
+    normal_specs = {
+        key: WorkSpec(w.name, w.desired_state, phase_id=phase_id, roadmap_id=roadmap_id, related=tuple(w.related))
+        for key, w in design.works.items()
+    }
+    normal_relations = [RelationSpec("planned_next", a, b) for a, b in design.planned_next]
+    normal_relations += [RelationSpec("requires_completion", a, b) for a, b in design.requires_completion]
+    integration_spec = WorkSpec(
+        design.integration.name,
+        design.integration.desired_state,
+        phase_id=phase_id,
+        roadmap_id=roadmap_id,
+        work_kind="phase_integration_check",
+        related=tuple(design.integration.related),
+    )
+    # The confirmation's target is the integration registered before it.
+    confirmation_spec = None if design.human_confirmation is None else WorkSpec(
+        design.human_confirmation.name,
+        design.human_confirmation.desired_state,
+        phase_id=phase_id,
+        roadmap_id=roadmap_id,
+        work_kind="human_confirmation",
+        related=tuple(design.human_confirmation.related),
+    )
+    return PhaseEntryStages(normal_specs, tuple(normal_relations), integration_spec, confirmation_spec)
+
+
+def integration_relations(normal_work_ids: dict[str, str]) -> list[RelationSpec]:
+    """``requires_completion <normal Work> -> integration``, normal Works in declared order."""
+    return [RelationSpec("requires_completion", work_id, "integration") for work_id in normal_work_ids.values()]
+
+
+def confirmation_stage_spec(confirmation_spec: WorkSpec, integration_id: str) -> WorkSpec:
+    """The confirmation Work confirming the registered integration."""
+    return replace(confirmation_spec, confirmation_target=integration_id)
+
+
+def confirmation_relations(integration_id: str) -> list[RelationSpec]:
+    """``requires_completion <integration> -> confirmation``."""
+    return [RelationSpec("requires_completion", integration_id, "confirmation")]
+
+
 # --------------------------------------------------------------------------- new Roadmap
 
-def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
+def create_roadmap(store: ProjectStore, plan: RoadmapPlan, *, review: Any = None) -> RoadmapResult:
+    """Create a Roadmap with all of its Phases.
+
+    ``review=None`` is the legacy path, unchanged. ``review=PlanningReview(...)``
+    opts this one invocation into the review-v1 RoadmapPlan Review gate
+    (``skills/roadmap``) and returns a ``ReviewedPlanningResult``.
+    """
+    if review is not None:
+        from . import roadmap_review
+
+        roadmap_review.require_entry_gate(review)
     if not plan.name.strip() or not plan.background.strip() or not plan.desired_state.strip():
         raise ValidationError("Roadmap needs name, background and desired state")
     if not plan.phases:
@@ -457,11 +632,13 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
     with project_operation(store, "roadmap-create", {"name": plan.name}):
         _stop_on_structure(store, "precheck")
         request = roadmap_request_identity(plan)
-        require_same_request(
-            pending_for_slot(store, OWNER, {"operation": "roadmap-create", "name": plan.name}),
-            request,
-            f"Roadmap creation of {plan.name!r}",
-        )
+        if review is not None:
+            roadmap_review.preflight_roadmap_request(request)
+        pending = pending_for_slot(store, OWNER, {"operation": "roadmap-create", "name": plan.name})
+        require_same_request(pending, request, f"Roadmap creation of {plan.name!r}")
+        require_marker_compatible(pending, "roadmap-create", review_v1=review is not None)
+        if review is not None:
+            return roadmap_review.create_roadmap_reviewed(store, plan, request, review, pending)
         mutation, destination = _open(
             store, "roadmap-create", {"name": plan.name, "request": request}, refuse_recorded=refuse_invalid_phase_writes
         )
@@ -472,18 +649,36 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan) -> RoadmapResult:
 def _create_roadmap(
     store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, plan: RoadmapPlan
 ) -> RoadmapResult:
+    roadmap_id, phases = _register_roadmap(store, mutation, roadmap_stages(plan))
+    head = _finalize(
+        mutation, destination, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}"
+    )
+    return RoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed)
+
+
+def _register_roadmap(
+    store: ProjectStore,
+    mutation: Mutation,
+    stages: RoadmapStages,
+    *,
+    before_stage: Callable[[str], None] | None = None,
+):
+    """Register the Roadmap and its Phases in ``mutation``, from ``stages``; no Git.
+
+    ``before_stage`` is called right before a registration stage is recorded -
+    the review-v1 display base check. The legacy path passes none.
+    """
     roadmap_id = mutation.reserve_id("roadmap", "roadmap")
     mutation.extend_scope(entities=[roadmap_id])
 
     if not mutation.has_stage("roadmap"):
-        sections = [(ROADMAP_BACKGROUND_HEADING, plan.background), (ROADMAP_DESIRED_HEADING, plan.desired_state)]
-        if plan.scope:
-            sections.append((ROADMAP_SCOPE_HEADING, plan.scope))
-        if plan.out_of_scope:
-            sections.append((ROADMAP_OUT_OF_SCOPE_HEADING, plan.out_of_scope))
-        meta = {"id": roadmap_id, "display": f"R-{store.count_entities('roadmap') + 1:02d}", "type": "roadmap"}
-        content = render_entity(meta, render_body(plan.name, sections))
-        written = [Effect.write_file(ProjectStore.entity_rel_path("roadmap", roadmap_id), content)]
+        if before_stage is not None:
+            before_stage("roadmap")
+        written = [
+            roadmap_file_effect(
+                roadmap_id, f"R-{store.count_entities('roadmap') + 1:02d}", stages.name, list(stages.sections)
+            )
+        ]
         # The Roadmap is written before its Phases are registered, and once it is
         # recorded this mutation can no longer be abandoned. So the Phases are
         # decided and checked first - Phase CREATE's own precheck, relation
@@ -492,16 +687,15 @@ def _create_roadmap(
         # refused before the Roadmap is recorded. The Phase and relation IDs this
         # reserves are the ones the registration below then uses.
         projected = ProjectView.load(store).with_effects(written)
-        decided = decide_phases(mutation, "phases", roadmap_id, plan.phases, list(plan.relations), view=projected)
+        decided = decide_phases(mutation, "phases", roadmap_id, stages.phases, list(stages.relations), view=projected)
         refuse_invalid_phase_writes(mutation, decided.effects, projected)
         mutation.add_effects("roadmap", written)
     mutation.apply()
 
-    phases = register_phases(mutation, "phases", roadmap_id, plan.phases, list(plan.relations))
-    head = _finalize(
-        mutation, destination, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}"
-    )
-    return RoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed)
+    if before_stage is not None and not mutation.has_stage("phases"):
+        before_stage("phases")
+    phases = register_phases(mutation, "phases", roadmap_id, stages.phases, list(stages.relations))
+    return roadmap_id, phases
 
 
 # --------------------------------------------------------------------------- Phase addition
@@ -754,12 +948,24 @@ def _recorded_registration(mutation: Mutation, stage: str, keys: list[str]) -> R
     return RegistrationResult(work_ids, {}, tuple(paths))
 
 
-def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
+def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign, *, review: Any = None) -> PhaseEntryResult:
+    """Expand a Phase into its Works (Phase entry).
+
+    ``review=None`` is the legacy path, unchanged. ``review=PlanningReview(...)``
+    opts this one invocation into the review-v1 PhaseEntryDesign Review gate
+    (``skills/roadmap``) and returns a ``ReviewedPlanningResult``.
+    """
+    if review is not None:
+        from . import roadmap_review
+
+        roadmap_review.require_entry_gate(review)
     with project_operation(store, "phase-entry", {"phase_id": phase_id}):
-        return _enter_phase_locked(store, phase_id, design)
+        return _enter_phase_locked(store, phase_id, design, review)
 
 
-def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
+def _enter_phase_locked(
+    store: ProjectStore, phase_id: str, design: PhaseEntryDesign, review: Any = None
+) -> PhaseEntryResult:
     view = _stop_on_structure(store, "precheck")
     phase = view.phases.get(phase_id)
     if phase is None:
@@ -784,12 +990,17 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
         )
 
     identity = design_identity(design)
+    if review is not None:
+        from . import roadmap_review
+
+        roadmap_review.preflight_phase_entry_request(design, identity)
     interrupted = _pending_phase_entry(store, phase_id)
     if interrupted:
         # An expansion of this Phase is unfinished. It is continued only where
         # it is provably the same plan; otherwise it is left for reconciliation
         # rather than hidden behind the already-expanded refusal.
         _require_resumable(interrupted, phase_id, identity)
+        require_marker_compatible(interrupted, "phase-entry", review_v1=review is not None)
     if view.phase_works(phase_id):
         if not interrupted:
             # This Phase already holds its Works, so there is nothing for a design
@@ -816,6 +1027,10 @@ def _enter_phase_locked(store: ProjectStore, phase_id: str, design: PhaseEntryDe
         # reported afterwards rather than stranding a half-finished expansion.
         _require_unique_entry(view, design)
 
+    if review is not None:
+        return roadmap_review.enter_phase_reviewed(
+            store, phase_id, roadmap_id, phase, design, identity, review, interrupted
+        )
     mutation, destination = _open(
         store, "phase-entry", {"phase_id": phase_id, "design": identity}, [phase_id],
         refuse_recorded=refuse_invalid_work_writes,
@@ -947,77 +1162,9 @@ def _entry_the_plan_points_to(view: ProjectView, startable: list[Entity]) -> str
 
 
 def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, phase: Entity, phase_id: str, roadmap_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
-    normal_specs = {
-        key: WorkSpec(w.name, w.desired_state, phase_id=phase_id, roadmap_id=roadmap_id, related=tuple(w.related))
-        for key, w in design.works.items()
-    }
-    normal_relations = [RelationSpec("planned_next", a, b) for a, b in design.planned_next]
-    normal_relations += [RelationSpec("requires_completion", a, b) for a, b in design.requires_completion]
-    integration_spec = WorkSpec(
-        design.integration.name,
-        design.integration.desired_state,
-        phase_id=phase_id,
-        roadmap_id=roadmap_id,
-        work_kind="phase_integration_check",
-        related=tuple(design.integration.related),
+    normal, integration_id, confirmation_id, paths = _register_phase_expansion(
+        store, mutation, phase_entry_stages(design, phase_id, roadmap_id)
     )
-    # The confirmation's target is the integration registered below.
-    confirmation_spec = None if design.human_confirmation is None else WorkSpec(
-        design.human_confirmation.name,
-        design.human_confirmation.desired_state,
-        phase_id=phase_id,
-        roadmap_id=roadmap_id,
-        work_kind="human_confirmation",
-        related=tuple(design.human_confirmation.related),
-    )
-
-    # The expansion registers in stages, and the registration core refuses each
-    # stage before that stage writes - but by then an earlier stage may already
-    # be applied, in a mutation that can no longer be abandoned. So the payload
-    # the design decides for every stage not recorded yet - each Work's name,
-    # desired state and Related - is refused here by the core's own payload
-    # rules, before the first of those stages writes. Nothing else in a later
-    # stage can be refused once its payload passes: its relations and the
-    # confirmation's target are built by this expansion from the Works it has
-    # just registered, and adding unstarted Works to this Phase changes nothing
-    # those rules read.
-    view = ProjectView.load(store)
-    stages = [("works", normal_specs), ("integration", {"integration": integration_spec})]
-    if confirmation_spec is not None:
-        stages.append(("confirmation", {"confirmation": confirmation_spec}))
-    for stage, specs in stages:
-        if not mutation.has_stage(stage):
-            validate_work_specs(specs, view)
-
-    def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
-        if mutation.has_stage(stage):
-            return _recorded_registration(mutation, stage, list(specs))
-        return register_works(mutation, stage, specs, relations)
-
-    normal = registered("works", normal_specs, normal_relations)
-
-    integration = registered(
-        "integration",
-        {"integration": integration_spec},
-        [RelationSpec("requires_completion", work_id, "integration") for work_id in normal.work_ids.values()],
-    )
-    integration_id = integration.work_ids["integration"]
-
-    confirmation_id: str | None = None
-    paths = list(normal.paths) + list(integration.paths)
-    if confirmation_spec is not None:
-        confirmation = registered(
-            "confirmation",
-            {"confirmation": replace(confirmation_spec, confirmation_target=integration_id)},
-            [RelationSpec("requires_completion", integration_id, "confirmation")],
-        )
-        confirmation_id = confirmation.work_ids["confirmation"]
-        paths += list(confirmation.paths)
-
-    # Called for its refusal, not for its value: this is the last chance to
-    # STOP before :func:`_finalize` commits and pushes, so the structure this
-    # expansion produced is checked here rather than after it has landed.
-    _stop_on_structure(store, "phase structure check")
     head = _finalize(mutation, destination, f"chore(workline): expand phase {phase.display}", paths)
 
     after = ProjectView.load(store)
@@ -1035,6 +1182,75 @@ def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.P
     else:
         entry = _entry_the_plan_points_to(after, startable)
     return PhaseEntryResult(phase_id, normal.work_ids, integration_id, confirmation_id, entry, True, mutation.id, head)
+
+
+def _register_phase_expansion(
+    store: ProjectStore,
+    mutation: Mutation,
+    stages: PhaseEntryStages,
+    *,
+    before_stage: Callable[[str], None] | None = None,
+) -> tuple[RegistrationResult, str, str | None, list[str]]:
+    """Register a Phase expansion's three stages in ``mutation``, from ``stages``, and check its structure; no Git.
+
+    ``before_stage`` is called right before a registration stage is recorded -
+    the review-v1 display base check. The legacy path passes none.
+    """
+    normal_specs = stages.normal_specs
+    normal_relations = list(stages.normal_relations)
+    integration_spec = stages.integration_spec
+    confirmation_spec = stages.confirmation_spec
+
+    # The expansion registers in stages, and the registration core refuses each
+    # stage before that stage writes - but by then an earlier stage may already
+    # be applied, in a mutation that can no longer be abandoned. So the payload
+    # the design decides for every stage not recorded yet - each Work's name,
+    # desired state and Related - is refused here by the core's own payload
+    # rules, before the first of those stages writes. Nothing else in a later
+    # stage can be refused once its payload passes: its relations and the
+    # confirmation's target are built by this expansion from the Works it has
+    # just registered, and adding unstarted Works to this Phase changes nothing
+    # those rules read.
+    view = ProjectView.load(store)
+    stage_specs = [("works", normal_specs), ("integration", {"integration": integration_spec})]
+    if confirmation_spec is not None:
+        stage_specs.append(("confirmation", {"confirmation": confirmation_spec}))
+    for stage, specs in stage_specs:
+        if not mutation.has_stage(stage):
+            validate_work_specs(specs, view)
+
+    def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
+        if mutation.has_stage(stage):
+            return _recorded_registration(mutation, stage, list(specs))
+        if before_stage is not None:
+            before_stage(stage)
+        return register_works(mutation, stage, specs, relations)
+
+    normal = registered("works", normal_specs, normal_relations)
+
+    integration = registered(
+        "integration",
+        {"integration": integration_spec},
+        integration_relations(normal.work_ids),
+    )
+    integration_id = integration.work_ids["integration"]
+
+    confirmation_id: str | None = None
+    paths = list(normal.paths) + list(integration.paths)
+    if confirmation_spec is not None:
+        confirmation = registered(
+            "confirmation",
+            {"confirmation": confirmation_stage_spec(confirmation_spec, integration_id)},
+            confirmation_relations(integration_id),
+        )
+        confirmation_id = confirmation.work_ids["confirmation"]
+        paths += list(confirmation.paths)
+
+    # Called for its refusal, not for its value: this is the last chance to
+    # STOP before :func:`_finalize` commits and pushes, so the structure this
+    # expansion produced is checked here rather than after it has landed.
+    _stop_on_structure(store, "phase structure check")
+    return normal, integration_id, confirmation_id, paths
 
 
 # --------------------------------------------------------------------------- lifecycle

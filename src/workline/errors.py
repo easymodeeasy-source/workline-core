@@ -36,10 +36,16 @@ class StopError(WorklineError):
 
 
 class ReconcileRequired(StopError):
-    """Recovery state cannot be resolved automatically (``reconcile required``)."""
+    """Recovery state cannot be resolved automatically (``reconcile required``).
 
-    def __init__(self, message: str) -> None:
+    ``code`` is always ``reconcile_required``. ``reason`` says which of the
+    review-v1 planning reasons (``skills/roadmap``, ``skills/review``) stopped
+    the operation; every other construction leaves it ``None``.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
         super().__init__(message, code="reconcile_required")
+        self.reason = reason
 
 
 class ValidationError(StopError):

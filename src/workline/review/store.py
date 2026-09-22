@@ -46,6 +46,7 @@ from .records import (
     CandidateSnapshot,
     Consumption,
     GateGeneration,
+    PlanningConsumption,
     Receipt,
     Supersession,
     TaskInput,
@@ -426,9 +427,10 @@ class ReviewStore:
         return self._ids_in(paths.RECEIPTS_DIR, "review_receipt")
 
     # consumptions -----------------------------------------------------------
-    def read_consumption(self, consumption_id: str) -> Consumption:
+    def read_consumption(self, consumption_id: str) -> "Consumption | PlanningConsumption":
+        """One stored Consumption: version 1 through the P1 reader, a Planning Consumption through version 2's."""
         relative = paths.consumption_rel(consumption_id)
-        found, _ = self._read_record(relative, f"Review consumption {relative}", Consumption.from_record)
+        found, _ = self._read_record(relative, f"Review consumption {relative}", records.consumption_from_record)
         if found.consumption_id != consumption_id:
             raise ValidationError(
                 f"Review consumption {relative} declares consumption {found.consumption_id}, not the one its "
@@ -440,10 +442,47 @@ class ReviewStore:
     def consumption_ids(self) -> tuple[str, ...]:
         return self._ids_in(paths.CONSUMPTIONS_DIR, "review_consumption")
 
-    def consumptions(self) -> tuple[Consumption, ...]:
+    def consumptions(self) -> "tuple[Consumption | PlanningConsumption, ...]":
         return tuple(self.read_consumption(found) for found in self.consumption_ids())
 
-    def consumption_by_receipt(self) -> dict[str, Consumption]:
+    def planning_consumption_by_commit(self) -> dict[str, PlanningConsumption]:
+        """``registration_commit -> Planning Consumption``, refusing a second one for one registration commit.
+
+        ``R4`` §7: planning uniqueness is Receipt-based plus the kind-specific
+        persisted-result binding. Building the index is the check.
+        """
+        index: dict[str, PlanningConsumption] = {}
+        for found in self.consumptions():
+            if not isinstance(found, PlanningConsumption):
+                continue
+            existing = index.get(found.registration_commit)
+            if existing is not None:
+                raise ValidationError(
+                    f"registration commit {found.registration_commit} has two Planning Consumptions "
+                    f"({existing.consumption_id} and {found.consumption_id})",
+                    code="review_consumption_conflict",
+                )
+            index[found.registration_commit] = found
+        return index
+
+    def planning_consumption_by_target(self) -> dict[tuple[str, str], PlanningConsumption]:
+        """``(review_kind, target_identity) -> Planning Consumption``, refusing a second one for one target."""
+        index: dict[tuple[str, str], PlanningConsumption] = {}
+        for found in self.consumptions():
+            if not isinstance(found, PlanningConsumption):
+                continue
+            key = (found.review_kind, found.target_identity)
+            existing = index.get(key)
+            if existing is not None:
+                raise ValidationError(
+                    f"{found.review_kind} target {found.target_identity} has two Planning Consumptions "
+                    f"({existing.consumption_id} and {found.consumption_id})",
+                    code="review_consumption_conflict",
+                )
+            index[key] = found
+        return index
+
+    def consumption_by_receipt(self) -> "dict[str, Consumption | PlanningConsumption]":
         """``receipt_id -> Consumption``, refusing a second Consumption of one Receipt.
 
         The common invariant of ``R4`` §1: one authorization is used at most
@@ -451,7 +490,7 @@ class ReviewStore:
         Receipt cannot both be in a mapping, so the conflict is raised here
         rather than being left for a caller to notice.
         """
-        index: dict[str, Consumption] = {}
+        index: dict[str, Consumption | PlanningConsumption] = {}
         for found in self.consumptions():
             existing = index.get(found.receipt_id)
             if existing is not None:
@@ -463,13 +502,13 @@ class ReviewStore:
             index[found.receipt_id] = found
         return index
 
-    def consumption_by_terminal_event(self) -> dict[str, Consumption]:
+    def consumption_by_terminal_event(self) -> "dict[str, Consumption | PlanningConsumption]":
         """``terminal_event_id -> Consumption``, refusing two Consumptions of one event.
 
         Planning and Policy Consumptions name no terminal event and are absent
         from this index by design; they are unique by Receipt alone (``R4`` §7).
         """
-        index: dict[str, Consumption] = {}
+        index: dict[str, Consumption | PlanningConsumption] = {}
         for found in self.consumptions():
             if found.terminal_event_id is None:
                 continue

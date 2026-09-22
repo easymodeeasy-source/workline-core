@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from ..errors import ValidationError
 from ..store import ProjectStore
 from . import paths
-from .records import Consumption, GateGeneration, Receipt
+from .records import Consumption, GateGeneration, PlanningConsumption, Receipt
 from .store import GateChain, ReviewStore
 
 
@@ -332,6 +332,11 @@ def _consumptions(
     try:
         by_receipt = review.consumption_by_receipt()
         review.consumption_by_terminal_event()
+        # Planning Consumptions (version 2) are unique by Receipt as every
+        # Consumption is, and by their kind-specific persisted-result binding:
+        # one per registration commit, one per (review_kind, target_identity).
+        review.planning_consumption_by_commit()
+        review.planning_consumption_by_target()
     except ValidationError as exc:
         return [_problem(exc)]
     superseded, _ = _superseded(chains, review)
@@ -357,7 +362,7 @@ def _consumptions(
     return problems
 
 
-def _receipt_consumption_binding(receipt: Receipt, consumption: Consumption) -> list[ReviewProblem]:
+def _receipt_consumption_binding(receipt: Receipt, consumption: "Consumption | PlanningConsumption") -> list[ReviewProblem]:
     problems: list[ReviewProblem] = []
     for name in RECEIPT_CONSUMPTION_BINDING:
         if getattr(receipt, name) != getattr(consumption, name):

@@ -436,3 +436,331 @@ def commits_touching(repo: Path, since: str, until: str, paths: list[str]) -> li
     if not result.ok:
         return None
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+# --------------------------------------------------------------------------- review-v1 planning: versions
+#
+# ``rules/git`` owns both thresholds. They are independent and never merged:
+# the first is what beginning or resuming an explicit review-v1 planning
+# invocation needs (``git check-attr --source`` of the checkout capability),
+# the second what the publication barrier's registered-Run discovery and the
+# committed planning proof need (``git log --diff-merges=combined``).
+
+#: The oldest Git that may begin or resume an explicit review-v1 planning invocation.
+P2_REVIEW_GIT_MIN = (2, 40, 0)
+#: The oldest Git that may classify a history holding planning Review material for publication.
+P2_PUBLICATION_GIT_MIN = (2, 31, 0)
+
+_VERSION_TEXT = re.compile(r"git version (\d+)\.(\d+)\.(\d+)(?!\d)")
+_VERSION_READ: list[tuple[int, int, int] | None] = []
+
+
+def parse_git_version(text: str) -> tuple[int, int, int] | None:
+    """The first three numeric components of ``git --version`` output; None when they are not there.
+
+    ``git version 2.54.0.windows.1`` is 2.54.0. A text that does not carry
+    three numeric components where Git prints them is an unknown version,
+    which meets no minimum.
+    """
+    if not isinstance(text, str):
+        return None
+    match = _VERSION_TEXT.match(text.strip())
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2)), int(match.group(3))
+
+
+def running_git_version() -> tuple[int, int, int] | None:
+    """The running Git's version, read once per process with ``git --version``; None when unknown."""
+    if not _VERSION_READ:
+        result = run_git(None, "--version", check=False)
+        _VERSION_READ.append(parse_git_version(result.stdout) if result.ok else None)
+    return _VERSION_READ[0]
+
+
+def version_meets(version: tuple[int, int, int] | None, minimum: tuple[int, int, int]) -> bool:
+    """Whether ``version`` is at or above ``minimum``; an unknown version meets none."""
+    return version is not None and tuple(version) >= tuple(minimum)
+
+
+def version_text(version: tuple[int, ...]) -> str:
+    return ".".join(str(part) for part in version)
+
+
+# --------------------------------------------------------------------------- review-v1 planning: raw committed objects
+#
+# Every read here is of Git objects as Git stores them: bytes, never text a
+# checkout, a filter or a line-end conversion produced. Nothing here evaluates
+# an attribute except :func:`check_attributes`, and nothing reads the working
+# tree.
+
+
+@dataclass(frozen=True)
+class GitBytes:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+
+def run_git_bytes(
+    repo: Path | None,
+    *args: str,
+    input: bytes | None = None,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> GitBytes:
+    """Run git and keep its output as bytes: nothing is decoded, replaced or translated."""
+    command = ["git"]
+    if repo is not None:
+        command += ["-C", str(repo)]
+    command += list(args)
+    feed = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, env=env, cwd=None if cwd is None else str(cwd), **feed
+        )
+    except FileNotFoundError as exc:
+        raise GitError("git executable not found") from exc
+    return GitBytes(completed.returncode, completed.stdout, completed.stderr)
+
+
+def full_commit_id(value: object) -> bool:
+    """Whether ``value`` names a commit by its full lowercase hexadecimal object ID (SHA-1 or SHA-256)."""
+    return isinstance(value, str) and _FULL_ID.fullmatch(value) is not None
+
+
+def zero_object_id(like: str) -> str:
+    """The all-zero object ID in the object format of ``like``: as many ``0`` as ``like`` has characters."""
+    return "0" * len(like)
+
+
+def _path_text(raw: bytes) -> str:
+    # Git writes a path's bytes as they are; surrogateescape keeps any byte that is not UTF-8 exactly.
+    return raw.decode("utf-8", "surrogateescape")
+
+
+@dataclass(frozen=True)
+class TreeEntry:
+    """One ``git ls-tree`` entry: the mode as Git prints it, the object type and ID, the full path."""
+
+    mode: str
+    type: str
+    oid: str
+    path: str
+
+
+def tree_entries(
+    repo: Path, commit: str, paths: "list[str] | tuple[str, ...]" = (), *, recursive: bool = True, trees: bool = False
+) -> list[TreeEntry] | None:
+    """The entries of ``commit``'s tree (``git ls-tree -z --full-tree``); None when undeterminable."""
+    args = ["ls-tree", "-z", "--full-tree"]
+    if recursive:
+        args.append("-r")
+    if trees:
+        args.append("-t")
+    args.append(commit)
+    if paths:
+        args += ["--", *paths]
+    result = run_git_bytes(repo, *args)
+    if not result.ok:
+        return None
+    entries: list[TreeEntry] = []
+    for item in result.stdout.split(b"\0"):
+        if not item:
+            continue
+        head, separator, path = item.partition(b"\t")
+        fields = head.split(b" ")
+        if not separator or len(fields) != 3 or not path:
+            return None
+        try:
+            mode, kind, oid = (field.decode("ascii") for field in fields)
+        except UnicodeDecodeError:
+            return None
+        entries.append(TreeEntry(mode, kind, oid, _path_text(path)))
+    return entries
+
+
+def read_blob(repo: Path, oid: str) -> bytes | None:
+    """The raw bytes of blob ``oid`` (``git cat-file blob``); None when it cannot be read."""
+    result = run_git_bytes(repo, "cat-file", "blob", oid)
+    return result.stdout if result.ok else None
+
+
+def blob_at(repo: Path, commit: str, path: str) -> bytes | None:
+    """The raw bytes ``commit`` holds at ``path`` (``git cat-file blob <commit>:<path>``); None when it holds none."""
+    result = run_git_bytes(repo, "cat-file", "blob", f"{commit}:{path}")
+    return result.stdout if result.ok else None
+
+
+def hash_blob(repo: Path, data: bytes) -> str | None:
+    """The object ID ``data`` has as a blob (``git hash-object --no-filters -t blob --stdin``); nothing is written."""
+    result = run_git_bytes(repo, "hash-object", "--no-filters", "-t", "blob", "--stdin", input=data)
+    if not result.ok:
+        return None
+    oid = result.stdout.decode("ascii", "replace").strip()
+    return oid if _FULL_ID.fullmatch(oid) else None
+
+
+@dataclass(frozen=True)
+class DeltaEntry:
+    """One entry of ``git diff-tree -r -z --no-renames --no-abbrev --raw``."""
+
+    old_mode: str
+    new_mode: str
+    old_blob: str
+    new_blob: str
+    status: str
+    path: str
+
+
+def commit_delta(repo: Path, parent: str, commit: str) -> list[DeltaEntry] | None:
+    """Every path ``commit`` changes against ``parent``, with modes, blobs and status; None when undeterminable."""
+    result = run_git_bytes(repo, "diff-tree", "-r", "-z", "--no-renames", "--no-abbrev", "--raw", parent, commit)
+    if not result.ok:
+        return None
+    items = result.stdout.split(b"\0")
+    entries: list[DeltaEntry] = []
+    index = 0
+    while index < len(items):
+        header = items[index]
+        index += 1
+        if not header:
+            continue
+        if not header.startswith(b":") or index >= len(items):
+            return None
+        fields = header[1:].split(b" ")
+        if len(fields) != 5:
+            return None
+        try:
+            old_mode, new_mode, old_blob, new_blob, status = (field.decode("ascii") for field in fields)
+        except UnicodeDecodeError:
+            return None
+        path = items[index]
+        index += 1
+        if not path:
+            return None
+        entries.append(DeltaEntry(old_mode, new_mode, old_blob, new_blob, status, _path_text(path)))
+    return entries
+
+
+def added_paths(repo: Path, commit: str, paths: "list[str] | tuple[str, ...]") -> list[tuple[str, list[str]]] | None:
+    """The commits in ``commit``'s history that add any of ``paths``, each with the paths it adds; None when undeterminable.
+
+    A commit adds a path when its tree holds the path and none of its parents'
+    trees does, every parent of a merge followed:
+    ``git log --full-history --no-renames --diff-merges=combined --diff-filter=A --name-only -z``.
+    This is the one spelling the add-history read has; no other is ever run.
+    """
+    result = run_git_bytes(
+        repo, "log", "--full-history", "--no-renames", "--diff-merges=combined", "--diff-filter=A", "--name-only",
+        "-z", "--format=%x01%H%x02", commit, "--", *paths,
+    )
+    if not result.ok:
+        return None
+    found: list[tuple[str, list[str]]] = []
+    for chunk in result.stdout.split(b"\x01"):
+        if not chunk:
+            continue
+        head, separator, rest = chunk.partition(b"\x02")
+        try:
+            listed = head.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        if not separator or not _FULL_ID.fullmatch(listed):
+            return None
+        names = [_path_text(name.lstrip(b"\n")) for name in rest.split(b"\0") if name.lstrip(b"\n")]
+        if names:
+            found.append((listed, names))
+    return found
+
+
+def history_touches(repo: Path, commit: str, directory: str) -> bool | None:
+    """Whether any commit in ``commit``'s history changed anything under ``directory``; None when Git cannot answer.
+
+    ``git rev-list --full-history -n 1 <commit> -- <directory>``: empty exactly
+    when no commit in the history changed anything there.
+    """
+    result = run_git(repo, "rev-list", "--full-history", "-n", "1", commit, "--", directory, check=False)
+    if not result.ok:
+        return None
+    return bool(result.stdout.strip())
+
+
+def check_attributes(
+    repo: Path | None,
+    paths: "list[str] | tuple[str, ...]",
+    attributes: "list[str] | tuple[str, ...]",
+    *,
+    before: "tuple[str, ...]" = (),
+    options: "tuple[str, ...]" = (),
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> dict[str, dict[str, str]] | None:
+    """What ``git check-attr`` prints for each path and attribute; None when Git cannot answer.
+
+    ``before`` are global options (``--git-dir``, ``-c``), ``options`` those of
+    ``check-attr`` itself (``--source``). Paths go on standard input, NUL
+    separated. The printed word is what is returned; it is never, by itself,
+    the state of the attribute.
+    """
+    if not paths:
+        return {}
+    feed = b"".join(path.encode("utf-8", "surrogateescape") + b"\0" for path in paths)
+    result = run_git_bytes(
+        repo, *before, "check-attr", *options, "--stdin", "-z", *attributes, input=feed, env=env, cwd=cwd
+    )
+    if not result.ok:
+        return None
+    items = result.stdout.split(b"\0")
+    if items and items[-1] == b"":
+        items = items[:-1]
+    if len(items) % 3 != 0:
+        return None
+    printed: dict[str, dict[str, str]] = {}
+    for index in range(0, len(items), 3):
+        path = _path_text(items[index])
+        try:
+            name, value = items[index + 1].decode("utf-8"), items[index + 2].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        printed.setdefault(path, {})[name] = value
+    for path in paths:
+        if set(printed.get(path, {})) != set(attributes):
+            return None
+    return printed
+
+
+def config_names_matching(repo: Path, pattern: str) -> list[str] | None:
+    """The effective configuration's variable names matching ``pattern``; None when Git cannot answer."""
+    result = run_git_bytes(repo, "config", "-z", "--name-only", "--get-regexp", pattern)
+    if result.returncode == 1:
+        return []  # no variable matches
+    if not result.ok:
+        return None
+    return [_path_text(name) for name in result.stdout.split(b"\0") if name]
+
+
+def contained_add(repo: Path, paths: list[str], hooks_path: str) -> None:
+    """``git add`` with no hook, no filesystem monitor: the planning commit primitive's staging."""
+    if not paths:
+        return
+    run_git(repo, "-c", f"core.hooksPath={hooks_path}", "-c", "core.fsmonitor=false", "add", "--", *paths)
+
+
+def contained_commit(repo: Path, message: str, paths: list[str], hooks_path: str) -> None:
+    """``git commit --only`` with no hook, no signing and no background maintenance (``review-v1-planning-local-v1``)."""
+    if not paths:
+        raise GitError("nothing to commit: empty path list")
+    run_git(
+        repo,
+        "-c", f"core.hooksPath={hooks_path}",
+        "-c", "commit.gpgSign=false",
+        "-c", "core.fsmonitor=false",
+        "-c", "gc.auto=0",
+        "-c", "maintenance.auto=false",
+        "commit", "--only", "--no-verify", "--no-gpg-sign", "-m", message, "--", *paths,
+    )

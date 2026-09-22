@@ -123,6 +123,27 @@ def decide_phases(
     relation_ids = {index: mutation.reserve_id(f"{stage}:rel:{index}", "relation") for index in range(len(relations))}
     mutation.extend_scope(entities=list(phase_ids.values()))
 
+    resolved = resolve_phase_relations(view, relations, phase_ids, relation_ids)
+
+    # Effects ---------------------------------------------------------------
+    effects: list[Effect] = []
+    if not mutation.has_stage(stage):
+        effects = phase_registration_effects(specs, phase_ids, resolved, roadmap_id, store.count_entities("phase"))
+    return DecidedPhases(phase_ids, relation_ids, tuple(resolved), tuple(effects))
+
+
+def resolve_phase_relations(
+    view: ProjectView,
+    relations: "Sequence[PhaseRelationSpec]",
+    phase_ids: dict[str, str],
+    relation_ids: dict[int, str],
+) -> list[Relation]:
+    """The Roadmap-decided Phase relations under the IDs reserved for them, or the payload refusal.
+
+    Pure: ``view`` is the Project the relations are decided against. A spec key
+    resolves to its reserved Phase ID, and any other endpoint is taken as the
+    Phase ID it is written as.
+    """
     resolved: list[Relation] = []
     for index, rel in enumerate(relations):
         if rel.type not in ROADMAP_RELATION_TYPES:
@@ -137,24 +158,35 @@ def decide_phases(
         if from_id == to_id:
             raise ValidationError(f"phase relation {index}: self relation")
         resolved.append(Relation(relation_ids[index], rel.type, from_id, to_id))
+    return resolved
 
-    # Effects ---------------------------------------------------------------
+
+def phase_registration_effects(
+    specs: dict[str, PhaseSpec],
+    phase_ids: dict[str, str],
+    resolved: "Sequence[Relation]",
+    roadmap_id: str,
+    base_number: int,
+) -> list[Effect]:
+    """The effects a Phase registration stage records, in the order it records them.
+
+    Pure: the Phase files - display numbers allocated after the ``base_number``
+    Phases already held, in declared order - and then the Phase relations.
+    """
     effects: list[Effect] = []
-    if not mutation.has_stage(stage):
-        base_number = store.count_entities("phase")
-        for offset, (key, spec) in enumerate(specs.items()):
-            phase_id = phase_ids[key]
-            meta: dict[str, Any] = {
-                "id": phase_id,
-                "display": f"P-{base_number + offset + 1:02d}",
-                "type": "phase",
-                "roadmap_id": roadmap_id,
-            }
-            body = render_body(spec.name, [(PHASE_DESIRED_HEADING, spec.desired_state)])
-            effects.append(Effect.write_file(ProjectStore.entity_rel_path("phase", phase_id), render_entity(meta, body)))
-        for relation in resolved:
-            effects.append(Effect.add_relation("roadmap", relation))
-    return DecidedPhases(phase_ids, relation_ids, tuple(resolved), tuple(effects))
+    for offset, (key, spec) in enumerate(specs.items()):
+        phase_id = phase_ids[key]
+        meta: dict[str, Any] = {
+            "id": phase_id,
+            "display": f"P-{base_number + offset + 1:02d}",
+            "type": "phase",
+            "roadmap_id": roadmap_id,
+        }
+        body = render_body(spec.name, [(PHASE_DESIRED_HEADING, spec.desired_state)])
+        effects.append(Effect.write_file(ProjectStore.entity_rel_path("phase", phase_id), render_entity(meta, body)))
+    for relation in resolved:
+        effects.append(Effect.add_relation("roadmap", relation))
+    return effects
 
 
 def register_phases(

@@ -525,10 +525,12 @@ class Mutation:
         outcomes: list[tuple[int, str]] = []
         effects = self.record.get("effects") or []
         for position, record in enumerate(effects):
-            classification = _classify_recorded(self.controller, effects, position)
+            classification = _classify_recorded(self.controller, effects, position, self.record)
             if classification == MISMATCH:
+                base_exact = record["kind"] == "git_commit" and record["payload"].get("base_exact") is True
                 raise ReconcileRequired(
-                    f"mutation {self.id} effect {record['seq']} ({record['kind']}) applied with unexpected result: reconcile required"
+                    f"mutation {self.id} effect {record['seq']} ({record['kind']}) applied with unexpected result: reconcile required",
+                    reason="review_registration_base_moved" if base_exact else None,
                 )
             identified = False
             if classification == UNAPPLIED:
@@ -627,7 +629,12 @@ class Mutation:
         self._save()
 
 
-def _classify_recorded(controller: "MutationController", effects: list[dict[str, Any]], position: int) -> str:
+def _classify_recorded(
+    controller: "MutationController",
+    effects: list[dict[str, Any]],
+    position: int,
+    mutation_record: dict[str, Any] | None = None,
+) -> str:
     """Classify the effect at ``position`` of a mutation's recorded ``effects``, as replaying that record classifies it.
 
     ``effects`` are in the order they were recorded - all of the record's, or
@@ -653,11 +660,14 @@ def _classify_recorded(controller: "MutationController", effects: list[dict[str,
 
     A push is classified by where the commit its own Git stage made stands at
     its destination, and only the record can name that commit
-    (:func:`_recorded_publication`).
+    (:func:`_recorded_publication`) - by the publication contract the durable
+    invocation of ``mutation_record`` selects.
     """
     record = effects[position]
     if record.get("kind") == "git_push":
-        return controller._classify_push(record["payload"], _recorded_publication(controller.store.root, effects, position))
+        return controller._classify_push(
+            record["payload"], _recorded_publication(controller.store.root, effects, position, mutation_record)
+        )
     classification = controller.classify(record)
     if classification != UNAPPLIED or record["kind"] != "add_relation" or record.get("applied") is not True:
         return classification
@@ -1078,6 +1088,27 @@ def _on_recorded_branch(repo: Path, payload: dict[str, Any]) -> bool:
     return isinstance(branch, str) and gitcmd.current_branch_ref(repo) == branch
 
 
+#: The planning commit primitive's durable mode (``rules/git``: review-v1 planning commits). A commit
+#: recorded with it is staged and made with no hook, no signing and no background maintenance.
+PLANNING_COMMIT_MODE = "review-v1-planning-local-v1"
+
+
+def _validate_planning_commit(payload: dict[str, Any]) -> None:
+    """``mode`` only as the planning primitive; ``base_exact`` only ``true``, with that mode, a full base and a branch."""
+    if "mode" in payload and payload["mode"] != PLANNING_COMMIT_MODE:
+        raise ValidationError(f"git_commit mode must be {PLANNING_COMMIT_MODE}")
+    if "base_exact" in payload and not (
+        payload["base_exact"] is True
+        and payload.get("mode") == PLANNING_COMMIT_MODE
+        and isinstance(payload.get("base_head"), str)
+        and _COMMIT_ID.fullmatch(payload["base_head"])
+        and isinstance(payload.get("branch"), str)
+    ):
+        raise ValidationError(
+            "git_commit base_exact is only true, with the planning commit mode, a full base_head and a branch"
+        )
+
+
 def _head_advanced_independently(repo: Path, payload: dict[str, Any], head: str) -> bool:
     """Whether a recorded commit that was never made can still be made now that HEAD has moved on.
 
@@ -1430,8 +1461,129 @@ class _Publication:
         return f"{self.commit}:{self.ref}"
 
 
-def _recorded_publication(repo: Path, effects: list[dict[str, Any]], position: int) -> "_Publication | str":
+@dataclass(frozen=True)
+class _Refused:
+    """A recorded push the publication contract its mutation's durable invocation selects refuses, with the reason."""
+
+    message: str
+    reason: str
+
+
+#: The durable invocation markers of a review-v1 planning mutation (``rules/git`` Push destination).
+_REVIEW_CONTRACT = "review-v1-planning-v1"
+_PLANNING_PUBLICATION_CONTRACT = "review-v1-planning-publication-v1"
+_PLANNING_OPERATIONS = ("roadmap-create", "phase-entry")
+_GENERATION_OPERATION = "review-generation"
+_STAGE_REGISTRATION_COMMIT = "review-registration-commit"
+_STAGE_CONSUMPTION = "review-consumption"
+
+
+def _publication_contract(invocation: object) -> str:
+    """Which publication rule a mutation's durable invocation selects: never its stages' shape or content.
+
+    ``current-combined`` (no marker, not a generation mutation - every legacy
+    mutation), ``planning`` (the frozen marker pair on a planning operation,
+    with or without the recovery key), ``generation`` (a generation mutation:
+    it publishes nothing), and ``invalid`` for any other presence, value or
+    combination - which fails closed, never falling back to current-combined.
+    """
+    if not isinstance(invocation, dict):
+        return "current-combined"
+    if invocation.get("operation") == _GENERATION_OPERATION:
+        return "generation"
+    if "review_contract" not in invocation and "publication_contract" not in invocation:
+        return "current-combined"
+    if (
+        invocation.get("review_contract") == _REVIEW_CONTRACT
+        and invocation.get("publication_contract") == _PLANNING_PUBLICATION_CONTRACT
+        and invocation.get("operation") in _PLANNING_OPERATIONS
+    ):
+        return "planning"
+    return "invalid"
+
+
+def _planning_publication(
+    repo: Path, effects: list[dict[str, Any]], position: int, mutation_record: dict[str, Any]
+) -> "_Publication | _Refused":
+    """The planning push validator: the exact metadata commit Km this planning mutation made and proved, or a refusal."""
+    push = effects[position]
+    stage = push.get("stage")
+    members = [index for index, effect in enumerate(effects) if effect.get("stage") == stage]
+    if members != [position]:
+        combined = members == [position - 1, position] and effects[position - 1].get("kind") == "git_commit"
+        return _Refused(
+            "a review-v1 planning mutation publishes by a push-only stage, and this push shares its stage"
+            + (" with a commit (a combined commit and push)" if combined else ""),
+            "review_publication_contract_invalid" if combined else "review_publication_invalid",
+        )
+    invalid = "review_publication_invalid"
+    if position != len(effects) - 1:
+        return _Refused("the planning push is not the last effect of the record", invalid)
+    payload = push.get("payload") if isinstance(push.get("payload"), dict) else {}
+    commit = payload.get("commit")
+    if not isinstance(commit, str) or _COMMIT_ID.fullmatch(commit) is None:
+        return _Refused("the planning push does not name a full commit ID", invalid)
+    notes = mutation_record.get("notes") if isinstance(mutation_record.get("notes"), dict) else {}
+    proof = notes.get("publication_proof")
+    if not isinstance(proof, dict) or proof.get("metadata_commit") != commit:
+        return _Refused("the planning push does not name the metadata commit its publication proof note names", invalid)
+    metadata = effects[position - 1] if position > 0 else {}
+    ref = f"refs/heads/{payload.get('branch')}"
+    if (
+        metadata.get("kind") != "git_commit"
+        or [index for index, effect in enumerate(effects) if effect.get("stage") == metadata.get("stage")] != [position - 1]
+        or type(metadata.get("seq")) is not int
+        or type(push.get("seq")) is not int
+        or metadata["seq"] + 1 != push["seq"]
+        or metadata.get("applied") is not True
+        or metadata.get(_MADE_COMMIT) != commit
+        or not isinstance(metadata.get("payload"), dict)
+        or metadata["payload"].get("branch") != ref
+    ):
+        return _Refused(
+            "the effect right before the planning push is not the one applied metadata commit of its own stage, made "
+            "by this mutation with the pushed ID, on the pushed branch",
+            invalid,
+        )
+    registrations = [
+        effect for effect in effects
+        if effect.get("stage") == _STAGE_REGISTRATION_COMMIT and effect.get("kind") == "git_commit"
+    ]
+    registration = registrations[0].get(_MADE_COMMIT) if len(registrations) == 1 else None
+    if (
+        len(registrations) != 1
+        or registrations[0].get("applied") is not True
+        or not isinstance(registration, str)
+        or proof.get("registration_commit") != registration
+    ):
+        return _Refused("the publication proof note does not name the registration commit this mutation made", invalid)
+    parents = gitcmd.commit_parents(repo, commit)
+    if parents is None or len(parents) != 1 or gitcmd.descends_from(repo, parents[0], registration) is not True:
+        return _Refused(f"Git does not show {commit} as one commit on top of the registration commit's history", invalid)
+    consumption = [
+        effect["payload"].get("path") for effect in effects
+        if effect.get("stage") == _STAGE_CONSUMPTION and effect.get("kind") == "create_file"
+    ]
+    changed = gitcmd.commit_changes(repo, commit)
+    if changed is None or len(consumption) != 1 or not set(changed) <= set(consumption):
+        return _Refused(f"Git does not show {commit} as a commit of the planning Consumption alone", invalid)
+    tip = gitcmd.branch_commit(repo, ref)
+    if tip is None or gitcmd.descends_from(repo, tip, commit) is not True:
+        return _Refused(f"{ref} does not hold {commit}", invalid)
+    return _Publication(commit, ref)
+
+
+def _recorded_publication(
+    repo: Path, effects: list[dict[str, Any]], position: int, mutation_record: dict[str, Any] | None = None
+) -> "_Publication | _Refused | str":
     """What the push recorded at ``position`` of ``effects`` publishes; why that cannot be shown, when it cannot.
+
+    The durable invocation of ``mutation_record`` selects the publication rule
+    (:func:`_publication_contract`): a review-v1 planning mutation publishes by
+    its own validator (:func:`_planning_publication`), a generation mutation
+    publishes nothing, and an unknown or partial marker fails closed. Every
+    other mutation - and a push classified without its record - follows the
+    current-combined rule below, unchanged.
 
     A Git stage is recorded as one commit and, with a remote, the push of it
     right after (:func:`workline.gitops.finalize_effects`). The push publishes
@@ -1458,6 +1610,16 @@ def _recorded_publication(repo: Path, effects: list[dict[str, Any]], position: i
       commit ``git commit --only`` makes of them - and that the recorded branch
       still holds it.
     """
+    contract = _publication_contract(None if mutation_record is None else mutation_record.get("invocation"))
+    if contract == "generation":
+        return _Refused("a review generation mutation publishes nothing", "review_publication_contract_invalid")
+    if contract == "invalid":
+        return _Refused(
+            "the mutation's durable invocation names no publication contract this build implements",
+            "review_publication_contract_invalid",
+        )
+    if contract == "planning":
+        return _planning_publication(repo, effects, position, mutation_record or {})
     push = effects[position]
     stage = push.get("stage")
     commit = effects[position - 1] if position > 0 else {}
@@ -1554,7 +1716,13 @@ def _publish(mutation: Mutation, effects: list[dict[str, Any]], position: int, r
     and handed to :meth:`MutationController.apply_effect` for this one call, which
     pushes that commit alone to its branch - whatever the branch holds by then.
     """
-    publication = _recorded_publication(mutation.store.root, effects, position)
+    publication = _recorded_publication(mutation.store.root, effects, position, mutation.record)
+    if isinstance(publication, _Refused):
+        raise ReconcileRequired(
+            f"mutation {mutation.id} effect {record['seq']} (git_push) is refused: {publication.message}; nothing is "
+            "pushed: reconcile required",
+            reason=publication.reason,
+        )
     if isinstance(publication, str):
         raise ReconcileRequired(
             f"mutation {mutation.id} effect {record['seq']} (git_push) cannot show which commit it publishes: "
@@ -1566,6 +1734,141 @@ def _publish(mutation: Mutation, effects: list[dict[str, Any]], position: int, r
         controller.apply_effect(record)
     finally:
         controller._publishing = None
+
+
+def planned_write(store: ProjectStore, record: dict[str, Any]) -> tuple[Path, str] | None:
+    """The file ``record`` writes in ``store`` and the exact text it puts there; ``None`` for one that writes no file.
+
+    The writer's own planned-write computation, and the only one: the Mutation
+    Controller applies exactly this (:meth:`MutationController._planned_write`),
+    and the expected physical projection of a review-v1 planning registration
+    computes a registration's bytes with it on a materialized base. A
+    ``write_file`` puts its content; a relation effect re-renders the whole
+    ledger from what the file holds; an event is appended to the log.
+    """
+    kind = record["kind"]
+    payload = record["payload"]
+    if kind in ("write_file", "create_file"):
+        return store.abs(payload["path"]), payload["content"]
+    if kind == "add_relation":
+        relations = store.read_relation_file(payload["file"])
+        relations.append(Relation.from_record(payload["record"]))
+        return store.relation_file(payload["file"]), render_relations(relations)
+    if kind == "remove_relation":
+        relations = [r for r in store.read_relation_file(payload["file"]) if r.id != payload["record"]["id"]]
+        return store.relation_file(payload["file"]), render_relations(relations)
+    if kind == "append_event":
+        text = _normalize(store.events_text())
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += yamlish.escape_line_separators(json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":"))) + "\n"
+        return store.events_jsonl, text
+    if kind in ("git_commit", "git_push"):
+        return None
+    raise ValidationError(f"unknown effect kind: {kind}")
+
+
+# --------------------------------------------------------------------------- review-v1 planning (private helpers)
+
+def _no_hooks_directory(store: ProjectStore) -> str:
+    """The absolute path of the Workline-owned empty directory the planning commit primitive names as its hooks.
+
+    Created when absent. Anything there that is not an empty plain directory is
+    ``review_hooks_path_invalid``: a hook found there would run.
+    """
+    path = store.root / review_paths.RUNTIME_NO_HOOKS_DIR
+    try:
+        if not os.path.lexists(path):
+            path.mkdir(parents=True)
+        info = os.lstat(path)
+        reparse = getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        if not stat.S_ISDIR(info.st_mode) or reparse or any(path.iterdir()):
+            raise StopError(
+                f"{review_paths.RUNTIME_NO_HOOKS_DIR} is not an empty plain directory, so the planning commit could run "
+                "a hook from it; nothing is committed: STOP",
+                code="review_hooks_path_invalid",
+            )
+    except OSError as exc:
+        raise StopError(
+            f"{review_paths.RUNTIME_NO_HOOKS_DIR} cannot be prepared as the empty hooks directory ({exc}): STOP",
+            code="review_hooks_path_invalid",
+        ) from exc
+    return os.path.abspath(path)
+
+
+def _make_planning_commit(store: ProjectStore, payload: dict[str, Any], paths: list[str]) -> None:
+    """The planning commit primitive (``review-v1-planning-local-v1``): no hook, no signing, no maintenance.
+
+    A base-exact commit is made only while HEAD is exactly its recorded parent:
+    HEAD is read again right before ``git commit``, and a moved HEAD never
+    shifts the registration commit onto another base.
+    """
+    repo = store.root
+    hooks = _no_hooks_directory(store)
+
+    def require_base() -> None:
+        if payload.get("base_exact") is True and gitcmd.head_commit(repo) != payload.get("base_head"):
+            raise ReconcileRequired(
+                f"HEAD is no longer {payload.get('base_head')}, the recorded parent of the registration commit; it is "
+                "made only on that parent, so nothing is committed: reconcile required",
+                reason="review_registration_base_moved",
+            )
+
+    require_base()
+    gitcmd.contained_add(repo, paths, hooks)
+    require_base()
+    gitcmd.contained_commit(repo, payload["message"], paths, hooks)
+
+
+def _require_publication_barrier(repo: Path, commit: str) -> None:
+    """``review_publication_barrier`` unless the history ``commit`` would publish holds no unproven planning registration."""
+    from .review import publication
+
+    publication.require_barrier_clear(repo, commit)
+
+
+#: The kinds whose recovered IDs name Project entities or relations.
+_DOMAIN_KINDS = ("roadmap", "phase", "work", "relation")
+
+
+def _bind_recovered_reservations(
+    mutation: Mutation, bindings: list[tuple[str, str, str]], used_ids: set[str], note: tuple[str, Any]
+) -> None:
+    """Record, into a recovery planning mutation, reservations that already exist canonically; never generate one.
+
+    Recovery-only (``skills/roadmap``: recovered reservations). ``bindings`` are
+    ``(key, id, kind)`` taken from the recovered Run's committed records, under
+    the keys the unchanged registration code reserves; ``used_ids`` every
+    entity and relation ID HEAD's committed view or the working tree already
+    holds. Everything is recorded in one durable save with ``note``, before any
+    effect, or nothing is: a mutation that is not an unbound recovery planning
+    mutation, a key bound twice, an ID of the wrong kind or a domain ID already
+    in use is ``review_recovery_reservation_conflict``.
+    """
+    mutation._writable()
+
+    def conflict(message: str) -> ReconcileRequired:
+        return ReconcileRequired(
+            f"mutation {mutation.id}: {message}; nothing is recorded: reconcile required",
+            reason="review_recovery_reservation_conflict",
+        )
+
+    if mutation.status != "pending" or "recovery_of_review_run_id" not in mutation.invocation:
+        raise conflict("only a pending recovery planning mutation binds recovered reservations")
+    if mutation.effects or (mutation.record.get("reserved_ids") or {}) or mutation.note(note[0]) is not None:
+        raise conflict("it already holds a reservation, an effect or its recovery binding")
+    reserved: dict[str, str] = {}
+    for key, identifier, kind in bindings:
+        if key in reserved and reserved[key] != identifier:
+            raise conflict(f"{key} would be bound to both {reserved[key]} and {identifier}")
+        if kind_of(identifier) != kind:
+            raise conflict(f"{key} names {identifier}, which is not a {kind} ID")
+        if kind in _DOMAIN_KINDS and identifier in used_ids:
+            raise conflict(f"{identifier} ({key}) already names an entity or a relation of this Project")
+        reserved[key] = identifier
+    mutation.record["reserved_ids"] = reserved
+    mutation.record.setdefault("notes", {})[note[0]] = note[1]
+    mutation._save()
 
 
 class MutationController:
@@ -1878,11 +2181,14 @@ class MutationController:
                 raise ValidationError("runtime metadata is never committed")
             if "branch" in payload and not (isinstance(payload["branch"], str) and _BRANCH_REF.fullmatch(payload["branch"])):
                 raise ValidationError("git_commit branch must be the full name of a branch")
+            _validate_planning_commit(payload)
             return
         if kind == "git_push":
             remote, branch, locator = payload.get("remote"), payload.get("branch"), payload.get("locator")
             if not remote or not branch or not locator:
                 raise ValidationError("git_push needs remote, branch and the resolved push locator")
+            if "commit" in payload and not (isinstance(payload["commit"], str) and _COMMIT_ID.fullmatch(payload["commit"])):
+                raise ValidationError("git_push commit must be a full commit ID")
             if pushurl.is_secret_bearing(locator):
                 raise ValidationError(
                     f"git_push destination carries credentials ({pushurl.redact(locator)})",
@@ -2011,11 +2317,13 @@ class MutationController:
             return MATCHING  # nothing left to commit for these paths
         if head == base and _on_recorded_branch(repo, payload):
             return UNAPPLIED
-        if head is not None and _head_advanced_independently(repo, payload, head):
+        # A base-exact commit (the review-v1 registration commit) is made on its recorded parent and nowhere
+        # else: the independent-advancement step, and only that step, is not taken for it.
+        if head is not None and payload.get("base_exact") is not True and _head_advanced_independently(repo, payload, head):
             return UNAPPLIED
         return MISMATCH
 
-    def _classify_push(self, payload: dict[str, Any], publication: "_Publication | str") -> str:
+    def _classify_push(self, payload: dict[str, Any], publication: "_Publication | _Refused | str") -> str:
         """Classify a recorded push by where the commit it publishes stands at its destination.
 
         Destination first: the destination the effect was recorded against is
@@ -2039,6 +2347,11 @@ class MutationController:
         repo = self.store.root
         remote, branch, locator = payload["remote"], payload["branch"], payload["locator"]
         verify_recorded_destination(self.store, remote, locator)
+        if isinstance(publication, _Refused):
+            raise ReconcileRequired(
+                f"the recorded push to {branch} is refused: {publication.message}; nothing is pushed: reconcile required",
+                reason=publication.reason,
+            )
         if isinstance(publication, str):
             raise ReconcileRequired(
                 f"the recorded push to {branch} cannot show which commit it publishes: {publication}; the branch as it "
@@ -2048,6 +2361,8 @@ class MutationController:
         if preview.flag == "=":
             return MATCHING  # the branch is that commit
         if preview.flag in ("*", " "):
+            # The push would write: what it publishes is held to the publication barrier first (``rules/git``).
+            _require_publication_barrier(repo, publication.commit)
             return UNAPPLIED  # new branch / fast-forward to that commit, and no further
         if preview.flag == "!":
             return _published_under(repo, locator, publication, preview)
@@ -2145,28 +2460,9 @@ class MutationController:
         The same computation :meth:`apply_effect` performs, so that what a
         mutation records having written (:meth:`Mutation.apply`) is what the
         write puts on disk, and never a second, separately written rendering of
-        it that could come to differ.
+        it that could come to differ (:func:`planned_write`).
         """
-        kind = record["kind"]
-        payload = record["payload"]
-        if kind in ("write_file", "create_file"):
-            return self.store.abs(payload["path"]), payload["content"]
-        if kind == "add_relation":
-            relations = self.store.read_relation_file(payload["file"])
-            relations.append(Relation.from_record(payload["record"]))
-            return self.store.relation_file(payload["file"]), render_relations(relations)
-        if kind == "remove_relation":
-            relations = [r for r in self.store.read_relation_file(payload["file"]) if r.id != payload["record"]["id"]]
-            return self.store.relation_file(payload["file"]), render_relations(relations)
-        if kind == "append_event":
-            text = _normalize(self.store.events_text())
-            if text and not text.endswith("\n"):
-                text += "\n"
-            text += yamlish.escape_line_separators(json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":"))) + "\n"
-            return self.store.events_jsonl, text
-        if kind in ("git_commit", "git_push"):
-            return None
-        raise ValidationError(f"unknown effect kind: {kind}")
+        return planned_write(self.store, record)
 
     def apply_effect(self, record: dict[str, Any]) -> None:
         kind = record["kind"]
@@ -2182,6 +2478,9 @@ class MutationController:
         if kind == "git_commit":
             repo = self.store.root
             paths = list(payload["paths"])
+            if payload.get("mode") == PLANNING_COMMIT_MODE:
+                _make_planning_commit(self.store, payload, paths)
+                return
             gitcmd.add_paths(repo, paths)
             gitcmd.commit_only(repo, payload["message"], paths)
             return
@@ -2206,6 +2505,8 @@ class MutationController:
                     f"now resolves to {current}): STOP",
                     code="push_destination_changed",
                 )
+            # Right before the push, what it publishes is held to the publication barrier once more.
+            _require_publication_barrier(repo, staged[1].commit)
             result = gitcmd.push(repo, remote, staged[1].refspec)
             if not result.ok:
                 raise GitError(f"push to {locator} failed: {result.stderr.strip() or result.stdout.strip()}")

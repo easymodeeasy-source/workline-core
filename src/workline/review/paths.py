@@ -41,6 +41,21 @@ ACTIVATION_DIR = f"{REVIEW_DIR}/activation"
 #: only material an accepted task can be reconstructed from (``R1`` §3).
 RUNTIME_REVIEW_DIR = f"{WORKLINE_DIR}/runtime/review"
 
+#: Scratch directories the committed-result loader materializes a commit's canonical Project files into.
+RUNTIME_PROOFS_DIR = f"{RUNTIME_REVIEW_DIR}/proofs"
+#: The runtime copies of reviewer reports, read only to return findings after a resume.
+RUNTIME_REPORTS_DIR = f"{RUNTIME_REVIEW_DIR}/reports"
+#: The Workline-owned empty directory the planning commit primitive names as ``core.hooksPath``.
+RUNTIME_NO_HOOKS_DIR = f"{RUNTIME_REVIEW_DIR}/no-hooks"
+#: Throw-away bare directories the committed attribute evaluation runs in.
+RUNTIME_ATTR_EVAL_DIR = f"{RUNTIME_REVIEW_DIR}/attr-eval"
+
+
+def runtime_report_rel(review_task_id: str) -> str:
+    """The runtime report copy of ``review_task_id``: never authority, never settlement material."""
+    _require_id(review_task_id, "review_task")
+    return f"{RUNTIME_REPORTS_DIR}/{review_task_id}.yaml"
+
 WORK_TERMINAL_ACTIVATION_REL = f"{ACTIVATION_DIR}/work-terminal-v1.yaml"
 
 #: The directories a Review namespace may hold, and nothing else.

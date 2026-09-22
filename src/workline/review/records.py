@@ -649,6 +649,248 @@ class Consumption:
         )
 
 
+# --------------------------------------------------------------------------- planning consumption (version 2)
+#
+# The Planning Consumption (P2, ``skills/review``): the P1 Consumption schema at
+# version 2, for the two planning kinds only, with a ``persisted_result`` that
+# binds the registration commit it consumed the Receipt for. Version 1 keeps
+# every record it ever read, with exactly its P1 meaning; a planning kind is
+# valid only in version 2, and version 2 only for a planning kind.
+
+PLANNING_CONSUMPTION_VERSION = 2
+
+#: The planning kinds (``skills/review``); a Consumption of either is a Planning Consumption, version 2.
+PLANNING_REVIEW_KINDS = ("roadmap-plan-v1", "phase-entry-design-v1")
+
+PLANNING_ADAPTER_IDENTITY = {
+    "roadmap-plan-v1": "roadmap-plan-adapter-v1",
+    "phase-entry-design-v1": "phase-entry-design-adapter-v1",
+}
+
+PERSISTED_RESULT_CONTRACT = "review-v1-planning-persisted-result-v1"
+
+PLANNING_CONSUMPTION_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "consumption_id",
+    "receipt_id",
+    "review_run_id",
+    "review_generation",
+    "review_kind",
+    "authorized_candidate_hash",
+    "operation_identity",
+    "operation_mutation_id",
+    "target_identity",
+    "persisted_result",
+)
+
+PERSISTED_RESULT_COMMON_FIELDS = (
+    "contract",
+    "request_digest",
+    "registration_commit",
+    "registration_parent",
+    "branch",
+    "registration_delta_digest",
+    "semantic_projection_digest",
+    "adapter_identity",
+    "loader_identity",
+)
+
+PERSISTED_RESULT_KIND_FIELDS = {
+    "roadmap-plan-v1": ("roadmap_id", "phase_ids", "relation_ids"),
+    "phase-entry-design-v1": (
+        "phase_id",
+        "roadmap_id",
+        "work_ids",
+        "integration_work_id",
+        "confirmation_work_id",
+        "roadmap_relation_ids",
+        "related_relation_ids",
+        "canonical_first_work_id",
+    ),
+}
+
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_FULL_BRANCH = re.compile(r"refs/heads/\S+")
+
+
+def _require_full_commit(record: dict[str, Any], key: str, described: str) -> str:
+    value = record.get(key)
+    if not isinstance(value, str) or _FULL_COMMIT.fullmatch(value) is None:
+        raise ValidationError(f"{described} {key} is not a full commit id: {value!r}", code="review_record_invalid")
+    return value
+
+
+def _require_keyed_ids(record: dict[str, Any], key: str, kind: str, described: str) -> list[dict[str, str]]:
+    items = _require_list(record, key, described)
+    seen_keys: set[str] = set()
+    seen_ids: set[str] = set()
+    for item in items:
+        entry = _require_mapping(item, f"{described} {key} entry")
+        _require_exact_fields(entry, ("key", "id"), f"{described} {key} entry")
+        entry_key = _require_text(entry, "key", f"{described} {key} entry")
+        entry_id = _require_id(entry, "id", kind, f"{described} {key} entry")
+        if entry_key in seen_keys or entry_id in seen_ids:
+            raise ValidationError(f"{described} {key} holds a duplicate", code="review_record_invalid")
+        seen_keys.add(entry_key)
+        seen_ids.add(entry_id)
+    return items
+
+
+def _require_id_list(record: dict[str, Any], key: str, kind: str, described: str) -> list[str]:
+    items = _require_list(record, key, described)
+    for item in items:
+        if not isinstance(item, str) or not is_valid_id(item, kind):
+            raise ValidationError(f"{described} {key} holds {item!r}, not a {kind} id", code="review_record_invalid")
+    if len(set(items)) != len(items):
+        raise ValidationError(f"{described} {key} holds a duplicate", code="review_record_invalid")
+    return items
+
+
+def _require_optional_id(record: dict[str, Any], key: str, kind: str, described: str) -> str | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    return _require_id(record, key, kind, described)
+
+
+def _validate_persisted_result(value: object, review_kind: str, target_identity: str, described: str) -> dict[str, Any]:
+    where = f"{described} persisted_result"
+    result = _require_mapping(value, where)
+    _require_exact_fields(result, PERSISTED_RESULT_COMMON_FIELDS + PERSISTED_RESULT_KIND_FIELDS[review_kind], where)
+    _require_choice(result, "contract", (PERSISTED_RESULT_CONTRACT,), where)
+    _require_digest(result, "request_digest", where)
+    _require_full_commit(result, "registration_commit", where)
+    _require_full_commit(result, "registration_parent", where)
+    branch = result.get("branch")
+    if not isinstance(branch, str) or _FULL_BRANCH.fullmatch(branch) is None:
+        raise ValidationError(f"{where} branch is not a full branch ref: {branch!r}", code="review_record_invalid")
+    _require_digest(result, "registration_delta_digest", where)
+    _require_digest(result, "semantic_projection_digest", where)
+    _require_choice(result, "adapter_identity", (PLANNING_ADAPTER_IDENTITY[review_kind],), where)
+    _require_digest(result, "loader_identity", where)
+    if review_kind == "roadmap-plan-v1":
+        roadmap_id = _require_id(result, "roadmap_id", "roadmap", where)
+        _require_keyed_ids(result, "phase_ids", "phase", where)
+        _require_id_list(result, "relation_ids", "relation", where)
+        if target_identity != roadmap_id:
+            raise ValidationError(
+                f"{described} target_identity {target_identity!r} is not its roadmap_id {roadmap_id!r}",
+                code="review_record_invalid",
+            )
+    else:
+        phase_id = _require_id(result, "phase_id", "phase", where)
+        _require_id(result, "roadmap_id", "roadmap", where)
+        _require_keyed_ids(result, "work_ids", "work", where)
+        _require_id(result, "integration_work_id", "work", where)
+        _require_optional_id(result, "confirmation_work_id", "work", where)
+        _require_id_list(result, "roadmap_relation_ids", "relation", where)
+        _require_id_list(result, "related_relation_ids", "relation", where)
+        _require_optional_id(result, "canonical_first_work_id", "work", where)
+        if target_identity != phase_id:
+            raise ValidationError(
+                f"{described} target_identity {target_identity!r} is not its phase_id {phase_id!r}",
+                code="review_record_invalid",
+            )
+    return result
+
+
+@dataclass(frozen=True)
+class PlanningConsumption:
+    """The one use of one planning Receipt, bound to the registration commit it authorized (version 2).
+
+    Reading proves form and bindings only. What it claims - the registration
+    commit and parent, the delta and semantic projection digests, the IDs, the
+    adapter and loader identities - is never trusted for publication: the
+    committed planning proof recomputes or cross-checks every claim from
+    committed objects. It carries no Work terminal binding and never invents
+    one (``R4`` §7).
+    """
+
+    consumption_id: str
+    receipt_id: str
+    review_run_id: str
+    review_generation: int
+    review_kind: str
+    authorized_candidate_hash: str
+    operation_identity: str
+    operation_mutation_id: str
+    target_identity: str
+    persisted_result: dict[str, Any]
+
+    #: A planning Consumption binds no Work terminal event.
+    terminal_event_id = None
+    terminal_event_type = None
+    authorized_result_commit_sha = None
+
+    @property
+    def work_kind(self) -> bool:
+        return False
+
+    @property
+    def work_id(self) -> str | None:
+        return None
+
+    @property
+    def registration_commit(self) -> str:
+        return str(self.persisted_result["registration_commit"])
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            serialize.SCHEMA_KEY: SCHEMA_CONSUMPTION,
+            serialize.VERSION_KEY: PLANNING_CONSUMPTION_VERSION,
+            "consumption_id": self.consumption_id,
+            "receipt_id": self.receipt_id,
+            "review_run_id": self.review_run_id,
+            "review_generation": self.review_generation,
+            "review_kind": self.review_kind,
+            "authorized_candidate_hash": self.authorized_candidate_hash,
+            "operation_identity": self.operation_identity,
+            "operation_mutation_id": self.operation_mutation_id,
+            "target_identity": self.target_identity,
+            "persisted_result": dict(self.persisted_result),
+        }
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "PlanningConsumption":
+        serialize.require_schema(record, SCHEMA_CONSUMPTION, PLANNING_CONSUMPTION_VERSION, described)
+        _require_exact_fields(record, PLANNING_CONSUMPTION_FIELDS, described)
+        review_kind = _require_choice(record, "review_kind", PLANNING_REVIEW_KINDS, described)
+        target = _require_text(record, "target_identity", described)
+        persisted = _validate_persisted_result(record.get("persisted_result"), review_kind, target, described)
+        return PlanningConsumption(
+            consumption_id=_require_id(record, "consumption_id", "review_consumption", described),
+            receipt_id=_require_id(record, "receipt_id", "review_receipt", described),
+            review_run_id=_require_id(record, "review_run_id", "review_run", described),
+            review_generation=_require_int(record, "review_generation", described, minimum=FIRST_GENERATION),
+            review_kind=review_kind,
+            authorized_candidate_hash=_require_digest(record, "authorized_candidate_hash", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            operation_mutation_id=_require_id(record, "operation_mutation_id", "mutation", described),
+            target_identity=target,
+            persisted_result=dict(persisted),
+        )
+
+
+def consumption_from_record(record: dict[str, Any], described: str) -> "Consumption | PlanningConsumption":
+    """A stored Consumption of either version, read by its own reader.
+
+    Version 1 is the P1 reader, unchanged, and a planning kind is refused there;
+    version 2 is the Planning Consumption. Any other version is not read.
+    """
+    version = record.get(serialize.VERSION_KEY)
+    if version == PLANNING_CONSUMPTION_VERSION:
+        return PlanningConsumption.from_record(record, described)
+    found = Consumption.from_record(record, described)
+    if found.review_kind in PLANNING_REVIEW_KINDS:
+        raise ValidationError(
+            f"{described} is a version {VERSION} Consumption of planning kind {found.review_kind}; a planning "
+            f"Consumption is version {PLANNING_CONSUMPTION_VERSION}",
+            code="review_record_invalid",
+        )
+    return found
+
+
 # --------------------------------------------------------------------------- supersession
 
 SUPERSESSION_FIELDS = (
