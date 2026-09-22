@@ -153,9 +153,13 @@ class ScopeAndSnapshotTests(_GenerationCase):
         # the dirty snapshot was noted when the generation mutation began, before its first effect
         self.assertIn("preexisting_dirty", gen["notes"])
 
+    def pending_generation(self) -> dict:
+        (gen,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "review-generation"]
+        return gen
+
     def test_seal_and_invalidation_scopes(self) -> None:
         self.crash(rr, "_finish_generation", when=lambda n, store, gen: gen.invocation.get("generation") == 3)
-        (gen,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "review-generation"]
+        gen = self.pending_generation()
         run_id = gen["invocation"]["review_run_id"]
         receipt_id = gen["invocation"]["receipt_id"]
         self.assertEqual(
@@ -164,6 +168,51 @@ class ScopeAndSnapshotTests(_GenerationCase):
             set(gen["write_scope"]["files"]),
         )
         self.assertEqual("seal", gen["invocation"]["transition"])
+
+    def test_settle_scope(self) -> None:
+        self.crash(rr, "_finish_generation", when=lambda n, store, gen: gen.invocation.get("generation") == 2)
+        gen = self.pending_generation()
+        run_id = gen["invocation"]["review_run_id"]
+        self.assertEqual("settle", gen["invocation"]["transition"])
+        self.assertEqual({review_paths.gate_rel(run_id, 2), review_paths.serialization_token_rel(run_id)},
+                         set(gen["write_scope"]["files"]))
+        self.assertEqual([], gen["write_scope"]["entities"])
+
+    def test_invalidation_scope_and_its_one_stage(self) -> None:
+        self.crash(rr, "_use_check")
+        with _changed_authority():
+            self.crash(rr, "_finish_generation", when=lambda n, store, gen: gen.invocation.get("generation") == 4)
+        gen = self.pending_generation()
+        run_id = gen["invocation"]["review_run_id"]
+        receipt_id = gen["invocation"]["receipt_id"]
+        self.assertEqual("invalidate", gen["invocation"]["transition"])
+        self.assertEqual(
+            {review_paths.gate_rel(run_id, 4), review_paths.serialization_token_rel(run_id),
+             review_paths.supersession_rel(receipt_id)},
+            set(gen["write_scope"]["files"]),
+        )
+        self.assertEqual([], gen["write_scope"]["entities"])
+        # gate 4 and the Supersession are one stage, in this order, then that stage's commit (§11.6)
+        files = [e for e in gen["effects"] if e["kind"] == "create_file"]
+        self.assertEqual([review_paths.gate_rel(run_id, 4), review_paths.supersession_rel(receipt_id)],
+                         [e["payload"]["path"] for e in files])
+        self.assertEqual(1, len({e["stage"] for e in files}), "one stage")
+
+    def test_no_generation_mutation_ever_extends_its_scope(self) -> None:
+        extended: list[int] = []
+        real = Mutation.extend_scope
+
+        def watch(self_, *args, **kwargs):
+            if self_.invocation.get("operation") == "review-generation":
+                extended.append(self_.invocation.get("generation"))
+            return real(self_, *args, **kwargs)
+
+        with mock.patch.object(Mutation, "extend_scope", watch):
+            self.crash(rr, "_use_check")  # generations 1 to 3, each applied, committed and completed
+            with _changed_authority():
+                self.assertEqual("stale", self.run_plan().status)  # generation 4
+            self.assertEqual("registered", self.run_plan(plan("Another Roadmap")).status)
+        self.assertEqual([], extended)
 
 
 class OwnershipConflictTests(_GenerationCase):
@@ -285,15 +334,28 @@ class InvalidationTests(_InvalidationCase):
     def test_the_superseded_receipt_cannot_be_consumed(self) -> None:
         self.crash(rr, "_use_check")
         with _changed_authority():
-            result = self.run_plan()
+            # the real invalidation: generation 4 and the Supersession committed, the planning mutation not completed
+            self.crash(Mutation, "complete", when=lambda n, self_: self_.invocation.get("operation") == "roadmap-create")
+        (record,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "roadmap-create"]
         review = ReviewStore(self.store)
-        chain = review.gate_chain(result.review_run_id)
-        # the use check refuses it: its latest generation is no longer the seal
+        (run_id,) = run_ids(self.store)
+        chain = review.gate_chain(run_id)
+        receipt_id = chain.generations[2].receipt_id
+        self.assertTrue(review.supersession_exists(receipt_id))
+        # the use check itself, on the chain as it stood at the seal: the Supersession the flow wrote refuses the Receipt
+        from workline.review.store import GateChain
+
+        sealed = GateChain(run_id, chain.generations[:3], chain.digests[:3])
         op = rr._Op(store=self.store, operation="roadmap-create", kind=planning.KINDS[planning.KIND_ROADMAP],
                     request=rm.roadmap_request_identity(plan()), review=self.reviewer.review(), live_identity={})
-        run = rr._Run(result.review_run_id, None, result.receipt_id, None)
-        problems = rr._receipt_problems(op, Mutation(MutationController(self.store), {"invocation": {}, "reserved_ids": {}, "mutation_id": "mut_01ARZ3NDEKTSV4RRFFQ69G5FAV", "owner": "roadmap", "status": "pending", "write_scope": {}}, resumed=True), run, chain)
-        self.assertTrue(problems)
+        run = rr._Run(run_id, None, receipt_id, None)
+        mutation = Mutation(MutationController(self.store), record, resumed=True)
+        with self.assertRaises(ReconcileRequired) as raised:
+            rr._use_check(op, mutation, run, sealed)
+        self.assertEqual("review_receipt_invalid", raised.exception.reason)
+        self.assertIn("a Supersession names the Receipt", str(raised.exception))
+        result = self.run_plan()
+        self.assertEqual(("stale", receipt_id), (result.status, result.receipt_id))
         # and a fixture Consumption of it is a validate_review problem
         consumption = records.Consumption(
             "rcs_01ARZ3NDEKTSV4RRFFQ69G5FAV", result.receipt_id, result.review_run_id, 3, "custom-kind",
@@ -303,7 +365,9 @@ class InvalidationTests(_InvalidationCase):
         target = self.store.root / review_paths.consumption_rel(consumption.consumption_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(serialize.canonical_text(consumption.to_record()), encoding="utf-8", newline="\n")
-        self.assertIn("review_record_conflict", [problem.code for problem in validate_review(self.store)])
+        superseded = [problem for problem in validate_review(self.store)
+                      if problem.code == "review_record_conflict" and "which is superseded" in problem.message]
+        self.assertEqual(1, len(superseded), "the supersession rule refuses the Consumption of the superseded Receipt")
 
 
 class InvalidationWindowTests(_InvalidationCase):
@@ -334,6 +398,11 @@ class InvalidationWindowTests(_InvalidationCase):
     def test_row_15_gate_4_created_applied_flag_unsaved(self) -> None:
         self._stale_after_seal(target=MutationController, name="_create_review_record", after=True,
                                when=lambda n, self_, relative, content: relative.endswith("/000004.yaml"))
+        (gen,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "review-generation"]
+        gate_4 = gen["effects"][0]
+        self.assertTrue(gate_4["payload"]["path"].endswith("/000004.yaml"))
+        self.assertFalse(gate_4["applied"], "created, its applied flag not saved")
+        self.assertTrue((self.store.root / gate_4["payload"]["path"]).is_file())
         result = self.run_plan()  # nothing is evaluated again: the recorded invalidation is finished
         self.assert_invalidated(result, planning.STALE_CONTEXT)
 

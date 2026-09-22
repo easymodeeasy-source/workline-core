@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
+import sys
 import unittest
 from unittest import mock
 
@@ -31,9 +34,19 @@ def changed_policy():
     return mock.patch.dict(planning.POLICY_RECORD, {"repair": "a changed repair rule"})
 
 
-def changed_loader():
+def changed_loader(tmp: Path):
+    """The running implementation with one package file changed: the production identity over a changed copy."""
     real = planning.loader_identity
-    return mock.patch.object(planning, "loader_identity", lambda directory: serialize.digest({"changed": real(directory)}))
+    target = Path(tmp) / "changed-implementation" / "workline"
+
+    def changed(directory):
+        if not target.exists():
+            shutil.copytree(directory, target, ignore=shutil.ignore_patterns("__pycache__"))
+            module = target / "review" / "planning.py"
+            module.write_bytes(module.read_bytes() + b"\n# one changed package file\n")
+        return real(target)
+
+    return mock.patch.object(planning, "loader_identity", changed)
 
 
 class _CurrencyCase(PlanningTestCase):
@@ -76,7 +89,7 @@ def _factor_context(factor: str, test: _CurrencyCase):
     if factor == "policy":
         return changed_policy()
     if factor == "loader":
-        return changed_loader()
+        return changed_loader(test.tmp)
     raise AssertionError(factor)
 
 
@@ -98,13 +111,27 @@ class FourMomentsTests(_CurrencyCase):
         self._moment_1(changed_policy())
 
     def test_moment_1_loader(self) -> None:
-        self._moment_1(changed_loader())
+        self._moment_1(changed_loader(self.tmp))
 
     def test_moment_1_declared_base(self) -> None:
         self.crash(rr, "_use_check")
         rm.hold_phase(self.store, self.x)
         result = self.run_plan()
         self.assertEqual(("stale", planning.STALE_DECLARED_BASE), (result.status, result.detail))
+        self.assertEqual(4, self.chain(self.store, self.run_id()).latest.generation)
+        self.assertTrue(ReviewStore(self.store).supersession_exists(result.receipt_id))
+
+    def test_the_changed_loader_is_a_changed_package_file(self) -> None:
+        from workline.implementation import package_directory
+
+        package = package_directory(self.store.workline_root())
+        with changed_loader(self.tmp):
+            changed = planning.loader_identity(package)
+        self.assertNotEqual(planning.loader_identity(package), changed)
+        copy = self.tmp / "changed-implementation" / "workline"
+        differing = [path.relative_to(copy).as_posix() for path in copy.rglob("*.py")
+                     if path.read_bytes() != (package / path.relative_to(copy)).read_bytes()]
+        self.assertEqual(["review/planning.py"], differing)
 
     # after the first registration stage, before Kp is recorded: the pre-Kp currency proof refuses
     def _moment_2(self, change, reason: str = "review_registration_currency_changed") -> None:
@@ -123,7 +150,7 @@ class FourMomentsTests(_CurrencyCase):
         self._moment_2(changed_policy())
 
     def test_moment_2_loader(self) -> None:
-        self._moment_2(changed_loader())
+        self._moment_2(changed_loader(self.tmp))
 
     def test_moment_2_declared_base(self) -> None:
         self.crash(rm, "register_phases")
@@ -155,7 +182,7 @@ class FourMomentsTests(_CurrencyCase):
         self._moment_3(changed_policy())
 
     def test_moment_3_loader(self) -> None:
-        self._moment_3(changed_loader())
+        self._moment_3(changed_loader(self.tmp))
 
     def test_moment_3_declared_base(self) -> None:
         self._crash_before_kp_is_made()
@@ -185,7 +212,7 @@ class FourMomentsTests(_CurrencyCase):
         self._moment_4(changed_policy())
 
     def test_moment_4_loader(self) -> None:
-        self._moment_4(changed_loader())
+        self._moment_4(changed_loader(self.tmp))
 
     def test_moment_4_declared_base_hold_after_kp_waits_for_the_publication(self) -> None:
         """With a push destination a hold after Kp cannot commit: its push would publish Kp (§18.7, §21.1 row 25)."""
@@ -237,6 +264,20 @@ class FourMomentsTests(_CurrencyCase):
 
 
 class IndependentAdvanceTests(_CurrencyCase):
+    def test_a_disjoint_scope_operations_commit_lets_kp_be_made_on_the_new_head(self) -> None:
+        unrelated = rm.create_roadmap(self.store, rm.RoadmapPlan("Unrelated", "背景", "状態", {"u": PhaseSpec("U", "U")}))
+        self.crash(rm, "register_phases")
+        (record,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "roadmap-create"]
+        use_check_head = record["notes"][rr.NOTE_USE_CHECK_HEAD]
+        held = rm.hold_roadmap(self.store, unrelated.roadmap_id)  # the event log only: no planning-owned path
+        self.assertEqual(held.head, self.remote_head())
+        result = self.run_plan()
+        self.assertEqual("registered", result.status)
+        persisted = ReviewStore(self.store).read_consumption(result.consumption_id).persisted_result
+        self.assertEqual(held.head, persisted["registration_parent"], "Kp is made on the new HEAD")
+        self.assertNotEqual(use_check_head, persisted["registration_parent"], "P is not use_check_head")
+        self.assertEqual(self.head(self.store), self.remote_head())
+
     def test_an_independent_commit_touching_nothing_planned_lets_kp_be_made_on_the_new_head(self) -> None:
         self.crash(rm, "register_phases")
         (self.store.root / "notes.txt").write_text("unrelated\n", encoding="utf-8")
@@ -344,22 +385,36 @@ class StaleBeforeTheSealTests(_CurrencyCase):
 
 
 class RoundTripTests(PlanningTestCase):
+    POINTS = {
+        "_setup_new_run": "the representability check (§7.6)",
+        "_registration_flow": "the working-tree round trip (§15.1 step 2)",
+        "_c2_kp": "the persisted proof, P8",
+        "_prove": "the committed planning proof, CP6",
+    }
+
     def test_round_trips_are_exact_at_all_three_points(self) -> None:
-        store = self.planning_project()
-        seen: list[bool] = []
+        store = self.planning_project(remote=True)
+        seen: dict[tuple[str, str], list[bool]] = {}
         real = rr.semantic_projection
 
         def spy(material, view, selection_view=None):
             found = real(material, view, selection_view)
-            seen.append(found == rr.reviewed_projection(material))
+            frame = sys._getframe(1)
+            while frame is not None and frame.f_code.co_name not in self.POINTS:
+                frame = frame.f_back
+            point = frame.f_code.co_name if frame is not None else "elsewhere"
+            seen.setdefault((material["review_kind"], point), []).append(found == rr.reviewed_projection(material))
             return found
 
         with mock.patch.object(rr, "semantic_projection", spy):
             roadmap = self.reviewed_roadmap(store)
             self.reviewed_entry(store, roadmap.registration.phase_ids["a"])
-        # per kind: the representability check, the working-tree round trip, the persisted proof (and CP)
-        self.assertGreaterEqual(len(seen), 6)
-        self.assertTrue(all(seen))
+        for kind in (planning.KIND_ROADMAP, planning.KIND_PHASE_ENTRY):
+            for point, described in self.POINTS.items():
+                with self.subTest(kind=kind, point=described):
+                    self.assertIn((kind, point), seen)
+                    self.assertTrue(all(seen[(kind, point)]), "exact")
+        self.assertNotIn("elsewhere", {point for _, point in seen})
 
 
 class ReaderLossTests(PlanningTestCase):
@@ -367,13 +422,24 @@ class ReaderLossTests(PlanningTestCase):
 
     def test_reader_loss_inputs_are_unrepresentable(self) -> None:
         store = self.planning_project()
+        phase = {"a": PhaseSpec("A", "A")}
         cases = {
-            "trailing space in a name": rm.RoadmapPlan("Roadmap ", "背景", "状態", {"a": PhaseSpec("A", "A")}),
-            "a heading injected into a section": rm.RoadmapPlan("R", "背景\n## 注入", "状態", {"a": PhaseSpec("A", "A")}),
-            "a lone CR": rm.RoadmapPlan("R", "背景\rつづき", "状態", {"a": PhaseSpec("A", "A")}),
-            "CRLF": rm.RoadmapPlan("R", "背景\r\nつづき", "状態", {"a": PhaseSpec("A", "A")}),
-            "U+2028 in a name": rm.RoadmapPlan("R S", "背景", "状態", {"a": PhaseSpec("A", "A")}),
-            "U+2028 in a Phase name": rm.RoadmapPlan("R", "背景", "状態", {"a": PhaseSpec("A B", "A")}),
+            "trailing space in a name": rm.RoadmapPlan("Roadmap ", "背景", "状態", phase),
+            "a leading space in a name": rm.RoadmapPlan(" Roadmap", "背景", "状態", phase),
+            "a trailing newline in a name": rm.RoadmapPlan("Roadmap\n", "背景", "状態", phase),
+            "a second line in a name": rm.RoadmapPlan("RM\nsecond line", "背景", "状態", phase),
+            "a heading injected through the name": rm.RoadmapPlan("RM\n## 達成したい状態\nINJECTED", "背景", "状態", phase),
+            "a heading injected into a section": rm.RoadmapPlan("R", "背景\n## 注入", "状態", phase),
+            "the desired-state heading in the background": rm.RoadmapPlan("R", "BG\n## 達成したい状態\nINJECTED", "DS", phase),
+            "a lone CR": rm.RoadmapPlan("R", "背景\rつづき", "状態", phase),
+            "CRLF": rm.RoadmapPlan("R", "背景\r\nつづき", "状態", phase),
+            "CRLF in the desired state": rm.RoadmapPlan("R", "背景", "line1\r\nline2", phase),
+            "a heading line in the desired state": rm.RoadmapPlan("R", "背景", "x\n## other\ny", phase),
+            "U+2028 in a name": rm.RoadmapPlan("R\u2028S", "背景", "状態", phase),
+            "U+2028 in a Phase name": rm.RoadmapPlan("R", "背景", "状態", {"a": PhaseSpec("A\u2028B", "A")}),
+            "a trailing space in a Phase name": rm.RoadmapPlan("R", "背景", "状態", {"a": PhaseSpec("A ", "A")}),
+            "a Phase desired state repeating its heading": rm.RoadmapPlan(
+                "R", "背景", "状態", {"a": PhaseSpec("A", "A\n## 成立させたい状態\nB")}),
         }
         for label, the_plan in cases.items():
             with self.subTest(label):
@@ -383,6 +449,92 @@ class ReaderLossTests(PlanningTestCase):
                 self.assertEqual((), run_ids(store), "refused before any Review record")
                 self.assertFalse(any((store.root / ".workline" / "roadmaps").glob("*.md")))
                 self.assertEqual([], self.pending(store))
+
+    def test_phase_entry_reader_loss_inputs_are_unrepresentable(self) -> None:
+        store = self.planning_project()
+        phase_id = rm.create_roadmap(store, plan()).phase_ids["a"]
+
+        def entry(name: str, desired: str) -> rm.PhaseEntryDesign:
+            return rm.PhaseEntryDesign(
+                {"w1": rm.WorkDesign(name, desired, ())},
+                rm.WorkDesign("Integration", "全Workの統合確認が取れている", ()),
+                rm.WorkDesign("Confirmation", "人間が成果を確認した"),
+                planned_next=(), requires_completion=(), entry=None,
+            )
+
+        cases = {
+            "a newline in a Work name": entry("W\nsecond", "W が成立する"),
+            "a trailing space in a Work name": entry("W ", "W が成立する"),
+            "CRLF in a Work desired state": entry("W", "line1\r\nline2"),
+            "a Work desired state repeating its heading": entry("W", "a\n## このWorkで成立させる状態\nb"),
+            "a lone CR in a Work desired state": entry("W", "a\rb"),
+        }
+        for label, the_design in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(ValidationError) as raised:
+                    self.reviewed_entry(store, phase_id, Reviewer(), the_design)
+                self.assertEqual("review_candidate_unrepresentable", raised.exception.code)
+                self.assertEqual((), run_ids(store), "refused before any Review record")
+                self.assertFalse(any((store.root / ".workline" / "works").glob("*.md")))
+                self.assertEqual([], self.pending(store))
+
+
+class PhaseEntryRoadmapHoldTests(PlanningTestCase):
+    """§28 D names the declared-base factor "a hold of the Phase's Roadmap committed by a disjoint-scope operation in a
+    crash window". For a review-v1 Phase entry that hold is refused by the live Roadmap-state check the frozen entry
+    order runs first on every call (§5.6 step 2), before any currency evaluation; the planning mutation stays pending,
+    and once the Roadmap is resumed the flow goes on. (For a Roadmap creation, a hold of a named Phase's Roadmap is no
+    declared-base fact: phase lifecycle and state read the Phase's own events; FourMomentsTests hold the Phase itself.)
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.planning_project(remote=True)
+        created = rm.create_roadmap(self.store, plan())
+        self.roadmap_id, self.phase_id = created.roadmap_id, created.phase_ids["a"]
+
+    def entry(self):
+        return self.reviewed_entry(self.store, self.phase_id)
+
+    def crash(self, target, name, **kwargs) -> None:
+        with crash_at(target, name, **kwargs):
+            with self.assertRaises(Crash):
+                self.entry()
+
+    def held_then_refused(self) -> dict:
+        (before,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
+        held = rm.hold_roadmap(self.store, self.roadmap_id)
+        self.assertEqual(held.head, self.remote_head(), "the disjoint-scope operation committed and published")
+        with self.assertRaises(StopError) as raised:
+            self.entry()
+        self.assertEqual("roadmap_held", raised.exception.code, "the live Roadmap-state check, §5.6 step 2")
+        (after,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
+        self.assertEqual(before, after, "the planning mutation stays pending, untouched")
+        self.assertFalse(ReviewStore(self.store).consumption_ids())
+        rm.resume_roadmap(self.store, self.roadmap_id)
+        return before
+
+    def test_moment_1_after_the_review_before_the_registration(self) -> None:
+        self.crash(rr, "_use_check")
+        self.held_then_refused()
+        result = self.entry()  # the Roadmap is active again: the declared base is the Candidate's
+        self.assertEqual("registered", result.status)
+        self.assertEqual([1, 2, 3], [g.generation for g in self.chain(self.store, result.review_run_id).generations])
+
+    def test_moment_2_after_the_first_registration_stage(self) -> None:
+        self.crash(rm, "register_works", when=lambda n, mutation, stage, specs, relations: stage == "integration")
+        self.held_then_refused()
+        result = self.entry()  # P descends from use_check_head through event-log commits only
+        self.assertEqual("registered", result.status)
+
+    def test_moment_3_after_the_kp_stage_is_recorded_before_it_is_made(self) -> None:
+        self.crash(mutation_module, "_make_planning_commit",
+                   when=lambda n, store, payload, paths: payload.get("base_exact") is True)
+        self.held_then_refused()
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.entry()  # HEAD is no longer the recorded parent: base_exact refuses before any replay
+        self.assertEqual("review_registration_base_moved", raised.exception.reason)
+        self.assertFalse(any("expand phase" in subject for subject in self.subjects(self.store)))
 
 
 class R9Tests(PlanningTestCase):

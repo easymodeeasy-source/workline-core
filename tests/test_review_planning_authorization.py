@@ -10,7 +10,7 @@ from helpers import git
 from planning_helpers import Crash, PlanningTestCase, Reviewer, crash_at, plan, rr, run_ids
 from workline import roadmap as rm
 from workline.errors import ReconcileRequired, StopError, ValidationError
-from workline.review import gate, planning, serialize
+from workline.review import gate, planning, publication, serialize
 from workline.review import paths as review_paths
 from workline.review import records
 from workline.review.planning import PlanningReviewFinding, PlanningReviewReport
@@ -86,8 +86,8 @@ class ReceiptAtTheUseCheckTests(PlanningTestCase):
 
 
 class NotAuthorizedTests(PlanningTestCase):
-    def _not_authorized(self, reviewer: Reviewer, *, remote: bool = False):
-        store = self.planning_project(remote=remote)
+    def _not_authorized(self, reviewer: Reviewer, *, remote: bool = False, name: str = "proj"):
+        store = self.planning_project(name, remote=remote)
         result = self.reviewed_roadmap(store, reviewer)
         self.assertEqual(("not_authorized", None, None, None),
                          (result.status, result.receipt_id, result.consumption_id, result.registration))
@@ -113,9 +113,16 @@ class NotAuthorizedTests(PlanningTestCase):
         self.assertNotEqual(planning.empty_obligation_digest(), self.chain(store, result.review_run_id).latest.obligation_digest)
 
     def test_no_publication_barrier_results_and_a_legacy_push_proceeds(self) -> None:
-        store, _ = self._not_authorized(Reviewer(status="declined"), remote=True)
-        legacy = rm.create_roadmap(store, plan("Legacy after refusal"))
-        self.assertEqual(legacy.head, self.remote_head())
+        for name, reviewer in (
+            ("declined", Reviewer(status="declined")),
+            ("high", Reviewer(findings=(PlanningReviewFinding("HIGH", "phase-scope", "no measurable state"),))),
+            ("mid", Reviewer(findings=(PlanningReviewFinding("MID", "ordering", "the order is unclear"),))),
+        ):
+            with self.subTest(name):
+                store, _ = self._not_authorized(reviewer, remote=True, name=name)
+                self.assertIsNone(publication.barrier_problem(store.root, self.head(store)))
+                legacy = rm.create_roadmap(store, plan("Legacy after refusal"))
+                self.assertEqual(legacy.head, self.remote_head(name))
 
 
 class LowFindingTests(PlanningTestCase):
@@ -185,7 +192,25 @@ class ReviewerFailureTests(PlanningTestCase):
         self.assertEqual([], other.tasks, "the reviewer is not called")
 
 
+class ProcessDeath(BaseException):
+    """The process ends inside the reviewer call: no handler of the operation sees it (not an Exception)."""
+
+
 class RelaunchTests(PlanningTestCase):
+    def test_the_same_task_id_is_relaunched_after_the_process_died_in_the_reviewer_call(self) -> None:
+        store = self.planning_project()
+        first = Reviewer(raises=ProcessDeath())
+        with self.assertRaises(ProcessDeath):
+            self.reviewed_roadmap(store, first)
+        (run_id,) = run_ids(store)
+        self.assertEqual(1, self.chain(store, run_id).latest.generation, "nothing was settled")
+        self.assertEqual(1, len([r for r in self.pending(store) if r["invocation"].get("operation") == "roadmap-create"]))
+        second = Reviewer()
+        result = self.reviewed_roadmap(store, second)
+        self.assertEqual("registered", result.status)
+        self.assertEqual(run_id, result.review_run_id)
+        self.assertEqual(first.tasks, second.tasks, "the relaunched task is exactly the stored one, by the same task ID")
+
     def test_the_same_task_id_is_relaunched_after_a_crash(self) -> None:
         store = self.planning_project()
         first = Reviewer(raises=RuntimeError("process died"))
