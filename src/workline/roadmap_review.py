@@ -1763,7 +1763,22 @@ def _run(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> Revie
                 run = _setup_new_run(op, mutation, destination, discovery)
     else:
         run = _recorded_run(op, mutation)
-    return _proceed(op, mutation, destination, run)
+    try:
+        return _proceed(op, mutation, destination, run)
+    except StopError:
+        _abandon_if_nothing_started(op, mutation)
+        raise
+
+
+def _abandon_if_nothing_started(op: _Op, mutation: Mutation) -> None:
+    """The §12 table after the setup too: a STOP of any class abandons a planning mutation that has recorded no effect
+    and started no generation mutation - a recovery planning mutation until its first generation mutation (§12.4)."""
+    try:
+        idle = mutation.status == "pending" and not mutation.effects and not _generation_started(op, mutation)
+    except (StopError, ValidationError, OSError):
+        return  # when that cannot be told, the planning mutation is left pending
+    if idle:
+        mutation.abandon()
 
 
 def _recorded_run(op: _Op, mutation: Mutation) -> _Run:
