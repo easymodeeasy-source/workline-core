@@ -89,9 +89,10 @@ class ModeAndScopeTests(_KpCase):
         with mock.patch.object(gitcmd, "contained_commit", commit_less):
             with self.assertRaises(ReconcileRequired) as raised:
                 self.run_plan()
-        # the ledger left uncommitted is either the proof's missing path or a commit that is not this mutation's own
-        self.assertIn(raised.exception.reason, ("review_persisted_proof_failed", "review_commit_unowned"))
+        self.assertEqual("review_persisted_proof_failed", raised.exception.reason)
+        self.assertIn("C-2(Kp) P3 fails", str(raised.exception), "Kp's delta lacks a path E holds")
         self.assertFalse(ReviewStore(self.store).consumption_ids())
+        self.barrier_holds_for_head()
 
     def test_a_ledger_with_an_extra_relation_is_detected(self) -> None:
         real = gitcmd.contained_add

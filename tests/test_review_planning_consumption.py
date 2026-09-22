@@ -85,18 +85,52 @@ class BindingTests(_RegisteredCase):
     def test_phase_entry_persisted_result_binding(self) -> None:
         entry = self.reviewed_entry(self.store, self.result.registration.phase_ids["a"],
                                     the_design=design(related={"w1": (rr.RelatedSpec("must_read", "docs/a.md"),)}))
-        consumption = ReviewStore(self.store).read_consumption(entry.consumption_id)
+        review = ReviewStore(self.store)
+        consumption = review.read_consumption(entry.consumption_id)
         result = consumption.persisted_result
         registration = entry.registration
-        self.assertEqual(registration.phase_id, consumption.target_identity)
-        self.assertEqual("phase-entry-design-adapter-v1", result["adapter_identity"])
-        self.assertEqual([{"key": k, "id": v} for k, v in registration.work_ids.items()], result["work_ids"])
-        self.assertEqual(registration.integration_id, result["integration_work_id"])
-        self.assertEqual(registration.confirmation_id, result["confirmation_work_id"])
-        self.assertEqual(registration.entry_work_id, result["canonical_first_work_id"])
+        chain = self.chain(self.store, entry.review_run_id)
+        first = chain.generations[0]
+        kp = git(self.store.root, "rev-parse", "HEAD~1").strip()
+        parent = git(self.store.root, "rev-parse", "HEAD~2").strip()
+        material = review.read_candidate_snapshot(first.candidate_hash).material
+        content = planning.candidate_content(material)
+        context = review.read_task_input(first.accepted_tasks[0]["task_id"]).request_envelope["context"]
+        expected = rr.expected_projection(self.store, material, context, parent)
+        items = list(content["works"]) + [content["integration"], content["confirmation"]]
+        self.assertEqual(
+            {
+                "contract": "review-v1-planning-persisted-result-v1",
+                "request_digest": planning.request_digest_of(first.operation_identity),
+                "registration_commit": kp,
+                "registration_parent": parent,
+                "branch": "refs/heads/main",
+                "registration_delta_digest": expected.delta_digest(kp),
+                "semantic_projection_digest": rr.reviewed_projection(material).identity(),
+                "adapter_identity": "phase-entry-design-adapter-v1",
+                "loader_identity": context["loader_identity"],
+                "phase_id": registration.phase_id,
+                "roadmap_id": content["roadmap_id"],
+                "work_ids": [{"key": k, "id": v} for k, v in registration.work_ids.items()],
+                "integration_work_id": registration.integration_id,
+                "confirmation_work_id": registration.confirmation_id,
+                # planned_next w1 -> w2, then the integration dependencies, then the confirmation dependency
+                "roadmap_relation_ids": [relation["id"] for relation in content["relations"]],
+                "related_relation_ids": [related["id"] for item in items for related in item["related"]],
+                "canonical_first_work_id": registration.entry_work_id,
+            },
+            result,
+        )
+        self.assertEqual(4, len(result["roadmap_relation_ids"]))
         self.assertEqual(1, len(result["related_relation_ids"]))
-        # planned_next w1 -> w2, then integration dependencies, then the confirmation dependency
-        self.assertEqual(1 + 2 + 1, len(result["roadmap_relation_ids"]))
+        self.assertEqual(content["canonical_first_work"]["id"], result["canonical_first_work_id"])
+        self.assertEqual(
+            (entry.receipt_id, entry.review_run_id, 3, "phase-entry-design-v1", first.candidate_hash,
+             first.operation_identity, entry.mutation_id, registration.phase_id),
+            (consumption.receipt_id, consumption.review_run_id, consumption.review_generation, consumption.review_kind,
+             consumption.authorized_candidate_hash, consumption.operation_identity, consumption.operation_mutation_id,
+             consumption.target_identity),
+        )
 
 
 class UniquenessTests(_RegisteredCase):
@@ -195,6 +229,49 @@ class VersionTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             records.consumption_from_record(missing, "v2")
 
+    def _v2_phase_entry(self) -> dict:
+        record = self._v2()
+        record.update({"review_kind": "phase-entry-design-v1", "operation_identity": "phase-entry:" + "b" * 64,
+                       "target_identity": "p_01ARZ3NDEKTSV4RRFFQ69G5FAV"})
+        record["persisted_result"] = {
+            **{key: record["persisted_result"][key] for key in records.PERSISTED_RESULT_COMMON_FIELDS},
+            "adapter_identity": "phase-entry-design-adapter-v1",
+            "phase_id": "p_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "roadmap_id": "r_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "work_ids": [{"key": "w1", "id": "w_01ARZ3NDEKTSV4RRFFQ69G5FAV"}],
+            "integration_work_id": "w_01BX5ZZKBKACTAV9WEVGEMMVRZ",
+            "confirmation_work_id": None,
+            "roadmap_relation_ids": ["rel_01ARZ3NDEKTSV4RRFFQ69G5FAV"],
+            "related_relation_ids": [],
+            "canonical_first_work_id": "w_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        }
+        return record
+
+    def test_version_2_phase_entry_has_exactly_the_contract_fields(self) -> None:
+        contract = {  # §16.1, typed from the contract
+            "roadmap-plan-v1": ("roadmap_id", "phase_ids", "relation_ids"),
+            "phase-entry-design-v1": ("phase_id", "roadmap_id", "work_ids", "integration_work_id", "confirmation_work_id",
+                                      "roadmap_relation_ids", "related_relation_ids", "canonical_first_work_id"),
+        }
+        self.assertEqual(contract, dict(records.PERSISTED_RESULT_KIND_FIELDS))
+        self.assertEqual(("contract", "request_digest", "registration_commit", "registration_parent", "branch",
+                          "registration_delta_digest", "semantic_projection_digest", "adapter_identity",
+                          "loader_identity"), records.PERSISTED_RESULT_COMMON_FIELDS)
+        record = self._v2_phase_entry()
+        found = records.consumption_from_record(record, "v2")
+        self.assertIsInstance(found, records.PlanningConsumption)
+        self.assertEqual(serialize.canonical_data(record), serialize.canonical_data(found.to_record()))
+        extra = self._v2_phase_entry()
+        extra["persisted_result"]["phase_ids"] = []  # a Roadmap field in a Phase-entry record
+        with self.assertRaises(ValidationError):
+            records.consumption_from_record(extra, "v2")
+        for key in contract["phase-entry-design-v1"]:
+            missing = self._v2_phase_entry()
+            del missing["persisted_result"][key]
+            with self.subTest(missing=key):
+                with self.assertRaises(ValidationError):
+                    records.consumption_from_record(missing, "v2")
+
     def test_an_adapter_identity_mismatch_is_refused(self) -> None:
         record = self._v2()
         record["persisted_result"]["adapter_identity"] = "phase-entry-design-adapter-v1"
@@ -220,19 +297,24 @@ class VersionTests(unittest.TestCase):
                     records.consumption_from_record(record, "v2")
 
     def test_a_version_1_consumption_of_a_planning_kind_is_invalid(self) -> None:
-        v1 = {
-            "schema": "review-consumption", "version": 1, "consumption_id": "rcs_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "receipt_id": "rcp_01ARZ3NDEKTSV4RRFFQ69G5FAV", "review_run_id": "rr_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "review_generation": 3, "review_kind": "roadmap-plan-v1", "authorized_candidate_hash": "a" * 64,
-            "operation_identity": "roadmap-create:x", "operation_mutation_id": "mut_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "terminal_event_id": None, "terminal_event_type": None, "target_identity": "r_01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "authorized_result_commit_sha": None,
-        }
-        with self.assertRaises(ValidationError) as raised:
-            records.consumption_from_record(v1, "v1")
-        self.assertEqual("review_record_invalid", raised.exception.code)
-        # the P1 reader itself is unchanged: it reads the same record
-        self.assertEqual("roadmap-plan-v1", records.Consumption.from_record(v1, "v1").review_kind)
+        for kind, target, operation in (
+            ("roadmap-plan-v1", "r_01ARZ3NDEKTSV4RRFFQ69G5FAV", "roadmap-create:x"),
+            ("phase-entry-design-v1", "p_01ARZ3NDEKTSV4RRFFQ69G5FAV", "phase-entry:x"),
+        ):
+            v1 = {
+                "schema": "review-consumption", "version": 1, "consumption_id": "rcs_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "receipt_id": "rcp_01ARZ3NDEKTSV4RRFFQ69G5FAV", "review_run_id": "rr_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "review_generation": 3, "review_kind": kind, "authorized_candidate_hash": "a" * 64,
+                "operation_identity": operation, "operation_mutation_id": "mut_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                "terminal_event_id": None, "terminal_event_type": None, "target_identity": target,
+                "authorized_result_commit_sha": None,
+            }
+            with self.subTest(kind):
+                with self.assertRaises(ValidationError) as raised:
+                    records.consumption_from_record(v1, "v1")
+                self.assertEqual("review_record_invalid", raised.exception.code)
+                # the P1 reader itself is unchanged: it reads the same record
+                self.assertEqual(kind, records.Consumption.from_record(v1, "v1").review_kind)
 
     def test_version_1_records_are_unchanged(self) -> None:
         v1 = {
