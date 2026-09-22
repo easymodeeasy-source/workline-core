@@ -83,8 +83,10 @@ class TamperedRecordTests(PlanningTestCase):
         self.assertEqual(before, lifecycle_facts(ProjectView.load(store)), "lifecycle is not reinterpreted")
         self.assertEqual([], validate_structure(ProjectView.load(store)))
         rm.hold_roadmap(store, other)  # an operation that relies on no Review record proceeds
-        with self.assertRaises((ReconcileRequired, StopError, ValidationError)):
+        with self.assertRaises((ReconcileRequired, StopError, ValidationError)) as raised:
             self.reviewed_roadmap(store)  # the gated operation relying on the record stops
+        self.assertEqual(("ReconcileRequired", "review_receipt_invalid"),
+                         (type(raised.exception).__name__, getattr(raised.exception, "reason", None)))
 
 
 class StatePyTests(unittest.TestCase):

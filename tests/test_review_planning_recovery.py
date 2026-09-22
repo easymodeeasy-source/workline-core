@@ -556,14 +556,16 @@ class RecoveryMarkerTests(_RecoveryCase):
                       if k not in (planning.MARKER_REVIEW, planning.MARKER_PUBLICATION)}
         before = self._rewritten(invocation)
         for call in (self.run_plan, lambda: rm.create_roadmap(self.store, plan())):
-            with self.assertRaises(ReconcileRequired):
+            with self.assertRaises(ReconcileRequired) as raised:
                 call()
+            self.assertEqual("review_marker_mismatch", raised.exception.reason)
             self.assertEqual(before, self.path.read_bytes())
 
     def test_any_other_extra_key(self) -> None:
         before = self._rewritten({**self.recovering["invocation"], "extra": "x"})
-        with self.assertRaises(ReconcileRequired):
+        with self.assertRaises(ReconcileRequired) as raised:
             self.run_plan()
+        self.assertEqual("review_marker_mismatch", raised.exception.reason)
         self.assertEqual(before, self.path.read_bytes())
 
 

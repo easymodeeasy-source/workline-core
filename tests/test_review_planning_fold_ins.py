@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
+import re
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -11,7 +12,7 @@ from unittest import mock
 from helpers import WORKLINE_ROOT, cwd, git
 from planning_helpers import (
     CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, crash_at, design, noncanonical_registration, plan, plumb_commit,
-    registered, rr, run_ids,
+    registered, rr, run_ids, state_entries,
 )
 from workline import errors, gitcmd, gitops
 from workline import mutation as mutation_module
@@ -56,26 +57,143 @@ P2_MODULES = [
 ]
 
 
+#: The modules only P2 has: every ReconcileRequired they build carries a reason.
+P2_ONLY_MODULES = [
+    SRC / "roadmap_review.py", SRC / "committed_view.py", SRC / "review" / "planning.py", SRC / "review" / "recovery.py",
+    SRC / "review" / "publication.py", SRC / "review" / "checkout.py", SRC / "review" / "committed.py",
+]
+#: The functions P2 adds to live modules: the same holds inside them (the live code beside them keeps reason None).
+P2_FUNCTIONS_IN_LIVE_MODULES = {
+    "mutation.py": {"_bind_recovered_reservations", "conflict", "_make_planning_commit", "require_base",
+                    "_planning_publication", "_publication_contract", "_require_publication_barrier",
+                    "_validate_planning_commit", "_no_hooks_directory", "planned_write"},
+    "roadmap.py": {"require_marker_compatible", "planning_marker"},
+    "gitops.py": {"require_no_planning_transform", "review_commit_effect", "review_publication_effect"},
+}
+CONTRACT = WORKLINE_ROOT / "REVIEW_SYSTEM_P2_INTEGRATION_CONTRACT.md"
+
+
+class _Refusals:
+    """What a module's refusals name: resolved reasons and codes, what cannot be resolved, reasonless P2 raises."""
+
+    def __init__(self) -> None:
+        self.reasons: set = set()
+        self.codes: set[str] = set()
+        self.unresolved: list[str] = []
+        self.reasonless: list[str] = []
+
+
+def _call_name(node: ast.Call) -> str:
+    return node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+
+
+def _values(node: ast.AST, names: dict[str, set]) -> set | None:
+    """The text values ``node`` can take: a literal, a conditional of literals, or a name bound to literals."""
+    if isinstance(node, ast.Constant) and (node.value is None or isinstance(node.value, str)):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        body, orelse = _values(node.body, names), _values(node.orelse, names)
+        return None if body is None or orelse is None else body | orelse
+    if isinstance(node, ast.Name) and node.id in names:
+        return set(names[node.id])
+    return None
+
+
+def _own_calls(scope: ast.AST) -> list[ast.Call]:
+    """The calls in ``scope`` itself, not in a function nested in it."""
+    calls: list[ast.Call] = []
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(node, ast.Call):
+            calls.append(node)
+        pending.extend(ast.iter_child_nodes(node))
+    return calls
+
+
+def _refusals(path: Path) -> _Refusals:
+    found = _Refusals()
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    p2_only = path in P2_ONLY_MODULES
+    p2_functions = P2_FUNCTIONS_IN_LIVE_MODULES.get(path.name, set())
+    for scope in ast.walk(tree):
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        names: dict[str, set] = {}
+        for node in ast.walk(scope):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.setdefault(target.id, set()).add(node.value.value)
+        for node in _own_calls(scope):
+            name = _call_name(node)
+            where = f"{path.name}:{node.lineno}"
+            if name == "ReconcileRequired":
+                reason = [keyword.value for keyword in node.keywords if keyword.arg == "reason"]
+                if not reason:
+                    if p2_only or scope.name in p2_functions:
+                        found.reasonless.append(where)
+                    continue
+                if isinstance(reason[0], ast.Attribute) and reason[0].attr == "reason":
+                    continue  # a _Refused's reason: every _Refused construction is resolved below
+                if scope.name == "_reconcile" and isinstance(reason[0], ast.Name) and reason[0].id == "reason":
+                    continue  # the helper passes its caller's reason on: every _reconcile call is resolved below
+                values = _values(reason[0], names)
+                if values is None:
+                    found.unresolved.append(where)
+                else:
+                    found.reasons |= values
+            elif name in ("_reconcile", "_Refused") and len(node.args) >= 2:
+                values = _values(node.args[1], names)
+                if values is None:
+                    found.unresolved.append(where)
+                else:
+                    found.reasons |= values
+            elif name in ("StopError", "ValidationError"):
+                for keyword in node.keywords:
+                    if keyword.arg == "code" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+                        found.codes.add(keyword.value.value)
+    return found
+
+
 def _raised(path: Path) -> tuple[set[str], set[str]]:
-    """The literal reasons and codes of every P2 refusal constructed in ``path``."""
+    """The reasons and codes of every P2 refusal constructed in ``path`` (``None``, the live reason, left out)."""
+    found = _refusals(path)
+    return {reason for reason in found.reasons if reason is not None}, found.codes
+
+
+def _contract_catalogue() -> tuple[set[str], set[str], set[str]]:
+    """§25.1 as the frozen contract states it: the ReconcileRequired reasons, the codes, the non-exception reasons."""
+    text = CONTRACT.read_text(encoding="utf-8")
+    section = text[text.index("### 25.1 Error and reason catalogue"):text.index("## 26. Authority changes")]
     reasons: set[str] = set()
     codes: set[str] = set()
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    other: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("| `"):
             continue
-        name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
-        for keyword in node.keywords:
-            if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-                if keyword.arg == "reason" and name == "ReconcileRequired":
-                    reasons.add(keyword.value.value)
-                if keyword.arg == "code" and name in ("StopError", "ValidationError"):
-                    codes.add(keyword.value.value)
-        if name in ("_reconcile", "_Refused") and len(node.args) >= 2:
-            last = node.args[1]
-            if isinstance(last, ast.Constant) and isinstance(last.value, str):
-                reasons.add(last.value)
-    return reasons, codes
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        names = set(re.findall(r"`([a-z_]+)`", cells[0]))
+        if "ReconcileRequired" in cells[1] and "reason" in cells[1]:
+            reasons |= names
+        elif "no exception" in cells[1]:
+            other |= names
+        else:
+            codes |= names
+    return reasons, codes, other
+
+
+def _contract_uses() -> set[str]:
+    """Every code or reason the contract names where something raises or reports one."""
+    text = CONTRACT.read_text(encoding="utf-8")
+    used: set[str] = set()
+    for pattern in (r"code `([a-z_]+)`", r"reason `([a-z_]+)`", r"`StopError` `([a-z_]+)`", r"`ValidationError` `([a-z_]+)`"):
+        used |= set(re.findall(pattern, text))
+    for group in re.findall(r"`(?:ReconcileRequired|StopError)` \(([^)]*)\)", text):
+        used |= set(re.findall(r"`([a-z_]+)`", group))
+    return used
 
 
 class ReasonAttributeTests(PlanningTestCase):
@@ -105,6 +223,30 @@ class ReasonAttributeTests(PlanningTestCase):
         self.assertTrue(reasons >= {"review_commit_unowned", "review_persisted_proof_failed"})
         self.assertEqual(set(), reasons - CATALOGUE_REASONS, "a reason outside §25.1")
         self.assertEqual(set(), codes - CATALOGUE_CODES, "a code outside §25.1")
+
+    def test_every_reconcile_required_p2_raises_names_a_catalogue_reason(self) -> None:
+        for path in P2_MODULES:
+            found = _refusals(path)
+            with self.subTest(path.name):
+                self.assertEqual([], found.unresolved, "a reason the scan cannot resolve to catalogue text")
+                self.assertEqual([], found.reasonless, "a P2 ReconcileRequired without a reason")
+                self.assertEqual(set(), found.reasons - CATALOGUE_REASONS - {None}, "a reason outside §25.1")
+                if path in P2_ONLY_MODULES:
+                    self.assertNotIn(None, found.reasons, "only live code keeps reason None")
+        self.assertEqual({"review_publication_invalid", "review_publication_contract_invalid",
+                          "review_registration_base_moved", "review_recovery_reservation_conflict", None},
+                         _refusals(SRC / "mutation.py").reasons)
+
+    def test_the_catalogue_is_the_contracts_and_covers_every_code_and_reason_it_names(self) -> None:
+        reasons, codes, other = _contract_catalogue()
+        self.assertEqual(CATALOGUE_REASONS, reasons)
+        self.assertEqual(CATALOGUE_CODES, codes)
+        self.assertEqual({"review_context_changed", "review_policy_changed", "review_declared_base_changed",
+                          "invalidated", "consumed", "not_authorized", "set_aside"}, other)
+        used = _contract_uses()
+        self.assertTrue(used >= {"review_publication_barrier", "review_registration_base_moved", "review_checkout_unsafe",
+                                 "review_recovery_incomplete", "dirty_overlap"})
+        self.assertEqual(set(), used - reasons - codes - other, "a code or reason the contract uses outside §25.1")
 
 
 def planning_phase(name: str):
@@ -168,8 +310,9 @@ class BaseExactTests(PlanningTestCase):
                 with self.assertRaises(Crash):
                     self.reviewed_roadmap(self.store)  # its ID shows it held: C-2(Kp) runs, nothing is made again
         git(self.store.root, "reset", "-q", "--hard", f"{kp}~1")  # the branch no longer holds that ID
-        with self.assertRaises(ReconcileRequired):
+        with self.assertRaises(ReconcileRequired) as raised:
             self.reviewed_roadmap(self.store)
+        self.assertEqual("review_registration_base_moved", raised.exception.reason)
 
     def test_a_legacy_commit_keeps_the_independent_advancement_rule(self) -> None:
         other = rm.create_roadmap(self.store, plan("Other Roadmap")).roadmap_id
@@ -183,18 +326,30 @@ class BaseExactTests(PlanningTestCase):
 
 
 class DeltaRecordTests(PlanningTestCase):
-    def assert_types(self, record: dict, length: int) -> None:
+    def assert_object_id(self, value, length: int) -> None:
+        self.assertIsInstance(value, str)
+        self.assertRegex(value, "^[0-9a-f]{%d}$" % length)
+
+    def assert_types(self, record: dict, length: int, parent: str, commit: str) -> None:
+        self.assertEqual({"schema", "version", "parent", "commit", "entries"}, set(record))
+        self.assertEqual(("review-planning-delta", 1), (record["schema"], record["version"]))
+        self.assertIs(int, type(record["version"]))
+        self.assert_object_id(record["parent"], length)
+        self.assert_object_id(record["commit"], length)
+        self.assertEqual((parent, commit), (record["parent"], record["commit"]))
+        paths = [entry["path"] for entry in record["entries"]]
+        self.assertEqual(sorted(paths, key=lambda path: path.encode("utf-8")), paths, "sorted by path, bytewise")
         for entry in record["entries"]:
+            self.assertEqual({"path", "status", "old_mode", "new_mode", "old_blob", "new_blob"}, set(entry))
+            self.assertIsInstance(entry["path"], str)
+            self.assertIn(entry["status"], ("A", "M"))
             self.assertIsInstance(entry["old_mode"], str)
             self.assertIsInstance(entry["new_mode"], str)
-            self.assertIn(entry["old_mode"], ("000000", "100644"))
+            self.assertEqual("000000" if entry["status"] == "A" else "100644", entry["old_mode"])
             self.assertEqual("100644", entry["new_mode"])
             for key in ("old_blob", "new_blob"):
-                self.assertIsInstance(entry[key], str)
-                self.assertEqual(length, len(entry[key]))
-                self.assertEqual(entry[key], entry[key].lower())
-                int(entry[key], 16)
-        self.assertEqual(length, len(record["parent"]))
+                self.assert_object_id(entry[key], length)
+            self.assertEqual(entry["status"] == "A", entry["old_blob"] == "0" * length)
 
     def test_every_scalar_has_its_type_and_integer_modes_digest_differently(self) -> None:
         store = self.planning_project()
@@ -204,7 +359,8 @@ class DeltaRecordTests(PlanningTestCase):
             self.chain(store, result.review_run_id).generations[0].accepted_tasks[0]["task_id"]).request_envelope["context"]
         expected = rr.expected_projection(store, found.material, context, found.parent)
         record = expected.delta_record(found.kp)
-        self.assert_types(record, 40)
+        self.assert_types(record, 40, found.parent, found.kp)
+        self.assertEqual({"A", "M"}, {entry["status"] for entry in record["entries"]}, "added files and a changed ledger")
         self.assertIn("0" * 40, [entry["old_blob"] for entry in record["entries"]], "the zero ID for an added path")
         integer_modes = {**record, "entries": [{**e, "old_mode": int(e["old_mode"]), "new_mode": int(e["new_mode"])}
                                                for e in record["entries"]]}
@@ -233,7 +389,7 @@ class DeltaRecordTests(PlanningTestCase):
         context = ReviewStore(store).read_task_input(
             self.chain(store, result.review_run_id).generations[0].accepted_tasks[0]["task_id"]).request_envelope["context"]
         record = rr.expected_projection(store, found.material, context, found.parent).delta_record(found.kp)
-        self.assert_types(record, 64)
+        self.assert_types(record, 64, found.parent, found.kp)
         self.assertIn("0" * 64, [entry["old_blob"] for entry in record["entries"]])
 
 
@@ -276,6 +432,21 @@ class GitMinimumTests(PlanningTestCase):
         self.assertEqual("review_git_unsupported", raised.exception.code)
         self.assertEqual(before, path.read_bytes())
 
+    def test_b_2_39_stops_before_the_lock_and_writes_nothing(self) -> None:
+        from workline import oplock
+
+        phase_id = rm.create_roadmap(self.store, plan("A Roadmap To Enter")).phase_ids["a"]
+        before = state_entries(self.store)
+        head = self.head(self.store)
+        with version((2, 39, 5)), mock.patch.object(oplock, "project_operation", side_effect=AssertionError("the lock")):
+            for call in (lambda: self.reviewed_roadmap(self.store),
+                         lambda: self.reviewed_entry(self.store, phase_id, Reviewer())):
+                with self.assertRaises(StopError) as raised:
+                    call()
+                self.assertEqual("review_git_unsupported", raised.exception.code)
+        self.assertEqual(before, state_entries(self.store))
+        self.assertEqual(head, self.head(self.store))
+
     def test_b_2_39_a_legacy_invocation_registers_as_today(self) -> None:
         with version((2, 39, 5)):
             created = rm.create_roadmap(self.store, plan("A Legacy Roadmap"))
@@ -301,16 +472,25 @@ class GitMinimumTests(PlanningTestCase):
     def test_c_the_publication_behaviour_on_exactly_2_31_0(self) -> None:
         self.publication_behaviour((2, 31, 0))
 
-    def test_b_a_valid_kp_km_history_passes_and_an_invalid_kp_holds_on_2_39(self) -> None:
+    def valid_and_invalid_kp(self, found_version) -> None:
         valid = self.reviewed_roadmap(self.store)
-        with version((2, 39, 5)):
+        gitcmd.forget_object_answers()
+        with version(found_version):
             self.assertIsNone(publication.barrier_problem(self.store.root, valid.registration.head))
             self.legacy_push()
         with noncanonical_registration():
-            with self.assertRaises(ReconcileRequired):
+            with self.assertRaises(ReconcileRequired) as raised:
                 self.reviewed_roadmap(self.store, Reviewer(), plan("Invalid Registration"))
-        with version((2, 39, 5)):
+        self.assertEqual("review_persisted_proof_failed", raised.exception.reason)
+        gitcmd.forget_object_answers()
+        with version(found_version):
             self.assertIn("CP5 fails", publication.barrier_problem(self.store.root, self.head(self.store)))
+
+    def test_b_a_valid_kp_km_history_passes_and_an_invalid_kp_holds_on_2_39(self) -> None:
+        self.valid_and_invalid_kp((2, 39, 5))
+
+    def test_c_a_valid_kp_km_history_passes_and_an_invalid_kp_holds_on_exactly_2_31_0(self) -> None:
+        self.valid_and_invalid_kp((2, 31, 0))
 
     def test_d_2_30_9_clears_a_snapshot_free_history_and_refuses_one_holding_a_snapshot(self) -> None:
         with version((2, 30, 9)):
@@ -418,9 +598,6 @@ class OneSpellingTests(PlanningTestCase):
                              [a for a in args if a.startswith("-") and a != "--" and not a.startswith("--format")])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class AuthorityTextTests(unittest.TestCase):
     """§26: each rule has one normative owner; the Skills name rules/git instead of restating it."""
@@ -479,6 +656,12 @@ class AuthorityTextTests(unittest.TestCase):
         self.assertIn("`rules/git`（Commit / push、Push destination、Git versions）が所有", skill)
         self.assertNotIn("2.31.0", skill, "the minimums are named, not restated")
         self.assertNotIn("2.40.0", skill)
+        registry = self.read("registry.md")
+        rules_git = registry[registry.index("<!-- workline-id: rules/git -->"):registry.index("## AI Decision")]
+        for restated in ("--full-history", "--diff-merges", "gitops.finalize", "_classify_push"):
+            with self.subTest(restated=restated):
+                self.assertNotIn(restated, skill, "the barrier's reads and the push stage's mechanics belong to rules/git")
+        self.assertIn("--full-history", rules_git, "rules/git is where the barrier's read is stated")
 
 
 class StaticInvariantTests(unittest.TestCase):
@@ -512,3 +695,7 @@ class StaticInvariantTests(unittest.TestCase):
             text = (SRC / "review" / name).read_text(encoding="utf-8").replace("CommittedReviewStore(", "")
             for forbidden in ("checkout", "check_attributes", "ReviewStore(", "read_text("):
                 self.assertNotIn(forbidden, text, f"review/{name} uses {forbidden}")
+
+
+if __name__ == "__main__":
+    unittest.main()

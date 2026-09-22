@@ -146,6 +146,7 @@ class WindowTests(_PublishCase):
         with executable_registration():
             with self.assertRaises(ReconcileRequired) as first:
                 self.run_plan()
+        self.assertEqual("review_persisted_proof_failed", first.exception.reason)
         self.assertIn("C-2(Kp) P3 fails", str(first.exception))
         for _ in range(2):
             with self.assertRaises(ReconcileRequired) as again:
@@ -187,8 +188,9 @@ class WindowTests(_PublishCase):
         path = self.store.root / self.stage_effect(rr.STAGE_CONSUMPTION)["payload"]["path"]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("other: bytes\n", encoding="utf-8", newline="\n")
-        with self.assertRaises(ReconcileRequired):
+        with self.assertRaises(ReconcileRequired) as raised:
             self.run_plan()
+        self.assertIsNone(raised.exception.reason, "the live create_file classification keeps reason None")
         self.assertFalse([e for e in self.planning_record()["effects"] if e["stage"] == rr.STAGE_KM])
         self.nothing_published()
 
@@ -346,8 +348,9 @@ class BranchAndHistoryTests(_PublishCase):
     def test_a_branch_switch_reconciles_and_the_bound_branch_continues(self) -> None:
         self.crash(rr, "_c2_kp")
         git(self.store.root, "checkout", "-q", "-b", "elsewhere")
-        with self.assertRaises(ReconcileRequired):
+        with self.assertRaises(ReconcileRequired) as raised:
             self.run_plan()
+        self.assertEqual("review_persisted_proof_failed", raised.exception.reason)  # C-2(Kp) P2: HEAD off the bound branch
         self.assertFalse(ReviewStore(self.store).consumption_ids())
         self.nothing_published()
         git(self.store.root, "checkout", "-q", "main")
@@ -358,8 +361,9 @@ class BranchAndHistoryTests(_PublishCase):
         km = self.stage_effect(rr.STAGE_KM)["commit_id"]
         git(self.store.root, "commit", "-q", "--amend", "--no-verify", "-m", "a rewritten metadata commit")
         self.assertNotEqual(km, self.head(self.store))
-        with self.assertRaises(ReconcileRequired):
+        with self.assertRaises(ReconcileRequired) as raised:
             self.run_plan()
+        self.assertIsNone(raised.exception.reason, "the live classification of the recorded metadata commit")
         self.assertEqual([], self.pushes_recorded())
         self.nothing_published()
 
@@ -394,8 +398,9 @@ class RemoteAdvancementTests(_PublishCase):
         git(other, "-c", "user.name=Other", "-c", "user.email=other@example.invalid", "commit", "-q", "-m", "foreign")
         git(other, "push", "-q", "origin", "HEAD:refs/heads/main")
         diverged = self.remote_head()
-        with self.assertRaises(ReconcileRequired):
+        with self.assertRaises(ReconcileRequired) as raised:
             self.run_plan()
+        self.assertIsNone(raised.exception.reason, "the live push classification")
         self.assertEqual(diverged, self.remote_head(), "never forced")
 
 
