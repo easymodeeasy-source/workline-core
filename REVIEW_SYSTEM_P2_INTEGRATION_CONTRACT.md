@@ -1,6 +1,6 @@
 # Review System P2 — Planning Review Gates: Integration Contract
 
-Status: `CONTRACT FROZEN / ROUND 3 REPAIRED (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT CONTRACT RE-REVIEW`
+Status: `CONTRACT FROZEN / ROUND 4 REPAIRED (round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007) / IMPLEMENTATION NOT STARTED / PENDING INDEPENDENT CONTRACT RE-REVIEW`
 
 Runtime authority is unchanged by this document: `registry.md`, the registry-routed canonical Skills, and the live implementation and tests. This is a non-normative contract checkpoint. It freezes how P2 connects RoadmapPlan Review and PhaseEntryDesign Review to the landed P1 Review Core and to the live Roadmap operation, so that the P2 implementation is left with no choice to make. It starts no implementation and edits no authority; §26 states the authority text the implementation changes under the approval of this contract.
 
@@ -13,7 +13,7 @@ P2 scope:               1. RoadmapPlan Review
                         2. PhaseEntryDesign Review
                         3. semantic round-trip integration
 C-1 .. C-6:             CLOSED BY P2 CONTRACT (§23)
-P2-CONTRACT-001 .. 006: CLOSED (round 1: 001-004; round 2: 001, 005; round 3: 006; §33); cross-finding pass §34
+P2-CONTRACT-001 .. 007: CLOSED (round 1: 001-004; round 2: 001, 005; round 3: 006; round 4: 007; §33); cross-finding pass §34
 P3:                     NOT STARTED, and nothing here activates it
 ```
 
@@ -40,6 +40,7 @@ Where the accepted reconnaissance listed contract directions, this document name
 | round-1 repair baseline = contract under repair | `2f8771ae91df580453a0ebc026febe5c5a562cc0` — local `main`, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; repaired in a fresh GitHub clone at `2f8771a`, and the repair changes this document only |
 | round-2 repair baseline = contract under repair | `3a8b9cf0496b230ebcb773f5905d98f529b6b313` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 | round-3 repair baseline = contract under repair | `459f431c9715c5db0c50691d63f42d90b0c70513` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
+| round-4 repair baseline = contract under repair | `bbdd93d38c48eddb86ce2200e27a4cc1f774a7bb` — local `main` of a fresh GitHub clone, `origin/main` and GitHub `refs/heads/main` verified equal, working tree clean; `src/`, `tests/`, Skills and `registry.md` still byte-identical to `b78be1c`; the repair changes this document only |
 
 Accepted inputs, not reopened here:
 
@@ -89,7 +90,8 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | publication barrier | the rule that no Workline push publishes a history holding a registration commit unless the committed planning proof proves that registration (§18.7, §18.8) |
 | checkout capability | the positive proof that Git reproduces canonical Review bytes in this repository and in a fresh clone (§14.5) |
 | committed planning proof (CP) | the proof, re-run from committed objects alone, that a registered Run's Kp (its exact bytes and its meaning), Consumption and Km are exactly what its Receipt authorized; the durable basis of C-2(Km) and the only thing that clears the publication barrier (§18.8) |
-| expected physical projection (E) | every path, add / modify transition, mode and exact byte Kp may carry — whole ledgers included — recomputed from the Run's Candidate snapshot and Kp's parent P by the writer's own builders and planned-write computation; computed, never stored (§15.7) |
+| canonical planning writer input (W) | `CanonicalPlanningWriterInput`: the exact inputs the live Roadmap, Phase CREATE and Work CREATE writer helpers receive on the review-v1 path, computed from the canonical Candidate record alone; computed, never stored (§7.8) |
+| expected physical projection (E) | every path, add / modify transition, mode and exact byte Kp may carry — whole ledgers included — recomputed from W and Kp's parent P by the writer's own builders and planned-write computation; computed, never stored (§15.7) |
 | display base check | the check, before each registration stage is recorded, that the working-tree entity files whose count allocates the stage's display numbers are exactly HEAD's plus the files the planning mutation's recorded stages wrote (§15.7) |
 | matching Run | a canonical Review Run whose generation 1 carries this invocation's `review_kind` and `operation_identity` (§12.2) |
 | recoverable Run | a matching Run that is cleanly persisted, reconstructs exactly, is not terminal and not set aside, has no registration commit, and — below generation 3 — has a current Candidate (§12.2–§12.3) |
@@ -114,6 +116,7 @@ Ungated planning writers stay ungated (reconnaissance §3.7 / Q18): `add_phases`
 | C-2(Km) durable proof (P2-CONTRACT-001, round 2) | C-2(Km) = the operation's ownership checks + CP; its durable basis is the committed objects CP reads, reproducible in any clone; `publication_proof` is a runtime marker only; the barrier needs CP alone — safe history for another operation to publish ≠ a commit this planning mutation may adopt as its own | §18.2, §18.8 |
 | runtime-loss recovery (P2-CONTRACT-005) | before any new Run is reserved, canonical recovery discovery finds the matching Runs; exactly one recoverable → a recovery planning mutation (`recovery_of_review_run_id`) binds the canonical Run, task, Receipt and domain IDs and continues the same Run and task; none → a new Run that records the set-aside Runs; several, or any matching Run that is incomplete → `ReconcileRequired` | §12.1–§12.8, §21.2 |
 | exact physical projection (P2-CONTRACT-006, round 3) | Kp's delta must be exactly E: the path set, transitions, modes and every byte — whole ledgers included — that the writer's own builders and planned-write computation produce from the committed Candidate snapshot on Kp's exact parent P; one computation and one comparison for the pre-Kp proof, C-2(Kp) and the committed planning proof; semantic equality stays separately required, and each proof is required on its own; `registration_delta_digest` is derived from the proven E | §15.7, §15.3, §15.6, §18.8, §20 |
+| canonical writer input (P2-CONTRACT-007, round 4) | on the review-v1 path the canonical Candidate is the only source of byte-affecting writer input: W is computed from the canonical Candidate record — mappings in the P1 canonical key order, sequences in Candidate order, every entry kept — and feeds the representability check, the actual registration, E, the pre-Kp proof, C-2(Kp), recovery and the committed planning proof; after the freeze the caller's plan or design never reaches a byte-producing helper; legacy is unchanged | §7.8, §7.6, §15.1, §15.7, §20 |
 | registration base (P2-CONTRACT-003) | `use_check_head` noted at the use check; Kp made on exactly its recorded parent P (`base_exact`); P = `use_check_head`, or a descendant through commits that touch no planning-owned path, with full currency on P; C-2(Kp) proves full currency on P's committed view | §13, §15.2, §15.3, §15.6, §17 |
 | checkout capability (P2-CONTRACT-004) | committed and effective attributes of Review paths must be exactly form L or form B; every existing Review record must read canonically; fail closed before the first Review record; P1 reader unchanged; legacy unchanged | §14.5, §14.6 |
 | not authorized | terminal `not_authorized` outcome, nothing registered, planning mutation completed | §19 |
@@ -241,7 +244,7 @@ PhaseEntryDesign  {schema: review-planning-request-identity, version: 1,
                    operation: phase-entry, phase_id: <phase_id>, design: <design_identity(design)>}
 ```
 
-Properties, each by construction: every key part is colon-free and stripped (`gate._require_key_part`); every value is stable across retry (the request identity is durable before any reservation; the target is a planning reservation for RoadmapPlan and the given, existing Phase ID for PhaseEntryDesign); none uses a display number, a timestamp or a process identity; `operation_identity` binds the exact request / design semantics; the kind names carry the planned object and a version, and this contract reserves the `roadmap-` and `phase-entry-` prefixes for planning kinds, so a Work review kind cannot collide; `authorized_operation_stage` names exactly the registration stages of the planning mutation that holds the Consumption, committed as Kp (§15.1) — nothing else is authorized by the Receipt.
+Properties, each by construction: every key part is colon-free and stripped (`gate._require_key_part`); every value is stable across retry (the request identity is durable before any reservation; the target is a planning reservation for RoadmapPlan and the given, existing Phase ID for PhaseEntryDesign); none uses a display number, a timestamp or a process identity; `operation_identity` binds the exact request / design semantics, and not the insertion order of a caller's mapping (the digest is over canonical bytes; **Measured**, §31); the kind names carry the planned object and a version, and this contract reserves the `roadmap-` and `phase-entry-` prefixes for planning kinds, so a Work review kind cannot collide; `authorized_operation_stage` names exactly the registration stages of the planning mutation that holds the Consumption, committed as Kp (§15.1) — nothing else is authorized by the Receipt.
 
 ### 6.3 Where each Review ID is reserved
 
@@ -268,7 +271,7 @@ declared_base: <kind-specific: §7.4>
 - CandidateSnapshot (P1 schema, snapshot mode) at `.workline/review/candidate-snapshots/<candidate_hash>.yaml`: `{candidate_hash, reconstruction_mode: snapshot, projection_semantics_version, material: <candidate record>, builder: null}`.
 - `candidate_material_digest` = SHA-256 of the snapshot record's canonical bytes (`ReviewStore.candidate_material_digest`).
 - Reconstruction mode: `snapshot`. `builder_v1` is not used: its inputs (the request and the reserved IDs) live only in the runtime record, which is not clone-safe.
-- Reconstruction on resume: from the planning invocation (`request` / `design`), the planning mutation's reserved IDs (for a recovery planning mutation, the IDs bound from the snapshot, §12.5) and the declared base recomputed under the lock on the committed view of the base commit that currency is evaluated on (§7.4, §13). The rebuilt record must digest to the Run's `candidate_hash` and equal the stored snapshot's `material`. A different declared base is staleness or, once the registration began, reconciliation (§13); any other difference is `ReconcileRequired`.
+- Reconstruction on resume: from the planning invocation (`request` / `design`), the planning mutation's reserved IDs (for a recovery planning mutation, the IDs bound from the snapshot, §12.5) and the declared base recomputed under the lock on the committed view of the base commit that currency is evaluated on (§7.4, §13). The rebuilt record must digest to the Run's `candidate_hash` and equal the stored snapshot's `material`; it is compared, never written from — the writer takes W from the stored snapshot (§7.8). A different declared base is staleness or, once the registration began, reconciliation (§13); any other difference is `ReconcileRequired`.
 - After runtime loss the planning mutation's reservations are gone, but the Candidate is not: the committed snapshot holds the reviewed content with every reserved domain ID, and the Run's records hold the Run and task IDs. The same logical invocation recovers them (§12): discovery, then a recovery planning mutation that binds exactly those IDs and continues the same Run and task. A fresh Candidate (new reserved IDs, new `candidate_hash`, new Run) is built only when no matching Run is recoverable (§12.8), and a matching Run that cannot be shown whole stops the call instead of being replaced (§12.3). A registration commit whose Run has no CP-proven Consumption is never recovered and never bypassed: the publication barrier keeps it unpublished (§18.7, §21.2).
 
 ### 7.2 RoadmapPlan content (`normalize_candidate`)
@@ -295,7 +298,7 @@ relations:                         # declared order of plan.relations
     to:   <same rule>
 ```
 
-The only normalization is the stripping the live writer itself performs (`store.render_body` strips section text; `roadmap_request_identity` records the same). Names stay verbatim. Frozen P1 R8 §3 fields are all present; the caller keys are reviewed semantics carried through the reservation map (Frozen P1 R8 §4, §6).
+The only normalization is the stripping the live writer itself performs (`store.render_body` strips section text; `roadmap_request_identity` records the same). Names stay verbatim. Frozen P1 R8 §3 fields are all present; the caller keys are reviewed semantics carried through the reservation map (Frozen P1 R8 §4, §6). A RoadmapPlan holds no caller-supplied mapping, and §7.8 applies to it all the same: after the freeze a review-v1 Roadmap creation writes from the Candidate, never from the caller's plan.
 
 ### 7.3 PhaseEntryDesign content (`normalize_candidate`)
 
@@ -314,7 +317,7 @@ works:                             # declared order of design.works
       - id:        <reserved under works:related:<key>:<i>>
         type:      <type>
         to:        <verbatim>
-        condition: <mapping, or null>
+        condition: <null, or the caller's mapping as serialize.canonical_data gives it (§7.8)>
 integration:
   id:            <reserved under integration:work:integration>
   name / desired_state / related   (related IDs under integration:related:integration:<i>)
@@ -338,6 +341,8 @@ canonical_first_work:              # §7.7
 
 These are exactly the reservation keys and orders the unchanged `register_works` uses (`create.py:251-259`); **Measured** (reconnaissance probe 5): the unchanged `_expand_phase` used exactly the pre-reserved IDs.
 
+A condition is recorded as `serialize.canonical_data` gives it: keys in the P1 canonical order at every depth, every entry kept, sequences in their order. Two conditions equal as values are one Candidate value, whatever their key insertion order; a condition whose canonical form would differ from it in anything but key order is refused before Review (§7.6).
+
 ### 7.4 Declared base
 
 **Frozen.** Computed under the lock on the committed view of HEAD (§3, §15.4) — at the freeze HEAD is `review_binding.head` — never on the working tree: the registration is committed on a commit, and the currency that authorizes it is that commit's (§13). Part of the Candidate and so of `candidate_hash` (Candidate 7 §4.1: "reviewed artifact identity plus declared base/context identity"). An entity the declared base names that the committed view does not hold (a Phase or Work present only in the working tree) → at the freeze `ValidationError` code `review_base_uncommitted`, before any Review record, planning abandoned; at any subsequent evaluation, a declared-base difference (§13). The live preconditions keep reading the working tree, unchanged; a working-tree-only change of a declared-base fact is not part of the base until it is committed.
@@ -358,21 +363,23 @@ PhaseEntryDesign:
 
 ### 7.5 Excluded as presentation or runtime material
 
-Display numbers (`R-xx`, `P-xx`, `W-xx`), commit messages, frontmatter layout and key order, ledger file order and whole-file rendering, timestamps, mutation IDs, lock holder, Git commits and branch, the `entry` field as such (the canonical first Work stands for its meaning, §7.7), filesystem enumeration order. The bytes that carry display and layout are never reviewed as meaning, and they are not free: Kp must hold exactly the expected physical projection (§15.7), which the pre-Kp proof (§15.6 item 6), C-2(Kp) (§15.3 P3) and the committed planning proof (§18.8 CP5) require. A layout the reader accepts with the same meaning is a physical mismatch.
+Display numbers (`R-xx`, `P-xx`, `W-xx`), commit messages, frontmatter layout and key order, ledger file order and whole-file rendering, timestamps, mutation IDs, lock holder, Git commits and branch, the `entry` field as such (the canonical first Work stands for its meaning, §7.7), filesystem enumeration order. The bytes that carry display and layout are never reviewed as meaning, and they are not free: Kp must hold exactly the expected physical projection (§15.7), which the pre-Kp proof (§15.6 item 6), C-2(Kp) (§15.3 P3) and the committed planning proof (§18.8 CP5) require. A layout the reader accepts with the same meaning is a physical mismatch. The key order of a caller-supplied mapping (a Related condition) is likewise no reviewed meaning: the reviewed condition is the mapping value. Once the Candidate is frozen, its canonical representation is what the writer receives (§7.8), so it decides the bytes without adding anything to what was reviewed.
 
 ### 7.6 Representability check (pre-Review)
 
 **Frozen.** At the freeze, after every reservation and the live payload and structure refusals, before any Review record:
 
-1. the expected effects — RoadmapPlan: the Roadmap `write_file` effect exactly as `_create_roadmap` builds it now (`roadmap.py:478-486`) plus the `decide_phases` effects; PhaseEntryDesign: the three stages' effects built by the registration core's own effect builder (`create._registration_effects` with `_allocated_displays`, counts accumulating across stages, the reserved relation and Related IDs) — reused, or extracted as a pure function with no behaviour change;
+1. the expected effects, built from W (§7.8) — computed from the canonical Candidate record, never from the caller's plan or design — by the writer's own builders: RoadmapPlan: the Roadmap `write_file` effect exactly as `_create_roadmap` builds it (`roadmap.py:478-486`) plus the `decide_phases` effects; PhaseEntryDesign: the three stages' effects built by the registration core's own effect builder (`create._registration_effects` with `_allocated_displays`, counts accumulating across stages, the reserved relation and Related IDs) — reused, or extracted as pure functions with no behaviour change;
 2. `projected = ProjectView.load(store).with_effects(expected effects)`;
 3. `validate_structure(projected) == []`;
 4. `adapter.normalize_persisted(adapter.load_persisted(result identity, projected))` equals `adapter.normalize_candidate(...)` exactly (projection identity);
 5. PhaseEntryDesign: R9 (§7.7) evaluated on `projected`.
 
+Before step 1, every mapping a caller supplies to the Candidate (a Related condition) must be representable exactly: its canonical form (`serialize.canonical_data`) equal to it under Python equality — which ignores key order and tells a tuple from a list — and renderable (`serialize.canonical_text`). A tuple, which the canonical form would make a list; a float or a non-text key, which it refuses; an empty key or a sequence directly inside a sequence, which the canonical text cannot render → `ValidationError` code `review_candidate_unrepresentable`. Each is a value the canonical form cannot hold as given; the live writer's `yamlish.dump` refuses the tuple and the float as well (**Measured**, §31).
+
 Failure of 3 → the live refusal (`ValidationError` code `postcheck_failed`); of 4 → `ValidationError` code `review_candidate_unrepresentable`; of 5 → the R9 codes of §7.7. Every one happens before any Review record or domain effect, and the planning mutation is abandoned (§12). Nothing is normalized away to make it pass: a Roadmap name with a trailing space, a `## heading` line injected into a section, a CR or CRLF in any text, U+2028 in a name — every loss the reconnaissance measured (§10.2 there) — is refused here, and a lone CR can therefore never strand a review-v1 run (reconnaissance §17 item 1).
 
-This check predicts the working tree with the same effect builders the expected physical projection uses (§15.7 step 2). It is not the persisted proof, which is over the committed result, physically and semantically (§15.3, §15.7).
+This check predicts the working tree with the same W and the same effect builders the expected physical projection uses (§7.8, §15.7 step 2). It is not the persisted proof, which is over the committed result, physically and semantically (§15.3, §15.7).
 
 ### 7.7 R9 canonical self-selection
 
@@ -399,6 +406,57 @@ selection = none        when startable is empty
 | A | none startable | refused by the live `_require_startable_entry` before `_open`, as today |
 
 The rule applies to review-v1 invocations only; `tests/helpers.simple_entry`, which relies on the legacy acceptance of an explicit entry among equals, is unaffected. The adapter recomputes the selection on the committed view (§15.3 P9) and never decides it.
+
+### 7.8 The writer hand-off: `CanonicalPlanningWriterInput`
+
+**Frozen.** On the review-v1 path the canonical reviewed Candidate is the only source of every byte-affecting registration writer input. The caller's `RoadmapPlan` / `PhaseEntryDesign` validates the invocation (the live payload refusals, §7.6, §7.7), is what the Candidate is built from, and gives the request identity (§6.2). Once the Candidate is frozen, the caller's object never reaches a byte-producing helper again. Legacy invocations are unchanged: they hand the caller's objects to the live writer exactly as today.
+
+`CanonicalPlanningWriterInput` — W — is the one concept that turns the Candidate back into the exact inputs the live Roadmap, Phase CREATE and Work CREATE writer helpers consume. It is deterministic and computed from the canonical Candidate record alone. It is never stored; it is no Project or Review record, no lifecycle truth and no semantic authority; and nothing a caller supplies after the freeze enters it.
+
+**Source record.** W is computed from the Candidate record in its canonical form, never from an in-memory mapping that merely digests to the same `candidate_hash`:
+
+- before the snapshot is written (the freeze, §7.6): `serialize.canonical_data` of the Candidate record — the record whose canonical text becomes the snapshot's `material`;
+- afterwards (the actual registration, the pre-Kp proof, C-2(Kp), recovery, the committed planning proof, a fresh clone): the snapshot's `material` as the P1 strict reader returns it — `ReviewStore.read_candidate_snapshot` in the working tree, `serialize.parse_canonical` over the committed blob (§18.8).
+
+The two are the same data in the same key order: `parse_canonical` accepts only the canonical rendering of the record it returns (`review/serialize.py:135-173`; **Measured**, §31). So the hand-off before the write and after the read is the same W.
+
+**Mappings.** Every mapping inside a Candidate field that reaches Project bytes — today the Related `condition` (§7.3), at every depth — enters W in the Candidate's representation: the P1 serializer's key order (ascending code point at every depth, `serialize.canonical_data`, `review/serialize.py:47-73`), with every entry the Candidate holds. No entry is dropped, added or renamed: the live `validate_condition` (`validate.py:48-61`) checks `kind` and `pattern` and accepts further keys, nested mappings included (**Measured**, §31), and W keeps them. No other key-order rule exists, and nothing is sorted inside the writer: `Relation.to_record`, `yamlish.dump` and `render_relations` are unchanged and render a mapping in the order they receive it (`store.py:151-154`, `yamlish.py:84-145`) — on the review-v1 path, the Candidate's.
+
+**Sequences** keep the order the Candidate states: Phases, Works, Related entries, `planned_next` and `requires_completion`, relation records, reservation lists and the registration stages (§7.2, §7.3). Only mapping key order is normalized, as in the P1 serializer.
+
+**Contents.** The values the writer helpers take, stage by stage:
+
+```text
+RoadmapPlan (§7.2)
+  roadmap stage       the Roadmap file's id, name and sections in the writer's order: background, desired
+                      state, then scope and out of scope where the Candidate's value is not null
+  phases stage        the Roadmap ID; the Phase specs {key: PhaseSpec(name, desired_state)} in Candidate
+                      order; PhaseRelationSpec(type, from, to) for the Candidate's relations in order
+  reservations        roadmap, phases:phase:<key>, phases:rel:<i> -> the Candidate's IDs
+
+PhaseEntryDesign (§7.3)
+  works stage         {key: WorkSpec(name, desired_state, phase_id, roadmap_id, related=(RelatedSpec(type,
+                      to, condition), ...))} for the normal Works in Candidate order; RelationSpec(type, from,
+                      to) for the Candidate's works:rel relations in order (planned_next, then
+                      requires_completion)
+  integration stage   {"integration": WorkSpec(..., work_kind=phase_integration_check, related=...)};
+                      requires_completion <normal Work ID> -> integration, normal Works in Candidate order
+  confirmation stage  only with a Candidate confirmation: {"confirmation": WorkSpec(...,
+                      work_kind=human_confirmation, confirmation_target=<the integration ID>, related=...)};
+                      requires_completion <the integration ID> -> confirmation
+  reservations        works:work:<key>, works:related:<key>:<i>, works:rel:<i>, integration:*,
+                      confirmation:* -> the Candidate's IDs
+```
+
+In the relations the Candidate declares (RoadmapPlan `relations`, PhaseEntryDesign `works:rel`), an endpoint that is one of the Candidate's own reserved IDs is handed over as its key, as a caller writes it, and any other endpoint as the existing ID it is; the generated integration and confirmation relations take the form `_expand_phase` gives them (a Work ID, then the stage key). Each `condition` is the Candidate's mapping, or `None`. `entry` is not in W: the writer does not persist it, and the Candidate's `canonical_first_work` stands for its meaning (§7.7, Frozen P1 R9 §4).
+
+**One derivation, no second semantics.** These stage inputs are what `_create_roadmap` (`roadmap.py:472-504`) and `_expand_phase` (`roadmap.py:949-1037`) derive from a plan or design: the specs, the generated integration and confirmation relations, the confirmation target, the stage order. That derivation is extracted from them as a pure function with no behaviour change: the legacy path calls it with the caller's plan or design, and W calls it with the plan or design value rebuilt from the Candidate, every field of which is the Candidate's, in Candidate order, with no `entry`. W renders nothing; every byte still comes from the unchanged builders it feeds (§15.7 step 2). A registration stage already recorded is carried forward from its record, as today (Frozen P1 R8 §9); W feeds every stage not yet recorded, and the record check proves the recorded ones equal E (§15.6 item 6).
+
+**One hand-off, every user.** One function computes W from one record, and every consumer takes it: the representability check (§7.6), the actual review-v1 registration (§15.1 step 1), the expected physical projection (§15.7), the pre-Kp record check and C-2(Kp) (§15.6 item 6, §15.3 P3–P4), recovery after runtime loss (§12.4) and the committed planning proof in any clone (§18.8 CP5). For one Candidate, the W of an uninterrupted run, of a runtime-recovered run and of a fresh clone is the same; a mutation ID, a reviewer's or provider's state and a caller's mapping insertion order have no effect on it.
+
+**Request identity is another question.** `operation_identity` (§6.2) answers whether an invocation is the same requested plan or design, and it compares canonically: `serialize.digest` sorts keys, and the Mutation Controller normalizes and compares invocations with `json.dumps(..., sort_keys=True)` (`mutation.py:702`, `mutation.py:1668`). W answers which exact values the writer receives. Two designs that differ only in the insertion order of a condition's keys are the same request, the same Candidate and `candidate_hash`, the same W, the same E and the same Kp bytes (**Measured**, §31).
+
+The canonical key order is a representation, not reviewed meaning (§7.5): the reviewed condition is the mapping value. Once the Candidate is frozen, that representation decides which bytes the writer produces, as display numbers and layout do, and E proves them (§15.7).
 
 ## 8. Review Context
 
@@ -802,7 +860,7 @@ The way out of an operational failure is to run the same request again with a wo
 
 ### 12.1 Runtime loss is continued, not replaced
 
-**Frozen.** The runtime planning mutation is not clone-safe; the Review Run it started is. Runtime loss — a fresh clone, or `.workline/runtime/**` removed — takes the planning mutation's record, its reservations and notes, the runtime report copies and every pending generation mutation. It never takes the committed Run records. Frozen P1 R2 §5, R3 §4 and R12 §4 require that the same logical accepted task then continues under its own `task_id` after exact reconstruction, and that no replacement task ID is allocated for it. So a review-v1 invocation whose slot has no pending review-v1 planning mutation first runs canonical recovery discovery (§12.2) and continues the one recoverable Run (§12.4); only when there is none does it start a new Run (§12.8). Round 1's rule "runtime loss requires a fresh Candidate and a new Run" is withdrawn.
+**Frozen.** The runtime planning mutation is not clone-safe; the Review Run it started is. Runtime loss — a fresh clone, or `.workline/runtime/**` removed — takes the planning mutation's record, its reservations and notes, the runtime report copies and every pending generation mutation. It never takes the committed Run records. Frozen P1 R2 §5, R3 §4 and R12 §4 require that the same logical accepted task then continues under its own `task_id` after exact reconstruction, and that no replacement task ID is allocated for it. So a review-v1 invocation whose slot has no pending review-v1 planning mutation first runs canonical recovery discovery (§12.2) and continues the one recoverable Run (§12.4); only when there is none does it start a new Run (§12.8). Round 1's rule "runtime loss requires a fresh Candidate and a new Run" is withdrawn. Nothing the writer needs is lost with the runtime: W comes from the committed snapshot (§7.8).
 
 Normal retry stays separate: while the planning mutation's record exists, the same request resumes it by its exact invocation (§5.3, §11.8), and discovery never runs.
 
@@ -864,7 +922,7 @@ A failure is row e: missing or mismatching accepted material is never answered w
 - **Invocation.** The review-v1 invocation of §5.2 plus exactly one key: `"recovery_of_review_run_id": <the recovered Run ID>`. It is begun through the live `_open` with that invocation, so it has its own new mutation ID; it never takes the lost mutation's ID and never claims that mutation's records. §5.3 accepts it; §18.5 treats it as a planning mutation.
 - **Binding.** Right after `_open` returns — `_open` records only the live pre-existing-dirty snapshot note — and before any reservation, any other note and any effect, §12.2 steps 3–4 are evaluated again for its Run under the lock (the Run must still be the one recoverable Run), and the recovered reservations are bound (§12.5) in one durable save. A resumed recovery planning mutation checks again that its bound reservations are exactly the canonical ones.
 - **Remaining setup.** The reservations the Run still needs (§12.6), with the entity scope extended by the bound domain IDs and the file scope by the Consumption path, as §14.4 steps 1 and 4 extend them; then §14.4 steps 5–6: `gate.require_committable`, the Git persistence preflight with the checkout capability, dirty overlap on the registration paths + Run record paths + Consumption path, the publication barrier on HEAD with a push destination, and the note `review_binding` = the current branch and HEAD, which holds every committed record of the Run (§12.3). The Candidate, Context and Policy are never rebuilt for storage: the Run's committed records are them.
-- **Continuation.** By the Run's chain (§11.8 step 4): latest 1 → the reviewer launch of the same task (§10.3), then generation mutation 2; latest 2 → currency, then generation mutation 3; latest 3 → the use check (§17), then the registration, or the invalidation when stale (§13.3).
+- **Continuation.** By the Run's chain (§11.8 step 4): latest 1 → the reviewer launch of the same task (§10.3), then generation mutation 2; latest 2 → currency, then generation mutation 3; latest 3 → the use check (§17), then the registration, or the invalidation when stale (§13.3). The registration writes from W computed from the Run's committed Candidate snapshot (§7.8) — the W an uninterrupted run would have used; the recovering invocation's caller objects serve only its entry checks and its identity.
 - **Generation mutations** it starts bind `planning_mutation_id` = the recovery planning mutation, with the Run's own `review_run_id`, `candidate_hash`, `review_context_hash`, `effective_policy_hash`, obligation digest and Receipt ID (§11.2). Frozen P1 R3 §9 lists what the owning mutation binds; it does not require every generation of a Run to be written by one mutation, and gate records carry no mutation ID. Generation numbering continues from the validated chain (`gate.next_generation_scope`, unchanged).
 - **Lifecycle.** A recovery planning mutation begun by this run is abandoned on a STOP while it has recorded no effect and started no generation mutation (live `abandon_on_stop`; a resumed Phase entry is never abandoned); nothing canonical changes, and the next same-request invocation discovers again. From its first generation mutation on it remains pending until a terminal outcome (§12 table), and it is resumed like any planning mutation, by its exact recorded invocation.
 - **Never.** It never adopts Kp, Km or any registration commit; it never continues a Run that §12.2 classifies terminal, set aside or incomplete; it never allocates a replacement Run, task, Candidate or domain ID.
@@ -1028,7 +1086,8 @@ These are exactly the paths the registration stages write (`ops.owned_canonical_
 ```text
 1  RoadmapPlan: reserve `roadmap` (live) and the Phase and relation IDs through `decide_phases` (live; records
    nothing); PhaseEntryDesign: reserve every stage ID under the register_works keys (§7.3); extend the entity scope
-2  build the Candidate (declared base on the committed view of HEAD, §7.4); representability check (§7.6); R9 (§7.7)
+2  build the Candidate (declared base on the committed view of HEAD, §7.4) and W from its canonical record
+   (§7.8); representability check (§7.6); R9 (§7.7)
 3  Context (§8), Policy (§9), evidence (§10.6); the request envelope's set_aside_runs from the recovery_discovery note
 4  reserve Run, task, Receipt, Consumption IDs (§6.3); extend the file scope with the Consumption path
 5  gate.require_committable (every Review path the Run can write: snapshot, task input, gates 1-4, Receipt,
@@ -1096,8 +1155,8 @@ Why: it proves what Git stored rather than predicting it. Direction B would need
 
 ```text
 1  registration stages, live and unchanged — roadmap, phases | works, integration, confirmation —
-   each preceded by the display base check (§15.7), with their projected refusals, postchecks and
-   (Phase entry) the live phase structure check
+   fed from W (§7.8), never from the caller's plan or design; each preceded by the display base check
+   (§15.7), with their projected refusals, postchecks and (Phase entry) the live phase structure check
 2  working-tree round trip: ProjectView.load(store) -> normalize_persisted == reviewed;
    mismatch -> ValidationError review_roundtrip_mismatch (P1 adapter code), pending
 3  pre-Kp currency proof on P = HEAD (§15.6), the physical projection check of the recorded
@@ -1201,6 +1260,8 @@ The preflight (§14.3), the representability check (§7.6), the contained commit
 
 It writes nothing. A failure of 1–2 → `ReconcileRequired` (reason `review_registration_base_moved`); of 3–4 → `ReconcileRequired` (reason `review_receipt_invalid`); of 5 → `ReconcileRequired` (reason `review_registration_currency_changed`); of 6, or E unavailable (§15.7) → `ReconcileRequired` (reason `review_registration_projection_mismatch`). In every case no Kp is recorded or made, no Consumption is written and nothing is pushed; the planning mutation stays pending with its registration in the working tree (§13.4).
 
+With W as the only writer input (§7.8), item 6 never meets two legitimate representations of one Candidate: a caller's mapping order does not reach the writer. It stays mandatory as the proof that the implementation fed the writer W and nothing else, and that no builder drifted.
+
 Why not `P == use_check_head` alone: a Workline operation whose declared scope is disjoint from the pending planning mutation's (Roadmap / Phase hold, resume, cancel and achievement: event log only, §13.5) can commit in a crash window after the registration began. Strict equality would leave a registration that no Workline path can finish or undo. The invariant chosen is as strong for everything the Receipt authorized: the exact parent's committed semantic base, the Context and the Policy are the authorized ones (item 5, and again P12), no commit since the use check touched a planning-owned path, so every ledger the registration re-rendered holds on P exactly what it held when the registration was decided (item 2), the recorded registration is exactly E on P (item 6, and again P3/P4/P6), and Kp is made on exactly P (`base_exact`, §15.2). A commit that changed a declared-base fact, touched a planning-owned path, rewrote history, or added or removed an entity file whose count allocated the registration's display numbers stops the registration at this proof, before Kp exists.
 
 ### 15.7 The expected physical projection
@@ -1223,16 +1284,16 @@ E = project_expected(candidate, reserved, base=P)        # the kind's adapter (�
     new_blob   the object ID of content as a blob (git hash-object --no-filters -t blob --stdin, nothing written)
 ```
 
-**The computation.** Deterministic, from committed clone-safe inputs only: the Run's committed Candidate snapshot (its content and reserved IDs, §7.2 / §7.3), Kp's exact parent P, and the running implementation's support for the adapter identity and projection semantics version the Run names (§6.2). No recorded effect, note or other runtime record takes part, so it is the same computation for the planning mutation, for another operation's push, after runtime loss and in a fresh clone.
+**The computation.** Deterministic, from committed clone-safe inputs only: the Run's committed Candidate snapshot, through W (§7.8), Kp's exact parent P, and the running implementation's support for the adapter identity and projection semantics version the Run names (§6.2). No recorded effect, note or other runtime record takes part, so it is the same computation for the planning mutation, for another operation's push, after runtime loss and in a fresh clone.
 
 1. Materialize P's canonical Project files with the committed-result loader (§15.4) into a scratch directory S of their own.
 2. For each registration stage, in the writer's order — RoadmapPlan: `roadmap`, `phases`; PhaseEntryDesign: `works`, `integration`, then `confirmation` when the Candidate has one:
    1. allocate the stage's display numbers on S exactly as the writer allocates them on the working tree, from the number n of `*.md` entries S holds in the kind's entity directory (`ProjectStore.count_entities`), in the writer's two-digit form: the Roadmap `R-{n+1:02d}` (`roadmap.py:484`), the Phases `P-{n+offset+1:02d}` in declared order (`phase_create.py:144-152`), the Works `W-{n+offset+1:02d}` by `create._allocated_displays` (`create.py:100-107`, called at `create.py:276`), n growing across stages as the earlier stages' files land in S;
-   2. build the stage's effects with the writer's own effect builders from the Candidate's content and reserved IDs: the Roadmap `write_file` exactly as `_create_roadmap` builds it (`roadmap.py:478-486`); the Phase `write_file` and `add_relation` effects exactly as `decide_phases` builds them (`phase_create.py:141-157`); for each Work stage `create._registration_effects` (`create.py:325`) with the specs, relations and IDs `_expand_phase` gives that stage (`roadmap.py:949-1014`), rebuilt from the Candidate;
+   2. build the stage's effects with the writer's own effect builders from W's inputs for that stage (§7.8): the Roadmap `write_file` exactly as `_create_roadmap` builds it (`roadmap.py:478-486`); the Phase `write_file` and `add_relation` effects exactly as `decide_phases` builds them (`phase_create.py:141-157`); for each Work stage `create._registration_effects` (`create.py:325`) with W's specs, relations and reserved IDs for that stage;
    3. apply the effects to S in their order with the writer's own planned-write computation (`MutationController._planned_write`, `mutation.py:2142-2169`): a `write_file` puts its content, and an `add_relation` re-renders the whole ledger as `render_relations(read_relation_file(file) + [record])`; each result is written into S as `durable_write_text` writes it (UTF-8, no line-end translation).
 3. E's entries are the paths step 2 wrote, each with the bytes S holds at the end; the old side is read from P's tree.
 
-The effect builders and the planned-write computation are the writer's own: reused, or extracted as pure functions with no behaviour change that the writer itself calls (§20, §27). The adapter renders nothing, formats nothing and parses nothing of its own; it only maps the Candidate back to the writer's inputs (for Works: `WorkSpec(name, desired_state, phase_id, roadmap_id, work_kind, confirmation_target, related)` as `_expand_phase` builds them).
+The effect builders and the planned-write computation are the writer's own: reused, or extracted as pure functions with no behaviour change that the writer itself calls (§20, §27). The adapter renders nothing, formats nothing and parses nothing of its own, and it maps the Candidate to writer inputs only through W (§7.8), the same function the actual registration uses, so the registration and E cannot receive different inputs.
 
 By construction:
 
@@ -1248,7 +1309,7 @@ By construction:
 
 **Availability.** E is unavailable when the running implementation does not provide the adapter identity the Run's Context names, does not support the Candidate's projection semantics version, or cannot complete a step (a file of P unreadable or malformed, a ledger missing, an entry the loader refuses). Unknown is never proof: the pre-Kp proof and C-2(Kp) stop with `ReconcileRequired`, and the committed planning proof fails CP5, so the publication barrier holds (§18.7) and no Workline push publishes the history.
 
-**Implementation upgrades.** An implementation proves a registration only by reproducing E and the semantic projection exactly. A Workline version whose package digest (`loader_identity`) differs from the recorded one proves an old registration when it provides the Run's adapter identity and projection semantics version and those reproduce every byte of E and the same semantic projection, with every other CP item passing. If it produces one different expected byte anywhere, CP5 fails and the barrier holds for every history holding that registration. A change to a renderer, a display allocation or the planned-write computation that a planning adapter uses therefore changes that adapter's output, and a version that still has to publish histories holding such registrations keeps providing the adapter version they name; no loader-identity or semantic argument substitutes for the byte comparison.
+**Implementation upgrades.** An implementation proves a registration only by reproducing E and the semantic projection exactly. A Workline version whose package digest (`loader_identity`) differs from the recorded one proves an old registration when it provides the Run's adapter identity and projection semantics version and those reproduce every byte of E and the same semantic projection, with every other CP item passing. If it produces one different expected byte anywhere, CP5 fails and the barrier holds for every history holding that registration. A change to W (§7.8), a renderer, a display allocation or the planned-write computation that a planning adapter uses therefore changes that adapter's output: it is a new adapter version, never the old one under its old name, and a version that still has to publish histories holding such registrations keeps providing the adapter version they name; no loader-identity or semantic argument substitutes for the byte comparison.
 
 **`registration_delta_digest`.** Derived from E, never from whatever Kp holds: the `review-planning-delta` record of §16.1 with `parent` P, `commit` Kp and E's entries (`path`, `status`, `old_mode`, `new_mode`, `old_blob`, `new_blob`). The planning mutation computes it only after P3 has proven Kp's delta to be E (§15.1 steps 5–6), and CP9 recomputes it from E. A delta that is not E has no digest a Consumption may carry, and a Consumption carrying the digest of a delta that is not E fails CP5 and CP9.
 
@@ -1577,7 +1638,7 @@ The registration (Kp) — two independent requirements, physical (CP5) and seman
 
 | # | condition |
 | --- | --- |
-| CP5 | physical: the expected physical projection E of R's Candidate on P (§15.7), computed from committed objects with the adapter the Run's Context names, equals K's delta by the comparison of §15.7 — `git diff-tree -r -z --no-renames --no-abbrev --raw P K` lists exactly E's paths (R's registration paths, §14.1), each with E's status, old and new modes, old blob and `new_blob`, so every committed blob, whole ledgers included, holds exactly E's bytes; E unavailable → fails |
+| CP5 | physical: the expected physical projection E of R's Candidate on P (§15.7), computed from committed objects — the snapshot's `material` through W (§7.8) — with the adapter the Run's Context names, equals K's delta by the comparison of §15.7 — `git diff-tree -r -z --no-renames --no-abbrev --raw P K` lists exactly E's paths (R's registration paths, §14.1), each with E's status, old and new modes, old blob and `new_blob`, so every committed blob, whole ledgers included, holds exactly E's bytes; E unavailable → fails |
 | CP6 | semantic, on the committed views of P and K (§15.4): `validate_structure(K view) == []`; K's entities are P's plus exactly the Candidate's reserved new entities; K's roadmap relations and Related are P's plus exactly the Candidate's new ones, appended in registration order, records identical; `normalize_persisted(load_persisted(result identity, K view))`, with the adapter the Context names, equals the Candidate's projection (projection identity; kind and semantics version equal); PhaseEntryDesign: the R9 selection on the K view is the Candidate's `canonical_first_work` |
 | CP7 | authorized pre-state: the declared base computed on P's committed view equals the Candidate's declared base (§7.4) |
 
@@ -1673,6 +1734,7 @@ On `registered`, `registration.head` is Km. `PhaseEntryResult.entry_work_id` is 
 
 **Frozen.** Two implementations of the P1 `PersistedProjectionAdapter` protocol (`review/adapter.py`) live in `workline.roadmap_review` (Roadmap-owned). They reuse the canonical renderers and registration helpers:
 
+- W (§7.8): the stage-input derivation of `_create_roadmap` / `_expand_phase`, extracted as a pure function with no behaviour change that the legacy path itself calls, applied to the plan or design value rebuilt from the canonical Candidate;
 - the Roadmap-file rendering of `_create_roadmap`, extracted as a pure function with no behaviour change;
 - the effect building of `phase_create.decide_phases` (the Phase `write_file` and `add_relation` effects from reserved IDs and a display base, `phase_create.py:141-157`), extracted as a pure function with no behaviour change that `decide_phases` itself calls;
 - `create._registration_effects`, `_allocated_displays` and `_resolve_roadmap_relations`, reused, or extracted as pure functions with no behaviour change;
@@ -1680,11 +1742,13 @@ On `registered`, `registration.head` is Km. `PhaseEntryResult.entry_work_id` is 
 
 Their semantic side reads only through `ProjectView`, `Entity.name`, `Entity.section`, `Entity.meta` and the `Relation` records. Their physical side (§15.7) produces bytes only through the writer's own builders and planned-write computation listed above. They never reimplement Roadmap, Phase CREATE or Work CREATE semantics, entity rendering or relation rendering, in `review/` or anywhere else: a second renderer whose output merely parses the same is what the physical proof exists to exclude (Frozen P1 R8 §5, R9 §6). Roadmap and CREATE stay the semantic and rendering authorities; the adapters and `review/` only project and verify.
 
+One hand-off: W is computed by one function from one Candidate record, and the representability check, `project_expected` (E), the actual review-v1 registration and recovery all take it. No adapter method rebuilds `WorkSpec`, `RelatedSpec`, `RelationSpec`, `PhaseSpec` or `PhaseRelationSpec` values on its own, and none takes them from the caller's plan or design after the freeze (§7.8).
+
 | responsibility | Roadmap adapter (`roadmap-plan-adapter-v1`) | Phase-entry adapter (`phase-entry-design-adapter-v1`) |
 | --- | --- | --- |
 | `adapter_identity` / `loader_identity` | §6.2 / §8.1 | same |
 | `normalize_candidate` | §7.2 content as `Projection(reviewed_artifact, roadmap-plan-projection-v1)` | §7.3 content as `Projection(reviewed_artifact, phase-entry-design-projection-v1)` |
-| `project_expected` | the expected physical projection E on the base commit it is given (§15.7) — P for the pre-Kp proof, C-2(Kp) and CP5 — built from the Candidate snapshot's content and reserved IDs, never from recorded effects, which are compared with it (P4); returned as a `ProjectionSet` of the reviewed artifact and an authorized transition whose content is E's `{parent, entries: [{path, status, old_mode, new_mode, old_blob, new_blob}]}`. The display numbers are the ones the writer allocates under the lock (Frozen P1 R8 §11), reproduced on P and held equal to the writer's by the display base check and the record check. At the freeze the same builders predict the working tree (§7.6) | same, three stages |
+| `project_expected` | the expected physical projection E on the base commit it is given (§15.7) — P for the pre-Kp proof, C-2(Kp) and CP5 — built from W (§7.8), never from recorded effects, which are compared with it (P4); returned as a `ProjectionSet` of the reviewed artifact and an authorized transition whose content is E's `{parent, entries: [{path, status, old_mode, new_mode, old_blob, new_blob}]}`. The display numbers are the ones the writer allocates under the lock (Frozen P1 R8 §11), reproduced on P and held equal to the writer's by the display base check and the record check. At the freeze the same W and builders predict the working tree (§7.6) | same, three stages |
 | reserved IDs | `ReservedIds`: roadmap, `key → Phase ID`, `index → relation ID` | `key → Work ID`, integration, confirmation, relation and Related IDs |
 | expected scope | E: the registration paths (§14.1) with their transitions, modes and exact bytes | same |
 | persisted scope | Kp's whole delta (`git diff-tree -r -z --no-renames --no-abbrev --raw P Kp`), compared with E by §15.7 (P3, CP5) | same |
@@ -1779,7 +1843,7 @@ Baseline conditions for rows 1–38: the runtime record is intact, HEAD is on th
 | L17 | fresh clone, safe checkout semantics (the checked-out commit holds the committed rule, no clone-local override) | per its committed state | per its committed state | per its committed state | per its committed state | the same answer from the same objects | as the barrier says | every Review record checks out as its canonical LF bytes (**Measured**, §14.5); discovery and recovery read them as in L1–L16 |
 | L18 | fresh clone, unsafe checkout semantics (no committed rule at the checked-out commit, or a clone-local `info/attributes` override) | no | no | no | no | unaffected (it reads raw blobs) | as the barrier says | a review-v1 call stops at discovery's first step with `review_namespace_unreadable` (§12.2 step 1) or, at the freeze or the recovery setup, with `review_checkout_unsafe`; nothing is normalized (P1 unchanged); legacy operations are unaffected |
 
-A new Run never makes an unproven registration commit publishable: the barrier reads the history, not the Run a call happens to continue (§18.7). The committed planning proof every push runs includes the exact physical projection (CP5), recomputed from the committed Candidate snapshot, P's tree and the Run's adapter (§15.7): after runtime loss after Kp or Km, and in a fresh clone, a Kp whose bytes are not E stays unpublishable; recovery never bypasses the check, and a new Run never makes such a Kp publishable.
+A new Run never makes an unproven registration commit publishable: the barrier reads the history, not the Run a call happens to continue (§18.7). The committed planning proof every push runs includes the exact physical projection (CP5), recomputed from the committed Candidate snapshot, P's tree and the Run's adapter (§15.7): after runtime loss after Kp or Km, and in a fresh clone, a Kp whose bytes are not E stays unpublishable; recovery never bypasses the check, and a new Run never makes such a Kp publishable. Every registration after recovery writes from W computed from the committed snapshot (§7.8), exactly as an uninterrupted run would.
 
 ### 21.3 Other conditions, at any window
 
@@ -1813,6 +1877,7 @@ Nothing in the matrix is the P3 Work-terminal recovery contract.
 8. The publication barrier (§18.7) reads Review records and history only to decide whether a push may publish. It derives no lifecycle and changes no lifecycle fact: a legacy operation it holds back has applied exactly the effects it would have applied, and only its commit and push wait.
 9. Generation 4 and the Supersession (§13.3) are authorization records only: invalidating a Receipt changes no Work, Phase or Roadmap state, and nothing that derives lifecycle reads them.
 10. Canonical recovery discovery (§12.2) and the committed planning proof (§18.8) read Review records only to decide which Run an already gated call continues and what a push may publish. They derive no lifecycle and change none; a recovered Run changes no lifecycle fact until its registration does, exactly as the original Run would have.
+11. W (§7.8) is writer input only: computed from the Candidate, it is read by nothing that derives lifecycle and states nothing the Candidate does not already state.
 
 P3 stays inactive: no activation record, no Work-terminal Consumption, no START change.
 
@@ -1857,12 +1922,15 @@ Every seam is closed.
 | R5 §12.1 "not weakened, narrowed or made conditional" | every check of `_recorded_publication` stays as it is; the publication barrier (§18.7) is a separate refusal evaluated after the commit is named, never a substitute for any check, and in a history without a planning registration commit it refuses nothing |
 | R5 §12.5 "push already occurred but C-2 is absent → NEVER infer proof from push" | the barrier never reads the destination; a destination already holding a commit only means nothing is pushed for it (§18.7); a person's push of Kp is never proof (§15.5) |
 | R6 §6, R11 §10 attributes and line-ending semantics as bound Git semantics | the checkout capability contract is bound in the Context (`checkout_capability`, §8, §14.5) |
-| R8 §5 expected canonical projection: entity bytes from the writer's rendering functions, exact relation records, whole-ledger physical results; Phase CREATE rendering never reimplemented | E (§15.7), from the writer's own builders and planned-write computation on Kp's parent; §20 |
+| R8 §5 expected canonical projection: entity bytes from the writer's rendering functions, exact relation records, whole-ledger physical results; Phase CREATE rendering never reimplemented | E (§15.7), from W and the writer's own builders and planned-write computation on Kp's parent — the Candidate is mapped to writer inputs once, by W (§7.8); §20 |
 | R8 §6–§7 semantic reconstruction; PASS needs semantic equality and the exact commit-delta projection proof | semantic: P5–P9, CP6, CP7; physical: P3, CP5; each required on its own (§15.3, §18.8, §20) |
 | R8 §11 display numbers decided by the writer under the lock, then proven after write | the writer allocates them; the display base check (§15.7, §17 item 9) keeps its count equal to P's; E reproduces them on P, and pre-Kp item 6, P3 and CP5 prove them |
 | R8 §2–§4, §8–§10 | §7.2, §15.3, §16, §20 |
-| R9 §6, §8 expected effects from the canonical WorkSpec / render / registration helpers, no second hand-coded renderer; the exact physical commit-delta proof | E for the three Work stages (§15.7), P3, CP5; the R9 self-selection stays an additional semantic check (P9, CP6) and never replaces the byte proof |
+| R9 §6, §8 expected effects from the canonical WorkSpec / render / registration helpers, no second hand-coded renderer; the exact physical commit-delta proof | E for the three Work stages, fed by W (§7.8, §15.7), P3, CP5; the R9 self-selection stays an additional semantic check (P9, CP6) and never replaces the byte proof |
 | R9 §2–§11 (as repaired) | §7.3, §7.7, §15.3 P9, §16, §20 |
+| R9 §4, §11 `entry` is no persisted plan meaning | `entry` is not part of W; the Candidate's `canonical_first_work` stands for its meaning (§7.7, §7.8) |
+| R8 §9, R9 §10 recovery reuses reservations and recorded registration effects | a recorded stage is carried forward from its record; a stage not yet recorded is written from W with the Candidate's reserved IDs, after runtime loss exactly as before it (§7.8, §12.4) |
+| P1 canonical serialization (`review/serialize.py`: mapping keys in ascending code point order at every depth, sequences in their order; `parse_canonical` reads only that rendering) | the Candidate records a caller's mapping in that form, and W hands the writer the same form — from `canonical_data` before the snapshot is written, from the strict reader afterwards: the same data in the same order (§7.3, §7.8) |
 | R11 git_state, completeness | the primitive identity is bound; Evidence completeness `unknown`, never reused |
 | R12 §2 "clone reproduces canonical bytes/digest" | §14.5; tests §28 J |
 | R12 §4 fresh clone / runtime deletion reconstructs the exact Candidate and request and reruns the same `task_id`; negative cases fail closed | §12; tests §28 L |
@@ -1883,6 +1951,7 @@ No frozen P1 document needs repair for this contract. P2-CONTRACT-004 in particu
 | --- | --- |
 | `create_roadmap` | new keyword-only `review=None`; legacy unchanged; review-v1 returns `ReviewedPlanningResult` |
 | `enter_phase` | same |
+| caller `RoadmapPlan` / `PhaseEntryDesign` | unchanged types; on the review-v1 path they validate the invocation, build the Candidate and give the request identity, and after the freeze the writer receives W (§7.8); the legacy path passes them to the writer as today |
 | `RoadmapResult`, `PhaseEntryResult`, `OperationResult` | unchanged |
 | new result type | `ReviewedPlanningResult` (`workline.roadmap_review`) |
 | `Mutation` public methods | unchanged set (pin `test_project_start_recovery.py:978-991`) |
@@ -1929,12 +1998,14 @@ When the implementation lands, it changes canonical authority as follows. Under 
 - the terminal outcomes (§19), with stale before and after the seal (§13.2–§13.3);
 - the currency rules: the declared base on the committed view, the use check with `use_check_head`, the pre-Kp currency proof and the reconcile-only rule once the registration began (§13, §15.6, §17);
 - runtime-loss recovery: discovery, the recovery planning mutation, recovered reservations and new-Run eligibility (§12.1–§12.8);
+- the review-v1 writer hand-off: after the freeze the registration writes from W, computed from the canonical Candidate, never from the caller's plan or design (§7.8);
 - the display base check before each registration stage (§15.7, §17 item 9);
 - the operation binding (§11.5).
 
 ### 26.3 `skills/review`
 
 - the planning kinds and identities (§6);
+- the Candidate's canonical representation of a caller-supplied mapping, and the refusal of a mapping it cannot hold exactly (§7.3, §7.6);
 - the static policy record, verbatim (§9);
 - the reviewer interface (§10);
 - adjudication (§10.6);
@@ -1960,9 +2031,9 @@ When the implementation lands, it changes canonical authority as follows. Under 
 | `src/workline/review/store.py` | v2 reading; registration-commit and target indexes | §16.3 | F |
 | `src/workline/review/validate.py` | v2 validation, planning binding, uniqueness indexes | §16.2–§16.3 | F, H |
 | `src/workline/review/paths.py` | runtime subpaths `proofs/`, `reports/`, `no-hooks/`, `attr-eval/` | §10.5, §14.5, §15.2, §15.4 | E, J |
-| `src/workline/roadmap_review.py` (new, Roadmap-owned) | the review-v1 flow: recovery orchestration (discovery call before `_open`, the recovery planning mutation, its binding and continuation), freeze, generation mutations 1–4, reviewer call, currency on committed views, use check and `use_check_head`, registration hand-off, pre-Kp currency proof (and its `refuse_recorded` hook), Kp / Km, proofs, Consumption, publication, terminal outcomes; both adapters, with the expected physical projection (`project_expected`, §15.7), its comparison and record check, and the display base check; `ReviewedPlanningResult` | §7, §11–§21 | A–M |
+| `src/workline/roadmap_review.py` (new, Roadmap-owned) | the review-v1 flow: recovery orchestration (discovery call before `_open`, the recovery planning mutation, its binding and continuation), freeze, generation mutations 1–4, reviewer call, currency on committed views, use check and `use_check_head`, registration hand-off, pre-Kp currency proof (and its `refuse_recorded` hook), Kp / Km, proofs, Consumption, publication, terminal outcomes; W (`CanonicalPlanningWriterInput`, §7.8), the one Candidate-to-writer-input function every consumer takes; both adapters, with the expected physical projection (`project_expected`, §15.7), its comparison and record check, and the display base check; `ReviewedPlanningResult` | §7, §11–§21 | A–N |
 | `src/workline/committed_view.py` (new) | committed-result loader: materialization from raw blobs and `ProjectView.load`; delta reading; the materialized base of the expected physical projection | §15.3–§15.4, §15.7 | E, M |
-| `src/workline/roadmap.py` | `review=` keyword; marker check at the entry (§5.3); the registration of `_create_roadmap` / `_expand_phase` separated from the legacy `_finalize` without changing legacy behaviour; the Roadmap-file rendering of `_create_roadmap` extracted as a pure function the writer itself calls (§20); review-v1 branch | §5, §15.1, §15.7 | A, B, I, M |
+| `src/workline/roadmap.py` | `review=` keyword; marker check at the entry (§5.3); the registration of `_create_roadmap` / `_expand_phase` separated from the legacy `_finalize` without changing legacy behaviour; the Roadmap-file rendering of `_create_roadmap` and the stage-input derivation of `_create_roadmap` / `_expand_phase` extracted as pure functions the legacy path itself calls, with no behaviour change (§7.8, §20); review-v1 branch, whose registration takes W | §5, §7.8, §15.1, §15.7 | A, B, I, M, N |
 | `src/workline/phase_create.py` | the effect building of `decide_phases` extracted as a pure function that `decide_phases` calls, with identical output (§20) | §15.7, §20 | M |
 | `src/workline/gitcmd.py` | a bytes runner; `tree_entries`, `read_blob`, `commit_delta`, `check_attributes` (effective, and committed through the isolated evaluation directory), `added_paths`, `blob_at`; contained `add` / `commit` | §14.3, §14.5, §15.2–§15.4, §18.7 | E, G, J |
 | `src/workline/gitops.py` | `review_commit_effect`, `review_publication_effect`, attribute preflight helper; the publication barrier in `finalize` before a stage holding a push is recorded | §14.3, §15.2, §18.4, §18.7 | E, G |
@@ -1974,7 +2045,7 @@ Expected not to change: `state.py` (no helper is needed), `store.py`, `validate.
 
 ## 28. Test contract
 
-Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, through production code paths. A happy path alone is insufficient (Frozen P1 R12 §14). Section J and the round-1 items of B, D, E and G are the tests of the round-1 repairs; sections K and L are the tests of the round-2 repairs; section M is the test of the round-3 repair (§33).
+Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, through production code paths. A happy path alone is insufficient (Frozen P1 R12 §14). Section J and the round-1 items of B, D, E and G are the tests of the round-1 repairs; sections K and L are the tests of the round-2 repairs; section M is the test of the round-3 repair; section N is the test of the round-4 repair (§33).
 
 **A. Applicability**
 
@@ -2156,6 +2227,19 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 - **Display base check.** An untracked or deleted `*.md` entry in a display-allocating directory at the use check, or before a subsequent registration stage after a crash between stages: `dirty_overlap`, nothing recorded; once the entry is removed or committed the run continues and Kp equals E. A person's commit adding an entity file of that kind after the registration began: pre-Kp item 6 refuses (`review_registration_projection_mismatch`), and no Kp is made.
 - **One mechanism.** Pre-Kp item 6, P3, P4 and CP5 use the same `project_expected` and the same comparison: a test that patches the projection sees all of them change together. No module under `review/` renders an entity or a ledger.
 
+**N. Canonical writer input (P2-CONTRACT-007, round 4)**
+
+- **A — Condition key order.** Two review-v1 Phase entries whose designs differ only in one Related condition's insertion order — `{"pattern": "src/*.py", "kind": "path_glob"}` and `{"kind": "path_glob", "pattern": "src/*.py"}` — with the same reserved IDs (a deterministic ID source): equal Candidate records and `candidate_hash`, equal `request_digest` and `operation_identity` (§6.2), equal TaskInput `request_digest`, equal W, equal E, equal `related.yaml` bytes (`kind` before `pattern`, the canonical order), and P3 and CP5 pass for both.
+- **B — Nested mappings.** The live `validate_condition` accepts a nested mapping under an extra key (**Measured**, §31). Two conditions equal as values, with different insertion orders at two depths, give the same W, E and bytes, every entry kept. A value the canonical Candidate cannot hold exactly is refused as in J; no support is invented for it.
+- **C — Extra condition fields.** Extra scalar, list and nested-mapping entries in different insertion orders: no entry lost, one W, one set of bytes.
+- **D — Uninterrupted and recovered.** One Candidate registered by an uninterrupted run and, separately, by a recovery after `.workline/runtime/**` was deleted after generation 3: the same W, the same E and the same domain bytes, display numbers included.
+- **E — Fresh clone.** W and E computed in a fresh clone from the committed snapshot equal the originals.
+- **F — The caller's object is not the source after the freeze.** The same request is resumed with a new design object whose condition is equal as a value but built in the other insertion order: the resumed registration writes the Candidate's bytes, and its W is the Candidate's. Nothing the public API does not allow is mutated.
+- **G — Legacy unchanged.** A legacy Phase entry with the pattern-first condition writes `pattern` before `kind`, byte for byte as at the baseline; no Candidate canonicalization touches the legacy path.
+- **H — Sequences stay ordered.** Reordering two Related entries, or two normal Works, gives a different Candidate (`candidate_hash`), a different W and different bytes: mappings are canonicalized, sequences are not.
+- **I — Record check.** Registration effects produced from W equal E. A fixture that records an effect built from the caller's pattern-first mapping instead is refused by pre-Kp item 6 (`review_registration_projection_mismatch`), and no Kp is made.
+- **J — Representability.** A condition holding a tuple, a float, a non-text key, an empty key or a sequence directly inside a sequence → `review_candidate_unrepresentable` at the freeze, nothing written; the same condition with a list, an integer or a nested mapping instead is accepted and kept.
+
 ## 29. Incidental live findings outside P2
 
 1. **Review records under checkout line-ending conversion (P1 layer).** **Measured** (§31): with this machine's system `core.autocrlf=true` and no attribute rule, a fresh clone checks out an LF-only Review record as CRLF while `git status` stays clean, and `serialize.parse_canonical` refuses it (`review_record_noncanonical`). For every Review record P2 writes, the checkout capability (§14.5) closes this: P2 writes Review records only where the committed attributes make every fresh clone reproduce the canonical bytes, proves it before writing, and refuses otherwise. No other path writes Review records at the baseline (P3 is not active). The P1 reader and the P1 documents are unchanged; this is recorded so that P3 and any subsequent Review writer carry the same precondition.
@@ -2167,7 +2251,7 @@ Frozen minimum. Every test runs on real Projects through `tests/helpers.py`, thr
 
 ## 30. Quality gates applied to this document
 
-Searched, case-insensitively, after the round-3 repair, for `TBD`, `TODO`, `maybe`, `either`, `alternative`, `open`, `later`, `implementation decides`, `could`, `option`:
+Searched, case-insensitively, after the round-4 repair, for `TBD`, `TODO`, `maybe`, `either`, `alternative`, `open`, `later`, `implementation decides`, `could`, `option`:
 
 Outside this section:
 
@@ -2175,7 +2259,7 @@ Outside this section:
 - `later`: only inside the verbatim quotations of Frozen P1 R3 §8 in §13.3 and of Frozen P1 R2 §5 in §24;
 - `open`: only as the P1 gate status literal `` `open` `` (also inside `` `status: open` ``), the live function and method names `_open` / `MutationController.open`, and inside the task's own labels "Architecture reopen" / "not reopened". None marks an unresolved item.
 
-Also verified: no unresolved A/B choice (C-3 and C-4 name Direction A with reasons; §15.6 states why the equally strong invariant is chosen over bare equality with `use_check_head`; §18.2 chooses rule B for publication and states why rule A cannot serve); no implementation-defined identity (§6, §12.6); every mutation owner specified (§11.1, §12.4); Receipt / Consumption ordering specified (§17); commit / proof / push ordering specified (§15.1, §18); every recovery window specified (§21.1–§21.3); one projection mechanism for the pre-Kp proof, C-2(Kp) and the committed planning proof, and no second renderer (§15.7, §20); no hidden HUMAN choice (§32); no P3 activation (§2, §22); no Review-as-lifecycle authority (§22, §34.1 item 10).
+Also verified: no unresolved A/B choice (C-3 and C-4 name Direction A with reasons; §15.6 states why the equally strong invariant is chosen over bare equality with `use_check_head`; §18.2 chooses rule B for publication and states why rule A cannot serve); no implementation-defined identity (§6, §12.6); every mutation owner specified (§11.1, §12.4); Receipt / Consumption ordering specified (§17); commit / proof / push ordering specified (§15.1, §18); every recovery window specified (§21.1–§21.3); one projection mechanism for the pre-Kp proof, C-2(Kp) and the committed planning proof, and no second renderer (§15.7, §20); one writer-input function for every review-v1 byte producer (§7.8); no hidden HUMAN choice (§32); no P3 activation (§2, §22); no Review-as-lifecycle authority (§22, §34.1 item 10).
 
 Round-1 search for the superseded statements: no statement that another operation may publish Kp (§15.5, §17, §18.7 say the opposite); no statement that staleness ends without invalidation once a Receipt exists (§13.3, §19.2); no fixed three-generation sequence (the state machine of §11.6); no statement that the declared base is not re-evaluated after the use check (§13.4, §15.6, P12); no statement that a fresh clone does not matter (§14.5, §21.2 L17–L18, §29); and the checkpoint line "No push before proof: PASS" is replaced by the cross-operation lines of §32 (`C-2(Km)`, `Publication barrier`).
 
@@ -2198,6 +2282,14 @@ Round-3 search, over `presentation`, `layout`, `bytes`, `P4`, `delta`, `digest`,
 - Semantic equality is sufficient: no such statement. §15.3, §18.8 and §20 require the physical and the semantic proof separately, each for its own dimension.
 - A path and mode proof is sufficient: no such statement. P3 and CP5 compare raw blob bytes as well (§15.7); the round-2 CP5, which checked paths, statuses and modes only, is replaced.
 
+Round-4 search, over `plan`, `design`, `caller`, `WorkSpec`, `rebuilt`, `writer input` and `condition`, for the superseded statements:
+
+- The original plan or design is used after the Candidate freeze: no such statement. After the freeze the caller's object serves only validation and identity; the registration, the representability check, E and recovery take W (§7.8, §7.6, §15.1, §15.7, §12.4, §20).
+- Writer input is rebuilt from the caller: no such statement. §15.1 step 1 feeds the registration from W, and §15.7 step 2 builds E from W's inputs.
+- `WorkSpec` values are rebuilt from the design after the freeze: no such statement. `WorkSpec`, `RelatedSpec`, `RelationSpec`, `PhaseSpec` and `PhaseRelationSpec` values reach the writer only through W and the one stage-input derivation both paths share (§7.8, §20).
+- The Candidate feeds E while the live writer takes the caller's object: no such statement. The registration and E take the same W (§7.8, §15.7), and the record check stays the defence against drift (§15.6).
+- A condition recorded in the caller's key order: no such statement. §7.3 records it as `serialize.canonical_data` gives it, and §7.6 refuses one the canonical form would change in anything but key order.
+
 ## 31. Evidence
 
 Probes are plain scripts (no pytest), run outside the repository; those that use Workline code run against the clone's `src` (`PYTHONPATH`) and assert that `workline` was imported from that tree. The round-1 probes build throw-away repositories only. Environment: Windows 11, Git for Windows 2.54.0.windows.1 with system `core.autocrlf=true`.
@@ -2212,8 +2304,11 @@ Probes are plain scripts (no pytest), run outside the repository; those that use
 | checkout probe, part 2 (round 1) | do clone-local sources or core settings override a committed rule? | a clone-local `info/attributes` `eol=crlf` overrides committed `eol=lf` after a re-checkout: CRLF, refused, `git status` clean, the effective evaluation shows `eol: crlf`; committed `eol=lf` and committed `-text` keep LF under `core.autocrlf=false` with `core.eol=crlf`; a subsequent commit dropping the rule: a fresh clone of it CRLF, refused |
 | add-detection probe (round 1) | which `git log` form lists exactly the commits that add a path — present in the commit, absent from every parent — across merges? | the default form misses a merge that itself adds a path; `--full-history --no-renames --diff-merges=combined --diff-filter=A --name-only` lists the side-branch commit adding a path and the adding merge, and lists an ordinary merge as adding nothing |
 | physical projection probe (round 3) | does the production reader give the same meaning to physically different registration bytes, and does the writer's whole-ledger re-render canonicalize a ledger? | the writer's own `durable_write_text` puts exactly the canonical UTF-8 / LF bytes on disk; a Work entity file with CRLF line ends, reordered frontmatter keys, no blank line after the frontmatter, an extra trailing blank line or a quoted `display` scalar is read by `ProjectStore.read_entity` with the same meta, name and section as the canonical bytes; a `roadmap.yaml` with CRLF line ends, reordered record keys or an extra top-level key is read by `read_relation_file` as the same records, and `render_relations` of those records plus one more gives the same bytes in every case |
+| writer-input probe (round 4) | does a Related condition's key insertion order reach the ledger bytes, and what does the Candidate's canonical form do with it? | `validate_condition` accepts `{"pattern": ..., "kind": ...}` and `{"kind": ..., "pattern": ...}`, and further keys with a nested mapping; the live writer (`_registration_effects`, `render_relations`) writes each condition in its insertion order at every depth, so the two ledgers differ while `read_relation_file` reads them as the same records; `serialize.canonical_data` and `parse_canonical` give both the same key order, ascending at every depth, and the same digest, and the writer fed that form writes identical bytes for both; `design_identity` keeps the caller's order and compares equal under Python equality, `json.dumps(sort_keys=True)` and `serialize.digest`; a tuple value: the live writer refuses it (`unsupported scalar type: tuple`) and the canonical form makes it a list; a float: both refuse |
 
 Round 2 ran no new probe: what it relies on is Live code, cited where used (`mutation.py:391-395`, `gate.next_generation_scope`, `ReviewStore.provenance_problems`, and P1 `validate._candidate_snapshots` / `_task_inputs`, which treat an unreferenced snapshot or task input as a legal orphan), together with the round-1 add-detection probe for history reads.
+
+Round 4 ran one probe, the writer-input probe; everything else it relies on is Live code, cited where used (`validate.validate_condition`, `create.RelatedSpec`, `create._registration_effects`, `store.Relation.to_record`, `yamlish.dump`, `review/serialize.py`, `roadmap.design_identity`, `roadmap._create_roadmap`, `_expand_phase`, and the invocation normalization of `mutation.py`).
 
 Round 3 ran one probe, the physical projection probe; everything else it relies on is Live code, cited where used (`store.render_entity`, `render_body`, `render_relations`, `ProjectStore.count_entities`, `durable_write_text`, `MutationController._planned_write`, `phase_create.decide_phases`, `create._registration_effects`, `_allocated_displays`, `roadmap._create_roadmap`, `_expand_phase`, and the P1 `project_expected` protocol of `review/adapter.py`).
 
@@ -2221,21 +2316,23 @@ Kept outside the repository with the reconnaissance evidence: `D:\AIproject\work
 
 ## 32. HUMAN, architecture, checkpoint
 
-HUMAN: **None.** HUMAN-1 is resolved (A). Every choice made here, the round-1, round-2 and round-3 repairs included, is an engineering choice bounded by live code and frozen text, and each has its reason stated in its section.
+HUMAN: **None.** HUMAN-1 is resolved (A). Every choice made here, the round-1 to round-4 repairs included, is an engineering choice bounded by live code and frozen text, and each has its reason stated in its section.
 
-Architecture: Candidate 7 **RETAIN**; architecture reopen **No**; architecture blocker **None**. C-2, C-3 and C-4 close, and P2-CONTRACT-001..006 are repaired, inside Candidate 7's responsibility split: Review stays a subordinate gate, the Roadmap operation stays the only top-level owner (recovery orchestration included; Review only reads and validates), Roadmap and CREATE stay the rendering authorities whose own builders the physical projection reuses, lifecycle stays event-derived, and the publication barrier is a publication rule over committed objects, not a Review gate on any operation.
+Architecture: Candidate 7 **RETAIN**; architecture reopen **No**; architecture blocker **None**. C-2, C-3 and C-4 close, and P2-CONTRACT-001..007 are repaired, inside Candidate 7's responsibility split: Review stays a subordinate gate, the Roadmap operation stays the only top-level owner (recovery orchestration included; Review only reads and validates), Roadmap and CREATE stay the rendering authorities whose own builders the physical projection reuses and whose stage-input derivation W reuses, lifecycle stays event-derived, and the publication barrier is a publication rule over committed objects, not a Review gate on any operation.
 
 ```text
 Contract baseline:              cdb152312006f6ac25533962d942ed77e2d98bd4
 Round-1 contract under repair:  2f8771ae91df580453a0ebc026febe5c5a562cc0
 Round-2 contract under repair:  3a8b9cf0496b230ebcb773f5905d98f529b6b313
 Round-3 contract under repair:  459f431c9715c5db0c50691d63f42d90b0c70513
+Round-4 contract under repair:  bbdd93d38c48eddb86ce2200e27a4cc1f774a7bb
 P1 accepted checkpoint:         b78be1ccd778ceb2ecd97b90e2f71744bd1b3bc5
 HUMAN-1:                        RESOLVED — A, per-invocation opt-in (review=PlanningReview)
 C-1 .. C-6:                     CLOSED BY P2 CONTRACT (C-6 rewritten in round 2)
 P2-CONTRACT-001 .. 004:         CLOSED (round 1; 001 completed in round 2) (§33)
 P2-CONTRACT-005:                CLOSED (round 2) (§33)
 P2-CONTRACT-006:                CLOSED (round 3) (§33)
+P2-CONTRACT-007:                CLOSED (round 4) (§33)
 Generation contract:            Direction A — roadmap-owned generation mutations, R2/R3 unchanged;
                                 G1 accept -> G2 settle -> G3 seal [-> G4 invalidate + Supersession]
 Persisted-proof contract:       Direction A — Kp -> C-2(Kp) -> Consumption v2 -> Km -> C-2(Km) -> push Km
@@ -2243,6 +2340,8 @@ Registration base:              use_check_head; base-exact Kp on P; full currenc
 Physical projection:            Kp == E, the canonical writer's bytes on its exact parent, whole ledgers
                                 included; one mechanism for pre-Kp, C-2(Kp) and CP5; semantic proof
                                 separately required (§15.7)
+Writer input:                   W from the canonical Candidate only, for every review-v1 byte producer;
+                                no caller object reaches the writer after the freeze; legacy unchanged (§7.8)
 C-2(Km):                        reproducible over committed objects (committed planning proof, §18.8);
                                 publication_proof is a runtime marker only
 Publication barrier:            clears only when the committed planning proof passes, for every Workline push (§18.7)
@@ -2251,7 +2350,7 @@ Runtime-loss recovery:          the same Run and task via canonical discovery; a
 Checkout capability:            committed + effective attributes, form L or form B (§14.5)
 Lifecycle separation:           PASS
 P1 frozen contract repair:      not required
-P2 Integration Contract:        FROZEN / ROUND 3 REPAIRED
+P2 Integration Contract:        FROZEN / ROUND 4 REPAIRED
 P2 implementation:              NOT STARTED
 P2 accepted for implementation: NO (pending independent contract re-review)
 Candidate 7:                    RETAIN
@@ -2356,6 +2455,37 @@ Preserved:
 
 No frozen P1 document was edited or needs repair: P2 now conforms to R8 §5–§7 and R9 §6–§8 as written (§24).
 
+### 33.4 Round 4 (on `bbdd93d`)
+
+The independent contract re-review of `bbdd93d` closed P2-CONTRACT-006 and raised one HIGH, P2-CONTRACT-007. It was checked against the live code (`roadmap.py`, `create.py`, `store.py`, `yamlish.py`, `validate.py`, `mutation.py`, `review/serialize.py`, `review/adapter.py`) and the frozen P1 texts (R8 §3–§5, §9, §11; R9 §3–§6, §10; the P1 canonical serialization), and measured by the writer-input probe (§31), before being repaired. Only it is repaired; P2-CONTRACT-001 to -006 stay closed and unchanged.
+
+| finding | failure, confirmed against live code and frozen text | repair | sections |
+| --- | --- | --- | --- |
+| P2-CONTRACT-007 — a byte-affecting writer input had two sources | The review-v1 registration handed the writer the caller's design, while E, the pre-Kp proof and CP5 rebuilt the writer input from the canonical Candidate. `yamlish.dump` renders a mapping in insertion order and `serialize.canonical_data` sorts it, so a Related condition built pattern-first was written `pattern` before `kind` while E wrote `kind` first: one Candidate, one meaning, two ledger byte sequences (**Measured**). The semantic representability check passed, and the pre-Kp record check failed only after the Review and the registration had run. Extra and nested condition entries behaved the same | W (`CanonicalPlanningWriterInput`, §7.8): on the review-v1 path the canonical Candidate record is the only source of byte-affecting writer input — mappings in the P1 canonical key order, sequences in Candidate order, every condition entry kept — computed by one function, from `canonical_data` before the snapshot is written and from the P1 strict reader afterwards, and taken by the representability check, the actual registration, E, the pre-Kp proof, C-2(Kp), recovery and the committed planning proof. The live writer is unchanged, and legacy keeps the caller's objects. A condition the canonical form would change in anything but key order is refused before Review | §7.8, §3, §4, §6.2, §7.1–§7.3, §7.5, §7.6, §12.1, §12.4, §14.4, §15.1, §15.6, §15.7, §18.8, §20–§28 |
+
+Dependent changes, each required by it:
+- §7.3's condition (recorded as `serialize.canonical_data` gives it) and §7.6's representability refusal of a condition the canonical form would change;
+- §7.6 step 1, §15.1 step 1 and §15.7 step 2 fed from W; §14.4 step 2 computing W at the freeze;
+- §12.1 and §12.4 (recovery writes from W), §21.2's closing paragraph;
+- §15.6's note on the role of item 6, and §15.7's paragraphs on the adapter and on implementation upgrades;
+- CP5's source (§18.8);
+- §20's builder list and one hand-off; §22 item 11; the R8, R9 and P1-serialization rows of §24; §25's caller-object row;
+- authority text, surface map and tests (§26–§28);
+- quality gates and evidence (§30, §31).
+
+No new record, field or schema: W is recomputed from the existing Candidate snapshot whenever it is needed, and Planning Consumption v2 is unchanged.
+
+Preserved:
+- **001:** the barrier stays cross-operation and clone-safe, and C-2(Km) stays M1–M6 over committed objects; W only fixes what E is computed from.
+- **002:** generation 4 and the Supersession are unchanged.
+- **003:** `use_check_head`, the base-exact Kp and full currency on P are unchanged; the Candidate rebuilt for currency is compared, never written from.
+- **004:** the checkout capability is unchanged.
+- **005:** same-Run and same-task recovery is unchanged, and it now writes from exactly the W an uninterrupted run would.
+- **006:** the physical proof keeps its strength: Kp must still equal E in paths, statuses, modes, blobs and every byte, whole ledgers included, and the semantic proof stays separately required.
+- Candidate 7 RETAIN; architecture reopen No; HUMAN-1 = A; the legacy default is unchanged (a legacy invocation computes no W and writes its caller's objects as today); Review is subordinate and never a lifecycle controller; the Roadmap operation is the only top-level owner and owns W; Roadmap and CREATE are the semantic and rendering authorities; P3 is not started; `state.py` reads no Review metadata.
+
+No frozen P1 document was edited or needs repair: P2 conforms to R8 §3–§5, §9 and R9 §3–§6, §10 and to the P1 serializer as written (§24).
+
 ## 34. Cross-finding consistency
 
 ### 34.1 Round-1 questions, answered for the final contract
@@ -2413,3 +2543,16 @@ A new Run never makes an unproven Kp or Km history publishable.
 | 005 runtime-loss recovery | nothing in the recovery rules: a recovered Run registers through the same pre-Kp proof, C-2(Kp) and CP5, and after runtime loss the barrier recomputes E from committed objects; no recovery and no new Run makes a noncanonical Kp publishable |
 
 Lifecycle: E is computed in a scratch materialization and read by nothing that decides lifecycle (§22 item 6). Review gains no authority: the adapters render only through Roadmap's and CREATE's own builders, and `review/` renders nothing (§20).
+
+### 34.4 Round-4 check of P2-CONTRACT-007 against P2-CONTRACT-001 to -006
+
+| closed finding | what the canonical writer input changes there |
+| --- | --- |
+| 001 C-2(Km) and the barrier | nothing weakened: the barrier and C-2(Km) still read committed objects only, and E is still recomputed in any clone — now from W over the committed snapshot, which is what the writer used |
+| 002 generation 4 and the Supersession | nothing: W concerns registration, which never coexists with generation 4 |
+| 003 base and currency | nothing: currency still rebuilds the Candidate from the invocation and compares it with the snapshot; the rebuilt record is compared, never written from |
+| 004 checkout capability | nothing: W is computed from the Candidate record the P1 strict reader returns, whose bytes the checkout capability already protects |
+| 005 runtime-loss recovery | the same Run and task, now with the same writer input: a recovered registration takes W from the committed snapshot, the W an uninterrupted run would take; the caller object of the recovering invocation writes nothing |
+| 006 exact physical projection | strengthened, never weakened: E and the actual registration now have one input, so Kp == E is the expected outcome of every correct run, and the record check, P3 and CP5 still compare every byte |
+
+Lifecycle: W is writer input only and is read by nothing that decides lifecycle (§22 item 11). Review gains no authority: W belongs to the Roadmap-owned flow, and its derivation is the one `_create_roadmap` and `_expand_phase` already use (§7.8, §20).
