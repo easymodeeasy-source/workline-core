@@ -63,6 +63,8 @@ CREATEがRoadmap / STARTのparent operationなしで直接起動された場合�
 
 各state-changing operationのentryで、operation ownerは（成立済みProjectでは次節のProject context照合、self-hosting照合、Workline implementation照合、Project execution lock取得の後に）current invocationの対象と予定write scopeに関係するpending mutationを検査する。一意対応する1件があれば新規mutationを開始せずそのmutationをresumeし、0件なら新規mutationを開始してよい。複数件、競合、または他ownerのpending mutationから安全に独立していると証明できない場合は `reconcile required` として停止する。
 
+review-v1 planning operation（`skills/roadmap` の明示opt-inによるRoadmap作成・Phase entry）は、1つのplanning mutationと、それが開始するgeneration mutationをownする。entryで一意対応するmutationはそのplanning mutationである。`planning_mutation_id` とRunのserialization tokenでそれに結び付くpending generation mutationはその従属mutationであり、`skills/review` の順序で先にresume・解決する。それ以外は従来どおり複数件 / 競合として `reconcile required` で停止する。runtime（`.workline/runtime/**`）を失った後は、recovery discoveryが見つけた1つのcanonical Review Runを継続するrecovery planning mutation（invocationに `recovery_of_review_run_id` を持つ、新しいIDのmutation）を開始してよい。失われたmutationのIDやrecord、他のmutationのrecordを自分のものとして扱わない（`skills/roadmap`）。
+
 ### Project context
 
 成立済みWorkline Projectへ書き込むstate-changing operationは、invocation Project contextがtarget Projectと一致する場合だけ実行する。一致しなければ `foreign_project_mutation` としてSTOPする。
@@ -451,6 +453,14 @@ base..HEADのどのcommitも記録したpathsを変更していない
 
 START terminal処理は `work_target_removed` / `work_completed` を含む最終commitと、remoteありならその最終pushまでをfinalization mutationとする。local completed / remote未反映時は通常STARTを再実行せず finalization resumeする。
 
+review-v1 planning operationのcommit（generation commit、登録commit Kp、metadata commit Km）は、contained planning commit primitive（`review-v1-planning-local-v1`）で作る。記録したpathsだけを `git commit --only` し、hooksにはWorkline-ownedの空のdirectory（`.workline/runtime/review/no-hooks`）を `core.hooksPath` として渡し、hook・commit署名・background maintenanceのどれも実行しない。review-v1 planningは、最初のReview recordを書く前に、自分のplanning-owned path（登録path、Runのrecord path、Consumption path）と重なる開始時からの変更を `dirty_overlap` で拒否する。
+
+review-v1の登録commit（Kp）は、記録した親（`base_head`）の上でだけ作る（`base_exact`）。`base_exact` は上記のcommit分類から、独立なoperationや人のcommitでHEADがbaseから進んだ場合を未適用として扱う段だけを除き、それ以外の分類は変えない。HEADが記録した親から動いていれば、Kpを作らず `reconcile required`（reason `review_registration_base_moved`）で停止する。
+
+review-v1の登録commitは、その親の上でのexpected physical projection、すなわちcanonical writerが書くbytes（ledger全体を含む）そのものを運ぶ。同じ意味を別のbytesで持つ登録commitは、誰が作ったものでもWorklineは公開しない（Push destination）。
+
+review-v1 planning operationは、その登録が公開された時にだけ成功する（remoteなしではC-2(Km)が通った時）。`not_authorized` または `stale` で終わったoperationは何も登録せず、何も公開しない。そのgeneration commit（sealの後の `stale` ではgeneration 4とSupersessionも）はlocal履歴として残り、そのbranchからの次のpushが運ぶ。
+
 ### Push destination
 
 remoteがある通常Projectのpushは、Project正本が承認したpush destinationと一致するときだけ行う。承認先の正本は `.workline/project.yaml`。
@@ -517,6 +527,28 @@ credentialを含むURLは承認先・回復記録・エラーメッセージの�
 承認先を書き込めるのはProject開始と専用のpin maintenanceだけで、Mutation Controllerがownerを機械的に検査する。AIやdomain operationがcurrent remoteへ承認先を自動追従させない。承認先の追加・変更はProject固有ルール変更として人間確認の対象。
 
 Worklineが保証するのは「どのrepositoryへpushするか」までである。HTTPS credential account、SSH authentication identity、credential managerが選ぶaccount、provider CLIのlogin accountは保証しない。remote destination確認済みをaccount確認済みとして報告しない。
+
+durable invocationが `review-v1-planning-publication-v1` を名指すmutation（review-v1 planning mutation）のpushは、それ自身のstage（`review-publication`）であり、payloadが名指すcommit（metadata commit Km）だけを `<commit ID>:refs/heads/<branch>` として公開する。このstageは、C-2(Km)（committed planning proofを含む）が通った後にだけ記録する。上記のcurrent-combinedの規定は、それ以外のすべてのmutationについて変わらない。どちらの規定に従うかはdurable invocationだけが決め、stageの形や内容からは決めない。planning mutationのcommitとpushを同じstageにしたもの、generation mutationのpush、markerが不完全・未知のmutationのpushは、何もpushせずに `reconcile required` で停止する。
+
+どのoperationのpushも、review-v1 planningの登録commitを履歴に含むcommitを、committed planning proof（`skills/review`）がそのcommitについてその登録のRunを証明しない限り公開しない（publication barrier）。
+
+- pushを含むstageを記録する前（HEADについて）、記録済みpushのdry runが書き込み（`*` / 空白）を示す時、pushの直前に評価する。stageを記録する前に拒否されたoperationは、domain effectを適用したままpending mutationとして待ち、barrierが解けた後に続ける。
+- 承認先が既に持つpush（`=`、または `!` で承認先がそのcommitを含む）は何も公開しないので拒否しない。承認先について読んだものを証明として扱わない。
+- 履歴のどのcommitも `.workline/review/candidate-snapshots/` に触れていない履歴は、fast-path read（`git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/`）で通す。どのGitもこれに答え、P2の最小versionを要しない。この読み取りに答えられなければ通さない。
+- それ以外の履歴は、`P2_PUBLICATION_GIT_MIN` 以上のGitでだけ分類する。そこでは登録commitを持たないCandidate snapshotはbarrierを始めない。それ未満、またはversion不明のGitでは、登録が見つかったからではなく証明を実行できないために、その公開を `review_publication_barrier` で拒否する。
+
+### Git versions（review-v1 planning）
+
+`rules/git` は2つの閾値をownする。
+
+```text
+P2_REVIEW_GIT_MIN      = 2.40.0   review-v1 planningのGit semanticsを実行する最小version
+P2_PUBLICATION_GIT_MIN = 2.31.0   publication proof（barrierのregistered-Run discoveryとcommitted planning proof）を評価する最小version
+```
+
+- `P2_REVIEW_GIT_MIN` より古いGit、またはversion不明のGitでの明示的なreview-v1 planning invocationは、lockより前に `review_git_unsupported` で停止し、何も開始せず、pending mutationも変えない。
+- `P2_PUBLICATION_GIT_MIN` より古いGit、またはversion不明のGitでは、fast pathが通さない履歴のpushを `review_publication_barrier`（証明不能。Runも登録commitも名指さない）で拒否する。
+- legacy operationは、planning Candidate snapshotを一度も持たない履歴について、今日より新しいGitを要しない。
 
 ---
 

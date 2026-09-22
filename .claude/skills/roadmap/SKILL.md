@@ -195,7 +195,7 @@ Phase entryは、最初のID予約より前に、展開対象のdesignをmutatio
 
 designを記録していない旧実装のpending phase-entry recordは自動resumeしない。どの中断位置でも `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationへの差し替えは行わない。診断にはmutation id、Phase id、legacy phase-entry pendingであること、自動resumeにはdesign記録が不足していることを含める。
 
-中断した展開のmutationは、resume中のSTOPでabandonしない。今回の実行が新しく開いたPhase entryがeffect記録前にSTOPした場合にabandonする既存の動作は変えない。
+中断した展開のmutationは、resume中のSTOPでabandonしない。今回の実行が新しく開いたPhase entryがeffect記録前にSTOPした場合にabandonする既存の動作は変えない。この規則はlegacy Phase entryのものである。review-v1 Phase entryのplanning mutationは、最初のgeneration mutationを開始するまでは、開始したものでもresumeしたものでも、どのSTOPでもabandonする（Review-v1 planning）。
 
 明示entryの妥当性は、domain write・mutation effect・Git commit / pushより前に検査する。designのWork keyに存在しないentry、およびこの展開が作るWorkの完了を待つことになるentryは、展開前にSTOPする。既存Workの完了を待つentryは、その既存Workが既にcompletedなら妥当である。
 
@@ -404,6 +404,70 @@ desired state自体の変更が必要 → human confirmation
 
 Roadmap start event / Phase completion eventは作らない。stateは生成する。
 
+## Review-v1 planning（明示opt-in）
+
+Roadmap作成とPhase entryは、呼び出しごとの明示opt-inでだけReview gate（`skills/review`）を通る。`create_roadmap(..., review=PlanningReview(...))` / `enter_phase(..., review=PlanningReview(...))` がreview-v1 planningであり、`review=None`（既定）はlegacy pathで従来と1 byteも変わらない。opt-inはdurable invocationのmarker（`review_contract: review-v1-planning-v1`、`publication_contract: review-v1-planning-publication-v1`、recoveryでは `recovery_of_review_run_id`）として記録し、markerの無いrecordとある呼び出し、またはその逆は `reconcile required`（`review_marker_mismatch`）で停止してrecordを変えない。opt-inしたinvocationがlegacyへfallbackすることはない。
+
+入口（lockより前）: 不正な `review` 引数は `review_contract_invalid`、immutable Review createを保てないplatformは `review_create_unsupported`、`rules/git` のreview-v1最小version `P2_REVIEW_GIT_MIN` より古いGit・version不明のGitは `review_git_unsupported` で停止し、何も読まず書かない。
+
+entry順（両kindで固定）:
+
+```text
+1  引数・platform・Git versionの検査（lockより前）
+2  requestのidentityより前のlive検査（Roadmap作成: payload検査と構造precheck。Phase entry: 構造precheck、
+   Phase・Roadmap・lifecycleの状態、依存）
+3  request identity（live の roadmap_request_identity / design_identity）
+4  canonical-input preflight: conditional Relatedのconditionをliveの validate_condition で検査し（拒否はliveと
+   同じ validation_failed）、request identityをP1のserializerだけで表せることを示す。表せない値（float、tuple、
+   textでないkey、空key、sequence内のsequence、lone surrogate）は review_candidate_unrepresentable。
+   _open より前なので何も開始しない
+5  liveのsame-request検査とmarker検査
+6  残りのliveの受理検査（Phase entry: phase_already_expanded、通常Workが1つ以上、予約key、明示entryの
+   開始可能性、unique entry）。このPhase自身の中断したreview-v1 Phase entryには、liveの中断展開の規則どおり
+   phase_already_expanded と unique entry を適用しない
+7  slotにpendingなreview-v1 planning mutationが無い時だけ、canonical recovery discovery（skills/review）
+8  _open: pendingなplanning mutationを記録済みinvocationでresume、または新しいRun / recoveryのmutationを開始
+9  setup（新しいRunのfreeze、recoveryのbinding、中断したsetupの完成）の後にReviewの流れ
+```
+
+liveのRoadmap semanticsがoperationとして受理できるかを先に決め（2・5・6）、その後でReview recoveryがどのRunを続けるかを決める（7）。
+
+新しいRunのfreeze（順序固定）:
+
+```text
+1  予約: Roadmap作成は roadmap と decide_phases のPhase / relation ID、Phase entryは register_works のkeyの
+   全stageのID。entity scopeを広げる
+2  HEADのcommitted basis（committed-result loaderによるHEADのcommitted view + Wの期待effect）でCandidateを
+   作る: declared base、R9選択、working-tree互換検査、表現可能性検査
+3  Review Context、Effective Policy、evidence、request envelope
+4  Run / task / Receipt / ConsumptionのID予約。Consumption pathをfile scopeへ加える
+5  gate.require_committable、Git persistence preflight（transform属性とcheckout capability）、Review namespaceの
+   読取り可能性、dirty overlap（登録path + Run record path + Consumption path）、push先があれば
+   HEADについてのpublication barrier
+6  noteの review_binding（branchとHEAD）
+7  generation mutation 1を開始する
+```
+
+**R9のcanonical self-selection**（このSkillが所有する）: 最初のWorkは、HEADのcommitted basis上の `startable_works` + `planned_next_preference` だけで決まり、working treeでは決めない。一意ならそれがcanonical_first_work、候補なしならnull、明示entryがそれと違えば `review_entry_not_canonical`、同順位の中の明示entryは `review_entry_ambiguous`、entry無しの同順位はliveの `ambiguous_startable_candidates`。working treeとHEADがdeclared base・PhaseのWork集合・R9選択のどれかで違えば、freezeで `review_base_uncommitted` として停止する（commitまたは破棄してから再実行する）。
+
+**currency**: currencyは1つのbase commitについて、Context、Policy、そのcommitのcommitted viewで計算したdeclared base、そしてdeclared baseが等しい時だけCandidateの再構築（R9選択を含む）、の順で判定する。declared baseの差は常にdeclared baseの差として1回だけ分類し、R9やCandidateの不一致として報告しない。sealの前のstaleは何も書かずterminal `stale`、sealの後・登録開始前のstale（use check）はgeneration 4とSupersessionを書いてから `stale`。use checkが通るとHEADを `use_check_head` として記録する。最初の登録stageを記録した後は `stale` で終わらず、差は `reconcile required` になる: Kpを記録する直前のpre-Kp currency proof（P = HEAD。Pは `use_check_head` 自身、またはその子孫でplanning-owned pathに触れていない履歴であること、Runのrecordがcommit済みであること、currency、記録した登録effectがexpected physical projectionそのものであること）が `review_registration_base_moved` / `review_receipt_invalid` / `review_registration_currency_changed` / `review_candidate_mismatch` / `review_registration_projection_mismatch` で止める。working-tree round tripはR9選択をHEADのcommitted basisから読むが、HEADのdeclared baseがCandidateのものと違う場合はその差をpre-Kp currency proofに分類させ、R9不一致として止めない。
+
+**terminal**: `registered`（登録が公開された、remoteなしではC-2(Km)が通った）、`not_authorized`（reviewが許可しなかった。何も登録しない）、`stale`（sealの前、またはsealの後にgeneration 4とSupersessionを書いた）。
+
+**writer hand-off**: freeze後の登録は、canonical Candidateから計算したW（CanonicalPlanningWriterInput）だけから書き、callerのplan / designを二度とbytesを作るhelperへ渡さない。mappingのkey順はCandidateの正規順、sequenceの順はCandidateの順である。各登録stageの前に、display番号を割り当てるentity directory（Roadmap作成: `roadmaps/`・`phases/`、Phase entry: `works/`）のentryがHEADのものとこのmutationが書いたものだけであることを確かめ（display base check）、違えば `dirty_overlap` で止める。
+
+**operation binding**: freezeで記録した `review_binding`（branchとHEAD）を、以後のgeneration mutationと登録のすべてのstageの前に確かめ、branchが変わっていれば `reconcile required`（`review_binding_moved`）で止める。
+
+**Git段階**: 登録はKp（`base_exact` の登録commit）、C-2(Kp)、Planning Consumption、Km（Consumptionだけのmetadata commit）、C-2(Km)、push先があれば `review-publication` stageでのKmのpush、の順で進む。commit primitive、`base_exact`、pushのstageとpublication barrierは `rules/git` に従う。
+
+**runtime喪失からの回復**: slotにpendingなreview-v1 planning mutationが無い呼び出しは、まずcanonical recovery discovery（`skills/review` の分類）を行う。回復可能なRunがちょうど1つならそのRunを続けるrecovery planning mutationを開始し、Runのcanonical recordからreserved ID（domain ID、Run ID、task ID、generation 3があればReceipt ID）を1回のdurable saveで束縛する（`recovery_binding`）。canonicalにならなかったID（generation 3より前のReceipt ID、Consumption ID）だけを同じkeyで新しく予約する。どのIDも推測で作らず、束縛するIDが別IDで予約済み・種類違い・HEADのcommitted viewかworking treeで使用中なら `review_recovery_reservation_conflict`。回復可能なRunが無く、不完全なRunも無い時だけ新しいRunを開始し、set asideしたRunを `recovery_discovery` noteとrequest envelopeの `set_aside_runs` に記録する。不完全・曖昧なら `review_recovery_incomplete` / `review_recovery_ambiguous` で何も開始しない。runtime喪失だけを理由に新しいRunを開始しない。
+
+**中断したsetup（pre-freeze resume setup）**: effectを記録せずgeneration mutationも開始していないplanning mutationは、再実行でそのmutationのsetupを完成させる。`recovery_discovery` noteの無い新しいRunのmutationはdiscoveryをやり直し（その間にRunが回復可能になっていれば `review_discovery_changed`）、記録済みの予約はそのまま使い、足りない予約を固定順で予約し（順序に無い記録済みkeyは `review_setup_invalid`）、freezeの他の手順をすべてやり直す。bindingの無いrecovery planning mutationはdiscoveryで同じRunを示してから束縛する（予約だけ持つrecordは `review_recovery_reservation_conflict`、Runがもう唯一の回復可能なRunでなければ `review_discovery_changed`）。
+
+**abandon**: 最初のgeneration mutationを開始するまで、review-v1 planning mutationはeffectを持たずcanonicalなものを何も持たないので、開始したものでもresumeしたものでも、Phase entryでも、どのSTOPでもabandonする。generation mutationを開始した後はterminalまでpendingのまま残り、同じrequestの再実行がresumeする。
+
+**STOP codeとreason**: review-v1 planningのSTOPはcode（`StopError` / `ValidationError`）で、`reconcile required` は `code == "reconcile_required"` のまま意味を `reason` に持つ。liveのcodeが従来どおり投げる `reconcile required`（same-request不一致、scope重なり、`reserve_id` の種類違い、liveのbranch binding、liveのreplay / push分類の不一致）は `reason` を持たない。reasonの一覧は `review_marker_mismatch`、`review_recovery_incomplete`、`review_recovery_ambiguous`、`review_discovery_changed`、`review_recovery_reservation_conflict`、`review_setup_invalid`、`review_binding_moved`、`review_chain_invalid`、`review_task_invalid`、`review_generation_owner_conflict`、`review_candidate_mismatch`、`review_receipt_invalid`、`review_registration_base_moved`、`review_registration_currency_changed`、`review_registration_projection_mismatch`、`review_commit_unowned`、`review_persisted_proof_failed`、`review_metadata_commit_mismatch`、`review_publication_invalid`、`review_publication_contract_invalid`。
+
 ## Mutation / Git
 
 RoadmapがRoadmap operation owner。
@@ -470,6 +534,8 @@ plan exclusion（Phase / Work）は `plan_excluded` eventを記録・適用し�
 - Roadmap / Phaseのhold / resume / cancel、achievement記録: `events/events.jsonl`
 - plan exclusion（Phase / Work）: replanがWork登録とrelation変更を行い得るため3つとも
 - 既存未開始WorkのRelated maintenance: `relations/related.yaml`
+
+この静的集合には1つだけ例外がある。review-v1 planning mutation（Roadmap作成 / Phase entry）は、上記に加えて、自分のConsumption path `.workline/review/consumptions/<consumption_id>.yaml` を宣言する。このpathは予約したConsumption IDで決まるため、そのIDを予約した時にfile scopeへ加える（Review-v1 planning）。planning mutationが開始するgeneration mutationは、`skills/review` が各transitionに与える初期scopeを宣言する。
 
 宣言が実際より広いと、同じfileを一切書かないoperation同士が「安全に独立していると証明できない」として `reconcile_required` になる。狭すぎると競合を見逃す。どちらも避けるため、scopeはoperation種別から予測できる静的な集合とし、caller inputやcurrent stateで動的に変えない。scopeを決めていないoperationは全ledgerを宣言する（過大宣言の側へ倒す）。entity scopeは従来どおり、そのoperationが変更する対象と、operation中に発行したIDを含める。
 
