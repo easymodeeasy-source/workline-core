@@ -8,7 +8,7 @@ from unittest import mock
 
 from helpers import git
 from planning_helpers import (
-    CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, crash_at, design, plan, rr, run_ids,
+    CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, crash_at, deterministic_ids, design, plan, rr, run_ids,
 )
 from workline import roadmap as rm
 from workline import yamlish
@@ -104,6 +104,22 @@ class SomeReservationsTests(_SetupCase):
         result = self.call()
         self.assertEqual(record["reserved_ids"]["roadmap"], result.registration.roadmap_id)
 
+    def test_b_the_missing_ones_are_reserved_in_the_frozen_order(self) -> None:
+        records = []
+        for name, interrupted in (("straight", False), ("resumed", True)):
+            with deterministic_ids():
+                self.store = self.planning_project(name)
+                if interrupted:
+                    self.crash_after_the_roadmap_reservation()
+                with crash_at(rr, "_launch_and_settle"):
+                    with self.assertRaises(Crash):
+                        self.call()
+            records.append(self.record())
+        straight, resumed = records
+        self.assertEqual(list(straight["reserved_ids"].items()), list(resumed["reserved_ids"].items()),
+                         "every reservation, in the order the frozen freeze makes them")
+        self.assertEqual(straight["mutation_id"], resumed["mutation_id"])
+
     def test_b_a_recorded_key_the_order_does_not_reserve_is_setup_invalid(self) -> None:
         record = self.crash_after_the_roadmap_reservation()
         record["reserved_ids"]["an-unknown-key"] = "r_01ARZ3NDEKTSV4RRFFQ69G5FAV"
@@ -132,6 +148,10 @@ class RecoverableMeanwhileTests(_SetupCase):
             self.call()
         self.assertEqual("review_discovery_changed", raised.exception.reason)
         self.assert_abandoned(new_run["mutation_id"])
+        intent = MutationController(self.store).intent_path(new_run["mutation_id"])
+        if intent.exists():
+            self.assertEqual(new_run["invocation"], yamlish.load(intent.read_text(encoding="utf-8"))["invocation"],
+                             "the invocation is never rewritten into a recovery")
         result = self.call()
         self.assertEqual(("registered", run_id), (result.status, result.review_run_id))
 
@@ -240,6 +260,31 @@ class AfterGeneration1Tests(_SetupCase):
         self.assertEqual(before["mutation_id"], after["mutation_id"])
         self.assertEqual(before["notes"][rr.NOTE_DISCOVERY], after["notes"][rr.NOTE_DISCOVERY])
         self.assertEqual(before["notes"][rr.NOTE_BINDING], after["notes"][rr.NOTE_BINDING])
+        self.assertEqual("pending", after["status"])
+
+
+class RecoveryAfterGeneration1Tests(_SetupCase):
+    def test_f_a_recovery_mutation_keeps_its_binding_and_a_stop_leaves_it_pending(self) -> None:
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.call()
+        self.runtime_gone(self.store)
+        with crash_at(rr, "_launch_and_settle"):
+            with self.assertRaises(Crash):
+                self.call()  # the recovery planning mutation binds the Run and reaches the reviewer launch
+        before = self.record()
+        self.assertIn(planning.MARKER_RECOVERY, before["invocation"])
+        self.assertIn(rr.NOTE_RECOVERY_BINDING, before["notes"])
+        with mock.patch.object(recovery, "discover", side_effect=AssertionError("discovery ran")):
+            with self.assertRaises(StopError) as raised:
+                self.call(Reviewer(raises=RuntimeError("the reviewer failed")))
+        self.assertEqual("review_reviewer_failed", raised.exception.code)
+        after = self.record()
+        self.assertEqual(before["mutation_id"], after["mutation_id"])
+        self.assertEqual(before["invocation"], after["invocation"])
+        self.assertEqual(before["notes"][rr.NOTE_RECOVERY_BINDING], after["notes"][rr.NOTE_RECOVERY_BINDING])
+        self.assertEqual(before["notes"].get(rr.NOTE_DISCOVERY), after["notes"].get(rr.NOTE_DISCOVERY))
+        self.assertEqual(before["reserved_ids"], after["reserved_ids"])
         self.assertEqual("pending", after["status"])
 
 
