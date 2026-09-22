@@ -339,12 +339,18 @@ def deterministic_ids(start: int = 1) -> Iterator[None]:
 
 
 def state_entries(store: ProjectStore) -> dict[str, bytes | None]:
-    """Every entry under ``.workline`` - directories as ``None``, files as their bytes - except the execution lock."""
+    """Every entry under ``.workline`` - directories as ``None``, files as their bytes - except the execution lock.
+
+    The lock's own directories are left out too: taking it writes its holder durably, which recreates
+    ``.workline/runtime`` and ``.workline/runtime/tmp`` when they are gone (after runtime loss, and for a legacy
+    refusal exactly the same way). Whatever a run leaves *inside* them is still listed, entry for entry.
+    """
+    lock_directories = {".workline/runtime", store.tmp.relative_to(store.root).as_posix()}
     found: dict[str, bytes | None] = {}
     base = store.root / ".workline"
     for path in sorted(base.rglob("*")):
         relative = path.relative_to(store.root).as_posix()
-        if "/locks" in relative:
+        if "/locks" in relative or (relative in lock_directories and path.is_dir()):
             continue
         found[relative] = path.read_bytes() if path.is_file() else None
     return found
