@@ -42,7 +42,7 @@ CATALOGUE_CODES = {
     "review_reviewer_failed", "review_report_invalid", "review_reviewer_mismatch", "review_git_transform",
     "review_checkout_unsafe", "review_checkout_unknown", "review_namespace_unreadable", "review_hooks_path_invalid",
     "review_publication_barrier", "validation_failed", "postcheck_failed", "structure_invalid", "dirty_overlap",
-    "phase_already_expanded", "ambiguous_startable_candidates", "phase_blocked", "spec_violation",
+    "phase_already_expanded", "ambiguous_startable_candidates", "phase_blocked", "roadmap_held", "spec_violation",
     "review_not_persisted", "review_persistence_unknown", "review_roundtrip_mismatch", "review_callback_unknown",
     "review_callback_conflict", "review_consumption_conflict", "review_generation_conflict", "review_generation_pending",
     "review_path_ignored", "review_committability_unknown", "review_containment", "review_record_invalid",

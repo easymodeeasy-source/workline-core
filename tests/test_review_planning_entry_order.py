@@ -14,6 +14,7 @@ from workline.create import WorkSpec, create_standalone_work
 from workline.errors import ReconcileRequired, SpecViolation, StopError
 from workline.mutation import MutationController
 from workline.review import planning, recovery
+from workline.state import ProjectView
 
 EVENT_LOG = ".workline/events/events.jsonl"
 
@@ -111,7 +112,8 @@ class OwnAppliedStagesTests(_EntryCase):
             self.entry(the_design)
         self.assertEqual("review_registration_currency_changed", raised.exception.reason)
 
-    def test_d_the_explicit_entrys_startability_is_still_checked(self) -> None:
+    def test_d_the_explicit_entrys_startability_is_not_re_checked_for_it(self) -> None:
+        """Its Run has a canonical generation 1, so the entry is a continuation: the pre-Kp proof decides (§5.8)."""
         external = create_standalone_work(self.store, WorkSpec("External", "外部の前提が成立する")).work_id
         before = self.head(self.store)
         st.start(self.store, external, "single-work", completing_executor(self.store))
@@ -119,6 +121,31 @@ class OwnAppliedStagesTests(_EntryCase):
         the_design = design(requires_completion=((external, "w1"),), entry="w1")
         record = self.crash_between_stages(the_design)
         git(self.store.root, "revert", "--no-edit", f"{before}..{completed}")  # a person undoes the completion
+        w1 = (record.get("reserved_ids") or {})["works:work:w1"]
+        self.assertNotIn(w1, [work.id for work in ProjectView.load(self.store).startable_works(self.phase_id)],
+                         "the explicit entry is not startable now, so a new entry would be refused for it")
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.entry(the_design)
+        self.assertEqual("review_registration_currency_changed", raised.exception.reason,
+                         "the declared base owns the committed change, not the entry check")
+        (still,) = self.planning_records()
+        self.assertEqual(record["mutation_id"], still["mutation_id"],
+                         "the same planning mutation, still pending with its registration (§13.4)")
+        self.assertFalse(any("expand phase" in subject for subject in self.subjects(self.store)), "and no Kp")
+
+    def test_d_a_pending_mutation_without_a_canonical_generation_1_keeps_that_check(self) -> None:
+        """Before the boundary the live startability refusal stands, unchanged (§28 T E)."""
+        external = create_standalone_work(self.store, WorkSpec("External", "外部の前提が成立する")).work_id
+        before = self.head(self.store)
+        st.start(self.store, external, "single-work", completing_executor(self.store))
+        completed = self.head(self.store)
+        the_design = design(requires_completion=((external, "w1"),), entry="w1")
+        with crash_at(rr, "_accept"):
+            with self.assertRaises(Crash):
+                self.entry(the_design)
+        (record,) = self.planning_records()
+        self.assertEqual((), run_ids(self.store), "no Run was accepted canonically")
+        git(self.store.root, "revert", "--no-edit", f"{before}..{completed}")
         with self.assertRaises(SpecViolation):
             self.entry(the_design)
         (still,) = self.planning_records()
