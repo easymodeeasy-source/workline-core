@@ -265,11 +265,14 @@ class DeclaredBaseFirstTests(_BasisCase):
 
 
 class PhaseHeldTests(_BasisCase):
-    """P-E's other example, "the Phase held", for the kind that has an R9 selection: a review-v1 Phase entry. No
-    Workline operation can hold the Phase while its entry is pending (the scopes overlap: the live reconcile), so the
-    hold arrives as a person's commit; the frozen entry order then runs the live Phase-state check first on every call
-    (§5.6 step 2), before any currency evaluation, and the planning mutation stays pending. Once the Phase is resumed
-    the Run is current again and the flow goes on."""
+    """P-E's other example, "the Phase held", for the kind that has an R9 selection: a review-v1 Phase entry.
+
+    No Workline operation can hold the Phase while its entry is pending (the scopes overlap: the live
+    reconcile), so the hold arrives as a person's commit. Once the Run has a canonical generation 1 the retry
+    is a continuation (§5.8): the held Phase no longer refuses it as a new entry, and the committed change is
+    classified by the declared base at the boundary the flow has reached - stale before a Receipt, generation
+    4 at the use check, the pre-Kp currency proof once the registration began. Resuming the Phase makes the
+    Run current again."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -281,18 +284,38 @@ class PhaseHeldTests(_BasisCase):
         git(self.store.root, "reset", "-q", "--hard", before)
         self.hold_lines, self.resume_lines = held[len(log):], resumed[len(held):]
 
-    def held_then_refused(self) -> None:
+    def held_then_classified(self, expected) -> None:
+        """A person commits the hold; the continuation classifies it by the declared base, never as admission."""
         (before,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
         with self.assertRaises(ReconcileRequired) as overlap:
             rm.hold_phase(self.store, self.phase_id)
         self.assertIsNone(overlap.exception.reason, "the live scope overlap: no Workline hold while the entry is pending")
         self.persons_commit(self.hold_lines)
-        with self.assertRaises(SpecViolation) as raised:
-            self.entry()
-        self.assertIn("is held", str(raised.exception))
-        (after,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
-        self.assertEqual(before, after, "the planning mutation stays pending, untouched")
+        expected(before)
         self.persons_commit(self.resume_lines)
+
+    def entries_pending(self) -> list[dict]:
+        return [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
+
+    def assert_stale_before_a_receipt(self, before: dict) -> None:
+        result = self.entry()
+        self.assertEqual(("stale", planning.STALE_DECLARED_BASE), (result.status, result.detail))
+        self.assertEqual(before["mutation_id"], result.mutation_id, "the same planning mutation ended it")
+        self.assertEqual([], self.entries_pending(), "a terminal stale completes it with nothing written (§13.2)")
+
+    def assert_generation_4(self, before: dict) -> None:
+        result = self.entry()
+        self.assertEqual(("stale", planning.STALE_DECLARED_BASE), (result.status, result.detail))
+        self.assertEqual(4, self.chain(self.store, result.review_run_id).latest.generation)
+        self.assertEqual(before["mutation_id"], result.mutation_id)
+        self.assertEqual([], self.entries_pending(), "the invalidation completes it (§13.3)")
+
+    def assert_pre_kp_refusal(self, before: dict) -> None:
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.entry()
+        self.assertEqual("review_registration_currency_changed", raised.exception.reason)
+        (after,) = self.entries_pending()
+        self.assertEqual(before["mutation_id"], after["mutation_id"], "the same planning mutation, still pending")
 
     def assert_registered(self) -> None:
         result = self.entry()
@@ -303,29 +326,27 @@ class PhaseHeldTests(_BasisCase):
         with crash_at(rr, "_launch_and_settle"):
             with self.assertRaises(Crash):
                 self.entry()
-        self.held_then_refused()
-        self.assert_registered()
+        self.held_then_classified(self.assert_stale_before_a_receipt)
 
     def test_after_generation_2(self) -> None:
         with crash_at(rr, "_seal"):
             with self.assertRaises(Crash):
                 self.entry()
-        self.held_then_refused()
-        self.assert_registered()
+        self.held_then_classified(self.assert_stale_before_a_receipt)
 
     def test_after_generation_3(self) -> None:
         with crash_at(rr, "_use_check"):
             with self.assertRaises(Crash):
                 self.entry()
-        self.held_then_refused()
-        self.assert_registered()
+        self.held_then_classified(self.assert_generation_4)
 
     def test_after_the_registration_began(self) -> None:
         with crash_at(rm, "register_works", when=lambda n, mutation, stage, specs, relations: stage == "integration"):
             with self.assertRaises(Crash):
                 self.entry()
-        self.held_then_refused()
-        self.assert_registered()  # P descends from use_check_head through event-log commits, the base current again
+        self.held_then_classified(self.assert_pre_kp_refusal)
+        # the Phase is active again, and P descends from use_check_head through event-log commits only
+        self.assert_registered()
 
 
 class MismatchWithAnEqualBaseTests(_BasisCase):

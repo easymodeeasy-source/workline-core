@@ -539,6 +539,8 @@ class ForeignKmTests(PlanningTestCase):
 
 
 class LegacyOnlyPushTests(PlanningTestCase):
+    """§28 K: a legacy-only push pays one fast-path read per distinct commit the barrier evaluates, and nothing else."""
+
     def test_one_path_limited_history_read_per_commit_and_no_proof(self) -> None:
         store = self.new_project(remote=True)
         calls: list[str] = []
@@ -556,7 +558,8 @@ class LegacyOnlyPushTests(PlanningTestCase):
 
         with mock.patch.object(gitcmd, "history_touches", touches), mock.patch.object(gitcmd, "run_git", run), \
                 mock.patch.object(publication, "registered_runs", side_effect=AssertionError("Runs were read")), \
-                mock.patch.object(publication, "committed_planning_proof", side_effect=AssertionError("a proof ran")):
+                mock.patch.object(publication, "committed_planning_proof", side_effect=AssertionError("a proof ran")), \
+                mock.patch.object(gitcmd, "running_git_version", side_effect=AssertionError("a version was read")):
             result = rm.create_roadmap(store, plan())
         made = result.head
         before = gitcmd.commit_parents(store.root, made)[0]

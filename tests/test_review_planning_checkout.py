@@ -216,7 +216,16 @@ class RuleAfterTests(_CheckoutCase):
 
 
 class HostileConfigurationTests(_CheckoutCase):
-    """I: hostile global and system configuration; the in-tree canonical rule outranks all of it."""
+    """I and I2: hostile global and system configuration; the in-tree canonical rule outranks all of it.
+
+    I: with no filter driver named ``unset`` configured, every layer passes and a fresh clone keeps every
+    record byte for byte. I2: with such a driver configured beside the same rules, the bytes survive just as
+    well - the canonical rule's ``-filter`` selects no driver - and the capability is refused all the same,
+    because the configuration is outside the one form P2 v1 proves positively (§14.5). Which code a caller
+    sees depends on who asks: layer 4 alone gives ``review_checkout_unsafe``, and a review-v1 call meets the
+    transform preflight first, which refuses the same configuration key with ``review_git_transform``
+    (§14.3). Neither the byte probe nor the printed form L is ever taken as the capability's proof.
+    """
 
     RULES = {
         "eol": "*.yaml eol=crlf",
@@ -259,20 +268,37 @@ class HostileConfigurationTests(_CheckoutCase):
                     checkout.require_checkout_capability(self.store, self.relatives)
                 self.assertEqual("review_checkout_unsafe", raised.exception.code)
                 self.assertIn("filter driver named unset", str(raised.exception))
+                # and in a real review-v1 flow the transform preflight refuses first (§14.3): the configured
+                # driver named unset, or - where a hostile global rule reaches a planning path the Review-only
+                # canonical rule does not cover - that attribute. Either way nothing is written.
+                with self.assertRaises(StopError) as flow:
+                    self.reviewed_roadmap(self.store, Reviewer(), plan("Another Roadmap"))
+                self.assertEqual("review_git_transform", flow.exception.code)
             else:
                 checkout.require_checkout_capability(self.store, self.relatives)
         self.assert_clone_keeps_every_record(self.store.root, f"clone-{name}", env=env)
 
-    def test_i_each_hostile_global_rule_under_core_autocrlf(self) -> None:
+    def test_i_each_hostile_global_rule_with_no_driver_unset(self) -> None:
+        """I: the canonical rule outranks each hostile rule, and the capability holds."""
         for described, rule in self.RULES.items():
             with self.subTest(described):
-                self.check(described.replace(" ", "-"), [rule], driver="driver" in described)
+                self.check(described.replace(" ", "-"), [rule])
 
     def test_i_all_at_once_as_global_and_as_system_configuration(self) -> None:
         for scope in ("global", "system"):
             with self.subTest(scope):
-                self.check(f"all-{scope}", list(self.RULES.values()), all_at_once=True, driver=True, scope=scope)
                 self.check(f"all-no-driver-{scope}", list(self.RULES.values()), all_at_once=True, scope=scope)
+
+    def test_i2_each_hostile_rule_with_a_driver_unset_configured(self) -> None:
+        """I2: the same bytes survive, and the capability is refused as an unsupported configuration."""
+        for described, rule in self.RULES.items():
+            with self.subTest(described):
+                self.check(f"driver-{described.replace(' ', '-')}", [rule], driver=True)
+
+    def test_i2_all_at_once_with_a_driver_as_global_and_as_system_configuration(self) -> None:
+        for scope in ("global", "system"):
+            with self.subTest(scope):
+                self.check(f"all-driver-{scope}", list(self.RULES.values()), all_at_once=True, driver=True, scope=scope)
 
 
 class InfoAttributesTests(_CheckoutCase):

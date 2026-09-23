@@ -504,11 +504,12 @@ class ReaderLossTests(PlanningTestCase):
 
 
 class PhaseEntryRoadmapHoldTests(PlanningTestCase):
-    """§28 D names the declared-base factor "a hold of the Phase's Roadmap committed by a disjoint-scope operation in a
-    crash window". For a review-v1 Phase entry that hold is refused by the live Roadmap-state check the frozen entry
-    order runs first on every call (§5.6 step 2), before any currency evaluation; the planning mutation stays pending,
-    and once the Roadmap is resumed the flow goes on. (For a Roadmap creation, a hold of a named Phase's Roadmap is no
-    declared-base fact: phase lifecycle and state read the Phase's own events; FourMomentsTests hold the Phase itself.)
+    """§28 D names the declared-base factor "a hold of the Phase's Roadmap committed by a disjoint-scope operation in
+    a crash window". For a review-v1 Phase entry that hold is a declared-base fact (the declared base holds the
+    Roadmap's lifecycle, §7.4), and the retry reaches it: once the Run has a canonical generation 1 the call is a
+    continuation (§5.8), so the committed hold is classified at the boundary the flow has reached, never as a
+    new-entry refusal. (For a Roadmap creation, a hold of a named Phase's Roadmap is no declared-base fact: phase
+    lifecycle and state read the Phase's own events; FourMomentsTests hold the Phase itself.)
     """
 
     def setUp(self) -> None:
@@ -525,40 +526,60 @@ class PhaseEntryRoadmapHoldTests(PlanningTestCase):
             with self.assertRaises(Crash):
                 self.entry()
 
-    def held_then_refused(self) -> dict:
+    def held(self) -> dict:
+        """The disjoint-scope hold commits and publishes; the pending entry is untouched by it."""
         (before,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
         held = rm.hold_roadmap(self.store, self.roadmap_id)
         self.assertEqual(held.head, self.remote_head(), "the disjoint-scope operation committed and published")
-        with self.assertRaises(StopError) as raised:
-            self.entry()
-        self.assertEqual("roadmap_held", raised.exception.code, "the live Roadmap-state check, §5.6 step 2")
-        (after,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
-        self.assertEqual(before, after, "the planning mutation stays pending, untouched")
         self.assertFalse(ReviewStore(self.store).consumption_ids())
-        rm.resume_roadmap(self.store, self.roadmap_id)
         return before
+
+    def assert_still_pending(self, before: dict) -> None:
+        (after,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"]
+        self.assertEqual(before["mutation_id"], after["mutation_id"], "the same planning mutation, still pending")
 
     def test_moment_1_after_the_review_before_the_registration(self) -> None:
         self.crash(rr, "_use_check")
-        self.held_then_refused()
-        result = self.entry()  # the Roadmap is active again: the declared base is the Candidate's
-        self.assertEqual("registered", result.status)
-        self.assertEqual([1, 2, 3], [g.generation for g in self.chain(self.store, result.review_run_id).generations])
+        before = self.held()
+        result = self.entry()  # admitted as a continuation; the use check owns the committed change
+        self.assertEqual(("stale", planning.STALE_DECLARED_BASE), (result.status, result.detail))
+        self.assertEqual(4, self.chain(self.store, result.review_run_id).latest.generation)
+        self.assertIsNotNone(before)
 
     def test_moment_2_after_the_first_registration_stage(self) -> None:
         self.crash(rm, "register_works", when=lambda n, mutation, stage, specs, relations: stage == "integration")
-        self.held_then_refused()
+        before = self.held()
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.entry()  # the pre-Kp currency proof owns it: no Kp, no Consumption, nothing pushed
+        self.assertEqual("review_registration_currency_changed", raised.exception.reason)
+        self.assert_still_pending(before)
+        rm.resume_roadmap(self.store, self.roadmap_id)
         result = self.entry()  # P descends from use_check_head through event-log commits only
         self.assertEqual("registered", result.status)
 
     def test_moment_3_after_the_kp_stage_is_recorded_before_it_is_made(self) -> None:
         self.crash(mutation_module, "_make_planning_commit",
                    when=lambda n, store, payload, paths: payload.get("base_exact") is True)
-        self.held_then_refused()
+        before = self.held()
         with self.assertRaises(ReconcileRequired) as raised:
             self.entry()  # HEAD is no longer the recorded parent: base_exact refuses before any replay
         self.assertEqual("review_registration_base_moved", raised.exception.reason)
         self.assertFalse(any("expand phase" in subject for subject in self.subjects(self.store)))
+        self.assert_still_pending(before)
+
+    def test_moment_4_after_kp_is_made_the_hold_waits_for_the_publication(self) -> None:
+        """With a destination the hold cannot commit while Kp is unproven; the continuation publishes, then it does."""
+        self.crash(rr, "_c2_kp")
+        kp = self.head(self.store)
+        with self.assertRaises(StopError) as barrier:
+            rm.hold_roadmap(self.store, self.roadmap_id)
+        self.assertEqual("review_publication_barrier", barrier.exception.code)
+        result = self.entry()
+        self.assertEqual("registered", result.status)
+        self.assertEqual(kp, ReviewStore(self.store).read_consumption(
+            result.consumption_id).persisted_result["registration_commit"])
+        held = rm.hold_roadmap(self.store, self.roadmap_id)
+        self.assertEqual(held.head, self.remote_head())
 
 
 class R9Tests(PlanningTestCase):
