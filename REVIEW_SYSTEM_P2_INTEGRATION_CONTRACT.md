@@ -1,6 +1,6 @@
 # Review System P2 — Planning Review Gates: Integration Contract
 
-Status: `CONTRACT FROZEN / IMPLEMENTATION BLOCKER REPAIR ROUND 1 (P2-IMPL-BLOCKER-001..006, §33.8; earlier rounds: round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008; final readiness repair round 1: P2-READY-001..004 with P2-CONTRACT-004 closed again, and P2-READY-005, -006, -018, -024, -027; final readiness repair round 2: P2-READY-004 and P2-READY-029, with P2-CONTRACT-004 closed again) / FINAL IMPLEMENTATION READINESS READY for 6004669, the contract this repair changes (§32) / THE REPAIRED CONTRACT IS NOT YET INDEPENDENTLY REVIEWED / P2 IMPLEMENTATION NOT LANDED ON LIVE MAIN; LOCAL IMPLEMENTATION PAUSED PENDING CONTRACT RE-REVIEW`
+Status: `CONTRACT FROZEN / IMPLEMENTATION BLOCKER REPAIR ROUND 1 (P2-IMPL-BLOCKER-001..006, §33.8; earlier rounds: round 1: P2-CONTRACT-001..004; round 2: P2-CONTRACT-001, P2-CONTRACT-005; round 3: P2-CONTRACT-006; round 4: P2-CONTRACT-007; round 5: P2-CONTRACT-008; final readiness repair round 1: P2-READY-001..004 with P2-CONTRACT-004 closed again, and P2-READY-005, -006, -018, -024, -027; final readiness repair round 2: P2-READY-004 and P2-READY-029, with P2-CONTRACT-004 closed again) / FINAL IMPLEMENTATION READINESS READY for 6004669, the contract that repair changed (§32) / P2 IMPLEMENTATION BLOCKER REPAIR REVIEW ACCEPTED (independent review of 54c7896, §32) / P2 IMPLEMENTATION NOT LANDED ON LIVE MAIN; THE LOCAL IMPLEMENTATION MAY RESUME AGAINST THE ACCEPTED REPAIRED CONTRACT`
 
 Runtime authority is unchanged by this document: `registry.md`, the registry-routed canonical Skills, and the live implementation and tests. This is a non-normative contract checkpoint. It freezes how P2 connects RoadmapPlan Review and PhaseEntryDesign Review to the landed P1 Review Core and to the live Roadmap operation, so that the P2 implementation is left with no choice to make. It starts no implementation and edits no authority; §26 states the authority text the implementation changes under the approval of this contract.
 
@@ -22,7 +22,8 @@ P2-READY-005, -006, -018, -024, -027:
                         RESOLVED (final readiness repair round 1, §33.6; the Git minimum of -027 split in
                         two by P2-READY-029, §33.7)
 P2-IMPL-BLOCKER-001..006:
-                        CLOSED (implementation blocker repair round 1, §33.8); cross-finding pass §34.8.
+                        CLOSED (implementation blocker repair round 1, §33.8); cross-finding pass §34.8;
+                        the repaired contract independently reviewed and ACCEPTED (§32).
                         Six contradictions the P2 implementation met before its first push; 006 (HIGH) was a
                         deadlock between two valid Workline operations
 P3:                     NOT STARTED, and nothing here activates it
@@ -3103,18 +3104,25 @@ P1 frozen contract repair:      not required
 P2 Integration Contract:        FROZEN / IMPLEMENTATION BLOCKER REPAIR ROUND 1
 Final Implementation Readiness
   reviewed checkpoint:          6004669460be04aaf0a1b3dbd2a6233e808025e0 — the exact contract the independent
-                                Final Implementation Readiness Re-check judged; this repair changes it
+                                Final Implementation Readiness Re-check judged; the blocker repair changed it
 P2 Final Implementation Readiness:
-                                READY for that checkpoint (an independent re-check; a historical fact, kept).
-                                The repaired contract is NOT YET INDEPENDENTLY REVIEWED
-Verdict-recording checkpoint:   the docs-only commit on the reviewed checkpoint that adds this record; no
-                                contract-semantic change; not a reviewed contract checkpoint (below)
-P2 accepted for implementation under the repaired contract:
-                                NO — pending an independent Implementation Blocker Repair Review
+                                READY for that checkpoint (an independent re-check; a historical fact, kept)
+Implementation Blocker Repair
+  reviewed checkpoint:          54c7896cdad6e86fbaf70239392df34ff8f8afb0 — the exact repaired contract the
+                                independent P2 Implementation Blocker Repair Review judged
+P2 Implementation Blocker Repair Review:
+                                ACCEPTED (independent); HIGH 0, MID 0; P2-IMPL-BLOCKER-001..006 CLOSED
+Verdict-recording checkpoints:  each a docs-only commit on the checkpoint whose verdict it records, adding it
+                                to this section and the status line; no contract-semantic change, and itself
+                                no reviewed contract checkpoint (below)
+P2 repaired contract accepted:  YES — the independently reviewed 54c7896
 P2 implementation on live main: NOT LANDED
-P2 local implementation:        PAUSED PENDING CONTRACT RE-REVIEW. An implementation attempt on `de3681c`
-                                found the six contradictions of §33.8 and stopped before its first push; it is
-                                no authority, it is referenced by no rule here, and nothing of it is landed
+P2 local implementation:        AUTHORIZED TO RESUME AGAINST THE ACCEPTED REPAIRED CONTRACT. An implementation
+                                attempt on `de3681c` found the six contradictions of §33.8 and stopped before
+                                its first push; it is no authority, no rule here refers to it, nothing of it is
+                                landed, and it has never been independently reviewed. Resuming it means code
+                                and test repair to this accepted contract, the full gates, and a Production
+                                Implementation Review before any implementation push
 Candidate 7:                    RETAIN
 Architecture reopen:            No
 Architecture blocker:           None
@@ -3122,7 +3130,7 @@ HUMAN:                          None
 P3:                             NOT STARTED
 Outstanding HIGH:               0
 Outstanding MID:                0
-Status:                         READY_FOR_P2_IMPLEMENTATION_BLOCKER_REVIEW
+Status:                         READY_FOR_P2_IMPLEMENTATION_RESUME
 ```
 
 **Final Implementation Readiness verdict** (non-normative record). The independent Final Implementation Readiness Re-check was performed on `6004669460be04aaf0a1b3dbd2a6233e808025e0`, the contract after final readiness repair round 2, and judged it READY: HIGH 0, MID 0, every P2-READY and P2-CONTRACT finding closed. P2 implementation had not started at verdict time. A subsequent docs-only commit, the verdict-recording checkpoint, records that verdict in this section and in the status line. It changes no contract rule, and it is not a reviewed contract checkpoint: the reviewed contract stays `6004669`. A commit cannot name itself, so the verdict-recording checkpoint is the commit on `6004669` that introduced `READY_FOR_P2_IMPLEMENTATION` into this file (`git log --format=%H -S READY_FOR_P2_IMPLEMENTATION -- REVIEW_SYSTEM_P2_INTEGRATION_CONTRACT.md`). The next P2 implementation session may take it as its live-main start baseline, after verifying that its only difference from `6004669` is this record.
@@ -3133,10 +3141,15 @@ Status:                         READY_FOR_P2_IMPLEMENTATION_BLOCKER_REVIEW
 6004669   independent Final Implementation Readiness = READY
 de3681c   records that verdict; contract text identical to 6004669
           a P2 implementation attempt on de3681c finds six contract gaps and pushes nothing
-<this>    docs-only implementation blocker repair round 1 closes the six (§33.8, §34.8)
-          an independent Implementation Blocker Repair Review of the repaired contract
-          only then does implementation resume, forward-only
+54c7896   docs-only implementation blocker repair round 1 closes the six (§33.8, §34.8)
+          independent P2 Implementation Blocker Repair Review of 54c7896 = ACCEPTED, HIGH 0 / MID 0
+<this>    records that verdict; no contract rule changes
+          the local implementation may resume against the accepted repaired contract, forward-only
 ```
+
+**Implementation Blocker Repair Review verdict** (non-normative record). The independent P2 Implementation Blocker Repair Review was performed on `54c7896cdad6e86fbaf70239392df34ff8f8afb0`, the contract after implementation blocker repair round 1, and judged it **ACCEPTED**: HIGH 0, MID 0, P2-IMPL-BLOCKER-001 to -006 CLOSED, Candidate 7 retained, and no architecture, P1 or HUMAN item reopened. P2 implementation was not landed at verdict time, and P3 had not started. A subsequent docs-only commit — this verdict-recording checkpoint — records that verdict in this section and in the status line. It changes no contract rule, and it is not itself a reviewed contract checkpoint: the reviewed repaired contract stays `54c7896`. A commit cannot name itself, so this one is the commit on `54c7896` that introduced `READY_FOR_P2_IMPLEMENTATION_RESUME` into this file (`git log --format=%H -S READY_FOR_P2_IMPLEMENTATION_RESUME -- REVIEW_SYSTEM_P2_INTEGRATION_CONTRACT.md`). A P2 implementation session may take it as its live-main start baseline, after verifying that its only difference from `54c7896` is this record.
+
+The paused local implementation attempt may resume against this accepted contract. Nothing about it is accepted here: it was never independently reviewed, no rule of this document refers to it, and nothing of it is landed on main. Resuming it means repairing its code and tests to the accepted contract — the continuation branch of §5.8, the guard of §15.1, the §7.7 row and the test contract of §28 included — and then the full gates and a Production Implementation Review before any implementation push.
 
 ## 33. Repair dispositions
 
