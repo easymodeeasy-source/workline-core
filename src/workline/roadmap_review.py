@@ -223,6 +223,65 @@ def preflight_roadmap_request(request: dict[str, Any]) -> None:
     require_canonical_input(request, "the RoadmapPlan request")
 
 
+def phase_entry_continuation(store: ProjectStore, phase_id: str, pending: list[dict[str, Any]]) -> bool:
+    """Whether a review-v1 Phase entry of this slot continues a Run the Project already accepted (§5.8).
+
+    The boundary of §5.8, read from canonical state and from nothing a caller
+    supplies: the slot holds a pending review-v1 Phase-entry planning mutation,
+    and the Run that mutation holds - its reservation under the Run key, or the
+    Run its ``recovery_binding`` note names - has a canonical generation 1.
+
+    It is a read-only predicate. It reserves nothing, writes nothing, evaluates
+    no caller value, begins, repairs or classifies no Run, and runs no recovery
+    discovery. Anything it cannot prove is no continuation, and the live
+    admission checks of §5.6 branch A then decide the call.
+    """
+    from . import roadmap as rm
+
+    key = gate.review_run_key(planning.KIND_PHASE_ENTRY, phase_id)
+    for record in pending:
+        invocation = record.get("invocation") or {}
+        if rm.planning_marker(invocation, planning.OPERATION_PHASE_ENTRY) not in ("review", "recovery"):
+            continue
+        run_id = (record.get("reserved_ids") or {}).get(key)
+        if not run_id:
+            binding = (record.get("notes") or {}).get(NOTE_RECOVERY_BINDING)
+            run_id = binding.get("review_run_id") if isinstance(binding, dict) else None
+        if isinstance(run_id, str) and run_id and _canonical_generation_1(store, run_id):
+            return True
+    return False
+
+
+def _canonical_generation_1(store: ProjectStore, review_run_id: str) -> bool:
+    """Whether the Run's generation 1 is canonical: committed at HEAD and reading back with its own material.
+
+    "Reading back" is the P1 reader's, and "committed" is the persistence proof
+    the rest of P2 uses (``gate.require_persisted`` and the blob check, §12.3):
+    the gate, its Candidate snapshot and its task input are at HEAD as
+    ``100644`` blobs of exactly the canonical bytes. A generation 1 that is
+    recorded, applied or committed but not readable proves no accepted Run, so
+    it is no boundary; nothing here raises.
+    """
+    try:
+        review = ReviewStore(store)
+        chain = review.gate_chain(review_run_id)
+        if chain is None or not chain.generations or chain.generations[0].generation != 1:
+            return False
+        first = chain.generations[0]
+        task_id = str(first.accepted_tasks[0]["task_id"])
+        review.read_task_input(task_id)
+        review.read_candidate_snapshot(first.candidate_hash)
+        wanted = [
+            review_paths.gate_rel(review_run_id, 1),
+            review_paths.candidate_snapshot_rel(first.candidate_hash),
+            review_paths.task_input_rel(task_id),
+        ]
+        require_committed_records(store, {relative: (review.read_bytes(relative) or b"") for relative in wanted})
+    except (StopError, ValidationError, ReconcileRequired, OSError, LookupError, IndexError, TypeError, ValueError):
+        return False
+    return True
+
+
 def preflight_phase_entry_request(design: Any, identity: dict[str, Any]) -> None:
     """The canonical-input preflight of a review-v1 Phase entry (before ``_open``).
 

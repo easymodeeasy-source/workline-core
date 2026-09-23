@@ -307,9 +307,19 @@ def _require_settled_lifecycle(store: ProjectStore, entities: tuple[str, ...], d
     )
 
 
-def _require_active_roadmap(view: ProjectView, roadmap_id: str) -> None:
+def _require_roadmap_resolves(view: ProjectView, roadmap_id: str) -> None:
+    """The static half of :func:`_require_active_roadmap`: the named Roadmap exists.
+
+    A Phase-entry continuation keeps this one (§5.8): which Roadmap a Phase
+    belongs to is a structural fact of the request, not a lifecycle fact that a
+    later operation can change.
+    """
     if roadmap_id not in view.roadmaps:
         raise ValidationError(f"Roadmap unresolvable: {roadmap_id}")
+
+
+def _require_active_roadmap(view: ProjectView, roadmap_id: str) -> None:
+    _require_roadmap_resolves(view, roadmap_id)
     lifecycle = view.roadmap_lifecycle(roadmap_id)
     if lifecycle in (CANCELLED, ACHIEVED):
         raise SpecViolation(f"Roadmap {roadmap_id} is {lifecycle}")
@@ -971,30 +981,45 @@ def _enter_phase_locked(
     if phase is None:
         raise ValidationError(f"Phase unresolvable: {phase_id}")
     roadmap_id = phase.roadmap_id or ""
-    _require_active_roadmap(view, roadmap_id)
-    state = view.phase_state(phase_id)
-    if state == COMPLETE:
-        raise SpecViolation(f"Phase {phase_id} is already complete")
-    if state in (HELD, CANCELLED, PLAN_EXCLUDED):
-        raise SpecViolation(f"Phase {phase_id} is {state}")
-    # Expansion is decided by this Roadmap's and this Phase's lifecycle, neither
-    # of which this operation writes, so neither is covered by its write scope.
-    # Checked after what current state already shows, so an applied fact keeps
-    # its own reason and only a decision still invisible is reported here.
-    _require_settled_lifecycle(store, (roadmap_id, phase_id), f"Phase entry of {phase_id}")
-    unsatisfied = view.unsatisfied_dependencies(phase_id)
-    if unsatisfied:
-        raise StopError(
-            f"Phase {phase_id} is blocked by " + ", ".join(f"{r.from_id} ({label})" for r, label in unsatisfied),
-            code="phase_blocked",
-        )
+    # A review-v1 entry whose Run the Project already accepted asks a different
+    # question from a new one: not "may a Phase entry begin here now?" but "may
+    # the entry this Project began be carried to its end?" (§5.8). The boundary
+    # is read from the slot's pending records and one committed gate, before the
+    # facts below decide - it moves no check, and it only decides which of them
+    # refuse. Legacy reads nothing here and keeps its order exactly.
+    pending_entries = None
+    continuation = False
+    if review is not None:
+        from . import roadmap_review
+
+        pending_entries = _pending_phase_entry(store, phase_id)
+        continuation = roadmap_review.phase_entry_continuation(store, phase_id, pending_entries)
+    _require_roadmap_resolves(view, roadmap_id)
+    if not continuation:
+        _require_active_roadmap(view, roadmap_id)
+        state = view.phase_state(phase_id)
+        if state == COMPLETE:
+            raise SpecViolation(f"Phase {phase_id} is already complete")
+        if state in (HELD, CANCELLED, PLAN_EXCLUDED):
+            raise SpecViolation(f"Phase {phase_id} is {state}")
+        # Expansion is decided by this Roadmap's and this Phase's lifecycle, neither
+        # of which this operation writes, so neither is covered by its write scope.
+        # Checked after what current state already shows, so an applied fact keeps
+        # its own reason and only a decision still invisible is reported here.
+        _require_settled_lifecycle(store, (roadmap_id, phase_id), f"Phase entry of {phase_id}")
+        unsatisfied = view.unsatisfied_dependencies(phase_id)
+        if unsatisfied:
+            raise StopError(
+                f"Phase {phase_id} is blocked by " + ", ".join(f"{r.from_id} ({label})" for r, label in unsatisfied),
+                code="phase_blocked",
+            )
 
     identity = design_identity(design)
     if review is not None:
         from . import roadmap_review
 
         roadmap_review.preflight_phase_entry_request(design, identity)
-    interrupted = _pending_phase_entry(store, phase_id)
+    interrupted = pending_entries if pending_entries is not None else _pending_phase_entry(store, phase_id)
     if interrupted:
         # An expansion of this Phase is unfinished. It is continued only where
         # it is provably the same plan; otherwise it is left for reconciliation
@@ -1019,7 +1044,11 @@ def _enter_phase_locked(
     for key in design.works:
         if key in ("integration", "confirmation"):
             raise ValidationError(f"reserved Work key: {key}")
-    _require_startable_entry(view, design)
+    if not continuation:
+        # Whether the explicit entry is startable *now* decides a new entry. For a
+        # continuation the reviewed canonical first Work is already fixed on the
+        # committed basis, and the proofs own it (§5.8, §7.7).
+        _require_startable_entry(view, design)
     if not interrupted:
         # Only a new expansion is refused for being undecided. One already under
         # way is carried to its end (BL-023): the entry Work is a return value,
