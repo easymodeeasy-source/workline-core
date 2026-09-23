@@ -448,9 +448,15 @@ liveのRoadmap semanticsがoperationとして受理できるかを先に決め�
 7  generation mutation 1を開始する
 ```
 
-**R9のcanonical self-selection**（このSkillが所有する）: 最初のWorkは、HEADのcommitted basis上の `startable_works` + `planned_next_preference` だけで決まり、working treeでは決めない。一意ならそれがcanonical_first_work、候補なしならnull、明示entryがそれと違えば `review_entry_not_canonical`、同順位の中の明示entryは `review_entry_ambiguous`、entry無しの同順位はliveの `ambiguous_startable_candidates`。working treeとHEADがdeclared base・PhaseのWork集合・R9選択のどれかで違えば、freezeで `review_base_uncommitted` として停止する（commitまたは破棄してから再実行する）。
+**R9のcanonical self-selection**（このSkillが所有する）: 最初のWorkは、HEADのcommitted basis上の `startable_works` + `planned_next_preference` だけで決まり、working treeでは決めない。明示entryをどう拒否するかもこのcanonical selectionが決め、callerが名指したWorkでは決めない。
 
-**currency**: currencyは1つのbase commitについて、Context、Policy、そのcommitのcommitted viewで計算したdeclared base、そしてdeclared baseが等しい時だけCandidateの再構築（R9選択を含む）、の順で判定する。declared baseの差は常にdeclared baseの差として1回だけ分類し、R9やCandidateの不一致として報告しない。sealの前のstaleは何も書かずterminal `stale`、sealの後・登録開始前のstale（use check）はgeneration 4とSupersessionを書いてから `stale`。use checkが通るとHEADを `use_check_head` として記録する。最初の登録stageを記録した後は `stale` で終わらず、差は `reconcile required` になる: Kpを記録する直前のpre-Kp currency proof（P = HEAD。Pは `use_check_head` 自身、またはその子孫でplanning-owned pathに触れていない履歴であること、Runのrecordがcommit済みであること、currency、記録した登録effectがexpected physical projectionそのものであること）が `review_registration_base_moved` / `review_receipt_invalid` / `review_registration_currency_changed` / `review_candidate_mismatch` / `review_registration_projection_mismatch` で止める。working-tree round tripはR9選択をHEADのcommitted basisから読むが、HEADのdeclared baseがCandidateのものと違う場合はその差をpre-Kp currency proofに分類させ、R9不一致として止めない。
+- 優先候補が一意（A）: canonical_first_workはA。明示entryがAなら有効で、A以外のWorkを名指せば `review_entry_not_canonical`。このcodeは、canonicalな最初のWorkがあるのにcallerが別のWorkを名指した場合だけに使う。
+- 優先候補が同順位で複数（曖昧）: 明示entryはどれも `review_entry_ambiguous` で拒否する。同順位のWorkの1つを名指しても、同順位の外の開始可能なWorkを名指しても同じである（committed basisがどのWorkを最初にするか決めていないので、どの明示entryもcanonicalにならない）。entry無しの同順位はliveの `ambiguous_startable_candidates`。
+- 開始可能なWorkが無い: canonical_first_workはnull。明示entryは、liveの開始可能性検査が `_open` より前に従来どおり拒否する。
+
+特定のWorkから始めるdesignは、`planned_next` でそう計画して選択を一意にする。明示entryがcommitted basisを上書きすることはない。working treeとHEADがdeclared base・PhaseのWork集合・R9選択のどれかで違えば、freezeで `review_base_uncommitted` として停止する（commitまたは破棄してから再実行する）。
+
+**currency**: currencyは1つのbase commitについて、Context、Policy、そのcommitのcommitted viewで計算したdeclared base、そしてdeclared baseが等しい時だけCandidateの再構築（R9選択を含む）、の順で判定する。declared baseの差は常にdeclared baseの差として1回だけ分類し、R9やCandidateの不一致として報告しない。sealの前のstaleは何も書かずterminal `stale`、sealの後・登録開始前のstale（use check）はgeneration 4とSupersessionを書いてから `stale`。use checkが通るとHEADを `use_check_head` として記録する。最初の登録stageを記録した後は `stale` で終わらず、差は `reconcile required` になる: Kpを記録する直前のpre-Kp currency proof（P = HEAD。Pは `use_check_head` 自身、またはその子孫でplanning-owned pathに触れていない履歴であること、Runのrecordがcommit済みであること、currency、記録した登録effectがexpected physical projectionそのものであること）が `review_registration_base_moved` / `review_receipt_invalid` / `review_registration_currency_changed` / `review_candidate_mismatch` / `review_registration_projection_mismatch` で止める。working-tree round tripはR9選択をHEADのcommitted basisから読むが、HEADのdeclared baseがCandidateのものと違う場合はその差をpre-Kp currency proofに分類させ、R9不一致として止めない。declared baseが等しいのに、登録したworking treeの意味がReviewの許可したものと違えば、round trip自身が `review_roundtrip_mismatch` で止め、Kpを作らず、planning mutationはpendingのまま残る。
 
 **terminal**: `registered`（登録が公開された、remoteなしではC-2(Km)が通った）、`not_authorized`（reviewが許可しなかった。何も登録しない）、`stale`（sealの前、またはsealの後にgeneration 4とSupersessionを書いた）。
 
@@ -492,13 +498,36 @@ continuation modeはlifecycleの権限を作らない。Reviewは従属gateの�
 
 **Git段階**: 登録はKp（`base_exact` の登録commit）、C-2(Kp)、Planning Consumption、Km（Consumptionだけのmetadata commit）、C-2(Km)、push先があれば `review-publication` stageでのKmのpush、の順で進む。commit primitive、`base_exact`、pushのstageとpublication barrierは `rules/git` に従う。
 
+**Git persistence preflight**: freeze（手順5）で、また以後Review recordを書くstageを記録する前と、P2が記録するすべてのGit stageの直前に（attributeとconfigurationは途中で変わり得る）、次の2つをこの順で評価する。
+
+1. transform attribute: そのstageのplanning-owned pathのすべてについて、`git check-attr -z filter ident working-tree-encoding` が3つとも `unspecified`（または `unset`）を報告し、実効configurationが `unset` または `unspecified` という名前のfilter driverを定義していない（`filter.unset.*`・`filter.unspecified.*` のkeyが無い）こと。それ以外は `review_git_transform` で止める。書いたbytesとcommitされるblobを違えさせる変換や、`git add` 中に外部processを走らせる変換（clean / process filter、Git LFS、`$Id$` の展開、再encoding）を拒否するためである。印字された語だけでは状態を示さない（literalの値も同じ語を印字する）ので、driverの名前も見る。
+2. checkout capability: そのstageのReview record path（freezeではRunが書き得るすべてのReview pathと、HEADにcommit済みのすべてのReview record）について、`skills/review` のcheckout capability。
+
+`unset` という名前のfilter driverは第1部にもcheckout capabilityの第4層にも当たるが、review-v1の流れでは第1部を先に評価するので、そのrepositoryでのreview-v1 planningは `review_git_transform` で止まる。`review_checkout_unsafe` は、checkout capabilityをそれだけで評価した時に同じrepositoryが受ける拒否であり、流れの中では第1部が通ってcapabilityの条件だけが成り立たない時の拒否である（`unspecified` という名前のdriverは第1部だけに当たり、それ以外の層の失敗はcapabilityだけのものである）。どちらもfail-closedで何も書かず、freezeではplanning mutationをabandonし、それ以後はpendingのまま残す。どちらのcodeを受けるかに依存するものは無い。
+
 **runtime喪失からの回復**: slotにpendingなreview-v1 planning mutationが無い呼び出しは、まずcanonical recovery discovery（`skills/review` の分類）を行う。回復可能なRunがちょうど1つならそのRunを続けるrecovery planning mutationを開始し、Runのcanonical recordからreserved ID（domain ID、Run ID、task ID、generation 3があればReceipt ID）を1回のdurable saveで束縛する（`recovery_binding`）。canonicalにならなかったID（generation 3より前のReceipt ID、Consumption ID）だけを同じkeyで新しく予約する。どのIDも推測で作らず、束縛するIDが別IDで予約済み・種類違い・HEADのcommitted viewかworking treeで使用中なら `review_recovery_reservation_conflict`。回復可能なRunが無く、不完全なRunも無い時だけ新しいRunを開始し、set asideしたRunを `recovery_discovery` noteとrequest envelopeの `set_aside_runs` に記録する。不完全・曖昧なら `review_recovery_incomplete` / `review_recovery_ambiguous` で何も開始しない。runtime喪失だけを理由に新しいRunを開始しない。
 
 **中断したsetup（pre-freeze resume setup）**: effectを記録せずgeneration mutationも開始していないplanning mutationは、再実行でそのmutationのsetupを完成させる。`recovery_discovery` noteの無い新しいRunのmutationはdiscoveryをやり直し（その間にRunが回復可能になっていれば `review_discovery_changed`）、記録済みの予約はそのまま使い、足りない予約を固定順で予約し（順序に無い記録済みkeyは `review_setup_invalid`）、freezeの他の手順をすべてやり直す。bindingの無いrecovery planning mutationはdiscoveryで同じRunを示してから束縛する（予約だけ持つrecordは `review_recovery_reservation_conflict`、Runがもう唯一の回復可能なRunでなければ `review_discovery_changed`）。
 
 **abandon**: 最初のgeneration mutationを開始するまで、review-v1 planning mutationはeffectを持たずcanonicalなものを何も持たないので、開始したものでもresumeしたものでも、Phase entryでも、どのSTOPでもabandonする。generation mutationを開始した後はterminalまでpendingのまま残り、同じrequestの再実行がresumeする。
 
-**STOP codeとreason**: review-v1 planningのSTOPはcode（`StopError` / `ValidationError`）で、`reconcile required` は `code == "reconcile_required"` のまま意味を `reason` に持つ。liveのcodeが従来どおり投げる `reconcile required`（same-request不一致、scope重なり、`reserve_id` の種類違い、liveのbranch binding、liveのreplay / push分類の不一致）は `reason` を持たない。reasonの一覧は `review_marker_mismatch`、`review_recovery_incomplete`、`review_recovery_ambiguous`、`review_discovery_changed`、`review_recovery_reservation_conflict`、`review_setup_invalid`、`review_binding_moved`、`review_chain_invalid`、`review_task_invalid`、`review_generation_owner_conflict`、`review_candidate_mismatch`、`review_receipt_invalid`、`review_registration_base_moved`、`review_registration_currency_changed`、`review_registration_projection_mismatch`、`review_commit_unowned`、`review_persisted_proof_failed`、`review_metadata_commit_mismatch`、`review_publication_invalid`、`review_publication_contract_invalid`。
+**STOP codeとreason**: review-v1 planningのSTOPはcode（`StopError` / `ValidationError`）で、`reconcile required` は `code == "reconcile_required"` のまま意味を `reason` に持つ。STOPが残す状態は、lockまたは `_open` より前なら何も開始しないこと、`_open` の後は上のabandonの規則（最初のgeneration mutationより前はabandon、それ以後はpending）である。review-v1 planningのSTOP code:
+
+- lockより前: `review_contract_invalid`、`review_create_unsupported`、`review_git_unsupported`（入口）
+- `_open` より前: `review_candidate_unrepresentable`（canonical-input preflight。`_open` の後の表現可能性検査も同じcodeで、detailがどちらの拒否かを示す）
+- freeze: `review_base_uncommitted`、`review_entry_not_canonical`、`review_entry_ambiguous`（R9）
+- `review_context_unavailable`: configured Workline rootのregistryまたはSkillを解決・読取りできず、Review Contextを計算できない。recovery discovery、freeze、そしてContextを計算し直すすべての点（reviewer launchの前、2つ目以降のgeneration mutationの前、use check、pre-Kp currency proof、C-2(Kp)）で止まる。discoveryでは何も開始せず、freezeではabandonし、それ以後はpendingのまま残す。staleの差ではないので、一時的な読取り失敗がReceiptを無効にすることはない
+- `review_git_transform`: Git persistence preflightの第1部（上記）。freezeではabandon、それ以後はpending
+- `review_checkout_unsafe`、`review_checkout_unknown`: checkout capability（意味は `skills/review`）。freezeとrecovery setupではabandon、それ以後はpending
+- `review_namespace_unreadable`: 既存のReview namespaceの読取り（意味は `skills/review`）。recovery discoveryでは何も開始せず、freezeとrecovery setupではabandon
+- `review_reviewer_failed`、`review_report_invalid`、`review_reviewer_mismatch`: reviewer（意味は `skills/review`）。何もsettleせず、pendingのまま
+- `review_hooks_path_invalid`: contained planning commit primitive（`rules/git`）が `core.hooksPath` に渡す `.workline/runtime/review/no-hooks` に、空のplain directoryでないentryがある。Git stageの前に止まり、planning mutationはpendingのまま
+- `review_publication_barrier`: publication barrier（`rules/git`）。freezeとrecovery setupではabandon、Kmのpushの前なら何もpushしない
+- `review_roundtrip_mismatch`（P1のcode）: declared baseが等しい時のworking-tree round trip（上のcurrency）。pendingのまま
+
+liveのcode（`validation_failed`、`postcheck_failed`、`structure_invalid`、`dirty_overlap`、`phase_already_expanded`、`ambiguous_startable_candidates`、`phase_blocked`、`roadmap_held`、`spec_violation`）は意味を変えない。continuation modeでは、そのうち可変の受理factによるものがそのrequestを拒否しない。P1のcode（Review recordの読取り・検証、settlement、persistence、committability、containment）もP1の意味のままで、上の状態の規則で止まる。
+
+liveのcodeが従来どおり投げる `reconcile required`（same-request不一致、scope重なり、`reserve_id` の種類違い、liveのsettled-lifecycle検査（continuation modeでは走らない）、liveのbranch binding、liveのreplay / push分類の不一致）は `reason` を持たない。reasonの一覧は `review_marker_mismatch`、`review_recovery_incomplete`、`review_recovery_ambiguous`、`review_discovery_changed`、`review_recovery_reservation_conflict`、`review_setup_invalid`、`review_binding_moved`、`review_chain_invalid`、`review_task_invalid`、`review_generation_owner_conflict`、`review_candidate_mismatch`、`review_receipt_invalid`、`review_registration_base_moved`、`review_registration_currency_changed`、`review_registration_projection_mismatch`、`review_commit_unowned`、`review_persisted_proof_failed`、`review_metadata_commit_mismatch`、`review_publication_invalid`、`review_publication_contract_invalid`。
 
 ## Mutation / Git
 

@@ -185,6 +185,32 @@ def _contract_catalogue() -> tuple[set[str], set[str], set[str]]:
     return reasons, codes, other
 
 
+def _catalogue_owners() -> tuple[set[str], set[str], set[str]]:
+    """§25.1 split by owner: P2's own STOP codes, the live codes it keeps, and the ReconcileRequired reasons.
+
+    A P1 code (``(P1)`` in its carrier) keeps its P1 owner, and a reason that is no exception is a record's value.
+    """
+    text = CONTRACT.read_text(encoding="utf-8")
+    section = text[text.index("### 25.1 Error and reason catalogue"):text.index("## 26. Authority changes")]
+    p2: set[str] = set()
+    live: set[str] = set()
+    reasons: set[str] = set()
+    for line in section.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        names = set(re.findall(r"`([a-z_]+)`", cells[0]))
+        if "ReconcileRequired" in cells[1] and "reason" in cells[1]:
+            reasons |= names
+        elif "no exception" in cells[1] or "(P1)" in cells[1]:
+            continue
+        elif "live" in cells[1]:
+            live |= names
+        else:
+            p2 |= names
+    return p2, live, reasons
+
+
 def _contract_uses() -> set[str]:
     """Every code or reason the contract names where something raises or reports one."""
     text = CONTRACT.read_text(encoding="utf-8")
@@ -642,6 +668,49 @@ class AuthorityTextTests(unittest.TestCase):
         self.assertIn("1つだけ例外", scope)
         self.assertIn("`.workline/review/consumptions/<consumption_id>.yaml`", scope)
         self.assertIn("この規則はlegacy Phase entryのものである", skill, "the resumed-entry rule stays for legacy")
+
+    def review_v1_section(self) -> str:
+        skill = self.read(".claude", "skills", "roadmap", "SKILL.md")
+        return skill[skill.index("## Review-v1 planning"):skill.index("## Mutation / Git")]
+
+    def test_the_roadmap_skill_names_every_stop_code_and_reason_of_the_planning_operation(self) -> None:
+        """§26.2: the planning operation's STOP codes and ReconcileRequired reasons (§25.1) are the Roadmap Skill's
+        (P2-PROD-REVIEW-004) - every P2 code and reason, and the live codes it keeps, named in its review-v1
+        section. The P1 codes keep their P1 owner; ``review_roundtrip_mismatch``, whose point the planning flow
+        decides (§15.1 step 2), is named as well."""
+        section = self.review_v1_section()
+        p2_codes, live_codes, reasons = _catalogue_owners()
+        self.assertEqual((17, 9, 20), (len(p2_codes), len(live_codes), len(reasons)), "the catalogue as parsed")
+        self.assertTrue(p2_codes >= {"review_git_transform", "review_context_unavailable", "review_hooks_path_invalid"})
+        for name in sorted(p2_codes | live_codes | reasons | {"review_roundtrip_mismatch"}):
+            with self.subTest(name):
+                self.assertIn(f"`{name}`", section)
+
+    def test_the_roadmap_skill_states_the_accepted_r9_rows(self) -> None:
+        """§7.7 as repaired (P2-IMPL-BLOCKER-005): with the selection ambiguous every explicit entry is
+        ``review_entry_ambiguous``, a startable one outside the ties included; ``review_entry_not_canonical`` is
+        only a unique canonical first Work with another Work named."""
+        section = self.review_v1_section()
+        r9 = section[section.index("**R9のcanonical self-selection**"):section.index("**currency**")]
+        self.assertIn("明示entryはどれも `review_entry_ambiguous` で拒否する", r9)
+        self.assertIn("同順位の外の開始可能なWorkを名指しても同じ", r9)
+        self.assertIn("canonicalな最初のWorkがあるのにcallerが別のWorkを名指した場合だけ", r9)
+        self.assertNotIn("同順位の中の明示entryは `review_entry_ambiguous`", r9, "the pre-repair row is gone")
+
+    def test_the_roadmap_skill_orders_the_transform_preflight_before_the_checkout_capability(self) -> None:
+        """§14.3 (P2-IMPL-BLOCKER-001): the planning flow evaluates the transform attributes first, so a configured
+        driver named ``unset`` meets ``review_git_transform``; ``review_checkout_unsafe`` is the capability's own
+        refusal. The capability's meaning stays in ``skills/review``, which states no transform preflight."""
+        section = self.review_v1_section()
+        preflight = section[section.index("**Git persistence preflight**"):section.index("**runtime喪失からの回復**")]
+        for phrase in ("`git check-attr -z filter ident working-tree-encoding`", "`filter.unset.*`",
+                       "`filter.unspecified.*`", "第1部を先に評価するので", "`review_git_transform` で止まる",
+                       "`review_checkout_unsafe` は、checkout capabilityをそれだけで評価した時"):
+            with self.subTest(phrase):
+                self.assertIn(phrase, preflight)
+        self.assertLess(preflight.index("1. transform attribute"), preflight.index("2. checkout capability"))
+        review = self.read(".claude", "skills", "review", "SKILL.md")
+        self.assertNotIn("review_git_transform", review, "the transform preflight is the planning flow's, not Review's")
 
     def test_the_review_skill_carries_its_part_and_names_rules_git(self) -> None:
         skill = self.read(".claude", "skills", "review", "SKILL.md")
