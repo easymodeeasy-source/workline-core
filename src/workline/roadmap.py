@@ -519,6 +519,23 @@ def require_marker_compatible(pending: list[dict[str, Any]], operation: str, *, 
         )
 
 
+def _lock_details(details: dict[str, Any], review: Any) -> dict[str, Any]:
+    """What a planning operation puts in the execution lock's holder description (diagnostic only, ``oplock``).
+
+    A legacy invocation passes ``details`` exactly as it always has. A review-v1
+    invocation takes the lock before its canonical-input preflight has proven
+    that the caller's values can be carried (§5.6), and the holder is written as
+    UTF-8 as soon as the lock is taken, before the block that releases it: a
+    caller value that cannot be encoded - a lone surrogate in a Roadmap name or
+    a Phase ID - would escape as a serializer error and leave the lock held. So
+    the review-v1 description names no caller value, only the path's static
+    marker, and the preflight and the live checks decide the call (§21.3 O10).
+    """
+    if review is None:
+        return details
+    return {"review_contract": _REVIEW_CONTRACT}
+
+
 # --------------------------------------------------------------------------- registration stage inputs
 #
 # What ``_create_roadmap`` and ``_expand_phase`` derive from a plan or design -
@@ -639,7 +656,7 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan, *, review: Any = None
         raise ValidationError("Roadmap needs name, background and desired state")
     if not plan.phases:
         raise ValidationError("a new Roadmap registers all of its Phases; none were decided")
-    with project_operation(store, "roadmap-create", {"name": plan.name}):
+    with project_operation(store, "roadmap-create", _lock_details({"name": plan.name}, review)):
         _stop_on_structure(store, "precheck")
         request = roadmap_request_identity(plan)
         if review is not None:
@@ -969,7 +986,7 @@ def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign, *,
         from . import roadmap_review
 
         roadmap_review.require_entry_gate(review)
-    with project_operation(store, "phase-entry", {"phase_id": phase_id}):
+    with project_operation(store, "phase-entry", _lock_details({"phase_id": phase_id}, review)):
         return _enter_phase_locked(store, phase_id, design, review)
 
 

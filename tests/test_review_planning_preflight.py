@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import json
+import sys
+from typing import Iterator
 import unittest
 from unittest import mock
 
+from helpers import WORKLINE_ROOT, run_python
 from planning_helpers import (
     Crash, PlanningTestCase, Reviewer, blob_at, condition, crash_at, design, plan, registered, rr, run_ids, state_entries,
 )
 from test_review_planning_writer_input import CONDITIONAL, RELATED_YAML, _WriterCase, conditional
+from workline import oplock
 from workline import roadmap as rm
 from workline import yamlish
 from workline.errors import StopError, ValidationError
 from workline.mutation import MutationController
-from workline.review import recovery, serialize
+from workline.phase_create import PhaseSpec
+from workline.review import planning, recovery, serialize
 
 BASE = {"kind": "path_glob", "pattern": "src/*.py"}
 LONE_SURROGATE = "\ud800"
@@ -241,6 +248,165 @@ class OneSerializerTests(_PreflightCase):
                 self.entry(the_design)
         self.assertTrue(seen, "the preflight ran the P1 serializer before anything was begun")
         self.assertEqual(rm.design_identity(the_design), seen[0], "first on the request identity")
+
+
+# --------------------------------------------------------------------------- §21.3 O10 at the execution lock
+#: A legacy call with a lone surrogate in the value its lock description names, run in a child process: the
+#: failure leaves the lock held for the rest of that process, and only the process's end releases it.
+LEGACY_CHILD = """
+import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from workline import oplock
+from workline import roadmap as rm
+from workline.errors import StopError
+from workline.phase_create import PhaseSpec
+from workline.store import ProjectStore
+
+store = ProjectStore(Path(sys.argv[2]))
+lone = chr(0xD800)
+phases = {"a": PhaseSpec("Phase A", "A done")}
+the_design = rm.PhaseEntryDesign({"w1": rm.WorkDesign("W1", "W1 done")}, rm.WorkDesign("Integration", "integrated"))
+calls = {
+    "roadmap-create": lambda: rm.create_roadmap(store, rm.RoadmapPlan("Legacy " + lone, "background", "desired", phases)),
+    "phase-entry": lambda: rm.enter_phase(store, sys.argv[3] + lone, the_design),
+}
+report = {}
+try:
+    calls[sys.argv[4]]()
+    report["first"] = "returned"
+except Exception as exc:
+    report["first"] = type(exc).__name__
+report["held_in_this_process"] = oplock.held_lock(store) is not None
+try:
+    rm.create_roadmap(store, rm.RoadmapPlan("Next", "background", "desired", phases))
+    report["next"] = "returned"
+except StopError as exc:
+    report["next"] = exc.code
+print(json.dumps(report))
+"""
+
+
+class LockHolderTests(PlanningTestCase):
+    """§21.3 O10 on the way into the lock (P2-PROD-REVIEW-001).
+
+    The execution lock writes its holder description - diagnostic only - as UTF-8 as soon as it is taken, before
+    the block that releases it (``oplock``). A review-v1 caller value placed there that cannot be encoded, a lone
+    surrogate, would escape as a raw ``UnicodeEncodeError`` with the lock left held, before the canonical-input
+    preflight could refuse it. The review-v1 description therefore names only the static marker; the legacy one
+    is unchanged.
+    """
+
+    REVIEW_V1_DETAILS = {"review_contract": planning.PLANNING_CONTRACT}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.store = self.planning_project()
+        self.phase_id = rm.create_roadmap(self.store, plan()).phase_ids["a"]
+
+    @contextmanager
+    def holders(self) -> Iterator[list[tuple[str, dict]]]:
+        """(operation, details) of each holder description, read inside the lock where the operation's code starts."""
+        seen: list[tuple[str, dict]] = []
+        real = rm._stop_on_structure
+
+        def precheck(store, context):
+            if context == "precheck":
+                holder = oplock.read_holder(store)
+                seen.append((holder["operation"], holder["details"]))
+            return real(store, context)
+
+        with mock.patch.object(rm, "_stop_on_structure", precheck):
+            yield seen
+
+    def assert_released(self) -> None:
+        """No holder and no temporary file left, and this process takes the lock again."""
+        self.assertIsNone(oplock.held_lock(self.store))
+        self.assertFalse(self.store.lock_holder.exists())
+        self.assertEqual([], sorted(path.name for path in self.store.tmp.iterdir()))
+        with oplock.project_operation(self.store, "a later operation"):
+            pass
+
+    def test_a_lone_surrogate_in_a_roadmap_name_is_the_preflight_refusal(self) -> None:
+        before = state_entries(self.store)
+        reviewer = Reviewer()
+        with self.holders() as seen, self.assertRaises(ValidationError) as raised:
+            self.reviewed_roadmap(self.store, reviewer, plan(f"Planned {LONE_SURROGATE} Roadmap"))
+        self.assertEqual("review_candidate_unrepresentable", raised.exception.code)
+        self.assertIn("cannot be canonicalized", str(raised.exception))
+        self.assertEqual([("roadmap-create", self.REVIEW_V1_DETAILS)], seen, "no caller value in the description")
+        self.assertEqual(before, state_entries(self.store),
+                         "no mutation, reservation, Review record, Roadmap file or runtime file: entry for entry")
+        self.assertEqual([], self.pending(self.store))
+        self.assertEqual((), run_ids(self.store))
+        self.assertEqual([], reviewer.tasks)
+        self.assert_released()
+        # the next operation takes the lock and runs: a plan whose every value the canonical form carries
+        self.assertEqual("registered", self.reviewed_roadmap(self.store, Reviewer(), plan("Another Roadmap")).status)
+
+    def test_a_lone_surrogate_anywhere_else_in_a_roadmap_plan_is_the_same_refusal(self) -> None:
+        for described, the_plan in {
+            "the background": rm.RoadmapPlan("R", f"背景 {LONE_SURROGATE}", "状態", {"a": PhaseSpec("A", "A")}),
+            "the desired state": rm.RoadmapPlan("R", "背景", f"状態 {LONE_SURROGATE}", {"a": PhaseSpec("A", "A")}),
+            "the scope": rm.RoadmapPlan("R", "背景", "状態", {"a": PhaseSpec("A", "A")}, scope=f"範囲 {LONE_SURROGATE}"),
+            "a Phase name": rm.RoadmapPlan("R", "背景", "状態", {"a": PhaseSpec(f"A {LONE_SURROGATE}", "A")}),
+            "a Phase desired state": rm.RoadmapPlan("R", "背景", "状態", {"a": PhaseSpec("A", f"A {LONE_SURROGATE}")}),
+        }.items():
+            with self.subTest(described):
+                before = state_entries(self.store)
+                with self.assertRaises(ValidationError) as raised:
+                    self.reviewed_roadmap(self.store, Reviewer(), the_plan)
+                self.assertEqual("review_candidate_unrepresentable", raised.exception.code)
+                self.assertEqual(before, state_entries(self.store))
+                self.assert_released()
+
+    def test_a_lone_surrogate_in_a_phase_id_meets_the_live_phase_check(self) -> None:
+        """The Phase ID is no part of the request identity (§5.6): it names the slot. The live check that the named
+        Phase resolves - §5.6 step 2, which runs in every branch (§5.8) - refuses it, with nothing begun."""
+        before = state_entries(self.store)
+        reviewer = Reviewer()
+        with self.holders() as seen, self.assertRaises(ValidationError) as raised:
+            self.reviewed_entry(self.store, self.phase_id + LONE_SURROGATE, reviewer)
+        self.assertEqual("validation_failed", raised.exception.code)
+        self.assertTrue(str(raised.exception).startswith("Phase unresolvable: "), "the live refusal, unchanged")
+        self.assertEqual([("phase-entry", self.REVIEW_V1_DETAILS)], seen, "no caller value in the description")
+        self.assertEqual(before, state_entries(self.store))
+        self.assertEqual([], self.pending(self.store))
+        self.assertEqual([], reviewer.tasks)
+        self.assert_released()
+        # the next operation takes the lock and runs: the entry of the Phase the caller meant
+        self.assertEqual("registered", self.reviewed_entry(self.store, self.phase_id, Reviewer()).status)
+
+    def test_the_legacy_description_is_unchanged(self) -> None:
+        with self.holders() as seen:
+            rm.create_roadmap(self.store, plan("Legacy Roadmap"))
+            rm.enter_phase(self.store, self.phase_id, design())
+        self.assertEqual([("roadmap-create", {"name": "Legacy Roadmap"}), ("phase-entry", {"phase_id": self.phase_id})],
+                         seen)
+
+    def test_legacy_keeps_its_live_outcome(self) -> None:
+        """§5.6 Legacy: a legacy invocation keeps its live outcome, serializer errors included. Its description
+        still names the caller's value, so a lone surrogate there fails in the holder's UTF-8 write, leaves a
+        temporary file, and holds the lock for the rest of that process; the end of the process releases it."""
+        for operation in ("roadmap-create", "phase-entry"):
+            with self.subTest(operation):
+                tmp_before = set(self.store.tmp.iterdir())
+                completed = run_python(
+                    [sys.executable, "-I", "-B", "-c", LEGACY_CHILD,
+                     str(WORKLINE_ROOT / "src"), str(self.store.root), self.phase_id, operation],
+                    cwd=self.store.root,
+                )
+                reports = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+                self.assertTrue(reports, f"the child reported nothing: {completed.stdout}\n{completed.stderr}")
+                self.assertEqual(
+                    {"first": "UnicodeEncodeError", "held_in_this_process": True, "next": "project_operation_nested"},
+                    json.loads(reports[-1]),
+                )
+                (left,) = set(self.store.tmp.iterdir()) - tmp_before
+                self.assertTrue(left.name.startswith(".holder.json."), left.name)
+                self.assertEqual([], self.pending(self.store), "no mutation was opened")
+                with oplock.project_operation(self.store, "after the child"):
+                    pass
 
 
 if __name__ == "__main__":
