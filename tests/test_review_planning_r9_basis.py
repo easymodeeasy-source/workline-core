@@ -239,6 +239,46 @@ class DeclaredBaseFirstTests(_BasisCase):
             self.entry()
         self.assertEqual("review_registration_currency_changed", raised.exception.reason)
 
+    def test_e_the_round_trip_still_refuses_a_genuine_difference_with_the_declared_base_equal(self) -> None:
+        """§15.1 step 2 defers only a declared-base difference to the pre-Kp proof (P2-IMPL-BLOCKER-003). With the
+        declared base on HEAD's committed view equal to the Candidate's, a genuine semantic difference in what the
+        working tree holds is the round trip's own refusal. The fixture: a person renames a registered Work right
+        after the registration stages wrote it - no declared-base fact, and never committed."""
+        store = self.planning_project("equal-base", remote=True)
+        phase_id = rm.create_roadmap(store, plan()).phase_ids["a"]
+        published = self.remote_head("equal-base")
+        real = rm._register_phase_expansion
+        renamed: list[str] = []
+
+        def registered_then_a_person_renames_a_work(store_, mutation, stages, **kwargs):
+            found = real(store_, mutation, stages, **kwargs)
+            work_id = found[0].work_ids["w1"]
+            path = store_.root / ".workline" / "works" / f"{work_id}.md"
+            text = path.read_text(encoding="utf-8")
+            self.assertEqual(1, text.count("\n# W1\n"))
+            path.write_text(text.replace("\n# W1\n", "\n# W1 renamed\n"), encoding="utf-8", newline="\n")
+            renamed.append(work_id)
+            return found
+
+        with mock.patch.object(rm, "_register_phase_expansion", registered_then_a_person_renames_a_work):
+            with self.assertRaises(ValidationError) as raised:
+                self.reviewed_entry(store, phase_id, Reviewer(), design())
+        self.assertEqual("review_roundtrip_mismatch", raised.exception.code, "never the pre-Kp proof's reconcile")
+        (work_id,) = renamed
+        self.assertEqual("W1 renamed", rr.ProjectView.load(store).works[work_id].name, "a genuine semantic difference")
+        (run_id,) = run_ids(store)
+        self.assertTrue(rr._declared_base_holds(store, snapshot_material(store, run_id), self.head(store)),
+                        "the declared base on HEAD's committed view is the Candidate's")
+        # before Kp: the planning mutation pending with its registration applied, and nothing after it
+        (pending,) = [r for r in self.pending(store) if r["invocation"].get("operation") == "phase-entry"]
+        stages = {effect["stage"] for effect in pending["effects"]}
+        self.assertEqual({"works", "integration", "confirmation"}, stages,
+                         "the registration stages alone: no Kp, Consumption, Km or push stage")
+        self.assertTrue(all(effect["applied"] for effect in pending["effects"]), "the registration applied")
+        self.assertFalse(any(s.startswith("chore(workline): expand phase") for s in self.subjects(store)), "no Kp")
+        self.assertEqual((), ReviewStore(store).consumption_ids(), "no Consumption")
+        self.assertEqual(published, self.remote_head("equal-base"), "nothing pushed")
+
     def test_e_p12_in_c2_kp(self) -> None:
         lines = self.completion_lines()
         with crash_at(rm, "register_works", when=lambda n, mutation, stage, specs, relations: stage == "integration"):

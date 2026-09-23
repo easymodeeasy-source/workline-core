@@ -22,6 +22,7 @@ from planning_helpers import (
     plan,
     rr,
     run_ids,
+    snapshot_material,
 )
 from test_review_planning_writer_input import conditional
 
@@ -210,7 +211,13 @@ class BoundaryTests(_ContinuationCase):
 
 # --------------------------------------------------------------------------- T-D / T-E: the suppressed set
 class SuppressedChecksTests(_ContinuationCase):
-    """T-D: with the Run at canonical generation 1, no mutable new-entry admission fact refuses the request."""
+    """T-D: with the Run at canonical generation 1, no mutable new-entry admission fact refuses the request.
+
+    Each retry must come back as the same planning mutation, carried past the entry checks to the boundary its
+    flow has reached: before a Receipt, a committed change is the declared base's (§13.2: terminal ``stale``,
+    item G), and a decision not yet applied is no currency at all, so the Run registers (item H). Any exception
+    here - an admission refusal, or the live settled-lifecycle ``reconcile_required`` - fails the test.
+    """
 
     def setUp(self) -> None:
         super().setUp()
@@ -220,30 +227,52 @@ class SuppressedChecksTests(_ContinuationCase):
         self.crash(rr, "_launch_and_settle")
         self.record = self.pending_entry()
 
-    def assert_admitted(self) -> None:
-        found = self.admitted()
-        self.assertNotIsInstance(found, SpecViolation)
-        self.assertNotIsInstance(found, ValidationError)
+    def continued(self):
+        """The same request again, as the same planning mutation: no exception is an admission."""
+        result = self.entry()
+        self.assertEqual(self.record["mutation_id"], result.mutation_id, "the same planning mutation continued")
+        return result
+
+    def assert_stale_on_the_declared_base(self) -> None:
+        """A committed change reaches the currency of §13 before a Receipt: terminal stale, nothing registered."""
+        result = self.continued()
+        self.assertEqual(("stale", planning.STALE_DECLARED_BASE), (result.status, result.detail))
+        self.assertEqual([], [r for r in self.pending(self.store) if r["invocation"].get("operation") == "phase-entry"])
 
     def test_d_the_roadmap_is_held(self) -> None:
         rm.hold_roadmap(self.store, self.roadmap_id)
-        self.assert_admitted()
+        self.assert_stale_on_the_declared_base()
 
     def test_d_the_roadmap_is_cancelled(self) -> None:
         rm.cancel_roadmap(self.store, self.roadmap_id)
-        self.assert_admitted()
+        self.assert_stale_on_the_declared_base()
 
     def test_d_the_phase_is_held(self) -> None:
         self.persons_commit(self.hold_lines)
-        self.assert_admitted()
+        self.assert_stale_on_the_declared_base()
 
     def test_d_a_lifecycle_decision_is_decided_and_not_applied(self) -> None:
+        """The settled-lifecycle check refuses a *new* entry while another mutation's decision is not visible yet
+        (``_require_settled_lifecycle``, §5.6 branch A); it does not refuse the continuation (§5.8). The decision
+        is not even applied, so no currency reads it (item H): the same planning mutation registers, the decided
+        hold stays pending exactly as it was, and its own retry then completes - the Project holds both facts."""
         with crash_at(mutation_module.Mutation, "add_effects", after=True):
             with self.assertRaises(Crash):
                 rm.hold_roadmap(self.store, self.roadmap_id)
         (decided,) = [r for r in self.pending(self.store) if r["invocation"].get("operation") == "roadmap-hold"]
         self.assertTrue(decided["effects"], "the hold decided its event")
-        self.assert_admitted()
+        self.assertNotIn("roadmap_held", (self.store.root / EVENT_LOG).read_text(encoding="utf-8"), "and applied none")
+
+        result = self.continued()
+        self.assertEqual(("registered", "registered"), (result.status, result.detail))
+        self.assertIn(result.consumption_id, ReviewStore(self.store).consumption_ids())
+        self.assertEqual([decided], self.pending(self.store), "the decided hold alone is pending, untouched")
+
+        rm.hold_roadmap(self.store, self.roadmap_id)  # the decided hold, retried
+        self.assertEqual([], self.pending(self.store))
+        view = ProjectView.load(self.store)
+        self.assertEqual("held", view.roadmap_lifecycle(self.roadmap_id))
+        self.assertEqual(4, len(view.phase_works(self.phase_id)), "w1, w2, the integration and the confirmation")
 
     def test_d_a_dependency_of_the_phase_is_unsatisfied(self) -> None:
         relations = self.store.read_relation_file("roadmap")
@@ -253,13 +282,13 @@ class SuppressedChecksTests(_ContinuationCase):
         )
         self.commit_all(self.store, "a person adds a dependency", ROADMAP_LEDGER)
         self.assertTrue(ProjectView.load(self.store).unsatisfied_dependencies(self.phase_id))
-        self.assert_admitted()
+        self.assert_stale_on_the_declared_base()
 
     def test_d_the_explicit_entry_is_no_longer_startable(self) -> None:
         self.persons_commit(self.hold_lines)
         self.assertEqual([], ProjectView.load(self.store).startable_works(self.phase_id),
                          "the explicit entry w1 is not startable now")
-        self.assert_admitted()
+        self.assert_stale_on_the_declared_base()
 
 
 class BeforeTheBoundaryTests(_ContinuationCase):
@@ -467,6 +496,51 @@ class LifecycleAndEntryWorkTests(_ContinuationCase):
         self.assertEqual(first["id"], result.registration.entry_work_id,
                          "the reviewed selection, not a working-tree recomputation")
         self.assertEqual(result.registration.work_ids[first["key"]], result.registration.entry_work_id)
+
+    def append_uncommitted(self, lines: bytes) -> None:
+        path = self.store.root / EVENT_LOG
+        path.write_bytes(path.read_bytes() + lines)
+
+    def tracked_changes(self) -> list[str]:
+        return git(self.store.root, "status", "--porcelain", "--untracked-files=no").splitlines()
+
+    def test_l_an_uncommitted_change_after_the_registration_is_no_postcheck(self) -> None:
+        self.crash(rr, "_c2_kp")  # the registration is committed as Kp
+        self.append_uncommitted(self.hold_lines)  # a person's phase_held line, never committed
+        self.assertEqual([], ProjectView.load(self.store).startable_works(self.phase_id))
+        result = self.entry()
+        self.assertEqual("registered", result.status, "no postcheck_failed")
+        material = snapshot_material(self.store, result.review_run_id)
+        self.assertEqual(planning.candidate_content(material)["canonical_first_work"]["id"],
+                         result.registration.entry_work_id, "the Candidate's canonical_first_work")
+        self.assertEqual(result.registration.head, self.remote_head(), "Km published")
+        self.assertEqual([f" M {EVENT_LOG}"], self.tracked_changes(), "the person's line is still the only change")
+
+    def test_l_a_legacy_entry_keeps_its_live_postcheck(self) -> None:
+        """T-L, legacy half: the same person's uncommitted phase_held line, arriving once the expansion is committed
+        and before its entry is read back, meets the legacy working-tree recomputation, which keeps its live
+        postcheck_failed (§5.6 branch C). Nothing of the entry selection is patched: the fixture only times the
+        person's edit, right after the legacy finalize committed, pushed and completed the expansion."""
+        real = rm._finalize
+
+        def a_person_holds_the_phase_after_the_commit(*args, **kwargs):
+            head = real(*args, **kwargs)
+            self.append_uncommitted(self.hold_lines)
+            return head
+
+        with mock.patch.object(rm, "_finalize", a_person_holds_the_phase_after_the_commit):
+            with self.assertRaises(StopError) as raised:
+                rm.enter_phase(self.store, self.phase_id, self.the_design)
+        self.assertEqual("postcheck_failed", raised.exception.code)
+        self.assertIn("entry Work w1 is not startable after expansion", str(raised.exception))
+        # the expansion itself is durable: committed, published and completed, with no pending record
+        self.assertEqual([], self.pending(self.store))
+        self.assertTrue(self.subjects(self.store, 1)[0].startswith("chore(workline): expand phase "))
+        self.assertEqual(self.head(self.store), self.remote_head())
+        view = ProjectView.load(self.store)
+        self.assertEqual(4, len(view.phase_works(self.phase_id)), "w1, w2, the integration and the confirmation")
+        self.assertEqual([], view.startable_works(self.phase_id), "the working tree holds the Phase held")
+        self.assertEqual([f" M {EVENT_LOG}"], self.tracked_changes(), "the person's line is the only change")
 
 
 if __name__ == "__main__":
