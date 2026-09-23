@@ -415,7 +415,7 @@ entry順（両kindで固定）:
 ```text
 1  引数・platform・Git versionの検査（lockより前）
 2  requestのidentityより前のlive検査（Roadmap作成: payload検査と構造precheck。Phase entry: 構造precheck、
-   Phase・Roadmap・lifecycleの状態、依存）
+   Phase・Roadmap・lifecycleの状態、依存）。continuation modeではこのうち可変の受理factは拒否しない（下記）
 3  request identity（live の roadmap_request_identity / design_identity）
 4  canonical-input preflight: conditional Relatedのconditionをliveの validate_condition で検査し（拒否はliveと
    同じ validation_failed）、request identityをP1のserializerだけで表せることを示す。表せない値（float、tuple、
@@ -424,7 +424,7 @@ entry順（両kindで固定）:
 5  liveのsame-request検査とmarker検査
 6  残りのliveの受理検査（Phase entry: phase_already_expanded、通常Workが1つ以上、予約key、明示entryの
    開始可能性、unique entry）。このPhase自身の中断したreview-v1 Phase entryには、liveの中断展開の規則どおり
-   phase_already_expanded と unique entry を適用しない
+   phase_already_expanded と unique entry を適用しない。continuation modeでは明示entryの開始可能性も拒否しない
 7  slotにpendingなreview-v1 planning mutationが無い時だけ、canonical recovery discovery（skills/review）
 8  _open: pendingなplanning mutationを記録済みinvocationでresume、または新しいRun / recoveryのmutationを開始
 9  setup（新しいRunのfreeze、recoveryのbinding、中断したsetupの完成）の後にReviewの流れ
@@ -453,6 +453,38 @@ liveのRoadmap semanticsがoperationとして受理できるかを先に決め�
 **currency**: currencyは1つのbase commitについて、Context、Policy、そのcommitのcommitted viewで計算したdeclared base、そしてdeclared baseが等しい時だけCandidateの再構築（R9選択を含む）、の順で判定する。declared baseの差は常にdeclared baseの差として1回だけ分類し、R9やCandidateの不一致として報告しない。sealの前のstaleは何も書かずterminal `stale`、sealの後・登録開始前のstale（use check）はgeneration 4とSupersessionを書いてから `stale`。use checkが通るとHEADを `use_check_head` として記録する。最初の登録stageを記録した後は `stale` で終わらず、差は `reconcile required` になる: Kpを記録する直前のpre-Kp currency proof（P = HEAD。Pは `use_check_head` 自身、またはその子孫でplanning-owned pathに触れていない履歴であること、Runのrecordがcommit済みであること、currency、記録した登録effectがexpected physical projectionそのものであること）が `review_registration_base_moved` / `review_receipt_invalid` / `review_registration_currency_changed` / `review_candidate_mismatch` / `review_registration_projection_mismatch` で止める。working-tree round tripはR9選択をHEADのcommitted basisから読むが、HEADのdeclared baseがCandidateのものと違う場合はその差をpre-Kp currency proofに分類させ、R9不一致として止めない。
 
 **terminal**: `registered`（登録が公開された、remoteなしではC-2(Km)が通った）、`not_authorized`（reviewが許可しなかった。何も登録しない）、`stale`（sealの前、またはsealの後にgeneration 4とSupersessionを書いた）。
+
+**Phase entry continuation mode**: Phase entryのlive検査は「いまここで新しいPhase entryを始めてよいか」を答える。
+review-v1 Phase entryは2回目以降の呼び出しで別の問いも立てる。「このProjectが既に始めたPhase entryを最後まで
+運んでよいか」である。後者を前者のfactで決めると、canonicalになったRunが止まる。
+
+境界はcanonical stateだけから読む。slot（このPhase）にreview-v1 Phase entryのpending planning mutationがあり、
+そのmutationが持つRun（Run keyの予約、recovery planning mutationなら `recovery_binding` が指すRun）に
+**canonical generation 1**（HEADにcommitされ、P1 readerで読み戻せるgeneration 1と、そのCandidate snapshot・
+task input）があるとき、その呼び出しはcontinuation modeに入る。Runを持たないmutation、commitされていない
+generation 1、開始しただけのgeneration mutationは境界の外で、通常の新規entryとして扱う。この判定は予約も
+書き込みもせず、caller値を評価せず、Runを作らず・直さず、recovery discoveryも走らせない。検査の順序は変えない。
+
+continuation modeでは、新しいentryの可否を決める可変factが、そのpending mutation自身のrequestを拒否しない。
+Roadmapのlifecycle（held / cancelled / achieved）、Phaseのlifecycleとstate（complete / held / cancelled /
+plan_excluded）、Phase・Roadmapのsettled-lifecycle検査、Phaseの依存、明示entryの現在の開始可能性、そして
+liveの中断展開の規則が既に飛ばす phase_already_expanded と unique entry である。Phaseが属するRoadmapが解決
+すること自体は静的factなので拒否は残る。
+
+これらのfactが無視されるわけではない。committedな変化は、流れが到達している境界で分類される。Receiptの前は
+currency（stale）、seal後・登録前はuse check（generation 4）、登録開始後Kpの前は pre-Kp currency proof、Kp生成後は
+C-2(Kp) のP12（Kpの親P）、pushは committed planning proof のCP7である。publication barrierに止められた他の
+operationがworking treeへ適用しただけで未commitの変化は、どのcurrencyもproofも読まない。
+
+continuation modeは検査の免除ではない。引数・platform・Git version、構造precheck、Phaseとそのroadmapの解決、
+request identity、canonical-input preflight、same-request検査、marker互換、designの静的な形（通常Workが1つ以上、
+予約key、その他の不正design）、そしてresumeしたmutation自身のreplay・binding・proofは、すべてそのまま走る。
+境界はpending recordから読むので、このrequestでない呼び出しも可変factは通過するが、直後のsame-request検査が
+従来どおり拒否する（別のdesignは `reconcile required`、legacyは `review_marker_mismatch`）。
+
+fresh / generation 1前の呼び出しは従来どおりすべてのlive受理検査を受ける。legacy Phase entryはcontinuation mode
+に入らず、liveの中断展開・abandonの規則もそのままである。Roadmap作成にはこの種の可変受理検査が無いので関係しない。
+continuation modeはlifecycleの権限を作らない。Reviewは従属gateのままで、`state.py` もlifecycle導出も変わらない。
 
 **writer hand-off**: freeze後の登録は、canonical Candidateから計算したW（CanonicalPlanningWriterInput）だけから書き、callerのplan / designを二度とbytesを作るhelperへ渡さない。mappingのkey順はCandidateの正規順、sequenceの順はCandidateの順である。各登録stageの前に、display番号を割り当てるentity directory（Roadmap作成: `roadmaps/`・`phases/`、Phase entry: `works/`）のentryがHEADのものとこのmutationが書いたものだけであることを確かめ（display base check）、違えば `dirty_overlap` で止める。
 
