@@ -610,8 +610,8 @@ class R9Tests(PlanningTestCase):
         self.assertEqual((), run_ids(self.store))
 
     def test_entry_a_ambiguous_a_not_among_the_ties(self) -> None:
-        # §7.7's table has no row for an explicit entry that is startable but not among the ties of an ambiguous
-        # selection (P2-IMPL-BLOCKER-005): the implementation refuses it as ambiguous, like the row for A among them
+        # §7.7's table row C: an explicit entry startable but outside the ties of an ambiguous selection is refused
+        # as ambiguous, like the row for A among them - the ambiguous selection decides, never the caller's Work
         the_design = design(works={"w1": "W1", "w2": "W2", "w3": "W3"}, planned_next=(("w1", "w2"),), entry="w2")
         with self.assertRaises(StopError) as raised:
             self._entry(the_design)
