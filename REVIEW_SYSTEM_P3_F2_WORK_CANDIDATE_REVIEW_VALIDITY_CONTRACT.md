@@ -973,7 +973,7 @@ required task slots were settled.
 activation-valid        the activation record is present, well-formed, supported, and its prefix
                         digest reproduces
 candidate-projection    the declared owned set projects exactly to the Candidate's entries, with
-                        every mode and blob identity resolved
+                        every entry's kind, mode and object id resolved exactly
 object-kinds            every entry's kind, mode and object id are resolved exactly from the
                         Git tree entry (§6.3, §6.4)
 base-lineage            declared_base reproduces from base_commit's committed state through the
@@ -1268,7 +1268,7 @@ The Receipt is not the Consumption and does not name one. What consumes it, in w
 ```text
 the Candidate changes                    any field of §5.1, hence candidate_hash
 the base lineage changes                 base_commit, branch, or any declared_base field
-the owned bytes change                   any entry's new_blob or content_sha256
+the owned result identity changes        any entry's new_oid or content_sha256
 the Review Context changes               review_context_hash, including any bound authority
                                          digest, the loader identity or the activation binding
 the Effective Policy changes             effective_policy_hash
