@@ -39,18 +39,18 @@ Where F2 must control a P3 question differently, it says so as a **forward amend
 section, the change, the reason and its exact limit. Broad supersession is prohibited, and no decision of this
 contract is described as inheritance where it in fact narrows or changes a prior text.
 
-Forward amendments made here, and only these:
+Forward amendments made here:
 
 ```text
-P1 R1 §6 / P1 R3 §4   narrowed for review-v1-work-v1 (§6.4): the Candidate material binds path,
-                      mode, deletion and content identity exactly, and binds symlink semantics
-                      exactly; it does NOT support a gitlink at a result path. A Project whose
-                      HEAD tree holds any gitlink cannot use review-v1-work-v1, refused at START
-                      entry. This narrows the supported object-kind set of a Work Candidate at
-                      this contract version; it relaxes nothing and adds no guess.
+F2 semantic forward amendments:   NONE
 ```
 
-F1's own forward amendments (P1 R4 §2, P1 R4 §4.2, P1 R5 §8) are inherited unchanged. F2 re-amends none of them.
+F2 inherits P1 R1 §6 and P1 R3 §4 in full: a Work Candidate's material binds path, object kind, Git tree mode,
+deletion/absence, content identity, symlink semantics and gitlink semantics exactly (§6.3, §6.4). It narrows
+nothing and relaxes nothing.
+
+F1's own forward amendments (P1 R4 §2, P1 R4 §4.2, P1 R5 §8) are inherited unchanged. F2 re-amends none of them
+and adds none of its own.
 
 ### 1.4 F1 decisions F2 preserves without change
 
@@ -100,18 +100,28 @@ it, leaving a pending review-v1 mutation that could neither continue nor be retr
 reasoning as a rule:
 
 ```text
-An outcome that is ordinary and correct MUST be expressible as a Work Candidate.
+Every ordinary, correct Work outcome MUST be expressible as a Work Candidate. This includes
+every Git object kind an executor can legitimately leave at a declared result path.
 
-An outcome outside the expressible domain refuses. That refusal is an ordinary reconcile - a
-human decides, exactly as for any other STOP that strands a pending mutation - and never a
-contract trap, PROVIDED the inexpressible set is kept as small as the architecture allows.
+A refusal is permitted only for state that is malformed, externally interfered with, or whose
+ownership the operation cannot show - never for a supported result shape. Such a refusal is an
+ordinary reconcile: a human decides, exactly as for any other STOP that strands a pending
+mutation.
 
-Where the condition is knowable before the executor runs, the refusal MUST happen at START
-entry instead, so the caller learns it before any work is done.
+An outcome shape is NOT a safe thing to refuse after the executor returns. The declared owned
+set is first known when the executor returns (live START says so in those words), so no
+pre-executor check can enumerate the object kinds a future result will have. A contract that
+refuses a supported shape post-executor therefore has no non-trapping refusal point at all,
+and must support the shape instead.
 ```
 
-This rule is why §6.4 supports symlinks and the executable mode rather than refusing them, and why the gitlink
-limitation is an entry-time refusal rather than a post-executor one.
+This rule is why §6.4 supports every reachable Git object kind at a result path — regular files, the executable
+mode, symlinks and gitlinks — rather than excluding any of them. It is also why §6.5's refusals are limited to
+malformed declarations and unreadable state, which are not result *shapes*.
+
+No-trap does **not** require accepting unowned or contradictory Git state. START's existing own-bytes,
+dirty-separability and ownership rules are untouched, and a result the operation cannot show is its own is refused
+exactly as it is today.
 
 ---
 
@@ -129,7 +139,7 @@ Re-verified at this baseline. These are the facts the decisions rest on.
 | M-6 | P2's Context binds `review_kind`, `contract`, `projection_semantics_version`, `adapter_identity`, `loader_identity`, `authority` digests, `git_persistence`, `checkout_capability`. | `review/planning.py` |
 | M-7 | `rules/git`, `rules/ai-decision`, `rules/human-confirmation` and `rules/information-tracing` carry a `workline-id` but **no** `workline-target`: their text lives inside `registry.md`. Binding the `registry` digest therefore binds all four rules. Only `skills/*` resolve to separate files. | `registry.md`, `registry.py` |
 | M-8 | `gitcmd.hash_blob(repo, data)` returns the Git blob object id of arbitrary bytes and **writes nothing**. Exact Git object identity is therefore computable for working-tree bytes before any commit exists. | `gitcmd.py` |
-| M-9 | `gitcmd.tree_entries(repo, commit, …)` returns `mode`, `type`, `oid`, `path`; a gitlink entry has type `commit`. Whether a Project holds any gitlink is decidable from HEAD before the executor runs. | `gitcmd.py` |
+| M-9 | `gitcmd.tree_entries(repo, commit, …)` returns `mode`, `type`, `oid`, `path`; a gitlink entry has mode `160000` and type `commit`, and its `oid` is the referenced commit. `gitcmd.zero_object_id` gives the all-zero id of the repository's own width, and `_FULL_ID` accepts a 40- or 64-character id. | `gitcmd.py` |
 | M-10 | `review/closure.py` implements `ReviewValidityClosure`, `ReviewProvenance`, `SurfaceClosure`, `EvidenceDeclaration`, `MechanismProof`, `may_reuse`, the seven required surfaces and R11's fifteen dependency classes. Nothing constructs one; no record persists one. Its `to_record` emits `surfaces` / `evidence_dependencies` / `git_semantics` / `review_provenance_dependencies`, which is the live resolution of R6 §2's field sketch. | `review/closure.py` |
 | M-11 | `review/projections.py` implements the three projection kinds and `normative()`, which answers no for `operation_metadata`. Kind-specific contents are absent. | `review/projections.py` |
 | M-12 | START's `Completed` carries `result_paths`, `message`, `deleted_paths`. `completion_precheck` requires each result path to exist and each deleted path to be a tracked file that is now absent. `declare_own_content` records a sha256 per owned path at the moment the executor returns. | `start.py`, `mutation.py` |
@@ -303,47 +313,71 @@ Each entry binds exact Git object identity against `declared_base.base_commit`:
 {
   path:       <repository-relative POSIX path, exactly as declared>
   status:     "A" | "M" | "D"
-  old_mode:   <"100644" | "100755" | "120000", or "000000" when the base holds nothing>
-  old_blob:   <full blob id at the base, or the all-zero id when the base holds nothing>
-  new_mode:   <"100644" | "100755" | "120000", or "000000" for a deletion>
-  new_blob:   <full blob id of the bytes the executor produced, or the all-zero id for a deletion>
-  content_sha256: <SHA-256 of those same bytes, or null for a deletion>
+  old_kind:   <"absent" | "file" | "symlink" | "gitlink">
+  old_mode:   <"000000" | "100644" | "100755" | "120000" | "160000">
+  old_oid:    <the object id the base's tree entry names, or the all-zero id when "absent">
+  new_kind:   <"absent" | "file" | "symlink" | "gitlink">   ("absent" for a deletion)
+  new_mode:   <same vocabulary as old_mode>
+  new_oid:    <the object id the result names, or the all-zero id when "absent">
+  content_sha256: <SHA-256 of the object's bytes for "file" and "symlink"; null otherwise>
 }
 ```
 
-* `old_mode` / `old_blob` come from the base commit's tree.
-* `new_blob` is `gitcmd.hash_blob` of the bytes at the path **as the executor left them** (M-8). Nothing is
-  written and no commit is needed, which is what lets the Candidate exist before K1.
+* **The Git tree entry is authoritative** for `kind`, `mode` and `oid`. Filesystem permissions, directory
+  contents, a submodule's checked-out working tree, a branch tip, a submodule name and `.gitmodules` text are
+  never the artifact identity of an entry.
+* `old_kind` / `old_mode` / `old_oid` come from the base commit's tree.
+* `new_oid` is, per kind: for `file` and `symlink`, `gitcmd.hash_blob` of the object's bytes **as the executor
+  left them** (M-8) — nothing is written and no commit is needed, which is what lets the Candidate exist before
+  K1; for `gitlink`, the exact referenced commit OID the tree entry names.
+* Object ids use the width the repository uses, exactly as the live helpers already do: `_FULL_ID` accepts a
+  40-character SHA-1 or a 64-character SHA-256 id, and the all-zero id is `gitcmd.zero_object_id` of the same
+  width as the base commit. No width is hardcoded here.
 * `content_sha256` is the same digest `declare_own_content` already records, so the Candidate and START's
-  own-bytes proof speak about the same bytes.
-* `status` is derived: absent at base → `A`; present at base → `M`; declared deleted → `D`.
+  own-bytes proof speak about the same bytes. It is null for a `gitlink`, which has no bytes in this repository,
+  and null for `absent`.
+* `status` is derived: `old_kind` absent → `A`; both present → `M`; declared deleted → `D`.
 * Ordering is by the path's UTF-8 bytes, so the record is canonical and diffable.
 
 An entry whose `old_*` equals its `new_*` is a declared result that changed nothing. It stays in the Candidate,
 because what the executor declared is part of what is reviewed.
 
-### 6.4 Object kinds — supported, and the one narrowing
+### 6.4 Object kinds — all supported
 
 ```text
-supported   100644   regular file
-            100755   regular file, executable
-            120000   symlink; new_blob is the blob id of the link target bytes, exactly as Git
-                     stores a symlink, and content_sha256 is the SHA-256 of those same bytes
-            deletion of any of the above
-
-refused     a gitlink (mode 160000, tree entry type "commit")
+100644   file      regular file
+100755   file      regular file, executable
+120000   symlink   the object's bytes are the link target, exactly as Git stores a symlink;
+                   content_sha256 is the SHA-256 of those same bytes
+160000   gitlink   the object id is the exact referenced commit OID the tree entry names;
+                   content_sha256 is null
+deletion of any of the above, as new_kind "absent"
 ```
 
-**Symlinks and the executable mode are supported deliberately**, under the no-trap rule (§2.3): they are ordinary,
-correct results, they are fully expressible with live primitives, and refusing them after the executor returned
-would recreate exactly the trap F1-D10 rejected.
+Every Git object kind reachable at a declared result path is supported, and this is P1 R1 §6 / R3 §4 inherited in
+full rather than narrowed.
 
-**Gitlinks are not supported at this contract version**, and this is the forward amendment of §1.3 against
-R1 §6 / R3 §4. A gitlink's identity is a commit in another repository; the Candidate cannot bind its content, and
-`hash_blob` does not apply. To keep this out of the trap, the refusal is **entry-time, not post-executor**: a
-review-v1 START refuses at entry, before the lock takes effect on any write and before the executor runs, when
-HEAD's tree holds any entry of type `commit` (M-9). The caller learns immediately, nothing is stranded, and legacy
-START is unaffected.
+**Symlinks** are reviewed as symlinks: the artifact is the link object itself, identified by the link target
+bytes. The contract never dereferences a symlink and never reviews the target's contents as though they were the
+symlink's artifact. A broken symlink is therefore still representable, as a symlink object whose target happens to
+resolve to nothing; reading it requires the no-follow form of a filesystem read, which is implementation work and
+not a further architecture decision.
+
+**The executable bit is Git's, not the filesystem's.** `100644` and `100755` are distinguished by the Git tree
+entry. A platform whose filesystem does not carry an executable permission does not thereby change the mode the
+tree entry records, and no filesystem permission is ever authoritative here.
+
+**Gitlinks** are reviewed by the tree entry alone: `path`, `object_kind = gitlink`, `git_mode = 160000`, the exact
+referenced commit OID, and the base lineage the entry is measured against. The submodule's checked-out working
+tree, its directory contents, its branch tip, its name and `.gitmodules` are never the gitlink's artifact
+identity. If `.gitmodules` is itself a declared result path, it is an ordinary `file` entry like any other and is
+represented separately.
+
+This is a change from the original F2 freeze, which excluded gitlinks and tried to keep the no-trap invariant by
+refusing at START entry any Project whose HEAD tree held one. That was unsound: the declared owned set is first
+known when the executor returns, so an executor can introduce a gitlink during execution in a Project that had
+none at entry, and the post-executor refusal fires anyway. There is no sound non-trapping refusal point for a
+result shape, so the shape is supported (§2.3).
 
 ### 6.5 Post-executor refusals
 
@@ -775,8 +809,8 @@ activation-valid        the activation record is present, well-formed, supported
                         digest reproduces
 candidate-projection    the declared owned set projects exactly to the Candidate's entries, with
                         every mode and blob identity resolved
-object-kinds            every entry is a supported object kind (§6.4), and HEAD's tree holds no
-                        gitlink
+object-kinds            every entry's kind, mode and object id are resolved exactly from the
+                        Git tree entry (§6.3, §6.4)
 base-lineage            declared_base reproduces from base_commit's committed state through the
                         canonical loader
 own-bytes               every owned path still holds exactly what the operation recorded putting
@@ -786,8 +820,10 @@ review-namespace        every existing Review record reads canonically
 completion-precheck     START's own completion precheck passed
 ```
 
-Each is `pass` or `not-applicable`; there is no `unknown` result for a check. The Evidence record has the same
-shape as P2's (a schema, a version and a list of `{check, result}`), and `evidence_digest` is its canonical digest.
+Each is `pass` or `not-applicable`; there is no `unknown` result for a check. The checks are one part of the
+versioned logical Evidence payload; the isolated verification of §13.4 is the other. The payload has the shape of
+P2's evidence record (a schema, a version and a list of `{check, result}`), and its canonical digest is what
+`GateGeneration.evidence_digest` binds (§13.5).
 
 ### 13.3 Execution basis
 
@@ -800,19 +836,64 @@ never       mutates the Project. Any scratch material lives under .workline/runt
             committed and is never authorization.
 ```
 
-### 13.4 Isolated verification is not in P3
+### 13.4 Isolated verification is a P3 responsibility
+
+Candidate 7 assigns **isolated verification** to P3. It assigns to P4 the Repair Loop, dependency-class
+completeness and isolated Integration — different responsibilities. F2 therefore freezes the isolated verification
+boundary here; it does not defer it.
 
 ```text
-Running the Project's own tests or any other verifier against an exported tree is NOT part of
-review-v1-work-v1 Evidence. No such primitive exists at this baseline, and building one is the
-repair-loop phase's work, not F2's.
+P3 performs the required verification against the exact frozen Work Candidate, in an isolated
+verification workspace.
 ```
 
-The consequence is stated honestly rather than hidden: the dependency classes such a verifier would cover are
-declared `unknown`, and therefore **no Work Evidence is reusable across Candidates** (§13.5). Fresh use is
-permitted; reuse is not.
+Frozen minimum semantics:
 
-### 13.5 Dependency completeness (F2-D12)
+```text
+V-1  target            The verification target is the EXACT frozen Candidate - the artifact
+                       identified by candidate_hash - and nothing else.
+
+V-2  reconstruction    The workspace is materialized from canonical, clone-safe material: the
+                       Candidate snapshot (§9.2) and the committed state of
+                       declared_base.base_commit. Mutable runtime cache is never the sole
+                       source, and never authority.
+
+V-3  no substitution   The primary working tree is NEVER silently substituted for the workspace.
+                       It may be used only while it is provably still the exact Candidate - every
+                       entry's kind, mode, object id and content digest unchanged. The moment it
+                       is not, verification runs against the reconstructed workspace or fails
+                       closed; it never verifies something other than what was frozen.
+
+V-4  identity          The Evidence identity binds, at minimum:
+                         the exact Candidate            (candidate_hash, candidate_material_digest)
+                         the Review Context             (review_context_hash)
+                         the Effective Policy           (effective_policy_hash)
+                         the verifier / adapter identity and version
+                         the dependency declaration / coverage identity of §13.6
+
+V-5  persistence       The result is a versioned logical Evidence payload, canonically digested,
+                       and that digest is what the gate binds (§13.6). No new canonical record
+                       kind and no new schema is introduced.
+```
+
+The workspace mutates nothing in the Project: it lives under `.workline/runtime/**`, is never committed and is
+never authorization. Building the materialization primitive is implementation work — no live primitive exports a
+Work result tree at this baseline (the committed-result loader carries only `.workline/**`) — and that is an
+implementation gap, not a reason to move the responsibility to a later phase.
+
+### 13.5 Where Evidence is persisted
+
+```text
+versioned logical Evidence payload
+  -> canonical evidence digest
+    -> GateGeneration.evidence_digest
+```
+
+There is no `.workline/review/evidence/<...>` record and F2 introduces none. The Candidate and request
+reconstruction material stay in their existing canonical surfaces — the Candidate snapshot and the TaskInput — and
+the gate binds the Evidence by digest, exactly as the live schema already does (M-3).
+
+### 13.6 Dependency completeness (F2-D12)
 
 The Work Evidence declares, in the live `EvidenceDeclaration` form and R11's fifteen-class vocabulary:
 
@@ -833,13 +914,26 @@ environment,
 subprocess,
 dynamic_libraries,
 network,
-external_service      unknown    a reviewer and any future verifier may reach them, and nothing
-                                 here contains them
+external_service      unknown    the reviewer and the isolated verifier may reach them, and
+                                 nothing at this contract version contains them
 ```
 
-Completeness is therefore `unknown` for `review-v1-work-v1`, by construction and by declaration. Under R11 and the
-live `closure.may_reuse`, that means: usable for this authorization, never reusable for another Candidate. F2 does
-not claim a completeness it cannot prove.
+Completeness is therefore `unknown` for `review-v1-work-v1`, by construction and by declaration. `unknown` is a
+statement about *reuse*, never about validity, and R11's distinction is frozen here exactly:
+
+```text
+fresh use, this exact Candidate      ALLOWED
+    The verification and review result adjudicates the exact Candidate it was produced for,
+    under that Candidate's own Review contract. Unknown completeness does not make the Evidence
+    invalid, does not weaken the authorization, and does not refuse the Review.
+
+cross-Candidate reuse                REFUSED
+
+reuse across a HEAD advance          REFUSED while required completeness is unknown (§14.4)
+```
+
+`unknown` is never read as "invalid Evidence" and never read as "reusable anyway". F2 claims no completeness it
+cannot prove, and refuses no authorization it can support.
 
 ---
 
@@ -873,9 +967,9 @@ surfaces
                                             base_commit, branch
   tool_runtime                   covered    identities: loader_identity
 
-evidence_dependencies            the declaration of §13.5
+evidence_dependencies            the declaration of §13.6
 git_semantics                    {git_persistence, git_version, base_commit, branch}
-completeness                     unknown, because §13.5 leaves classes unaccounted
+completeness                     unknown, because §13.6 leaves classes unaccounted
 ```
 
 ### 14.3 Durable home
@@ -911,13 +1005,21 @@ L2  closure.may_reuse(before, after) == reusable, which requires BOTH closures c
 And the frozen consequence at this contract version:
 
 ```text
-Because §13.5 makes Work Evidence completeness "unknown", may_reuse can never answer "reusable"
-for review-v1-work-v1. Therefore an intervening HEAD advance always requires a NEW Candidate.
+Because §13.6 declares Work Evidence completeness "unknown", may_reuse cannot answer "reusable"
+for review-v1-work-v1. An intervening HEAD advance therefore resolves as:
 
-This is a fail-closed outcome, stated plainly rather than engineered around. The fast path is
-defined so that a later contract version which can prove completeness inherits a predicate that
-is already exact; it is not reachable now.
+    closure completeness unknown
+      -> prior Review is not reused
+        -> freeze a NEW Candidate against the new HEAD
+          -> perform fresh verification and review as required
 ```
+
+**This is a valid fail-closed v1, not a removal of the fast-path architecture.** P3 owns the
+`ReviewValidityClosure`, the HEAD-advancement predicate and its wiring, and F2 freezes all three here. Both layers
+are defined exactly; the positive branch is simply unreachable while the current Work Evidence declaration cannot
+establish completeness. A later contract version that can prove completeness — by covering the classes §13.6
+leaves unaccounted — inherits a predicate that is already exact and needs no architectural change to reach the
+positive branch.
 
 `unknown` is never `proven`, and absence of discovered change is never proof of invariance.
 
@@ -1046,9 +1148,10 @@ RV-12 the Receipt semantic boundary of §15 and the invalidation boundary of §1
 ```text
 ST-1  that START freezes the Work Candidate from the declared owned set at the moment the
       executor returns, before any result commit exists
-ST-2  the entry-time gitlink refusal of §6.4, alongside the activation precondition F1 froze
+ST-2  that no supported result object kind is refused, at entry or after the executor returns (§2.3, §6.4)
 ST-3  the post-executor refusal of §6.5 for a declared owned set that cannot be projected exactly
-ST-4  that START runs the Evidence checks of §13.2 and supplies them to the gate
+ST-4  that START runs the Evidence checks of §13.2, performs the isolated verification of §13.4
+      against the exact frozen Candidate, and supplies the resulting payload's digest to the gate
 ST-5  that START, not Review, applies the authorized transition, and only the transition the
       AuthorizedTransitionProjection names
 ```
@@ -1083,7 +1186,7 @@ lifecycle.
 | --- | --- | --- | --- | --- |
 | **F2-D1** Work Review identity | `review_kind` `work-result-v1`; task kind/slot, projection semantics, adapter identity and `authorized_operation_stage` of §4.1; `target_identity` = Work ID; `operation_identity` = `"start:" + digest(request identity)`, mode excluded; distinct from F1's `review-v1-work-v1` and both bound in the Context (§4) | P2's `PlanningKind` registration and `operation_identity` shape; no string collides | inherits P1 R2 identity discipline and the P2 kind-registration pattern | every later section; F3 checks the authorized stage |
 | **F2-D2** Candidate schema | the six-key record of §5.1; `candidate_hash` is the digest of the whole record; `declared_base` read from `base_commit`'s committed state through the canonical loader | P2 Candidate shape (M-5); `CandidateSnapshot.material` is unconstrained (M-1) | inherits P1 R1 §6 and R3 §4 reconstruction rules; **adds** the `activation` field F1 deferred | F3 compares K1's delta against the artifact content |
-| **F2-D3** result-bearing Candidate | the owned change set only; per-entry path, status, old/new mode, old/new blob id, content digest; ordered by path bytes; computable before any commit; supported object kinds `100644` / `100755` / `120000` and their deletion (§6.4) | `hash_blob` writes nothing (M-8); `declare_own_content` digests (M-12); a gitlink is decidable from HEAD before the executor runs (M-9) | inherits R3 §4's exact-identity requirement for path, mode, deletion, content and symlink semantics; **forward-amends P1 R1 §6 / P1 R3 §4** by excluding a gitlink at a result path at this contract version, refused at START entry (§1.3, §6.4) | F3's K1 delta proof; gitlink support is a later contract version |
+| **F2-D3** result-bearing Candidate | the owned change set only; per-entry path, status, old/new kind, mode and object id, content digest; ordered by path bytes; computable before any commit; the Git tree entry is authoritative and **every** reachable object kind is supported — `100644`, `100755`, `120000` and `160000` gitlink, and their deletion (§6.3, §6.4) | `hash_blob` writes nothing (M-8); `declare_own_content` digests (M-12); a gitlink entry's mode, type and referenced commit come from the tree entry (M-9) | **inherits** P1 R1 §6 and P1 R3 §4 in full, including object kind, mode, deletion, content, symlink and gitlink semantics; amends nothing | F3's K1 delta proof |
 | **F2-D4** empty-artifact Candidate | `artifact_kind: "empty"`, empty `entries`, positive `emptiness_proof`; same base lineage and hashing; mutually exclusive with result-bearing by construction; no fake or synthesized commit | a result-less Work makes no commit (M-13) | inherits F1-D10 Option B and F1's R5 §8 clarification | F3's proof topology when no K1 exists; F1 Gate 2's `Consumption.artifact_kind` |
 | **F2-D5** three projections | artifact content in the Candidate; transition = the two terminal events for this Work, by type and order, no event IDs; metadata = Review bookkeeping and never lifecycle truth or correctness authority (§8) | `projections.normative()` answers no for metadata (M-11); `state.py` has no Review dependency (M-14) | inherits the canonical three-projection boundary | F3 places the transition in a mutation stage |
 | **F2-D6** reconstruction | snapshot mode only; material is the whole Candidate record; `candidate_material_digest` over the snapshot record; builder mode not used (§9) | builder mode demands a deterministic regenerator that executor bytes do not have (M-1) | inherits P1 R1 §6 / R3 §4 / R3 §5 | F4 recovery reads it |
@@ -1091,10 +1194,10 @@ lifecycle.
 | **F2-D8** activation binding | `{record_digest, operation_contract, activation_base_head}` in both Candidate and Context; prefix digest never copied out; the activation-record digest and `work-terminal-activation-digest-v1` are different digests (§11) | F1-D7 defines the prefix digest; the activation record is a normal Review record | inherits F1-D4 and F1-D7 unchanged | §16 invalidation |
 | **F2-D9** reviewer binding | bound at the gate in the TaskInput and the accepted descriptor, never in the START invocation; mismatch is the existing `review_reviewer_mismatch`, at launch and at settlement (§12.1, §12.2) | P2 binds the reviewer at acceptance and refuses with this code | inherits F1-D2/F1-D3 (which forbid binding it in the invocation) and the P2 gate pattern | F4 recovery comparisons |
 | **F2-D10** request envelope | the record of §12.3; Candidate and Context carried whole; reviewer identity absent; no runtime identity anywhere (§12.3, §12.4) | P1 `TaskInput` fields suffice unchanged (M-2) | inherits P1 R3 §4 minimum binding | F4 reconstruction |
-| **F2-D11** Evidence execution | Evidence is Workline's own named checks (§13.2), never the reviewer's report; runs in-operation under the lock, mutates nothing; isolated verification is out of P3 (§13.3, §13.4) | the gate already separates `evidence_digest` from the report and adjudication digests (M-3) | inherits P1 R11 and the P2 evidence-record shape | the repair-loop phase may add isolated verification |
-| **F2-D12** dependency completeness | the declaration of §13.5 in R11's fifteen classes; completeness is **unknown** by construction, so Work Evidence is fresh-use only and never reused across Candidates | live `EvidenceDeclaration` / `completeness()` (M-10) | inherits P1 R11 §3–§10 | §14.4's consequence |
+| **F2-D11** Evidence execution | Evidence is Workline's own named checks (§13.2) plus the **isolated verification of §13.4, which is a P3 responsibility**, never the reviewer's report; verification targets the exact frozen Candidate, reconstructs from canonical clone-safe material, never silently substitutes the primary working tree, and binds Candidate / Context / Policy / verifier / coverage identity; the payload's canonical digest is bound through `GateGeneration.evidence_digest` and no new record kind is introduced (§13.3–§13.5) | Candidate 7 §15 assigns isolated verification to P3, and the Repair Loop, dependency-class completeness and isolated Integration to P4; the gate already separates `evidence_digest` from the report and adjudication digests (M-3) | inherits P1 R11 and the P2 evidence-record shape | P4 owns completeness improvements, the repair loop, Evidence reuse expansion and isolated Integration — not this verifier boundary |
+| **F2-D12** dependency completeness | the declaration of §13.6 in R11's fifteen classes; completeness may be **unknown** at this contract version. Fresh use for the exact Candidate it was produced for is **allowed**; cross-Candidate reuse is **refused**; reuse across a HEAD advance is **refused while unknown**. `unknown` is never read as invalid Evidence and never as reusable anyway | live `EvidenceDeclaration` / `completeness()` (M-10) | inherits P1 R11 §3–§10 and its unknown/reuse distinction | §14.4's consequence; P4 may later prove completeness |
 | **F2-D13** ReviewValidityClosure | specialize the live P1 closure, no second system; the surface and provenance contents of §14.2; bound by digest inside the Evidence record, so it reaches the gate and the Receipt without a new record kind | `closure.py` complete and unused (M-10) | inherits P1 R6; notes that live field naming, not R6 §2's sketch, is the shape | F4 |
-| **F2-D14** HEAD advancement | L1 Git-write compatibility **and** L2 `may_reuse == reusable`; at this contract version completeness is unknown, so an intervening advance always requires a new Candidate (§14.4) | `_head_advanced_independently` is L1 only; `may_reuse` refuses on unknown (M-10) | inherits P1 R6 §9/§10 | F4 decides what happens after |
+| **F2-D14** HEAD advancement | the predicate stays defined and P3-owned: L1 Git-write compatibility **and** L2 `may_reuse == reusable`. While completeness is unknown the positive branch is unreachable, so an intervening advance freezes a new Candidate against the new HEAD and verifies afresh — a valid fail-closed v1, not a removal of the fast-path architecture (§14.4) | `_head_advanced_independently` is L1 only; `may_reuse` refuses on unknown (M-10) | inherits P1 R6 §9/§10 | F4 decides what happens after a mismatch; a later version reaching the positive branch needs no architectural change |
 | **F2-D15** Receipt semantics | a Receipt authorizes an exact Candidate for `start:work-terminal` and nothing else; **no schema repair required** (§15) | `target_identity` and `authorized_operation_stage` are free text; no storage SHA (M-4) | inherits P1 R3 §7 and the canonical Receipt boundary | F1 Gate 2 and F3 consume it |
 | **F2-D16** invalidation boundary | the material facts of §16.1; an invalidated authorization is never consumable; unknown or contradictory is invalidating, never a weaker fallback | live Supersession and Consumption indexes | inherits P1 R3 §8 and R4 §1/§7 | F4 owns the mechanics |
 | **F2-D17** authority plan | RV-1…RV-12 to `skills/review`, ST-1…ST-5 to `skills/start`, GT-1 to `rules/git`, **no registry routing change** (§17) | no new Skill and no new operation owner is introduced | inherits the Review/START ownership boundary | each activates with its implementation |
@@ -1133,9 +1236,9 @@ what happens after an invalidation, a mismatch or an interruption
 ### Later phases
 
 ```text
-isolated verification / a verifier execution model, and the dependency-class coverage that would
-  let Work Evidence completeness become "complete" and the HEAD-advance fast path become reachable
-gitlink support at a result path
+the dependency-class coverage that would let Work Evidence completeness become "complete" and the
+  HEAD-advance fast path's positive branch become reachable (P4 owns this; the predicate itself is
+  already frozen here, §14.4)
 project-local or global adaptive Policy
 ```
 
