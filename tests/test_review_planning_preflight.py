@@ -240,14 +240,40 @@ class OneSerializerTests(_PreflightCase):
             seen.append(value)
             return real(value)
 
-        with mock.patch.object(serialize, "canonical_data", side_effect=ValidationError("patched", code="review_record_invalid")):
-            self.assert_refused_with_nothing_begun(design(related=conditional(condition("kind"))))
-        the_design = design(related=conditional(condition("kind")))
-        with mock.patch.object(serialize, "canonical_data", spy), crash_at(MutationController, "begin"):
-            with self.assertRaises(Crash):
-                self.entry(the_design)
+        # The §5.1 gate proves the reviewer identity and version with the same P1 serializer, and it runs
+        # first (entry step 1, against this preflight's step 4). It has its own coverage, so it is held out
+        # here and what these two patches then see is the preflight's own use of the serializer.
+        with mock.patch.object(planning, "_persistable_reviewer_text", return_value=True):
+            with mock.patch.object(serialize, "canonical_data",
+                                   side_effect=ValidationError("patched", code="review_record_invalid")):
+                self.assert_refused_with_nothing_begun(design(related=conditional(condition("kind"))))
+            the_design = design(related=conditional(condition("kind")))
+            with mock.patch.object(serialize, "canonical_data", spy), crash_at(MutationController, "begin"):
+                with self.assertRaises(Crash):
+                    self.entry(the_design)
         self.assertTrue(seen, "the preflight ran the P1 serializer before anything was begun")
         self.assertEqual(rm.design_identity(the_design), seen[0], "first on the request identity")
+
+    def test_the_reviewer_text_rule_runs_before_this_preflight(self) -> None:
+        """Entry step 1 before step 4: both prove a caller value with the P1 serializer, and neither begins anything."""
+        order: list[str] = []
+        real_text, real_preflight = planning._persistable_reviewer_text, rr.preflight_phase_entry_request
+
+        def note_text(value):
+            order.append("reviewer text")
+            return real_text(value)
+
+        def note_preflight(*args):
+            order.append("preflight")
+            return real_preflight(*args)
+
+        with mock.patch.object(planning, "_persistable_reviewer_text", note_text), \
+                mock.patch.object(rr, "preflight_phase_entry_request", note_preflight), \
+                crash_at(MutationController, "begin"):
+            with self.assertRaises(Crash):
+                self.entry(design(related=conditional(condition("kind"))))
+        self.assertEqual(["reviewer text", "reviewer text", "preflight"], order,
+                         "the identity and the version, then the request identity")
 
 
 # --------------------------------------------------------------------------- §21.3 O10 at the execution lock

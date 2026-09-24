@@ -7,7 +7,9 @@ import unittest
 from unittest import mock
 
 from helpers import git
-from planning_helpers import CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, crash_at, design, plan, rr
+from planning_helpers import (
+    CANONICAL_RULE, Crash, PlanningTestCase, Reviewer, crash_at, design, plan, rr, state_entries,
+)
 from workline import roadmap as rm
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.mutation import MutationController
@@ -15,6 +17,22 @@ from workline.review import checkout, fsafe, planning, serialize
 from workline.review import paths as review_paths
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore, render_body, render_entity
+
+
+HIGH_SURROGATE = "\ud800"
+LOW_SURROGATE = "\udfff"
+
+#: Reviewer identity / version pairs that pass the single-line shape rule and that the canonical Review form
+#: cannot carry (BL-057). Before the rule of the entry gate each of these was first encoded in generation-1
+#: acceptance, after the lock, the planning mutation and its reservations.
+UNREPRESENTABLE_REVIEWERS = {
+    "the identity is a lone high surrogate": (HIGH_SURROGATE, "1"),
+    "the identity is a lone low surrogate": (LOW_SURROGATE, "1"),
+    "the version is a lone high surrogate": ("id", HIGH_SURROGATE),
+    "the version is a lone low surrogate": ("id", LOW_SURROGATE),
+    "a surrogate inside the identity": (f"reviewer-{HIGH_SURROGATE}-x", "1"),
+    "a surrogate inside the version": ("id", f"v-{LOW_SURROGATE}-1"),
+}
 
 
 class LegacyUnchangedTests(PlanningTestCase):
@@ -282,6 +300,8 @@ class ReviewArgumentTests(PlanningTestCase):
             planning.PlanningReview(reviewer, " id", "1"),
             planning.PlanningReview(reviewer, "id", ""),
             planning.PlanningReview(reviewer, "id x", "1"),
+            *(planning.PlanningReview(reviewer, identity, version)
+              for identity, version in UNREPRESENTABLE_REVIEWERS.values()),
         ]
         for value in invalid:
             with self.subTest(value=value):
@@ -293,6 +313,166 @@ class ReviewArgumentTests(PlanningTestCase):
                 self.assertEqual("review_contract_invalid", entry.exception.code)
         self.assertEqual(before, self.snapshot_state(store))
         self.assertEqual([], self.pending(store))
+
+
+class ReviewerTextTests(PlanningTestCase):
+    """BL-057: the reviewer identity and version are text a Review record carries, proven at the entry gate.
+
+    Generation 1 makes both durable in the TaskInput and in the accepted
+    descriptor, so a value the canonical form cannot carry has to be refused
+    before the lock; the alternative, measured at the baseline, is a raw
+    ``UnicodeEncodeError`` from :func:`planning.accepted_descriptor` with the
+    planning mutation and its reservations already recorded.
+    """
+
+    def _call(self, store, phase_id: str, entry: str, reviewer: Reviewer):
+        if entry == "roadmap creation":
+            return self.reviewed_roadmap(store, reviewer)
+        return self.reviewed_entry(store, phase_id, reviewer)
+
+    def test_unrepresentable_reviewer_text_is_refused_before_the_lock(self) -> None:
+        store = self.planning_project()
+        _, phase_id = self.roadmap_and_phase(store)
+        before, head = state_entries(store), self.head(store)
+        for described, (identity, version) in UNREPRESENTABLE_REVIEWERS.items():
+            for entry in ("roadmap creation", "Phase entry"):
+                with self.subTest(described=described, entry=entry):
+                    reviewer = Reviewer(identity=identity, version=version)
+                    with mock.patch.object(rm, "project_operation", side_effect=AssertionError("lock taken")):
+                        with self.assertRaises(ValidationError) as raised:
+                            self._call(store, phase_id, entry, reviewer)
+                    self.assertEqual("review_contract_invalid", raised.exception.code)
+                    self.assertIn("the canonical Review form cannot carry", str(raised.exception))
+                    self.assertEqual([], reviewer.tasks, "the reviewer is not called")
+        self.assertEqual(before, state_entries(store),
+                         "no planning mutation, reservation, Review record, domain effect or runtime file")
+        self.assertEqual([], self.pending(store))
+        self.assertEqual(head, self.head(store))
+        self.assertFalse((store.root / ".workline" / "review").exists())
+        self.assertEqual([], sorted(store.tmp.rglob("*")) if store.tmp.exists() else [])
+
+    def test_representable_unicode_reviewer_text_still_registers(self) -> None:
+        cases = {
+            "japanese": ("\u30ec\u30d3\u30e5\u30a2\u30fc", "\u7b2c1\u7248"),
+            "accented": ("revi\u00e9wer", "v1.2-rc.3"),
+            "astral": ("reviewer " + chr(0x1F600), "v" + chr(0x20000)),
+            "spaced": ("Review Bot A (build #7)", "1.2.3+build.7"),
+        }
+        for name, (identity, version) in cases.items():
+            with self.subTest(name=name):
+                store = self.planning_project(name)
+                result = self.reviewed_roadmap(store, Reviewer(identity=identity, version=version))
+                self.assertEqual("registered", result.status)
+                if name == "japanese":
+                    entry = self.reviewed_entry(store, result.registration.phase_ids["a"],
+                                                Reviewer(identity=identity, version=version))
+                    self.assertEqual("registered", entry.status)
+                self.assertEqual([], self.pending(store))
+
+    def test_the_rule_is_the_canonical_bytes_and_the_round_trip_together(self) -> None:
+        """The round trip never encodes, so on its own it accepts text no Review file could hold."""
+        for described, value in {
+            "a lone high surrogate": HIGH_SURROGATE,
+            "a lone low surrogate": LOW_SURROGATE,
+            "a surrogate inside ordinary text": f"reviewer-{HIGH_SURROGATE}-x",
+        }.items():
+            with self.subTest(described=described):
+                holder = {"reviewer_text": value}
+                self.assertTrue(serialize.canonical_roundtrips(holder), "the round trip alone accepts it")
+                with self.assertRaises(UnicodeEncodeError):
+                    serialize.canonical_bytes(holder)
+                self.assertTrue(planning._single_line_text(value), "the shape rule alone accepts it")
+                self.assertFalse(planning._persistable_reviewer_text(value), "only the two together refuse it")
+
+    def test_the_shape_rule_and_everything_it_already_decided_are_unchanged(self) -> None:
+        refused = {
+            "empty": "", "whitespace only": " ", "a leading space": " id", "a trailing space": "id ",
+            "LF": "a\nb", "CR": "a\rb", "CRLF": "a\r\nb", "VT": "a\vb", "FF": "a\fb",
+            "FS": "a\x1cb", "GS": "a\x1db", "RS": "a\x1eb", "NEL": "a\x85b",
+            "LINE SEPARATOR": "a\u2028b", "PARAGRAPH SEPARATOR": "a\u2029b",
+        }
+        for described, value in refused.items():
+            with self.subTest(refused=described):
+                self.assertFalse(planning._persistable_reviewer_text(value))
+                with self.assertRaises(ValidationError) as raised:
+                    planning.validate_planning_review(planning.PlanningReview(Reviewer(), value, "1"))
+                self.assertEqual("review_contract_invalid", raised.exception.code)
+                self.assertIn("non-empty single-line text without surrounding whitespace", str(raised.exception),
+                              "a shape refusal keeps its own detail")
+        accepted = {
+            "ASCII": "reviewer-a",
+            "internal spaces": "Review Bot A",
+            "punctuation": "r@e.com/v1 (b#7) [x] {y} <z> |t| ~u",
+            "a backslash": "a\\b",
+            "a tab": "rev\ter",
+            "a no-break space": "rev\u00a0er",
+            "a byte order mark": "a\ufeffb",
+            "a noncharacter": "a\uffffb",
+            "a private use character": "a\ue000b",
+            "combining marks": "e\u0301 reviewer",
+            "right to left": "\u05d1\u05d5\u05d3",
+            "a joined emoji": chr(0x1F468) + "\u200d" + chr(0x1F4BB),
+            "text a reader could take for a number": "1",
+            "text a reader could take for a boolean": "true",
+            "text a reader could take for null": "null",
+            "text that looks like YAML": "- reviewer: {a: b}",
+            "long text": "r" * 5000,
+        }
+        for described, value in accepted.items():
+            with self.subTest(accepted=described):
+                self.assertTrue(planning._persistable_reviewer_text(value))
+                planning.validate_planning_review(planning.PlanningReview(Reviewer(), value, value))
+
+    def test_a_pending_planning_mutation_survives_an_unrepresentable_retry(self) -> None:
+        """The refusal is before the lock, so a planning mutation the Project already holds is left as it is."""
+        for operation, entry in (("roadmap-create", "roadmap creation"), ("phase-entry", "Phase entry")):
+            with self.subTest(operation=operation):
+                store = self.planning_project(operation)
+                phase_id = "" if entry == "roadmap creation" else self.roadmap_and_phase(store)[1]
+                with crash_at(rr, "_accept"):
+                    with self.assertRaises(Crash):
+                        self._call(store, phase_id, entry, Reviewer())
+                (record,) = [r for r in self.pending(store) if r["invocation"].get("operation") == operation]
+                path = store.mutations / f"{record['mutation_id']}.yaml"
+                before_record, before_state = path.read_bytes(), state_entries(store)
+
+                reviewer = Reviewer(identity=HIGH_SURROGATE)
+                with mock.patch.object(rm, "project_operation", side_effect=AssertionError("lock taken")):
+                    with self.assertRaises(ValidationError) as raised:
+                        self._call(store, phase_id, entry, reviewer)
+                self.assertEqual("review_contract_invalid", raised.exception.code)
+                self.assertEqual(before_record, path.read_bytes(), "the pending planning mutation is untouched")
+                self.assertEqual(before_state, state_entries(store))
+                self.assertEqual([], reviewer.tasks)
+
+                resumed = self._call(store, phase_id, entry, Reviewer())
+                self.assertEqual("registered", resumed.status)
+                self.assertEqual(record["mutation_id"], resumed.mutation_id, "the same planning mutation resumed")
+                self.assertEqual([], self.pending(store))
+
+    def test_the_rule_is_never_reached_on_the_legacy_path(self) -> None:
+        store = self.planning_project()
+        with mock.patch.object(planning, "_persistable_reviewer_text",
+                               side_effect=AssertionError("legacy consulted the reviewer-text rule")):
+            roadmap = rm.create_roadmap(store, plan())
+            rm.enter_phase(store, roadmap.phase_ids["a"], design())
+        self.assertEqual([], self.pending(store))
+
+    def test_a_report_keeps_its_own_representability_boundary(self) -> None:
+        """BL-057 moves nothing on the report path: a finding's shape rule is still ``_single_line_text``."""
+        descriptor = {"task_id": "rtk_1", "reviewer_identity": "id", "reviewer_version": "1"}
+        for described, finding in {
+            "a finding code": planning.PlanningReviewFinding("LOW", HIGH_SURROGATE, "m"),
+            "a finding message": planning.PlanningReviewFinding("LOW", "c", f"m {HIGH_SURROGATE}"),
+        }.items():
+            with self.subTest(described=described):
+                report = planning.PlanningReviewReport("rtk_1", "id", "1", "completed", (finding,))
+                with self.assertRaises(StopError) as raised:
+                    planning.report_record(report, descriptor)
+                self.assertEqual("review_report_invalid", raised.exception.code)
+                self.assertIn("cannot be recorded canonically", str(raised.exception),
+                              "refused where the report is canonicalized, not by the shape rule")
+        self.assertTrue(planning._single_line_text(HIGH_SURROGATE), "the shared shape rule itself is unchanged")
 
 
 class PosixTests(PlanningTestCase):

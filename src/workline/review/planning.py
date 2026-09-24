@@ -183,6 +183,37 @@ def _single_line_text(value: object) -> bool:
     return isinstance(value, str) and bool(value) and value == value.strip() and value.splitlines() == [value]
 
 
+def _persistable_reviewer_text(value: object) -> bool:
+    """Whether ``value`` is reviewer identity or version text a Review record can carry.
+
+    The single-line shape, and then representability, because these two values
+    are not diagnostics: generation 1 makes them durable in the TaskInput and
+    in the accepted descriptor, and ``task_input_digest`` is taken over their
+    canonical bytes. Neither is in the request identity nor in the Candidate,
+    so no canonical-input preflight reaches them, and without this rule the
+    first encode would be :func:`accepted_descriptor` - after the lock, after
+    the planning mutation and after its reservations.
+
+    Both serializer calls are needed, and only together: ``canonical_bytes``
+    says the value can be written at all, and ``canonical_roundtrips``, which
+    compares parsed data and never encodes, says a reader gets it back. A
+    representability failure is ``False`` here, so the refusal stays the one
+    the caller's contract names and no serializer exception escapes.
+
+    Only ``_single_line_text`` is shared with the finding code of a report
+    (:func:`report_record`); this rule is not, because a report's own
+    representability is already proven where the report is canonicalized.
+    """
+    if not _single_line_text(value):
+        return False
+    holder = {"reviewer_text": value}
+    try:
+        serialize.canonical_bytes(holder)
+        return serialize.canonical_roundtrips(holder)
+    except (ValidationError, ValueError, UnicodeError):
+        return False
+
+
 def validate_planning_review(review: object) -> PlanningReview:
     """The ``review`` argument, validated before the lock and before any Project state is read."""
     problems: list[str] = []
@@ -195,8 +226,14 @@ def validate_planning_review(review: object) -> PlanningReview:
     if not callable(review.reviewer):
         problems.append("reviewer is not callable")
     for name in ("reviewer_identity", "reviewer_version"):
-        if not _single_line_text(getattr(review, name)):
-            problems.append(f"{name} must be non-empty single-line text without surrounding whitespace")
+        value = getattr(review, name)
+        if _persistable_reviewer_text(value):
+            continue
+        problems.append(
+            f"{name} must be non-empty single-line text without surrounding whitespace"
+            if not _single_line_text(value)
+            else f"{name} is text the canonical Review form cannot carry, so the accepted task could not record it"
+        )
     if problems:
         raise ValidationError("invalid PlanningReview: " + "; ".join(problems), code="review_contract_invalid")
     return review
