@@ -3,11 +3,17 @@
 The Mutation Controller writes a ``write_file`` payload as given - UTF-8, no line
 ending translated (``durable_write_text``) - and the Project reader reads every
 file with universal newlines: CRLF and a lone CR (one no LF follows) both read as
-LF (``store.as_read_back``). The classifier reads the file the reader's way and
-compares it with the recorded content with only CRLF folded, so the operation's
-own write of a text holding a lone CR is classified applied with an unexpected
-result, and the next replay of the record stops ``reconcile required`` - on every
-retry of the same request.
+LF (``store.as_read_back``). The classifier compares the file as the reader reads
+it with the recorded content read back the same way, so the operation's own write
+is applied, matching, whatever line ends its text holds.
+
+Before BL-056 the classifier folded only CRLF in the recorded content: the own
+write of a text holding a lone CR was classified applied with an unexpected
+result, and the next replay of the record stopped ``reconcile required`` on every
+retry of the same request. On the baseline these pins held the lone CR, mixed and
+trailing lone CR shapes as ``applied_mismatch`` and a Roadmap creation with a
+lone CR or mixed line ends in its desired state as stranded; those are the only
+rows the change moved.
 
 These pins state, for each line-end shape of the decided text, what the writer
 puts on disk, what the reader reads, how the operation's own write is
@@ -26,7 +32,7 @@ from helpers import WorklineTestCase, git
 from workline import roadmap as rm
 from workline.errors import ReconcileRequired
 from workline.ids import new_id
-from workline.mutation import MATCHING, MISMATCH, Effect, MutationController, WriteScope
+from workline.mutation import MATCHING, Effect, MutationController, WriteScope
 from workline.oplock import project_operation
 from workline.phase_create import PhaseSpec
 from workline.state import ProjectView
@@ -55,9 +61,9 @@ SHAPES = {
     "plain": Shape("abc", "abc", MATCHING, True),
     "LF": Shape("a\nb", "a\nb", MATCHING, True),
     "CRLF": Shape("a\r\nb", "a\nb", MATCHING, True),
-    "lone CR": Shape("a\rb", "a\nb", MISMATCH, False),
-    "mixed": Shape("a\r\nb\rc\n", "a\nb\nc", MISMATCH, False),
-    "trailing lone CR": Shape("abc\r", "abc", MISMATCH, True),
+    "lone CR": Shape("a\rb", "a\nb", MATCHING, True),
+    "mixed": Shape("a\r\nb\rc\n", "a\nb\nc", MATCHING, True),
+    "trailing lone CR": Shape("abc\r", "abc", MATCHING, True),
     "LF at end": Shape("abc\n", "abc", MATCHING, True),
     "CRLF at end": Shape("abc\r\n", "abc", MATCHING, True),
 }

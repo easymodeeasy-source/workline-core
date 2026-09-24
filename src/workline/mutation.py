@@ -92,6 +92,7 @@ from .store import (
     Event,
     ProjectStore,
     Relation,
+    as_read_back,
     parse_push_pin,
     render_relations,
 )
@@ -2221,10 +2222,13 @@ class MutationController:
                 current = _normalize(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError):
                 return MISMATCH
-            if current == _normalize(payload["content"]):
+            # The file as the store reads it back, against the recorded text read back the same way: a write keeps
+            # line ends as given and reading turns CRLF and a lone CR alike into LF. Whose bytes the file holds is
+            # the own-bytes proof's to show (:func:`_require_own_bytes_committed`), never this comparison's (BL-056).
+            if current == as_read_back(payload["content"]):
                 return MATCHING
             base = payload.get("base")
-            if base is not None and current == _normalize(base):
+            if base is not None and current == as_read_back(base):
                 return UNAPPLIED  # the decided update has not been applied yet
             return MISMATCH
         if kind == "add_relation":
