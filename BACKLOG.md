@@ -88,6 +88,7 @@
 | BL-053 | Refused replay commit stage poisons recovery after foreign bytes are restored | RESOLVED |
 | BL-054 | Recorded derivation reuse permanently refuses when an earlier registration was externally committed before its Git stage was recorded | RESOLVED |
 | BL-055 | Prevent shadow authority from being introduced into established Workline Projects | OPEN |
+| BL-056 | Operation strands its own mutation when decided text contains a lone carriage return | VERIFIED |
 | BL-100 | Remove non-Workline systems and legacy operational surfaces from workline-core | OPEN |
 
 ## Items
@@ -993,6 +994,22 @@
 - Human confirmation likely: yes（共通authority boundaryを追加・変更する可能性があるため）
 - Self-hosting prerequisite: no
 - Evidence class: code inspection, design deferral
+
+### BL-056 Operation strands its own mutation when decided text contains a lone carriage return
+
+- ID: BL-056
+- Title: Operation strands its own mutation when decided text contains a lone carriage return
+- Status: VERIFIED
+- Kind: implementation, recovery, liveness
+- Severity: major
+- Problem: Roadmap作成・Phase追加・Phase entry・direct standalone CREATE・STARTのderivationは、callerが決めたtext（Roadmap / Phase / Workの名前と各section、derivation detail）を描画してentity file等へ `write_file` で書く。`durable_write_text` は改行を変換しないので、disk bytesは記録したcontentのUTF-8そのものである。Projectのreaderはfileをuniversal newlineで読み、CRLFもlone CR（LFが続かないCR）もLFとして読む（`ProjectStore` の `read_text`、`ProjectView.with_effects` の `store.as_read_back`）。`MutationController.classify` の `write_file` 分類も、fileはreaderと同じく読むが、記録したcontentと `base` は `mutation._normalize`（CRLFだけをLFにする）で正規化して比べる。このため描画後のcontentにlone CRが残ると、operation自身が書いたbytes（記録どおりで、`wrote` digestとも一致する）を `applied_mismatch` と分類する。書いた後の最初の `Mutation.apply()`（次のregistration stageかGit stage）が記録済みのeffectをすべて分類し直すので、最初の実行は自分のeffectを適用してから `reconcile_required`（`effect N (write_file) applied with unexpected result`）で止まり、同じrequestの再実行も毎回同じ位置で止まる。止まっているのは分類だけで、Projectはその内容を読め、構造検査も問題を報告しない。live `0f670a2` で再現した: 自分のwriteの分類は、lone CR（`a\rb`）・CRLFとlone CRの混在（`a\r\nb\rc\n`）・file末尾のlone CR（`abc\r`）で `applied_mismatch`、plain・LF・CRLF・末尾のLF / CRLFでは一致である。desired stateにlone CRを持つRoadmap作成は、Roadmap fileを書いたままcommitもpushもせずに止まる。sectionの末尾のCRは描画時にstripされ、名前の末尾のCRは描画時の改行とCRLFになるので止まらない。
+- Why it matters: 止まったmutationはeffectを記録済みなので `Mutation.abandon()` できず（`mutation_has_effects`）、record手編集以外の回復経路が無い。pending recordはwrite scopeを持ち続け、`MutationController.open` のscope重なりで、Roadmap作成（別名も）・Phase追加・Phase entry・START（全ledgerを宣言する）が `reconcile_required` になる。STARTのderivationで止まった場合はhold / resumeとdirect CREATEを含む全operationが止まり、push destinationのpin maintenanceはどの場合も `pending_operation` で止まる。入力はpayload検査・構造precheck・request identity・登録前の投影をすべて通ったcallerの決めたtextで、受理して書いてから止まる。P2のreview-v1 pathはlone CRをReview recordやdomain effectより前に `review_candidate_unrepresentable` で拒否するが、legacy invocationと、P2がgateしないwriter（Phase追加、direct CREATE、STARTのderivation）は影響を受け続ける。
+- Likely scope: `MutationController.classify` の `write_file` 分類で、記録したcontentと `base` を、readerと同じ規則（`store.as_read_back`）で読んだtextにしてから比べる（`src/workline/mutation.py` だけ）。変えないもの: writerとdisk bytes、`durable_write_text`、描画、request identity、`wrote` / `held_before` とown-bytes proof（bytes単位のまま）、Review recordの `create_file` 分類（bytes単位）とP1 strict reader、P2のreview-v1 path。退けた候補: bytes単位の分類（CRLFでcheckoutしたProjectのpin maintenanceを新たに止める）、writer側・request identity側・`durable_write_text` 側での正規化（既存のdisk bytesや中断したCRLF recordの継続を変え、既に止まっているrecordを回復しない）。
+- Cross-project impact: あり（全Projectの、callerが決めたtextを書く登録operation）
+- Backfill likely: no（既に止まっているrecordは、修正後に同じrequestを再実行すればそのまま進む見込みで、fileは書き直さず、止まった時のbytesのままcommit / pushする。record・file・履歴を書き換えるmigrationは入れない。人が止まったfileを編集した場合と、Git stageを記録した後に人がそのfileをcommitした場合は、従来の所有・Git規則のまま）
+- Human confirmation likely: no（canonical authorityはline endの比較規則を定めておらず、CREATE / Phase CREATEは登録前の投影を既に「storeが読み戻すのと同じ規則」で重ねると書いている。修正方針（分類をreaderの読みに合わせる）は採用時に決定済み）
+- Self-hosting prerequisite: no
+- Evidence class: code inspection, reproduction
 
 ### BL-100 Remove non-Workline systems and legacy operational surfaces from workline-core
 
