@@ -28,13 +28,19 @@ the corresponding implementation lands and the canonical authority statements of
 
 The P1 and P2 freeze documents remain historical frozen contracts and are **not edited**. Where this contract
 controls a P3 question differently from an earlier frozen text, it says so explicitly as a **forward amendment**
-(§11.3, §14), and the earlier document keeps its own text unchanged as the historical record.
+(§10.3, §11.3, §14), and the earlier document keeps its own text unchanged as the historical record.
 
 Forward amendments made here, and only these:
 
 ```text
-P1 R4 §2   amended for P3 Work-terminal Consumption: artifact_kind (§11.3)
-P1 R5 §8   clarified for P3: an empty-artifact Candidate has no physical K1 commit (§11.3)
+P1 R4 §2     amended for P3 Work-terminal Consumption: artifact_kind (§11.3)
+
+P1 R4 §4.2   amended for P3 post-activation classification (§10.3): because activation is
+             Project capability × per-invocation selection, a post-activation work_completed
+             with no operation-contract marker is a legacy completion; a review-v1 marker
+             selects review-v1; unknown or contradictory markers still fail closed.
+
+P1 R5 §8     clarified for P3: an empty-artifact Candidate has no physical K1 commit (§11.3)
 ```
 
 ### 1.3 Scope of the freeze
@@ -524,6 +530,41 @@ carries a marker contradicting the activation
   record, the Run or the Receipt it names            reconcile required
 ```
 
+**Forward amendment to P1 R4 §4.2.** P1 R4 §4.2 freezes that, once activation is present and its prefix
+reproduces, *every* later `work_completed` must carry explicit review-v1 operation-contract metadata, and that a
+post-activation event missing the marker is `reconcile_required` and never a legacy fallback. **That
+classification rule is superseded for P3 by the table above.**
+
+The reason is F1's selection model (F1-D1, F1-D4, F1-D9): activation is a Project **capability**, not a Project-wide
+mandate, and review-v1 is chosen **per invocation**. A legacy START therefore remains available and unchanged in an
+activated Project (§16 invariant 1), and it necessarily produces a post-activation `work_completed` with no marker.
+Under the unamended R4 §4.2 rule that ordinary, correct completion would be invalid — which is precisely the
+position-only outcome this section rejects below, and which would break the legacy guarantee this contract freezes.
+
+The amendment is narrow, and it is the **only** relaxation:
+
+```text
+amended       a post-activation work_completed with NO operation-contract marker is a legacy
+              completion, and requires no Consumption.
+              Marker absence is legacy only when the event otherwise belongs to the valid
+              post-activation history of an activated Project: the activation record must be
+              present, well-formed, of a supported version, and its prefix digest must reproduce.
+
+inherited     R4 §4.2's other statements, unchanged:
+                absence of arbitrary Review files is never legacy proof;
+                an explicit review-v1 event without matching activation is contradictory and invalid.
+              R4 §3 totality, for events positively classified review-v1 (§10.2).
+              R4 §5 Event metadata requirements (§12.1).
+
+NOT amended   unknown, malformed or contradictory Review metadata never falls back to legacy.
+              Only true absence of the marker means legacy. There is no general
+              "metadata problem -> legacy" rule, and none may be introduced.
+              Activation-prefix and activation-record failures stay fail-closed (§10.1):
+              a malformed record, an unsupported version, an unknown operation_contract or a
+              prefix digest that does not reproduce refuse the Project's review-v1 use outright,
+              and no event is classified legacy on their account.
+```
+
 The discriminator is the marker on the event. Measured at baseline, that marker cannot be carried end-to-end
 today, which is why §12.1 makes the carrier an ordered prerequisite of activation and why activation is refused
 until it exists. There is no half-activated state.
@@ -827,11 +868,11 @@ them.
 | **F1-D1** caller opt-in | explicit keyword-only selector carrying the versioned contract `review-v1-work-v1`; no boolean; validated before the lock and the executor with `review_contract_invalid`; unsupported version fails closed (§3) | START has no CLI, so the Python API is the sole caller surface; review-v1 planning's keyword-only versioned opt-in is validated before the lock | inherits the P2 opt-in pattern | F2 defines the reviewer's use; F3 the publication behaviour |
 | **F1-D2** durable markers | `review_contract` + `publication_contract` = `review-v1-work-v1` / `review-v1-split-v1`, written together at mutation open, before any Git stage; compatibility metadata, **not** slot identity; contract never inferred from shape or content (§4) | START's durable invocation carries no marker today; the publication-contract selector already reads the durable invocation only | inherits P1 R5 §12.3 and R5-IMPL-2; R5 §12.3.1 case B is why the publication marker cannot wait for F3 | F3 implements the `review-v1-split-v1` validator; until then a review-v1 push cannot be recorded, which is fail-closed and correct |
 | **F1-D3** resume mismatch | four-way matrix of §5.2; mismatch is `ReconcileRequired` with reason `review_marker_mismatch`; record untouched, executor never runs, Review never read | review-v1 planning already raises exactly this, with this reason, for the identical situation; `ReconcileRequired` is defined as a recovery/expectation mismatch | inherits the existing semantic category; introduces no new code | F2 adds the reviewer-identity check at the gate, not in the invocation |
-| **F1-D4** activation meaning | Project capability × per-invocation selection; never lifecycle truth, never a state-derivation input, never inferred from Review files (§6) | the activation record is Project-scoped and names no Work | inherits P1 R4 §4 and R5 §9 | F2 binds the activation record's canonical digest into Review Context / Candidate |
+| **F1-D4** activation meaning | Project capability × per-invocation selection; never lifecycle truth, never a state-derivation input, never inferred from Review files (§6) | the activation record is Project-scoped and names no Work | inherits P1 R4 §4's activation record and R5 §9; R4 §4.2's post-activation classification is forward-amended (§10.3) | F2 binds the activation record's canonical digest into Review Context / Candidate |
 | **F1-D5** activation producer | a dedicated human-confirmed maintenance operation with its own owner and mutation; mechanical owner allowlist; no pending mutation at production time; never START, never Review, never Roadmap; no implicit or retroactive activation (§8) | writing a canonical Review record is owner-agnostic today; the push destination pin already uses a closed owner allowlist enforced in effect validation | inherits the push-pin ownership pattern and the Review authority boundary | authority statements G1 and G2 |
 | **F1-D6** record uniqueness / immutability | one per Project at one canonical path; logical uniqueness equals physical uniqueness; immutable create-only; identical bytes replay as applied, different bytes reconcile; never replaced or deleted; dangling-Work case not reachable (§7) | the Review namespace validator already admits only that one filename, as a plain file, with no indirection anywhere | inherits P1 immutable-record semantics unchanged | a future contract is a different path and a deliberate validator change |
 | **F1-D7** activation digest | P1 R4 §4.1's algorithm over canonical parsed Events, deliberately not the Review record renderer; digest identity is (algorithm version, Event schema version) (§9) | the Event reader already ignores blank lines and normalizes CRLF; the event log is appended textually, so historical lines are never re-rendered | inherits P1 R4 §4.1 unchanged; adds the digest-identity pairing | F2 binds the record's canonical digest into Review Context / Candidate |
-| **F1-D8** totality / absence | absence means not activated and is valid; malformed, unknown or contradictory fails closed; scope is `work_completed` at index ≥ N; the discriminator is the event marker; **no carrier ⇒ not activatable** (§10, §12.1) | measured: a metadata-carrying event is written but classified `applied_mismatch`, and the next apply raises `reconcile_required` | inherits P1 R4 §3, §4.2 and §5 | Gate 1 of §12; the marker's full field set beyond R4 §5 is F3/F4 |
+| **F1-D8** totality / absence | absence means not activated and is valid; malformed, unknown or contradictory fails closed; scope is `work_completed` at index ≥ N; the discriminator is the event marker; **no carrier ⇒ not activatable** (§10, §12.1) | measured: a metadata-carrying event is written but classified `applied_mismatch`, and the next apply raises `reconcile_required` | **forward-amends the post-activation classification portion of P1 R4 §4.2** (§10.3); inherits R4 §3 totality for events positively classified review-v1, R4 §4.2's remaining statements, and R4 §5 Event metadata requirements | Gate 1 of §12; the marker's full field set beyond R4 §5 is F3/F4 |
 | **F1-D9** upgrade compatibility | no migration and none permitted; unstarted and in-progress Works may later be started review-v1; a pending legacy START is never converted; completed Works are untouched (§10.4) | activation is Project-scoped, so there is no per-Work state to backfill | — | none |
 | **F1-D10** result-less Work | Option B: an empty-artifact Candidate with no physical K1; no synthesized empty commit; review-v1 never refused for a correct result-less Work (§11) | measured: a Work with no owned result path produces no result commit; the Work-kind Consumption currently demands a commit id whenever a terminal event is present | **amends P1 R4 §2**; **clarifies P1 R5 §8**; neither file edited | F2 defines the empty-artifact Candidate content; F3 the proof topology without a K1; Gate 2 of §12 |
 | **F1-D11** authority surfaces | S1–S7 to `skills/start`, R1–R6 to `skills/review`, G1–G3 to `rules/git`; **no registry routing change** (§13) | the push destination pin maintenance operation is an owner and is not registry-routed | inherits the Review authority boundary | each statement activates with the contract that implements it |
