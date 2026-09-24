@@ -417,6 +417,17 @@ content = {
 
 `message` is absent: there is no result commit to carry one.
 
+Its reconstruction material envelope (§9.3) is correspondingly empty of payloads:
+
+```text
+material = { material_contract: "review-v1-work-snapshot-material-v1",
+             candidate: <the exact empty-artifact Work Candidate>,
+             payloads: [] }
+```
+
+No fake bytes, no fake K1, no synthetic commit. The positive emptiness proof of §7.3 and the base identity of
+§5.3 remain the whole reconstruction basis, and they are already clone-safe.
+
 ### 7.3 What is reviewed, and what proves the emptiness
 
 What is reviewed is **that this Work is correctly complete having produced no file result** — a semantic
@@ -536,42 +547,196 @@ Reason: the reviewed artifact is bytes an executor produced. There is no determi
 them from clone-safe inputs, which is precisely what builder mode requires (M-1). Declaring builder mode would
 make the record claim a reconstruction that does not exist.
 
-### 9.2 Snapshot material
+### 9.2 Candidate identity versus Candidate reconstruction material
+
+Two different things, deliberately kept apart:
 
 ```text
-CandidateSnapshot.material            = the whole Work Candidate record of §5.1
-CandidateSnapshot.candidate_hash      = §5.2
+Candidate identity         WHAT exact artifact was reviewed.
+                           The Work Candidate record of §5.1: path, old/new kind, mode and
+                           object id, content_sha256, declared_base, activation, artifact_kind.
+                           candidate_hash is unchanged (§5.2): the digest of that record.
+
+reconstruction material    The clone-safe canonical material required to REPRODUCE that exact
+                           artifact before K1 exists. It lives in CandidateSnapshot.material.
+```
+
+An object id or a content digest **identifies** material. It is not, by itself, the clone-safe reconstruction
+material for bytes the executor has just produced: before K1 there is no commit holding them, and `base_commit`
+holds only the previous tree. P1 R1 §6 states the rule directly — *a digest alone is never treated as
+reconstruction material* — and P1 R3 §4 requires that binary data be *represented canonically and exactly*.
+
+### 9.3 Snapshot material — the versioned envelope
+
+```text
+CandidateSnapshot.material = {
+    material_contract: "review-v1-work-snapshot-material-v1"
+    candidate:         <the whole canonical Work Candidate record of §5.1>
+    payloads:          [ <reconstruction payloads, §9.4> ]
+}
+
+CandidateSnapshot.candidate_hash      = §5.2, the digest of `candidate` alone
 CandidateSnapshot.reconstruction_mode = "snapshot"
 CandidateSnapshot.projection_semantics_version = "work-result-projection-v1"
 CandidateSnapshot.builder             = null
-candidate_material_digest             = SHA-256 of the canonical bytes of the snapshot record
+candidate_material_digest             = SHA-256 of the canonical bytes of the whole snapshot record,
+                                        payload strings included
 ```
 
-This is exactly P2's arrangement (M-5) with the Work Candidate as material, so no second reconstruction mechanism
-is introduced and `ReviewStore.provenance_problems` applies unchanged.
+The envelope carries an explicit versioned contract identity so a later material format is a different contract
+rather than a silent reinterpretation.
 
-### 9.3 What "reconstructible" means here
+This uses the existing extensible `material` mapping and **adds no fixed `CandidateSnapshot` field, no new
+canonical record type and no new namespace** (M-1: `material` is an unconstrained mapping in snapshot mode).
+`ReviewStore.provenance_problems` applies unchanged.
 
-The Candidate is **self-describing**: it binds path, status, modes, blob ids and content digests, plus the base
-commit and branch. After a clone or a loss of `.workline/runtime/**`, a reader rebuilds the exact reviewed artifact
-identity from the snapshot record alone, and can re-derive every `old_*` value from `base_commit` and every
-`new_*` value from the committed result once K1 exists.
-
-The reviewed **bytes** themselves are not copied into the record. What is stored is their exact Git object identity
-and content digest, which is what the artifact's identity *is*. This satisfies R1 §6's rule — a digest is never
-reconstruction material — because the record carries the full structured projection, not a bare hash of it.
-
-### 9.4 Mismatch behaviour
+**The two digests move independently, and that is intentional:**
 
 ```text
-snapshot missing, unreadable, or not a Work Candidate record      fail closed
-material does not digest to the Run's candidate_hash              fail closed
-reconstruction_mode is not "snapshot"                             fail closed
-projection_semantics_version is not this contract's               fail closed
+candidate_hash             changes only when the Candidate identity record changes
+candidate_material_digest  changes when the identity record OR any payload byte changes
+```
+
+Changing one Base64 character therefore changes the snapshot's canonical bytes and
+`candidate_material_digest`, while `candidate_hash` stays as it was — and the cross-checks of §9.5 then refuse
+the snapshot outright.
+
+### 9.4 Payloads
+
+#### 9.4.1 Coverage — a closed correspondence
+
+For every Candidate entry, by `new_kind`:
+
+```text
+file      exactly one payload, same path, kind "file"       — the exact result bytes
+symlink   exactly one payload, same path, kind "symlink"    — the exact link-target bytes Git
+                                                              stores as the blob; never the
+                                                              dereferenced target's contents
+gitlink   NO payload. The entry itself is the reconstruction material:
+          path + new_kind gitlink + new_mode 160000 + new_oid (the exact referenced commit OID)
+absent    NO payload. A deletion is reconstructed as explicit absence relative to declared_base.
+```
+
+`file` covers `100644` and `100755` alike, and covers arbitrary binary content losslessly. A payload provides
+**bytes only**; the mode always comes from the Candidate entry.
+
+The correspondence is closed and fails closed:
+
+```text
+missing payload for a file or symlink entry     reconcile
+duplicate payload for one path                  reconcile
+extra payload with no matching entry            reconcile
+path mismatch                                   reconcile
+kind mismatch                                   reconcile
+payload present for a gitlink entry             reconcile
+payload present for a deletion                  reconcile
+```
+
+**Uniform coverage rule.** An entry whose old and new Git identity are equal still carries its payload when its
+`new_kind` is `file` or `symlink`. Reconstruction never depends on noticing that the bytes happen to match the
+base and fetching them from there instead.
+
+#### 9.4.2 Payload shape and encoding
+
+```text
+{
+  path:     <the exact result path, as in the Candidate entry>
+  kind:     "file" | "symlink"
+  encoding: "base64-rfc4648-v1"
+  data:     <canonical padded Base64 string>
+}
+```
+
+The Review canonical serializer stores text, not raw bytes, so the byte encoding is frozen exactly:
+
+```text
+alphabet            RFC 4648 standard: A-Z a-z 0-9 + /
+padding             canonical "=" padding, required
+line breaks         NONE
+whitespace          NONE
+alternate alphabet  NOT ALLOWED
+unpadded form       NOT ALLOWED
+decoder             strict
+canonicality        decode, then standard re-encode, MUST reproduce the stored string exactly
+```
+
+This represents arbitrary binary bytes losslessly, which is what P1 R3 §4's "binary data is represented
+canonically and exactly" requires.
+
+#### 9.4.3 Ordering
+
+`payloads` is sorted by the payload's `path` **UTF-8 bytes** — the same ordering the Candidate entries use (§6.3).
+Never map iteration order, never filesystem traversal order.
+
+### 9.5 Payload cross-checks
+
+For every `file` and `symlink` payload, all of the following, before the material is trusted:
+
+```text
+1. strict canonical Base64 decode to exact bytes (§9.4.2)
+2. SHA-256(decoded bytes)             == the entry's content_sha256
+3. Git blob identity(decoded bytes)   == the entry's new_oid
+     computed with `git hash-object` semantics in the repository's own object format,
+     at the repository's full object-id width
+```
+
+For a symlink the bytes are the link-target bytes Git stores as the blob. For an executable file the mode remains
+`100755`, taken from the Candidate entry and never from the payload.
+
+Any mismatch is `reconcile_required`. The clone-safe bytes never become a second, contradictory source of truth:
+where they disagree with the Candidate identity, nothing is trusted and nothing is substituted.
+
+### 9.6 The reconstruction criterion
+
+Frozen, and this is what "clone-safe" means for a Work Candidate:
+
+```text
+Given ONLY:
+    the repository at declared_base.base_commit
+    the canonical Review records, including this CandidateSnapshot
+    the required authority / Context material
+
+and WITHOUT:
+    .workline/runtime/**
+    the original mutable working tree
+    any future K1
+
+a reader MUST be able to reproduce the exact frozen result artifact.
+
+If it cannot, the Candidate is not validly reconstructible, and no substitute Candidate is
+created silently.
+```
+
+Reconstruction never depends on K1. F2's ordering — Candidate → isolated verification and Review →
+authorization → F3's publication topology — is preserved, and moving K1 earlier is explicitly **not** how this
+requirement is met: that would invert the authorization boundary and is an F3 architecture change.
+
+**Where the bytes live, and only there.** The canonical payload bytes live in `CandidateSnapshot.material` and are
+not duplicated into every Review record. The TaskInput and the request envelope continue to bind the Candidate and
+its provenance by reference and digest, exactly as the existing P1 and F2 model does; a digest is acceptable
+*there* precisely because the actual reconstruction material exists canonically in the snapshot. What is
+prohibited is digest-only with no canonical material anywhere.
+
+No contract-level maximum payload size is imposed. If a later implementation needs an operational size or
+capability policy, it is designed separately and may not destroy this clone-safe reconstruction guarantee.
+
+### 9.7 Mismatch behaviour
+
+```text
+snapshot missing, unreadable, or not a Work Candidate snapshot     fail closed
+material_contract absent, unknown or of another version            fail closed
+material.candidate does not digest to the Run's candidate_hash     fail closed
+reconstruction_mode is not "snapshot"                              fail closed
+projection_semantics_version is not this contract's                fail closed
+payload coverage is not the closed correspondence of §9.4.1        fail closed
+a payload is not canonical Base64 under §9.4.2                     fail closed
+a payload's decoded SHA-256 or Git blob identity disagrees with
+  its Candidate entry (§9.5)                                       fail closed
+payloads are not ordered by path UTF-8 bytes (§9.4.3)              fail closed
 a later well-formed replacement of the snapshot that happens to
-  reproduce the same candidate_hash                               a Review-validity material
-                                                                  change (R3 §5); never silently
-                                                                  reused
+  reproduce the same candidate_hash                                a Review-validity material
+                                                                   change (R3 §5); never silently
+                                                                   reused
 ```
 
 Every one of these is `reconcile_required`; none degrades to a weaker Review contract, and none allocates a
@@ -853,10 +1018,27 @@ Frozen minimum semantics:
 V-1  target            The verification target is the EXACT frozen Candidate - the artifact
                        identified by candidate_hash - and nothing else.
 
-V-2  reconstruction    The workspace is materialized from canonical, clone-safe material: the
-                       Candidate snapshot (§9.2) and the committed state of
-                       declared_base.base_commit. Mutable runtime cache is never the sole
-                       source, and never authority.
+V-2  reconstruction    The workspace is materialized from canonical, clone-safe material and
+                       from nothing else:
+
+                           declared_base.base_commit          the committed base tree
+                         + CandidateSnapshot.material         the exact payloads of §9.4
+
+                       and NEVER from: a future K1; the mutable primary working tree; runtime
+                       cache; or any unbound filesystem state. Materialization by kind:
+
+                           file      install the exact decoded payload bytes, at the Candidate
+                                     entry's mode (100644 or 100755)
+                           symlink   reconstruct the exact link object from the target bytes;
+                                     never dereference
+                           gitlink   reconstruct the exact 160000 entry naming new_oid; no
+                                     submodule clone, checkout, branch tip or recursive content
+                                     is required or used
+                           absent    remove that exact path from the base materialization
+                           empty     the base materialization, with no owned result delta
+
+                       The semantic reconstruction result is frozen here; the implementation API
+                       and tooling that produce it are not.
 
 V-3  no substitution   The primary working tree is NEVER silently substituted for the workspace.
                        It may be used only while it is provably still the exact Candidate - every
@@ -1189,12 +1371,12 @@ lifecycle.
 | **F2-D3** result-bearing Candidate | the owned change set only; per-entry path, status, old/new kind, mode and object id, content digest; ordered by path bytes; computable before any commit; the Git tree entry is authoritative and **every** reachable object kind is supported — `100644`, `100755`, `120000` and `160000` gitlink, and their deletion (§6.3, §6.4) | `hash_blob` writes nothing (M-8); `declare_own_content` digests (M-12); a gitlink entry's mode, type and referenced commit come from the tree entry (M-9) | **inherits** P1 R1 §6 and P1 R3 §4 in full, including object kind, mode, deletion, content, symlink and gitlink semantics; amends nothing | F3's K1 delta proof |
 | **F2-D4** empty-artifact Candidate | `artifact_kind: "empty"`, empty `entries`, positive `emptiness_proof`; same base lineage and hashing; mutually exclusive with result-bearing by construction; no fake or synthesized commit | a result-less Work makes no commit (M-13) | inherits F1-D10 Option B and F1's R5 §8 clarification | F3's proof topology when no K1 exists; F1 Gate 2's `Consumption.artifact_kind` |
 | **F2-D5** three projections | artifact content in the Candidate; transition = the two terminal events for this Work, by type and order, no event IDs; metadata = Review bookkeeping and never lifecycle truth or correctness authority (§8) | `projections.normative()` answers no for metadata (M-11); `state.py` has no Review dependency (M-14) | inherits the canonical three-projection boundary | F3 places the transition in a mutation stage |
-| **F2-D6** reconstruction | snapshot mode only; material is the whole Candidate record; `candidate_material_digest` over the snapshot record; builder mode not used (§9) | builder mode demands a deterministic regenerator that executor bytes do not have (M-1) | inherits P1 R1 §6 / R3 §4 / R3 §5 | F4 recovery reads it |
+| **F2-D6** reconstruction | snapshot mode only for Work v1; the material is a versioned envelope (`review-v1-work-snapshot-material-v1`) carrying **both** the exact Candidate identity record **and** the exact clone-safe payload material needed to reproduce the artifact before K1 exists; arbitrary binary is represented losslessly and canonically (`base64-rfc4648-v1`); coverage is a closed correspondence with cross-checks against `content_sha256` and `new_oid`; reconstruction requires no future K1 and no mutable working tree, and succeeds from a fresh clone; **an object id or digest alone is not reconstruction material for newly produced bytes**; `candidate_material_digest` covers the whole envelope, payloads included; builder mode not used (§9) | builder mode demands a deterministic regenerator that executor bytes do not have (M-1); `CandidateSnapshot.material` is an unconstrained mapping (M-1) | **inherits** P1 R1 §6 (a digest alone is never reconstruction material), P1 R3 §4 (binary data represented canonically and exactly) and P1 R3 §5; amends nothing | F4 recovery reads it; F3 publication is unaffected |
 | **F2-D7** Review Context | the record of §10.1; authority = registry + `skills/start` + `skills/review` + `skills/create`; `rules/*` bound through `registry.md`; `git_persistence` bound, checkout capability not (§10) | rules have no `workline-target` (M-7); P2 Context shape (M-6) | inherits the P2 Context pattern and amends nothing: no frozen text binds a Work Context's authority set, so §10.2 defines this kind's own set rather than narrowing P2's, which belongs to different kinds | §14 closure; §16 invalidation |
 | **F2-D8** activation binding | `{record_digest, operation_contract, activation_base_head}` in both Candidate and Context; prefix digest never copied out; the activation-record digest and `work-terminal-activation-digest-v1` are different digests (§11) | F1-D7 defines the prefix digest; the activation record is a normal Review record | inherits F1-D4 and F1-D7 unchanged | §16 invalidation |
 | **F2-D9** reviewer binding | bound at the gate in the TaskInput and the accepted descriptor, never in the START invocation; mismatch is the existing `review_reviewer_mismatch`, at launch and at settlement (§12.1, §12.2) | P2 binds the reviewer at acceptance and refuses with this code | inherits F1-D2/F1-D3 (which forbid binding it in the invocation) and the P2 gate pattern | F4 recovery comparisons |
 | **F2-D10** request envelope | the record of §12.3; Candidate and Context carried whole; reviewer identity absent; no runtime identity anywhere (§12.3, §12.4) | P1 `TaskInput` fields suffice unchanged (M-2) | inherits P1 R3 §4 minimum binding | F4 reconstruction |
-| **F2-D11** Evidence execution | Evidence is Workline's own named checks (§13.2) plus the **isolated verification of §13.4, which is a P3 responsibility**, never the reviewer's report; verification targets the exact frozen Candidate, reconstructs from canonical clone-safe material, never silently substitutes the primary working tree, and binds Candidate / Context / Policy / verifier / coverage identity; the payload's canonical digest is bound through `GateGeneration.evidence_digest` and no new record kind is introduced (§13.3–§13.5) | Candidate 7 §15 assigns isolated verification to P3, and the Repair Loop, dependency-class completeness and isolated Integration to P4; the gate already separates `evidence_digest` from the report and adjudication digests (M-3) | inherits P1 R11 and the P2 evidence-record shape | P4 owns completeness improvements, the repair loop, Evidence reuse expansion and isolated Integration — not this verifier boundary |
+| **F2-D11** Evidence execution | Evidence is Workline's own named checks (§13.2) plus the **isolated verification of §13.4, which is a P3 responsibility**, never the reviewer's report; verification targets the exact frozen Candidate, reconstructs it from `declared_base.base_commit` plus the exact `CandidateSnapshot.material` payloads of §9.4 and from nothing else (V-2), never silently substitutes the primary working tree, and binds Candidate / Context / Policy / verifier / coverage identity; the payload's canonical digest is bound through `GateGeneration.evidence_digest` and no new record kind is introduced (§13.3–§13.5) | Candidate 7 §15 assigns isolated verification to P3, and the Repair Loop, dependency-class completeness and isolated Integration to P4; the gate already separates `evidence_digest` from the report and adjudication digests (M-3) | inherits P1 R11 and the P2 evidence-record shape | P4 owns completeness improvements, the repair loop, Evidence reuse expansion and isolated Integration — not this verifier boundary |
 | **F2-D12** dependency completeness | the declaration of §13.6 in R11's fifteen classes; completeness may be **unknown** at this contract version. Fresh use for the exact Candidate it was produced for is **allowed**; cross-Candidate reuse is **refused**; reuse across a HEAD advance is **refused while unknown**. `unknown` is never read as invalid Evidence and never as reusable anyway | live `EvidenceDeclaration` / `completeness()` (M-10) | inherits P1 R11 §3–§10 and its unknown/reuse distinction | §14.4's consequence; P4 may later prove completeness |
 | **F2-D13** ReviewValidityClosure | specialize the live P1 closure, no second system; the surface and provenance contents of §14.2; bound by digest inside the Evidence record, so it reaches the gate and the Receipt without a new record kind | `closure.py` complete and unused (M-10) | inherits P1 R6; notes that live field naming, not R6 §2's sketch, is the shape | F4 |
 | **F2-D14** HEAD advancement | the predicate stays defined and P3-owned: L1 Git-write compatibility **and** L2 `may_reuse == reusable`. While completeness is unknown the positive branch is unreachable, so an intervening advance freezes a new Candidate against the new HEAD and verifies afresh — a valid fail-closed v1, not a removal of the fast-path architecture (§14.4) | `_head_advanced_independently` is L1 only; `may_reuse` refuses on unknown (M-10) | inherits P1 R6 §9/§10 | F4 decides what happens after a mismatch; a later version reaching the positive branch needs no architectural change |
