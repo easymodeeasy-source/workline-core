@@ -60,7 +60,7 @@ implementation lands are listed in §23 and are not written by this document.
 P1 R1-R12          inherited; specialized, never weakened
 P2 integration     inherited; the publication barrier is preserved exactly (§12)
 P3 F1              inherited without change (F1-D1 ... F1-D11)
-P3 F2              inherited EXCEPT the four explicit forward amendments of §1.5
+P3 F2              inherited EXCEPT the five explicit forward amendments of §1.5
                    (F2-D1 ... F2-D17 otherwise unchanged)
 F3                 this document: physical topology, proof, publication, terminal stage
 F4                 deferred (§25)
@@ -70,7 +70,7 @@ Where F3 appears to say something an earlier freeze also says, F3 is a **special
 never widens. Every apparent collision was audited item by item in §22.
 
 ```text
-F3 semantic forward amendments: YES - four, all to landed F2, all stated in §1.5.
+F3 semantic forward amendments: YES - five, all to landed F2, all stated in §1.5.
 ```
 
 They are declared there in full, with the exact superseded sentences and the narrow replacement.
@@ -79,7 +79,7 @@ same discipline F1 used for its amendments to P1 R4 and R5.
 
 ### 1.4 F1 and F2 decisions F3 preserves without change
 
-Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the four
+Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the five
 statements named in §1.5, and nothing else.
 
 ```text
@@ -110,7 +110,7 @@ the invalidation boundary                                                       
 
 ### 1.5 Forward amendments to landed F2
 
-F3 supersedes four statements of the landed F2 contract. Each is named exactly, with the sentence
+F3 supersedes five statements of the landed F2 contract. Each is named exactly, with the sentence
 superseded, the replacement, and why the two cannot both stand. **The F2 file is not edited.** This is the
 mechanism F1 §11.3 already used for P1 R4 §2 and R5 §8: the amendment is declared in the new contract, and
 the historical freeze keeps its bytes.
@@ -321,6 +321,18 @@ F2 §10.3 says
 F3 supersedes the first sentence, by the exact mechanism the last sentence names.
 ```
 
+It supersedes F2 §10.1's exact record as well, because a Context field cannot be added to a frozen exact
+schema without doing so:
+
+```text
+F2 §10.1 freezes the Work Review Context as an EXACT record at version 1, with nine named fields,
+and the P1 reader is strict about unknown fields.
+
+F3 supersedes it with the complete version 2 record of §7.9.6: the same nine fields, unchanged in
+name, order and meaning, plus exactly one new field `review_checkout_capability`. A version 1
+Context is not a Context of this contract version.
+```
+
 The narrow replacement, frozen in §7.9:
 
 ```text
@@ -350,6 +362,43 @@ allowed to change persistence semantics, which is what §7.4.1 established.
 **Why this is an amendment and not a reinterpretation.** §10.3 states the exclusion as a decision, gives
 its reason, and names "a Context version change" as what a later version must do to add it. F3 does
 exactly that, and says so, rather than reading the exclusion as if it had been conditional all along.
+
+---
+
+#### A-5 — F2 §6.2: the reviewed surface excludes the canonical Review namespace
+
+```text
+F2 §6.2 says
+
+    "The reviewed surface is exactly `result_paths ∪ deleted_paths` as the executor declared
+     them — the same owned set START protects with declare_own_content and commits by exact
+     path."
+
+F3 supersedes it by ONE exclusion, and nothing else:
+
+    a review-v1 Work may not declare a result path or a deletion path inside the canonical
+    Review namespace (`.workline/review/**`). A declared owned set containing one cannot be
+    projected to a Candidate, and is refused with the existing `review_candidate_unavailable`
+    (F2 §6.5).
+```
+
+**Why both cannot stand.** Measured (M-26): with the canonical Review checkout rule in the base tree, a
+file staged inside `.workline/review/**` comes out with its bytes normalized, because `eol=lf` applies at
+check-in. So for a Candidate entry in that namespace, `Candidate.new_oid` and the committed object would
+differ, and the storage-identity invariant — the thing the whole pin architecture exists to guarantee —
+would break. F2 §6.2's unrestricted surface and that invariant cannot both hold once the Review namespace
+carries the rule that makes Review records durable.
+
+**Why the exclusion is not an invented post-executor prohibition.** Checked against primary sources, and
+the gap is real: `completion_precheck` applies no namespace restriction, `declare_own_content` takes any
+path, and no landed rule excludes the namespace — which is exactly why this is declared as an amendment
+rather than assumed. What makes the refusal lawful is that the namespace is already Review's own, by
+landed design: `REVIEW_SUBDIRS` closes it, `require_review_record_path` guards it, and a canonical Review
+record is immutable and written only through `create_file`, with live code refusing a `write_file` to a
+Review path outright (R1 §8). A Work result landing there would write a Review-namespace file through the
+one route that bypasses every one of those controls — the Work forging the records that authorize the
+Work. That is malformed in F2 §6.5's own sense, and it is a different thing from an executor-authored
+`.gitattributes`, which is an ordinary project file a Work may legitimately maintain (§7.4.1).
 
 ---
 
@@ -557,6 +606,43 @@ M-21  The live committed-attribute evaluation already demonstrates full source c
       `GIT_ATTR_NOSYSTEM=1`, `GIT_CONFIG_NOSYSTEM=1`, an empty `GIT_CONFIG_GLOBAL`, an empty
       `core.attributesFile`, and every `GIT_*` variable stripped from the environment. The same
       technique neutralizes the system and global attribute sources for a commit.
+
+M-25  THE COMPATIBILITY ALIAS `crlf` IS MATERIAL, AND SO IS `eol` ALONE. MEASURED, git 2.54.
+      Each rule below was placed in the BASE tree, and a CRLF file was staged under the full pin
+      with core.autocrlf=false and core.eol=lf. "RAW" means the staged object equalled
+      `git hash-object --no-filters`, i.e. Candidate.new_oid.
+
+          *.txt text            CHANGED   material
+          *.txt crlf            CHANGED   material   <- the alias the five-name set missed
+          *.txt crlf=input      CHANGED   material
+          *.txt eol=crlf        CHANGED   material   <- `eol` alone bites, without `text`
+          *.txt -crlf           RAW       safe (an unset)
+          *.txt -text           RAW       safe (an unset)
+          *.txt binary          RAW       safe (built-in macro -> -diff -merge -text)
+
+      Two frozen conclusions. `crlf` must be in the parsed surface, or `generated/** crlf` escapes
+      it. And `binary` is safe despite being a macro, because its built-in expansion only UNSETS
+      text — so the macro rule of §7.8.2 must distinguish the built-in `binary` from a
+      user-defined `[attr]` macro rather than refusing the word.
+
+M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, git 2.54.
+      With `skills/review`'s form-L line in the base tree:
+
+          .workline/review/** !text eol=lf -filter -ident -working-tree-encoding
+
+      a CRLF file staged at `.workline/review/gates/x.yaml` under the full pin came out CHANGED,
+      not RAW. So `eol=lf` normalizes on check-in even with `text` unspecified.
+
+      This is decisive for §7.8.4: the canonical Review safety rule and the storage-identity
+      invariant can only coexist if no Candidate entry ever lies inside the Review namespace.
+      That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
+      than merely exempting the rule from the parser.
+
+M-27  `GATE_STATUSES` is exactly `("open", "sealed_authorized")` (review/records.py:48-50), and
+      `GateGeneration` has no reason, detail or failure field: an open generation carrying a
+      receipt_id is refused, and only a seal names an authorized_operation_stage. So a
+      "Run ends unsealed with the reason recorded" state does not exist in the landed schema, and
+      §7.9.5 freezes what actually happens instead of inventing one.
 
 M-23  THE PIN DOES NOT COVER core.autocrlf / core.eol. MEASURED, git 2.54.
       `core.autocrlf` is CONFIGURATION, not an attribute, so pinning the attribute source does
@@ -1143,7 +1229,7 @@ Its behaviour is frozen as the contained commit primitive, identical in mechanis
 primitive (M-6) and carrying a **distinct identity**:
 
 ```text
-attribute   attr.tree = <the tree of declared_base.base_commit>, on BOTH invocations
+attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.1>, on BOTH invocations
 source      GIT_ATTR_NOSYSTEM=1, core.attributesFile = a Workline-owned empty file,
             GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL = that same empty file,
             every GIT_* variable stripped from the inherited environment
@@ -1176,6 +1262,56 @@ THE STAGING-BYTE CONTRACT, frozen, and this is what the whole primitive exists t
                        ==  the committed object after contained_commit
 
 for every supported Work result, with no exception and no "usually".
+```
+
+#### 7.1.1 The two bases, and why they are one persistence basis
+
+An earlier draft said "every commit this operation makes, including S-c0, pins to
+`declared_base.base_commit`". That is **circular** and is withdrawn: `declared_base.base_commit` is HEAD
+*after* S-c0 (amendment A-1), so S-c0 cannot pin to a commit that does not exist until S-c0 has finished.
+
+```text
+PRE_S_C0_BASE   the exact committed HEAD immediately before S-c0 is recorded.
+                It is a commit that already exists, so there is nothing circular about it.
+
+S-c0                            pins to PRE_S_C0_BASE
+declared_base.base_commit       = the exact post-S-c0 HEAD
+generation commits 1 / 2 / 3    pin to declared_base.base_commit
+every pre-completion Work commit
+S-c1, S-c2                      pin to declared_base.base_commit
+
+When S-c0 is not recorded at all — the event log already matches HEAD — PRE_S_C0_BASE and
+declared_base.base_commit are the same commit and the distinction collapses.
+```
+
+**Why this is semantically ONE persistence basis, and not two.** The premise has to be guaranteed, not
+assumed, so F3 freezes the restriction that makes it true:
+
+```text
+S-c0 COMMITS THE EVENT LOG AND NOTHING ELSE.
+
+    its path set is exactly { .workline/events/events.jsonl }, and a stage recorded under the
+    name <W>:entry:<n> whose payload names any other path is refused before it is applied.
+
+Therefore S-c0 cannot add, remove or modify ANY attribute source: not the root .gitattributes,
+not a nested one, not .git/info/attributes (which is outside the tree entirely and is not a
+committed path at all).
+
+Therefore the attribute-source tree of PRE_S_C0_BASE and that of declared_base.base_commit are
+IDENTICAL with respect to every attribute source: the two trees differ only at the event log,
+which is not an attribute source and matches no attribute pattern that the entry predicate of
+§7.8 permits to exist.
+
+So the entry predicate, proven once over PRE_S_C0_BASE, holds unchanged over
+declared_base.base_commit, and the two pins denote the same attribute state. One basis,
+named twice because the commit ids differ.
+```
+
+```text
+The entry predicate of §7.8 is evaluated over PRE_S_C0_BASE, because that is the tree that
+exists when the entry decision is made. Its conclusion carries to declared_base.base_commit by
+the argument above, and §7.3's per-commit preflight re-proves it under each commit's own pin
+regardless.
 ```
 
 The attribute-source pin is the part that is new in this contract version, and §7.6 is why it exists. It
@@ -1396,8 +1532,9 @@ The architecture that actually removes the refusal is the attribute-source pin o
 works is measured, not argued (M-20):
 
 ```text
-Every commit this operation makes runs with attr.tree pinned to the tree of
-declared_base.base_commit, with the system and global attribute sources neutralized.
+Every commit this operation makes runs with a pinned attribute source — S-c0 to PRE_S_C0_BASE,
+every later commit to declared_base.base_commit, which §7.1.1 proves is the same attribute state —
+with the system and global attribute sources neutralized.
 
 Therefore the persistence semantics this operation commits under are FIXED, at the base, before
 the executor runs — the same base the Candidate's object identities were computed against.
@@ -1571,8 +1708,9 @@ with K1.
 The pin closes this by the same mechanism, applied to the same complete surface:
 
 ```text
-EVERY commit this operation makes is pinned, and every persistence evaluation this operation
-makes is evaluated UNDER THE PIN, over exactly the paths that commit writes:
+EVERY commit this operation makes is pinned — S-c0 to PRE_S_C0_BASE and every later commit to
+declared_base.base_commit (§7.1.1) — and every persistence evaluation this operation makes is
+evaluated UNDER THAT SAME PIN, over exactly the paths that commit writes:
 
     S-c0                        the event log
     generation 1 / 2 / 3        .workline/review/candidate-snapshots/**
@@ -1591,8 +1729,8 @@ the two disagreeing, which is the defect M-22 names.
 ```text
 The base-tree condition, proven once at entry and re-proven before each commit under the pin:
 
-    no filter, ident or working-tree-encoding attribute applies, under the pinned source, to any
-    path this operation will write — result paths, Review record paths, the event log and the
+    no material attribute — filter, ident, working-tree-encoding, text, eol (and the alias crlf) —
+    applies, under the pinned source, to any path this operation will write — result paths, Review record paths, the event log and the
     Consumption path alike.
 
 A base tree that assigns none of those three attributes to anything satisfies this for every path
@@ -1713,48 +1851,166 @@ Rules that must not escape, and that a path-wise probe at entry would miss entir
 The predicate is therefore frozen over the **attribute source itself**, which is finite, and not over
 paths, which are not.
 
-#### 7.8.2 The frozen supported shape
+#### 7.8.2 The complete byte-transform surface, and the supported source shape
+
+The previous draft's five-name set was incomplete. The exact frozen surface, with every name classified
+and every compatibility alias expanded before it is judged (M-23, M-25):
 
 ```text
-THE MATERIAL ATTRIBUTES, and this list is exactly the staging-byte surface of M-23 and M-24:
+CANONICAL MATERIAL ATTRIBUTES — an assignment of any of these changes stored bytes
 
-    filter    ident    working-tree-encoding    text    eol
+    text                        check-in normalization
+    eol                         MEASURED material on its own, without `text` (M-25)
+    working-tree-encoding       re-encoding
+    filter                      clean / process / LFS driver
+    ident                       $Id$ expansion
 
-THE SOURCES, enumerated completely and finitely at entry:
+COMPATIBILITY ALIASES — the backwards-compatible spellings, expanded to canonical form BEFORE
+the decision, never matched as opaque words
 
-    every .gitattributes blob in the base tree, at the root and at EVERY nested depth, found by
-      enumerating the tree rather than by guessing at locations;
-    .git/info/attributes;
-    the system and global sources, which the primitive neutralizes (M-21) and which are proven
-    neutralized rather than assumed.
+    crlf                        ==  text
+    -crlf                       ==  -text          (an unset: SAFE)
+    crlf=input                  ==  eol=lf
+    binary                      ==  -diff -merge -text   built-in macro; only UNSETS text: SAFE
 
-THE SUPPORTED SHAPE. Across all of those sources, taken together:
+CONFIG VARIABLES — not attributes at all, so the attribute pin does not reach them; the primitive
+neutralizes them on every invocation (§7.1)
 
-    no line ASSIGNS or SETS any material attribute
-        refused:  `*.txt text`, `text=auto`, `eol=lf`, `*.bin filter=lfs`, `ident`,
-                  `working-tree-encoding=UTF-16`
-    an explicit UNSET or UNSPECIFIED of a material attribute is PERMITTED
-        allowed:  `* -text`, `-filter`, `!text`
-        because unset provably means "no transform", and refusing it would refuse the SAFEST
-        configuration a repository can have, which would be perverse;
-    NO macro definition exists at all
-        refused:  any `[attr]name ...` line, anywhere in any source.
-        A macro can expand to a material attribute, so permitting macros would require expansion
-        analysis; this contract version does not do that analysis and refuses the construct
-        instead of reasoning about it.
-
-Anything the parser cannot classify — an unreadable blob, a line it does not understand, a
-source it cannot enumerate — is a REFUSAL. Not knowing is not a yes.
+    core.autocrlf               MEASURED material (M-23)
+    core.eol                    neutralized with it; material for checkout semantics
 ```
 
 ```text
-This is deliberately a NARROW SUPPORTED SHAPE, which the re-review names as an acceptable
-approach. It over-refuses: a base tree with `docs/** text` is refused even though no Work result
-may ever land under docs/. That is a stated availability cost, never a correctness one, and it
-is decided at START ENTRY where a knowable condition belongs (F2 §20.17).
+`crlf` is the name the previous draft missed, and it is exactly the escape the re-review named:
+`generated/** crlf` assigns text normalization to a path that does not exist yet, and a parser
+that knows only the five canonical names would pass it. Measured CHANGED (M-25).
 ```
 
-#### 7.8.3 Defence in depth, not a substitute
+**The supported source shape**, over every source enumerated in §7.8.3:
+
+```text
+RULE 1 — ordinary paths
+    no rule may ASSIGN or SET any canonical material attribute, after alias expansion, to any
+    pattern that can match a path outside the canonical Review namespace.
+        refused:  `*.txt text`, `text=auto`, `eol=lf`, `eol=crlf`, `*.bin filter=lfs`, `ident`,
+                  `working-tree-encoding=UTF-16`, `generated/** crlf`, `**/*.txt crlf=input`
+
+RULE 2 — explicit unsets are permitted
+        allowed:  `-text`, `-crlf`, `-filter`, `-ident`, `!text`, and `binary`
+    An unset provably means "no transform", and refusing it would refuse the safest configuration
+    a repository can have. `binary` is permitted by its built-in expansion, measured RAW (M-25),
+    and is the one macro word the parser resolves rather than refuses.
+
+RULE 3 — user-defined macros are refused
+        refused:  any `[attr]name ...` definition, anywhere in any source, and any use of a name
+                  so defined.
+    A user-defined macro can expand to a material attribute; this contract version does not do
+    expansion analysis and refuses the construct. The built-in `binary` is not a definition and
+    is handled by RULE 2.
+
+RULE 4 — the canonical Review namespace is the one place an assignment is REQUIRED
+    See §7.8.4. The form-L rule is not merely tolerated there; the capability claim of §7.9
+    requires it.
+
+Anything the parser cannot classify — an unreadable blob, a line it does not understand, a source
+it cannot enumerate, an alias it does not recognize — is a REFUSAL. Not knowing is not a yes.
+```
+
+```text
+This is deliberately a NARROW SUPPORTED SHAPE. It over-refuses: a base tree with `docs/** text`
+is refused even though no Work result may ever land under docs/. That is a stated availability
+cost, never a correctness one, and it is decided at START ENTRY where a knowable condition
+belongs (F2 §20.17).
+```
+
+#### 7.8.3 The sources, enumerated completely
+
+```text
+every .gitattributes blob in PRE_S_C0_BASE, at the root and at EVERY nested depth, found by
+  enumerating the tree rather than by guessing at locations;
+.git/info/attributes;
+the system and global sources, which the primitive neutralizes (M-21) and which are proven
+  neutralized rather than assumed.
+```
+
+By §7.1.1 the conclusion carries unchanged to `declared_base.base_commit`.
+
+#### 7.8.4 The reserved canonical Review namespace (R21, amendment A-5)
+
+The canonical Review safety rule that `skills/review` freezes is itself an **assignment**:
+
+```text
+.workline/review/** !text eol=lf -filter -ident -working-tree-encoding
+```
+
+So RULE 1, applied blindly, would refuse exactly the configuration that makes canonical Review records
+durable — and would make every P2-capable Project incompatible with P3 Work Review. The two must coexist,
+and the measurement says how they cannot:
+
+```text
+MEASURED (M-26): with that rule in the base tree, a CRLF file staged at
+`.workline/review/gates/x.yaml` under the full pin came out CHANGED, not RAW.
+
+So `eol=lf` normalizes on check-in. If a Candidate entry ever lay inside the Review namespace,
+the committed object would differ from Candidate.new_oid and the storage-identity invariant
+would break. Exempting the rule from the parser alone is therefore NOT sufficient.
+```
+
+The frozen distinction:
+
+```text
+A. ORDINARY / RESULT PATH PERSISTENCE SEMANTICS
+   governed by RULE 1: no material assignment, so Candidate.new_oid == index oid == committed oid
+   holds absolutely.
+
+B. THE RESERVED CANONICAL REVIEW NAMESPACE  (.workline/review/**)
+   the form-L assignment is PERMITTED and REQUIRED there (§7.9). Nothing this operation stores
+   under the pin lies in that namespace except the canonical Review records themselves, which
+   Workline writes as canonical LF bytes through the P1 serializer — so `eol=lf` is a no-op on
+   them by construction, not by luck.
+
+   A rule in this namespace is permitted only when its pattern is CONFINED to it: a pattern that
+   can also match a path outside the namespace is judged by RULE 1, as an ordinary rule.
+```
+
+**What makes B sound is an ownership rule that does not yet exist in primary sources.** Checked, and
+stated rather than assumed:
+
+```text
+There is NO landed rule excluding .workline/review/** from Work result paths. completion_precheck
+checks existence, tracked-ness, must_update, realizes and dependency satisfaction, and no
+namespace at all; declare_own_content takes any path; F2 §6.2 says the reviewed surface is
+"exactly result_paths U deleted_paths as the executor declared them", with no exclusion.
+
+So F3 does not get to assume the namespace is reserved. It freezes the exclusion explicitly, as
+forward amendment A-5 (§1.5).
+```
+
+```text
+FROZEN: a review-v1 Work may not declare a result path or a deletion path inside the canonical
+Review namespace. A declared owned set containing one cannot be projected to a Candidate, and is
+refused with the existing `review_candidate_unavailable` (F2 §6.5).
+```
+
+**Why this refusal is lawful where the `.gitattributes` refusal was not.** The earlier draft called an
+executor-authored `.gitattributes` malformed without authority, and that was correctly rejected. This is a
+different case and the authority is citable:
+
+```text
+the canonical Review namespace is Review's own bookkeeping, closed by REVIEW_SUBDIRS and
+  require_review_record_path;
+a canonical Review record is immutable and is written ONLY through create_file, which never
+  updates one — live code refuses a write_file to a Review path in so many words (R1 §8);
+so a Work result landing there would write a Review-namespace file through the one path that
+  bypasses every control the Review system has, and it would be the Work forging the records
+  that authorize the Work.
+
+That is malformed in F2 §6.5's own sense — a declared owned set that cannot be projected exactly
+— and not an ordinary correct outcome whose shape is being refused. .gitattributes is an ordinary
+project file a Work may legitimately maintain; a gate generation record is not.
+```
+
+#### 7.8.5 Defence in depth, not a substitute
 
 ```text
 After the source parse passes, the entry check ALSO evaluates `check-attr` under the pinned
@@ -1793,25 +2049,13 @@ A Candidate that introduces such attributes REMAINS FULLY EXPRESSIBLE. It is fro
 material is built, it is verified and it is reviewed, exactly like any other Candidate. Nothing
 about the executor's result is refused, so F2 §2.3 and §20.17 are untouched.
 
-What it cannot do is receive AUTHORIZATION:
-
-    SEAL PRECONDITION, added to the seal prerequisites of F2 §15.3:
-
-        the RESULTING TREE preserves canonical Review checkout capability for the canonical
-        Review namespace.
+What it cannot do is receive AUTHORIZATION: the seal cannot issue a Receipt unless the capability
+claim of §7.9.3 holds over the RESULTING TREE.
 
     resulting tree = the base tree with this Candidate's entries applied — every changing entry
                      at its new kind, mode and object id, every deletion absent. It is fully
                      determined by the Candidate and declared_base, so it is computable BEFORE
-                     K1 exists, which is what lets this be a seal condition at all.
-
-    the proof     = the committed attribute evaluation of M-21, run with --source = that
-                    resulting tree, inside the contained scratch repository, over the canonical
-                    Review record paths of this Run plus the Consumption path: no material
-                    attribute (§7.8.2's five) applies to any of them.
-
-    failure       = the Review does not seal. No Receipt is issued, no terminalization is
-                    authorized, and the Run ends unsealed with the reason recorded.
+                     K1 exists and before the Review is even launched.
 ```
 
 ```text
@@ -1822,32 +2066,203 @@ Candidate; it does not require that every expressible Candidate be authorizable 
 rejecting a Candidate is the ordinary case of exactly that.
 ```
 
-#### 7.9.3 What the proof covers
+#### 7.9.3 The capability claim — the canonical form-L rule, reused verbatim (R19)
+
+The previous draft defined success as "no material attribute applies under a neutralized test config".
+**That is withdrawn**: it proves nothing about an actual fresh clone, which runs with the person's own
+configuration, and this contract has itself measured that `core.autocrlf` changes bytes (M-23).
+
+F3 therefore does **not** invent a proof. It reuses the canonical one, **the same exact form-L rule**
+that `skills/review` already freezes for P2:
 
 ```text
-root .gitattributes             covered: it is part of the resulting tree
-nested .gitattributes           covered at every depth: the resulting tree is enumerated, not
-                                sampled, so a rule the executor added deep in the tree counts
-newly ADDED .gitattributes      covered: it is an entry of the Candidate, so it is in the
-                                resulting tree
-DELETED .gitattributes          covered, and this direction matters too: deleting a source can
-                                UNCOVER a rule from a parent directory that the deleted file had
-                                overridden. The proof is over the resulting tree as a whole, so
-                                it sees the net effect rather than the diff
-text / eol                      material (M-24); a `text` rule over .workline/review/** would
-                                normalize record bytes on checkout
-filter / ident /
-working-tree-encoding           material, for the same reason
-fresh clone semantics           the evaluation is `--source=<resulting tree>` inside a scratch
-                                repository with system and global sources neutralized, which is
-                                exactly what a fresh clone of that tree evaluates. It is not the
-                                current working tree and not this machine's configuration
+THE REQUIRED RULE, verbatim from skills/review (Checkout capability):
+
+    .workline/review/** !text eol=lf -filter -ident -working-tree-encoding
+
+THE REQUIRED PRINTED FORM, verbatim:
+
+    form L   text: unspecified   eol: lf   filter: unset   ident: unset   working-tree-encoding: unset
+
+THE FOUR PROOF LAYERS, all required, verbatim in structure from skills/review, with the tree
+under test being the RESULTING TREE rather than HEAD:
+
+  1. the raw bytes of the resulting tree's root .gitattributes, read from the committed object,
+     contain no NUL and their LAST attribute rule is exactly that line;
+  2. the resulting tree holds no entry under .workline/ whose name folds to .gitattributes;
+  3. the evaluation of the resulting tree's committed .gitattributes ALONE prints form L;
+  4. this repository's effective evaluation — info/attributes, attribute-source substitution,
+     global and system included — prints form L, and no filter driver named `unset` is
+     configured.
+
+    failure at any layer -> review_checkout_unsafe
+    undeterminable       -> review_checkout_unknown
 ```
 
-#### 7.9.4 This requires a forward amendment — A-4
+**Why this proves actual fresh-clone bytes and the previous formulation did not.** `eol=lf` is an explicit
+assignment, so checkout produces LF **regardless of the reader's `core.autocrlf` or `core.eol`**; it does
+not depend on the absence of configuration, which is the thing a fresh clone cannot promise. `!text` keeps
+check-in from normalizing, and the three unsets keep filters, ident expansion and re-encoding away. That
+is why the canonical rule assigns rather than merely leaving things unspecified, and it is why F3 adopts it
+unchanged instead of substituting a weaker "nothing applies" test.
+
+```text
+The word "unspecified" printing in form L proves nothing on its own — a literal `filter=unset`
+prints the same word — which is exactly why layers 1 and 3 read the committed bytes and evaluate
+the committed source, and not only the printed result. F3 inherits that reasoning with the rule.
+```
+
+#### 7.9.4 The complete path surface the claim must cover (R20)
+
+The previous draft covered only this Run's record paths plus the Consumption path. **Too narrow**: a
+Candidate can leave this Run untouched and still corrupt an OLDER canonical Review record on fresh
+checkout.
+
+```text
+THE COVERED SURFACE, frozen:
+
+  1. EVERY canonical Review record path present in the RESULTING TREE, enumerated from that tree
+     over the closed Review namespace (REVIEW_SUBDIRS: gates, receipts, consumptions,
+     supersessions, candidate-snapshots, task-inputs, activation) — every Run's records, not
+     this one's;
+
+  2. the paths this seal is about to create: the sealing generation record and the Receipt;
+
+  3. the Consumption path this authorization may later create, whose identifier is already
+     reserved (§13.2).
+
+Because the required rule is a single pattern over `.workline/review/**`, proving it covers the
+whole namespace at once — including record paths that do not exist yet, which is the same reason
+the entry predicate is over the source rather than over paths (§7.8.1).
+```
+
+```text
+SECOND CONDITION, and it is separate from attributes: every canonical Review record present in
+the RESULTING TREE must still read under P1's strict reader.
+
+    `skills/review` already makes this a precondition of writing any Review record
+    (`review_namespace_unreadable`), evaluated over the Project. F3 evaluates the same condition
+    over the RESULTING TREE, because that is the state this authorization would bring about.
+
+    This is what catches a Candidate that writes bytes at a Review path — which §7.8.4 refuses at
+    Candidate projection anyway, so the two are belt and braces rather than one control.
+```
+
+#### 7.9.5 What happens when the capability proof fails (R23)
+
+The previous draft said the Run "ends unsealed with the reason recorded". **No such state exists**:
+`GATE_STATUSES` is exactly `("open", "sealed_authorized")`, `GateGeneration` has no reason field, an open
+generation carrying a `receipt_id` is refused, and only a seal names an `authorized_operation_stage`
+(M-27). F3 does not invent a state. What is frozen:
+
+```text
+NO new generation is written. Generation 2 — the settlement — remains the latest generation of
+  the Run, and it is `open`. The gate chain is left exactly as it was.
+
+NO Receipt is issued. NO authorization exists. NO Consumption is created. NO K1 is made, and
+  nothing is published.
+
+THE FAILURE IS AN OPERATION RESULT, NOT A REVIEW RECORD. It is the STOP of the owning operation
+  — review_checkout_unsafe, or review_checkout_unknown when undeterminable — carried in the
+  operation's own result and in the mutation's runtime metadata. No canonical Review record
+  states it, because none of them can.
+
+RECOVERY IS AN ORDINARY RETRY. The proof is deterministic over the resulting tree, so a retry
+  re-evaluates it and reaches the same answer until something changes. What can change it: the
+  person adds the canonical rule to the Project, or the Work's own result changes, which is a
+  different Candidate and therefore a different Run.
+
+PERMANENT SET-ASIDE IS DEFERRED. Whether an unsealable Run is invalidated, superseded or left
+  pending is F4's recovery matrix (§25). F3 does not decide it, and writes no invalidation
+  generation to imply it.
+```
+
+```text
+No schema change is required by this disposition, which is why it is freezable inside F3. Had it
+required a durable canonical representation of non-authorization, that would have been a schema
+change outside F3's scope and would have been reported as a blocker instead.
+```
+
+#### 7.9.6 The Work Review Context, version 2 — the complete record (R22)
+
+A-4 previously said only that the Context "gains a claim" and "the version is raised". That is not
+implementation-complete: F2 §10.1 freezes an exact canonical record and the P1 reader is strict about
+unknown fields, so the whole replacement record has to be stated. It is:
+
+```text
+{
+  schema:  "review-work-context"
+  version: 2
+  review_kind:                  "work-result-v1"
+  review_contract:              "review-v1-work-v1"
+  projection_semantics_version: "work-result-projection-v1"
+  adapter_identity:             "work-result-adapter-v1"
+  loader_identity:              <content identity of the running implementation package>
+  authority:                    [ {id, digest} ... ]                     F2 §10.2, unchanged
+  git_persistence:              "review-v1-work-local-v1"                F2 §10.3, unchanged
+  activation:                   <the activation binding of F2 §11>       unchanged
+  review_checkout_capability: {
+      capability_contract:    "review-v1-work-checkout-capability-v1"
+      form:                   "form-L"
+      namespace:              ".workline/review/**"
+      base_tree:              <the full object id of PRE_S_C0_BASE's tree>
+      base_tree_verdict:      "capable"
+      resulting_tree:         <the full object id of the resulting tree, §7.9.2>
+      resulting_tree_verdict: "capable"
+  }
+}
+```
+
+```text
+schema          unchanged: "review-work-context". The record kind is the same kind.
+version         2. Exactly one field is added to F2 §10.1's nine; the other nine keep their
+                names, their order and their meanings.
+field name      review_checkout_capability
+field type      a mapping of exactly seven keys, all present, none nullable
+field contents  the capability contract identity, the form identity, the namespace the claim is
+                about, and the two tree identities with their verdicts
+serialization   the existing P1 Review serializer, unchanged: mapping keys in ascending code
+                point order at every depth, sequences in given order, UTF-8, LF. The nested
+                mapping is serialized by the same rule at its own depth.
+review_context_hash
+                SHA-256 of the canonical bytes of the whole version 2 record, computed exactly as
+                F2 §10.1 computes it for version 1. The capability field is inside those bytes,
+                so it is bound by the hash and by everything the hash reaches: the gate
+                generations, the TaskInput, the Receipt and the closure.
+version 1       a Context at version 1 is NOT a Context of this contract version. The strict
+rejection      reader refuses a record whose field set does not match its version exactly, so a
+                v1 record cannot silently pass as v2 and a v2 record cannot be read as v1. A Run
+                whose Context is v1 is not a Run of the review-v1 Work contract F3 freezes.
+```
+
+**Timing, and what the seal actually does.** The re-review's ordering question, answered exactly:
+
+```text
+1. The Candidate is frozen first (F2 §5), so `declared_base` and every entry are fixed.
+2. The resulting tree is therefore fully determined BEFORE the Context is built, and before the
+   Review is launched. Its object id is computable at that point.
+3. The Context is built with both verdicts already proven, and becomes IMMUTABLE before
+   generation 1 accepts the task — which is what the TaskInput binds and what the reviewer is
+   shown.
+4. THE SEAL IS A RECHECK, NOT A NEW BINDING. It re-evaluates the four layers of §7.9.3 against
+   the SAME `resulting_tree` object id the Context already bound, and requires the same verdict.
+   It adds no field, changes no Context byte and computes no new review_context_hash.
+
+   If the recheck disagrees with the bound verdict, that is a material change under F2 §16.1 and
+   the seal does not issue a Receipt (§7.9.5).
+```
+
+```text
+So the immutable identity already bound into the Context, and rechecked at seal, is exactly:
+the capability contract identity, the form, the namespace, and the two tree object ids with
+their verdicts. Nothing about the capability is decided for the first time at seal.
+```
+
+#### 7.9.7 This requires a forward amendment — A-4
 
 F2 §10.3 does not merely omit checkout capability; it states its absence and names the mechanism for
-adding it. So this is a declared amendment and not a reinterpretation. See §1.5 A-4.
+adding it. So this is a declared amendment and not a reinterpretation. See §1.5 A-4, and §1.5 A-5 for the
+namespace ownership rule §7.8.4 needs.
 
 ---
 
@@ -3298,7 +3713,9 @@ IP-8  The commit primitive must pass the attribute-source pin on BOTH invocation
       core.attributesFile, GIT_CONFIG_NOSYSTEM=1, an empty GIT_CONFIG_GLOBAL, and a GIT_*-stripped
       environment. The mechanism is already proven live in review/checkout.py:171-215 (M-21); what
       is new is applying it to `git add` and `git commit` rather than only to `git check-attr`.
-      This requires Git >= 2.40, which review-v1 already requires (P2_REVIEW_GIT_MIN).
+      This requires Git >= P3_WORK_ATTR_PIN_GIT_MIN (2.43.0), NOT 2.40: `check-attr --source`
+      at 2.40 does not establish that attr.tree governs `git add` (§7.7.1). The capability
+      probe of §7.7 is the binding authority regardless of the declared floor.
 
 IP-10 The primitive must set core.autocrlf=false and core.eol=lf on both invocations. Measured,
       without them a CRLF result is normalized on check-in even with the attribute pin in place
@@ -3376,7 +3793,7 @@ FC-8   No synthetic, placeholder, empty-string or all-zero commit identity is wr
 FC-9   A Review record is never rewritten; an immutable create that finds different bytes at its
        path is reconcile_required.
 
-FC-10  The attribute source of every commit this operation makes is pinned to the base tree, so
+FC-10  The attribute source of every commit this operation makes is pinned (§7.1.1), so
        committed object identity equals the Candidate's by construction. A transform assigned by
        the PINNED source itself is refused at START entry, before any mutation exists. No
        transform is ever disabled to obtain a pass, and no result the executor produces is ever
@@ -3619,6 +4036,121 @@ authorization, which is not a refusal of a result shape.
 No case is refused after the executor returns for what the executor produced.
 ```
 
+### 21.6 Pinning-boundary case matrix
+
+Columns, for every case: entry decision / Context identity / Candidate expressibility / Review launch
+safety / Review-generation persistence / authorization / K1 existence / K1 identity / terminal safety /
+fresh-clone Review readability / recovery state.
+
+```text
+A. S-c0 EXISTS (entry events not yet committed)
+   entry      predicate proven over PRE_S_C0_BASE; probe passes
+   Context    v2, both tree verdicts capable
+   Candidate  expressible; declared_base.base_commit = post-S-c0 HEAD
+   launch     safe; generation commits pinned to declared_base.base_commit
+   review-gen persisted under the pin
+   auth       granted if the seal recheck passes
+   K1         exists iff artifact_kind = result_commit
+   K1 id      == Candidate.new_oid, by the pin
+   terminal   K2 ordinary; C-2(K2) T1...T12
+   clone      form L holds over the resulting tree
+   recovery   ordinary resume at the earliest unsatisfied checkpoint
+   NOTE       S-c0 pins to PRE_S_C0_BASE, NOT to declared_base.base_commit, which does not yet
+              exist. The circularity the re-review found is resolved in §7.1.1.
+
+B. S-c0 ABSENT (event log already matches HEAD)
+   as A, except PRE_S_C0_BASE == declared_base.base_commit and the distinction collapses. No
+   stage is recorded, nothing is committed, and every later pin names the same tree.
+
+C. BASE CONTAINS A LEGACY `crlf` WILDCARD MATCHING A FUTURE RESULT
+   e.g.       `generated/** crlf`, and the executor later creates generated/out.bin
+   entry      REFUSED, review_git_transform, before the lock. The parser expands crlf == text and
+              refuses the assignment over the SOURCE, so the not-yet-existing path never matters.
+              MEASURED material (M-25).
+   everything else  does not arise: no mutation is opened.
+
+D. BASE CONTAINS THE EXACT CANONICAL REVIEW CHECKOUT RULE
+   e.g.       `.workline/review/** !text eol=lf -filter -ident -working-tree-encoding`
+   entry      PERMITTED, and required by the capability claim. The pattern is confined to the
+              reserved namespace, so RULE 1 does not judge it (§7.8.4).
+   Candidate  expressible; no entry lies in the Review namespace (A-5), so the rule cannot touch
+              any Candidate entry's stored bytes
+   K1 id      == Candidate.new_oid: the rule applies only where no entry is
+   clone      form L holds: this IS the configuration that makes it hold
+   NOTE       this is the case the previous predicate would have refused, making every P2-capable
+              Project incompatible with P3 Work Review.
+
+E. OLD REVIEW RECORDS FROM EARLIER RUNS ARE PRESENT
+   auth       the §7.9.4 surface covers EVERY canonical Review record path in the resulting tree,
+              not just this Run's, so the old records are inside the proof
+   clone      guaranteed for them too, by the same single `.workline/review/**` pattern
+
+F. CANDIDATE ADDS A RULE AFFECTING ONLY AN OLD REVIEW RECORD
+   Candidate  EXPRESSIBLE, frozen, verified, reviewed. Nothing is refused.
+   auth       REFUSED at seal: the resulting-tree evaluation covers that old path (case E) and
+              form L no longer holds there
+   K1         none: seal failed, so no Receipt, no authorization, no K1
+   recovery   §7.9.5 — generation 2 stays latest and open, the failure is an operation STOP, a
+              retry re-evaluates, permanent set-aside is F4's
+   NOTE       this is precisely the case the previous "this Run's paths only" surface missed.
+
+G. CANDIDATE ADDS A NESTED .gitattributes AFFECTING THE REVIEW NAMESPACE
+   Candidate  EXPRESSIBLE
+   auth       REFUSED at seal: layer 2 of §7.9.3 requires the resulting tree to hold NO entry
+              under .workline/ whose name folds to .gitattributes, and layers 1 and 3 read the
+              root source's raw bytes and evaluate the committed source alone
+   recovery   as F
+
+H. CANDIDATE DELETES A NESTED .gitattributes AND UNCOVERS A PARENT RULE
+   Candidate  EXPRESSIBLE
+   auth       decided on the NET effect: the proof is over the resulting tree as a whole, not over
+              the diff, so an uncovered parent rule is seen (§7.9.4). If form L still holds, the
+              seal proceeds; if the uncovered rule breaks it, the seal refuses as in F.
+
+I. WINDOWS-LIKE FRESH CLONE WITH core.autocrlf=true
+   clone      Review records still check out as canonical LF, because `eol=lf` is an explicit
+              ASSIGNMENT and overrides the reader's autocrlf. This is exactly why F3 adopts the
+              canonical form-L rule rather than a "no attribute applies" test, which would have
+              left this case to the reader's configuration (§7.9.3).
+   storage    unaffected: the operation's own commits set core.autocrlf=false (M-23)
+
+J. CONTEXT v2 BYTES BEFORE GENERATION 1
+   timing     the Candidate is frozen first, so the resulting tree and its object id are known
+              before the Context is built; both verdicts are proven then; the Context is immutable
+              before generation 1 accepts the task and is what the TaskInput binds
+   identity   review_context_hash covers review_checkout_capability, so the claim reaches the gate
+              generations, the Receipt and the closure
+   v1         a version 1 Context is not a Context of this contract version; the strict reader
+              cannot confuse them (§7.9.6)
+
+K. SEAL CAPABILITY PASS
+   auth       the recheck agrees with the bound resulting_tree_verdict; the seal issues the
+              Receipt in the ordinary way; no Context byte changes
+
+L. SEAL CAPABILITY FAILURE
+   auth       NO Receipt, NO authorization, NO Consumption, NO K1
+   gate       NO new generation written; generation 2 remains latest and `open`
+   record     none: GATE_STATUSES has no third state and GateGeneration no reason field (M-27),
+              so the failure is an operation STOP (review_checkout_unsafe / _unknown) carried in
+              the operation result and runtime metadata
+   clone      unchanged, because nothing was authorized or committed
+
+M. RECOVERY AFTER SEAL CAPABILITY FAILURE
+   retry      deterministic: the proof is over the resulting tree, so a retry reaches the same
+              answer until something changes
+   changes    the person adds the canonical rule to the Project, or the Work's result changes —
+              which is a different Candidate and therefore a different Run
+   deferred   invalidation, supersession or permanent set-aside of an unsealable Run is F4's
+              recovery matrix; F3 writes no invalidation generation to imply one
+```
+
+```text
+Every case has a determinate outcome. Every refusal is either at START ENTRY on a condition
+knowable before execution (C), or at SEAL on authorization (F, G, H, L) — never a refusal of what
+the executor produced. The one Candidate-projection refusal (a declared path inside the reserved
+Review namespace, §7.8.4) is malformed in F2 §6.5's own sense and is declared as amendment A-5.
+```
+
 ## 22. Consistency audit against P1 / P2 / F1 / F2
 
 Every point at which F3 touches an earlier freeze, classified.
@@ -3693,12 +4225,20 @@ C  true conflict requiring a new forward amendment
     pin and the line-ending configuration are part of the frozen primitive. That is the part
     §10.3 left to F3. §7.1.                                 A
 
-22  F2 §10.3  "Checkout capability is not bound in the Work Context."
+23  F2 §6.2  "The reviewed surface is exactly result_paths U deleted_paths as the executor
+    declared them."
+    F3 excludes the canonical Review namespace from it, because the canonical Review checkout
+    rule normalizes check-in bytes there (M-26) and a Candidate entry in that namespace would
+    break the storage-identity invariant. No landed rule excludes it today - checked - so this
+    is declared rather than assumed. FORWARD AMENDMENT A-5 (§1.5). §7.8.4.                     C
+
+22  F2 §10.3 and §10.1  "Checkout capability is not bound in the Work Context.\"
     F3 binds a checkout-capability claim over the CANONICAL REVIEW NAMESPACE - not over the Work
     result, where §10.3's reason stands - because a Work result can now change persistence
     semantics and make the Run's own records unreadable in a fresh clone. §10.3 names "a Context
     version change" as the mechanism, and F3 uses exactly that.
-    FORWARD AMENDMENT A-4 (§1.5). §7.9.                                                        C
+    FORWARD AMENDMENT A-4 (§1.5), which also supersedes §10.1's exact Context record
+    because a field cannot be added to a frozen exact schema otherwise. §7.9, §7.9.6.                                                        C
 
 15  F2 §13.4 V-2  the verification workspace is materialized from base + snapshot material and
     NEVER from a future K1. F3 keeps K1 strictly after the Review and never makes verification
@@ -3743,11 +4283,13 @@ C  true conflict requiring a new forward amendment
 ```text
 Forward amendment required: YES
 
-Four, all to landed F2, all declared in full in §1.5:
-    A-1  F2 §5.3          base_commit's timing, and that it is K1's parent        row 19
-    A-2  F2 §14.4, §16.1  the unqualified "every HEAD advance" consequence        row 3
-    A-3  F2 §7.1/7.2/7.3  the result-bearing / no-K1 discriminator                row 21
-    A-4  F2 §10.3         checkout capability unbound in the Work Context         row 22
+Five, all to landed F2, all declared in full in §1.5:
+    A-1  F2 §5.3           base_commit's timing, and that it is K1's parent       row 19
+    A-2  F2 §14.4, §16.1   the unqualified "every HEAD advance" consequence       row 3
+    A-3  F2 §7.1/7.2/7.3   the result-bearing / no-K1 discriminator               row 21
+    A-4  F2 §10.3, §10.1   checkout capability unbound, and the exact Context     row 22
+                           record it has to be added to
+    A-5  F2 §6.2           the reviewed surface excludes the Review namespace     row 23
 
 No P1, P2 or P3 F1 statement is amended.
 No historical P1, P2, F1 or F2 document is edited by this contract.
@@ -3793,8 +4335,10 @@ PB-12 the primitive neutralizes core.autocrlf and core.eol, because they change 
 PB-13 the universal predicate over the attribute source, parsed rather than probed, which is
       what covers result paths that do not exist yet (§7.8)
 PB-7  a review-v1 Work START is refused at entry, before the lock, when the PINNED source —
-      the base tree, or a non-tree source — assigns any filter, ident or working-tree-encoding
-      (review_git_transform, §7.4). This is the only transform refusal the contract has.
+      the base tree, or a non-tree source — assigns any material attribute after alias
+      expansion (filter, ident, working-tree-encoding, text, eol (and the alias crlf)), outside the reserved
+      Review namespace (review_git_transform, §7.4, §7.8). This is the only transform refusal
+      the contract has.
 PB-8  the push cardinality of a review-v1 Work mutation is 2, 1 or 0 by case, computed from
       the destination pin and the independently agreed artifact_kind, never from stage shape
       (§11.3.1)
@@ -4057,8 +4601,10 @@ Stop conditions. An implementation that violates any of them is not implementing
     destination except as the proven history of a published K.
 
 20. Every commit this operation makes — the entry-events commit, the Review's own generation
-    commits, every pre-completion Work commit, K1 and K2 alike — is made with the attribute source
-    pinned to the tree of declared_base.base_commit, and the Git persistence preflight runs
+    commits, every pre-completion Work commit, K1 and K2 alike — is made with a pinned attribute
+    source: S-c0 to PRE_S_C0_BASE and every later commit to declared_base.base_commit, which are
+    the same attribute state because S-c0 commits the event log alone (§7.1.1). The Git
+    persistence preflight runs
     immediately before each of them, over exactly that commit's path set, evaluated under that
     same pin. A pass never carries from one commit to another, and an evaluation made against the
     working tree never satisfies it.
@@ -4083,7 +4629,28 @@ Stop conditions. An implementation that violates any of them is not implementing
     is withheld by mechanical proof over the resulting tree; it is never left to reviewer
     discretion, and it is never a refusal of the Candidate.
 
-27. No supported result shape is ever refused after the executor returns. An executor-authored
+27. The material byte-transform surface is complete and alias-expanded: text, eol,
+    working-tree-encoding, filter, ident, the compatibility spellings crlf / -crlf / crlf=input,
+    the built-in macro binary, and the configuration variables core.autocrlf and core.eol. A name
+    is never judged as an opaque word.
+
+28. The canonical Review namespace is reserved: no Candidate entry lies inside it, and the
+    canonical form-L checkout rule is required there rather than refused. Those two together are
+    what let the storage-identity invariant and canonical Review durability both hold.
+
+29. Canonical Review durability is proven by the same exact form-L rule and the same four proof
+    layers `skills/review` already freezes, evaluated over the RESULTING TREE and over every
+    canonical Review record path in it — not only this Run's. It is never defined as "nothing
+    applies under a neutralized test configuration".
+
+30. The Work Review Context is version 2 and binds the capability claim, so review_context_hash
+    covers it. The seal RECHECKS that bound identity and never adds or changes a Context byte.
+
+31. A failed capability proof writes no Review record and invents no gate state: no new
+    generation, no Receipt, no authorization, no Consumption, no K1. It is an operation STOP, and
+    permanent set-aside is F4's.
+
+32. No supported result shape is ever refused after the executor returns. An executor-authored
     change to Git persistence configuration is an ordinary Work result, committed and reviewed as
     an ordinary file entry; the pin makes what it covers irrelevant to this operation. The only
     transform refusal is at START entry, on the pinned source, which is knowable before
@@ -4102,10 +4669,10 @@ Stop conditions. An implementation that violates any of them is not implementing
 ## 27. Implementation readiness
 
 ```text
-Contract status              FROZEN (repaired after independent review, four times)
+Contract status              FROZEN (repaired after independent review, five times)
 Architecture blocker         NONE
 HUMAN decision               NONE
-Forward amendment required   YES - four, to landed F2 only, declared in §1.5
+Forward amendment required   YES - five, to landed F2 only, declared in §1.5
 Implementation authorized    NO
 P3 implementation            NOT STARTED
 F4 started                   NO
