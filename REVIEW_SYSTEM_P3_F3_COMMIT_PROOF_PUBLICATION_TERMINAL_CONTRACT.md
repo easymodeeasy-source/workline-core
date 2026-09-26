@@ -284,7 +284,7 @@ returns when nothing is left). The Candidate would demand a commit that is not p
 
 ```text
 STATED PLAINLY, BECAUSE THE PRIMITIVE CHANGED. The earlier draft rested this on a MECHANICAL fact:
-`git commit --only` refuses an empty delta. The object-driven primitive of §7.1.1 has no such
+`git commit --only` refuses an empty delta. The object-driven primitive of §7.1.2 has no such
 refusal — `write-tree` would return the parent's tree and `commit-tree` would happily commit it.
 So the guard is now the RULE alone, and the rule is made explicit rather than left implied:
 
@@ -759,6 +759,80 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-41  THE LIVE CONTROLLER RECORDS OWNERSHIP ONLY AFTER THE COMMIT PRIMITIVE RETURNS, AND THE GAP
+      IS REACHABLE. READ, not inferred. `Mutation.apply` (mutation.py:501) classifies, then for an
+      UNAPPLIED git_commit calls `_require_own_bytes_committed` and `_make_commit`
+      (mutation.py:1394). `_make_commit` calls `controller.apply_effect(record)` — which makes the
+      commit AND advances the ref — and only then reads `_commit_just_made`; the caller sets
+      `record["applied"] = True` and calls `self._save()` AFTERWARDS. Its own docstring says so:
+      "An interruption after the commit succeeded and before that save leaves neither."
+
+      What makes that unsafe under the object-driven primitive is `_classify_commit`
+      (mutation.py:2259). For a record that is NOT applied and has no recorded id it reaches
+
+          changed = gitcmd.changed_against_head(repo, list(payload["paths"]))
+          if head is not None and not changed:
+              return MATCHING          # "nothing left to commit for these paths"
+
+      so a crash between the ref advance and the save is classified MATCHING on retry, with NO
+      owned commit id. P1 R5 §3.1 / §3.5 forbid exactly that: the branch state is not ownership.
+      §7.1.2's prepared-commit checkpoint is what removes the gap.
+
+M-42  THE PREPARED COMMIT IS FULLY VERIFIABLE BEFORE ANY REF MOVES, AND THE CAS RETRY IS EXACT.
+      MEASURED. With PREPARED built by commit-tree and the ref still at the parent:
+
+          git cat-file -e <PREPARED>      -> exists
+          git cat-file -t <PREPARED>      -> commit
+          git rev-parse <PREPARED>^{tree} -> EQUAL to the planned tree
+          git rev-parse <PREPARED>^       -> EQUAL to the expected parent
+          git log -1 --format=%B          -> the exact recorded message
+          git update-ref <ref> <PREPARED> <expected-old>   -> succeeded
+
+      So a resume that holds a durable prepared id never has to rebuild: it re-verifies THAT
+      object and retries the CAS of THAT id.
+
+M-43  THE FOUR RESUME STATES ARE DISTINGUISHABLE FROM THE PREPARED ID ALONE. MEASURED.
+          ref == expected parent      -> CAS not yet applied              (case B)
+          ref == PREPARED             -> the CAS landed                   (case C)
+          ref != PREPARED and
+            `git merge-base --is-ancestor <PREPARED> <ref>` -> YES         (case F, descendant)
+          CAS with a stale expected-old -> refused, "is at <actual> but expected <given>", and
+            the ref was left unchanged                                     (case D)
+      A missing or unreadable object answers `cat-file -e` negatively, which is case E.
+      None of these readings is a branch-tip inference: each is a question asked ABOUT an id this
+      operation durably recorded as its own.
+
+M-44  NOT REFRESHING THE REAL INDEX IS NOT HARMLESS. MEASURED. After commit-tree + update-ref with
+      no index write, with the executor's result in the working tree and the base entry still in
+      the index:
+
+          git status --short        ->  MM a/f.txt
+          git diff --cached         ->  M  a/f.txt
+
+      The path shows as modified in BOTH the index and the working tree, and the person's next
+      ordinary `git commit` would record the OLD bytes back over the result just committed. So
+      "leave the index alone" is a hazard, not a neutral choice; the live `git add` primitive
+      updated the real index as a side effect and the object-driven one does not.
+
+M-45  A CONDITIONAL, ENTRY-COMPARED REFRESH IS SAFE AND PRESERVES FOREIGN STAGED STATE. MEASURED,
+      with a person's unrelated `b/g.txt` staged and our `a/f.txt` at its base entry:
+
+          git ls-files --stage -- a/f.txt   -> the exact current entry, comparable
+          entry == the expected base entry  -> refresh permitted
+          git update-index --add --cacheinfo 100644,<new>,a/f.txt
+          git status --short                -> our path CLEAN; only `M  b/g.txt` remains
+          git ls-files --stage -- b/g.txt   -> BYTE-IDENTICAL, untouched
+
+      And with a foreign entry staged on OUR path (the person staged different bytes there), the
+      comparison sees `b2f3ae2a` rather than the expected entry and the refresh is REFUSED for
+      that path — a person's staging intent is never overwritten.
+
+      WHAT THIS IS NOT: Git exposes no compare-and-swap for the real index, so the read and the
+      write are two invocations and a person staging in between is a real if narrow window. §7.1.4
+      handles it by verifying afterwards and by making the whole step non-authoritative, and says
+      plainly why that answer is acceptable for the index when it was NOT acceptable for the
+      committed tree.
+
 M-36  THE OBJECT-DRIVEN PRIMITIVE CLOSES THE STAGING RACE. MEASURED, git 2.54, UNDER ACTIVE
       SABOTAGE. A tracked `dir/file.txt` was committed, `dir` was then REPLACED BY A JUNCTION to
       a directory whose `file.txt` held different bytes — so `cat dir/file.txt` returned the
@@ -799,12 +873,52 @@ M-38  REF UPDATE IS A REAL COMPARE-AND-SWAP. MEASURED.
       <given>" — and left the ref unchanged; with the correct expected-old it succeeded. So the
       branch advance can be made conditional on the exact parent rather than on a re-read tip.
 
+M-46  THE GITLINK OID IS OBTAINABLE ENTIRELY THROUGH HANDLE-BOUND READS, WITH NO `git -C` AND NO
+      PATHNAME RE-RESOLUTION. MEASURED, against a real submodule, using `workline.review.fsafe`'s
+      own cross-platform primitives and no Git process at all:
+
+          fsafe.walk(root, ["sub"])                 -> proven handle to the submodule directory
+          .read_file(".git")                        -> b'gitdir: ../.git/modules/sub\n'
+          the components are ['..', '.git', 'modules', 'sub'], and '..' steps back to a handle
+            ALREADY HELD by the same chain
+          fsafe.walk(root, [".git","modules","sub"]).read_file("HEAD")  -> 'ref: refs/heads/master'
+          fsafe.walk(root, [".git","modules","sub","refs","heads"]).read_file("master")
+                                                    -> f600f63fd1c8ea463c51608453299e0a1a9a200c
+
+      and `git -C sub rev-parse HEAD` returns EXACTLY `f600f63fd1c8ea463c51608453299e0a1a9a200c`,
+      while `git ls-files --stage sub` shows `160000 f600f63f...`. So the handle-bound read
+      reproduces Git's own answer without ever handing a pathname to a second process.
+      MEASURED ALSO: a submodule's `.git` is a FILE holding a RELATIVE gitdir, not a directory, so
+      the indirection §7.8.4 must resolve is real and is the one place the chain could leave the
+      held handles. §7.8.4 resolves it against the held chain and fails closed otherwise.
+
+M-47  A FINAL COMPONENT'S IDENTITY IS OBTAINABLE WITHOUT DEREFERENCING IT, AND AN `O_NOFOLLOW`
+      OPEN IS THE WRONG PRIMITIVE FOR IT. MEASURED on NTFS with a junction `jn` -> `real`:
+
+          os.lstat("jn")   reparse=True   st_ino=11258999074582616   <- the JUNCTION ITSELF
+          os.lstat("real") reparse=False  st_ino= 4785074610237389
+          os.stat("jn")    (following)    st_ino= 4785074610237389   <- the TARGET
+
+      The no-follow identity of the indirection is its OWN identity and differs from its target's.
+      On Windows `S_ISLNK` is False for a junction while
+      `st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT` is True, so the reparse attribute is the
+      discriminator there, not `S_ISLNK`.
+      MEASURED ALSO: `os.supports_dir_fd` is EMPTY on Windows, so `dir_fd` is unavailable there and
+      the handle-bound form must be the `NtCreateFile(RootDirectory=..., FILE_OPEN_REPARSE_POINT)`
+      backend `fsafe` already carries; on POSIX it is
+      `os.stat(name, dir_fd=parent_fd, follow_symlinks=False)` — `fstatat(..., AT_SYMLINK_NOFOLLOW)`.
+      An `O_NOFOLLOW` OPEN cannot serve: on POSIX it REFUSES a symlink with ELOOP instead of
+      identifying it, which is precisely how the previous draft wrongly turned a valid F2 symlink
+      result into `review_candidate_unavailable`.
+
 M-39  THE GITLINK'S NEW OID HAS AN EXACT SOURCE. MEASURED. After moving a submodule's HEAD,
       `git add <submodule-path>` staged `160000 a4937a0df268...`, and
       `git -C <submodule-path> rev-parse HEAD` returned exactly `a4937a0df268...`. So the value
       Git records for a gitlink is the SUBMODULE REPOSITORY'S HEAD COMMIT, read from that
       repository — not a branch name, not the superproject's old index entry, and not anything
-      derived from directory contents. §7.8.4 binds that as the witness source.
+      derived from directory contents. This measurement establishes WHAT VALUE is correct; it is
+      NOT the mechanism F3 freezes, because `-C` re-resolves a pathname. §7.8.4 obtains the same
+      value by handle-bound reads (M-46).
 
 M-40  `hash-object -w --stdin` WRITES ONLY AN OBJECT. MEASURED: it returned the blob id, and
       afterwards HEAD was unchanged and `git status` reported nothing — no ref moved and no
@@ -1291,7 +1405,7 @@ R-6b THE OBJECT PROVEN IS THE OBJECT ASSERTED, AND IT IS THE OBJECT COMMITTED. T
      resolved a second time from the Project root for the ownership snapshot. Checking a name and
      then using the name are two operations, and a component can be swapped between them (fsafe,
      M-29) — so the capture is bound to the proven directory object, not repeated by pathname.
-     The chain does not stop at the assertion: §7.1.1's primitive carries the witnessed bytes and
+     The chain does not stop at the assertion: §7.1.2's primitive carries the witnessed bytes and
      identities into the commit itself, so no step between the proof and K1's tree resolves a
      working-tree pathname (M-36).
 R-7  Each step marked `durable` completes its save before the step below it runs. An interruption
@@ -1411,26 +1525,36 @@ after 15, before 16           the pre-seal boundary: the capability of Context.r
                               change it
 after 16, before 18           nothing physical happened since the seal; the flow continues from
                               the sealed Review as it stands
-18 recorded, 19 not applied   S-c1 is classified first, then §7.1.1 runs. O-2 seeds from the
-                              EXACT recorded parent and O-7 advances the branch only under
-                              compare-and-swap against it, so a branch that moved is refused at
-                              the ref update and the commit is simply orphaned, never adopted
-                              (M-38). The isolated index of O-1 is discarded and rebuilt on a
-                              retry, so a partially built index can never be reused
-19 applied, ref not advanced  the commit OBJECT exists but no ref points at it. This is not a
-                              made K1: C-1(K1) is the recorded-and-reachable proof, and an
-                              unreferenced object satisfies neither. The retry rebuilds from the
-                              same parent and either produces the identical commit — same tree,
-                              same parent, same message, same identity — or refuses. Nothing
-                              adopts the orphan by searching for it
-19 applied, 20 not reached    C-2(K1) runs; it is a re-execution, so a retry repeats it in full
+18 recorded, 19 not applied   S-c1 is classified first, then §7.1.2 runs. EVERY interruption
+                              inside it — before O-6a, between O-6a and O-7, between O-7 and
+                              O-7a, at a CAS refusal, and after C-1 — is decided by §7.1.3's
+                              matrix rows A ... G, from this operation's own durable
+                              prepared_commit_id and never from the branch tip. The isolated
+                              index of O-1 is discarded and rebuilt on a retry, so a partially
+                              built index is never reused.
+                              NOTE what is NOT here. The earlier draft carried a row "19 applied,
+                              ref not advanced" saying the retry "rebuilds from the same parent
+                              and either produces the identical commit — same tree, same parent,
+                              same message, same identity — or refuses". Both halves are
+                              withdrawn: the state it described is now §7.1.3 row B, where the
+                              prepared id is durable and the answer is to RE-VERIFY AND RETRY THE
+                              CAS OF THAT EXACT OBJECT (M-42), never to rebuild; and
+                              reconstruction-produces-the-same-id was an unstated assumption that
+                              every identity input — including the author and committer
+                              timestamps — is durably frozen, which this contract does not claim.
+                              Under the prepared-commit model reconstruction is not needed at all.
+19 applied, 20 not reached    C-2(K1) runs against the O-7a-owned commit; it is a re-execution,
+                              so a retry repeats it in full
+C-1 done, index not refreshed §7.1.4's refresh is non-authoritative (row G): C-1 stands, the
+                              operation continues, and the outcome is recorded rather than
+                              retried into a failure
 21 noted, 23 not recorded     the barrier and S-p1 are attempted again
 23 recorded, 24 not applied   C-2(K1) is re-evaluated before apply; a stale proof refuses
 24 applied                    the exact-commit push classification decides (registry.md)
 26 recorded, 27 not applied   the stage replays in recorded order, nothing is re-decided
-29 recorded, 30 not applied   as 18/19 for K2: O-2's exact parent and O-7's compare-and-swap
-                              refuse a moved branch, and an orphaned commit object is never
-                              adopted
+29 recorded, 30 not applied   as 18/19 for K2, by the same §7.1.3 matrix: the prepared id
+                              decides, a moved branch refuses at the CAS, and an unreachable
+                              object this operation never durably prepared is never adopted
 31 onward                     as 20 onward, for K2
 ```
 
@@ -1461,8 +1585,8 @@ empty-string or otherwise fabricated commit identity, anywhere, at any point, fo
 This is F1 §11.2, F1 invariant 8 and F2 §7.6 and §20.4/§20.5, restated because F3 is where a commit would
 have been created if anywhere. It holds for both cases above, and it is what forces the amendment A-3:
 an all-inert Candidate cannot have a K1, because a commit over an empty delta is the synthetic empty
-commit those rules prohibit — and, since §7.1.1's primitive would not mechanically refuse one, because
-§7.1.1 forbids O-5/O-6 from running on an empty delta at all.
+commit those rules prohibit — and, since §7.1.2's primitive would not mechanically refuse one, because
+§7.1.2 forbids O-5/O-6 from running on an empty delta at all.
 
 ### 6.2 The frozen sequence
 
@@ -1509,7 +1633,7 @@ contract of §8 measured from declared_base.base_commit:
     OR
     parent(K2) is reached from declared_base.base_commit by own-Review commits only (§8.2)
 
-and S-c2 is base-exact BY CONSTRUCTION: §7.1.1 O-2 seeds from the exact parent(K2) object id, O-6
+and S-c2 is base-exact BY CONSTRUCTION: §7.1.2 O-2 seeds from the exact parent(K2) object id, O-6
 records it as the parent, and O-7 advances the branch only under compare-and-swap against it, so a
 branch that moved refuses at the ref update rather than being committed onto (M-38).
 ```
@@ -1565,7 +1689,7 @@ Under the unamended boundary that Candidate is `result_commit`, and §5.1 would 
 exist:
 
 ```text
-the frozen primitive of §7.1.1 forbids O-5/O-6 on an empty delta — the rule that replaced
+the frozen primitive of §7.1.2 forbids O-5/O-6 on an empty delta — the rule that replaced
   `git commit --only`'s mechanical refusal — as an internal assertion, not a new reason;
 live START does not even record the stage: _commit computes
   `dirty = changed_against_head(root, owned)` and returns when nothing is left (start.py:446);
@@ -1720,7 +1844,7 @@ git_persistence identity = "review-v1-work-local-v1"
 `review-v1-work-local-v1` into the Work Review Context, and F3 does not touch it — renaming it would
 supersede a landed F2 statement for no reason, and this contract already declares six such amendments
 and wants no seventh. What F3-D1 freezes is what that identity MEANS at commit time, and §7.1.0 and
-§7.1.1 change that meaning from the earlier draft. No Context field, no record schema and no reader
+§7.1.2 change that meaning from the earlier draft. No Context field, no record schema and no reader
 comparison changes; only the behaviour the name denotes does.
 
 #### 7.1.0 Why the contained primitive could not be retained
@@ -1758,75 +1882,185 @@ downstream refusal does not repair it — it reports it. The primitive is theref
 under which the race **cannot change the committed tree**, rather than one under which it is detected
 afterwards.
 
-#### 7.1.1 The frozen object-driven sequence
+#### 7.1.1 The COMMIT TREE PLAN — what every commit class commits, and where its bytes come from
+
+The primitive below is generic. It commits a **plan**, never a reread of the working tree, and every
+commit this operation makes has one:
+
+```text
+CommitTreePlan
+    parent            the EXACT full commit id this commit is built on
+    ref               the EXACT full branch ref this commit advances (§7.1.5)
+    message           the EXACT message bytes
+    contract          the persistence contract identity
+    entries[]         one per path this commit changes, and no other path:
+                        path          canonical, from §7.8.4
+                        old_mode      \ as the PARENT TREE holds them, so the plan is
+                        old_oid       / self-checking against the parent it names
+                        new_mode      "100644" | "100755" | "120000" | "160000" | absent
+                        new_oid       the exact object id the entry will carry
+                        material      the exact bytes, for a file or a symlink ONLY
+                        deleted       true when the path is removed, and then no new_* at all
+```
+
+An earlier draft wrote O-3 as "hash the witnessed bytes and require the id to equal
+`Candidate.new_oid`". That is **K1-specific and is withdrawn**: S-c0, the three Review generation
+commits and S-c2 have no Candidate and no artifact witness, so the primitive as written did not
+describe four of the five commit classes it claimed to govern. The plan is what generalizes it, and
+`Candidate.new_oid` is now named only in the one class that has a Candidate.
+
+**Where each class's plan comes from. FROZEN, and in no class is the working tree the authority:**
+
+```text
+S-c1 / K1          SOURCE: the bound artifact witness (§7.8.4) and the frozen Candidate.
+                   entries = the Candidate's CHANGING entries plus its deletions.
+                   material = the witnessed bytes; new_oid = Candidate.new_oid; new_mode =
+                   Candidate.new_mode. The invariant is unchanged and is now one link longer:
+
+                       WITNESS == CANDIDATE == PLAN == STAGED == K1
+
+S-c0               SOURCE: the parent tree's event-log blob, plus THIS MUTATION'S ALREADY-RECORDED
+                   append_event effects, in their recorded order.
+                   entries = exactly one, `.workline/events/events.jsonl`.
+                   material = parent blob bytes ++ the canonical serialization of each recorded
+                   event, in recorded order. The mutable working-tree event log is NEVER the
+                   authority: it is a file anything may have appended to, and reading it would
+                   make S-c0 commit whatever is there rather than what this mutation recorded.
+                   The recorded effects are the durable, deterministic source, and the event log
+                   is append-only, so the parent blob is a strict prefix of the result — which the
+                   plan asserts and which is checkable before the commit.
+
+REVIEW GENERATION   SOURCE: the canonical record effects the generation mutation already recorded.
+COMMITS             entries = exactly the Review record paths that generation creates.
+(gen 1 / 2 / 3)    material = THE EXACT BYTES THE RECORDED IMMUTABLE-CREATE EFFECT CARRIES — the
+                   same bytes P1's serializer produced and the record effect holds, not a reread
+                   of the file that effect wrote. A record is immutable, so the two are equal when
+                   nothing interfered; committing the recorded bytes rather than the file means an
+                   interference changes nothing about what is committed.
+
+S-c2 / K2          SOURCE: the parent tree, plus this mutation's recorded terminal append_event
+                   effects and its recorded Consumption record effect.
+                   entries = the event log (as S-c0 computes it, from the parent blob and the
+                   recorded terminal events) and the Consumption record path (as a generation
+                   commit computes it, from the recorded record bytes).
+                   §16's exact two-entry delta is therefore a property of the PLAN, checkable
+                   before the commit rather than only after it.
+```
+
+```text
+HOW AN APPEND-STYLE "WHOLE FILE" MATERIAL IS CONSTRUCTED, stated exactly because two classes need
+it. The event log is a line-oriented append-only file (BL-039: LF-only, no NEL/LS/PS). For S-c0 and
+for S-c2's event entry:
+
+    material = <the parent tree's blob for that path, VERBATIM, or b"" when the parent has no
+                such path>
+               ++ for each recorded append_event effect, in recorded order:
+                    <P1's canonical serialization of that event> ++ b"\n"
+
+    and the plan REQUIRES material.startswith(parent_blob) — an append that is not an append is a
+    defect, and the check is free because both sides are already in hand.
+
+Nothing here reads the working-tree copy. A person who appended to the event log by hand has
+produced dirty overlap, which `gitops.ensure_separable_before_effects` (BL-041) already governs at
+entry; it does not get to redefine what this mutation commits.
+```
+
+#### 7.1.2 The frozen object-driven sequence
 
 ```text
 FROZEN. Every commit this operation makes — S-c0, each Review generation commit, S-c1/K1 and
-S-c2/K2 — is built by the following sequence and by no other. MEASURED end to end, M-36..M-40.
+S-c2/K2 — is built by the following sequence and by no other. MEASURED end to end,
+M-36..M-38, M-40, M-42..M-45.
 
 O-1  ISOLATED INDEX
        GIT_INDEX_FILE = a Workline-owned path under .workline/runtime/**, created fresh for this
        commit and removed afterwards. The repository's real index is NOT read and NOT written by
-       O-1..O-6.
+       O-1..O-8.
 
 O-2  SEED FROM THE EXACT PARENT
-       git read-tree <parent commit>
-       <parent> is the exact object id this commit's stage records — never `HEAD`, never a branch
-       name, never a re-read tip. Every path the parent holds is carried forward unchanged, so the
-       committed delta is COMPUTED, not filtered: paths this operation does not name cannot enter
-       the commit, and the executor's unrelated working-tree modifications are structurally absent
-       rather than excluded by a `--only` pathspec.
+       git read-tree <plan.parent>
+       never `HEAD`, never a branch name, never a re-read tip. Every path the parent holds is
+       carried forward unchanged, so the committed delta is COMPUTED, not filtered: paths the plan
+       does not name cannot enter the commit, and the executor's unrelated working-tree
+       modifications are structurally absent rather than excluded by a `--only` pathspec.
 
-O-3  MATERIALIZE EACH ARTIFACT FROM ITS WITNESSED BYTES
-       for a file, an executable file or a symlink:
-           git hash-object -w --stdin      <- fed THE WITNESSED BYTES from §7.8.4
-       and the returned object id is REQUIRED to equal Candidate.new_oid, or STOP
-       — an INTERNAL ASSERTION with no new reason value, because §7.8.4 derives the Candidate
-       FROM the witness, so the two can disagree only if that derivation is defective. No
-       `--path` is passed, so no attribute or filter
-       machinery is consulted and the id is the raw-bytes id — which is exactly what F2 §6.3's
-       `new_oid` is (M-40).
-       For a gitlink nothing is written: its identity is already a commit id (§7.8.4, M-39).
+O-2a PARENT AGREEMENT
+       for every plan entry, the parent tree's entry at that path EQUALS the plan's old_mode /
+       old_oid (absent where the plan says absent). A disagreement STOPS: the plan was computed
+       against a different parent than the one being committed on.
 
-O-4  PLACE EACH ARTIFACT BY IDENTITY, NOT BY PATH RESOLUTION
-       result:    git update-index --add --cacheinfo <new_mode>,<new_oid>,<path>
-       deletion:  git update-index --force-remove <path>
+O-3  MATERIALIZE EACH ENTRY FROM THE PLAN, NEVER FROM THE WORKING TREE
+       file / executable file / symlink:
+           git hash-object -w --stdin      <- fed plan.entry.material
+       and the returned id is REQUIRED to equal plan.entry.new_oid, or STOP. No `--path` is
+       passed, so no attribute or filter machinery is consulted and the id is the raw-bytes id
+       (M-40) — which for K1 is exactly F2 §6.3's `new_oid`.
+       gitlink: nothing is written; its identity is already a commit id (§7.8.4, M-46).
+       deletion: nothing is written.
+
+O-4  PLACE EACH ENTRY BY IDENTITY, NOT BY PATH RESOLUTION
+       present:   git update-index --add --cacheinfo <new_mode>,<new_oid>,<path>
+       deleted:   git update-index --force-remove <path>
        `--cacheinfo` and `--force-remove` write an INDEX ENTRY whose key is the path STRING. They
        do not open, stat, traverse or resolve anything on the filesystem. This is the step that
-       closes the race, and it is measured rather than reasoned: with an ancestor junction ACTIVE
+       closes the staging race, measured rather than reasoned: with an ancestor junction ACTIVE
        and redirecting throughout, the committed entry was the witnessed blob `924c75cd` and the
        redirected blob `b2f3ae2a` appeared nowhere in the commit (M-36).
 
 O-5  WRITE THE TREE
        git write-tree
+       The result is REQUIRED to equal the tree the plan determines. Nothing later recomputes it.
 
-O-6  WRITE THE COMMIT
-       git commit-tree <tree> -p <parent> --no-gpg-sign -m <message>
-       <parent> is the same exact object id as O-2, so the recorded parent cannot drift from the
-       tree's basis. Hooks do not run and no signature is applied — MEASURED, M-37: installed
-       `pre-commit` and `commit-msg` hooks did not fire, and `commit.gpgsign=true` with a broken
-       `gpg.program` still produced the identical commit id. Because `commit-msg` cannot run, the
-       committed message is the exact message given, which is what §13 and the same-message
-       identity rules downstream depend on.
+O-6  WRITE THE COMMIT OBJECT
+       git commit-tree <tree> -p <plan.parent> --no-gpg-sign -m <plan.message>
+       Hooks do not run and no signature is applied — MEASURED, M-37. Because `commit-msg` cannot
+       run, the committed message is exactly `plan.message`, which is what §13 and the
+       same-message identity rules downstream depend on.
+       NO REF HAS MOVED YET. The commit object exists and is unreachable.
+
+O-6a PREPARED-COMMIT OWNERSHIP CHECKPOINT — DURABLE, AND BEFORE ANY REF MUTATION
+       PREPARED_COMMIT_ID = the exact full object id O-6 returned.
+
+       Durably record, on this mutation's git_commit effect, in ONE save that completes before
+       O-7 begins:
+
+           prepared_commit_id   PREPARED_COMMIT_ID
+           prepared_parent      plan.parent
+           prepared_tree        the tree O-5 wrote
+           prepared_ref         plan.ref, by full ref name
+           prepared_contract    the persistence contract identity
+
+       THIS IS NOT C-1 AND IS NOT K. It proves exactly one thing: THIS OPERATION CREATED THIS
+       EXACT COMMIT OBJECT. It confers no reachability, authorizes no push, and satisfies no
+       proof item.
+
+       Why it must exist: without it there is a window in which the ref has advanced and no
+       durable record says this operation made the commit, and live `_classify_commit` resolves
+       that window by observing that the paths no longer differ from HEAD and returning MATCHING
+       with no owned id (M-41) — which P1 R5 §3.1 / §3.5 forbid. The precedent is live: the write
+       path already records the bytes it is about to write BEFORE writing them
+       (`record[_WROTE] = wrote; self._save()`, mutation.py:501), "so that what it wrote is known
+       however the write ends". O-6a is that same discipline for a commit.
 
 O-7  ADVANCE THE BRANCH BY COMPARE-AND-SWAP
-       git update-ref <ref> <new commit> <expected-old>
-       <ref> is the ref HEAD resolves to — the branch bound by BL-036 when on a branch, HEAD
-       itself when detached — and <expected-old> is the EXACT parent of O-2/O-6. MEASURED, M-38:
-       a wrong expected-old is refused ("is at <actual> but expected <given>") and the ref is left
-       untouched, so a concurrent advance can neither be overwritten nor silently accepted.
-       A refusal here STOPS with the EXISTING reason `review_registration_base_moved` (M-7),
-       never a retry against the new tip. F3 introduces no new reason value for it.
+       git update-ref <plan.ref> <PREPARED_COMMIT_ID> <plan.parent>
+       MEASURED, M-38: a wrong expected-old is refused ("is at <actual> but expected <given>") and
+       the ref is left untouched, so a concurrent advance can neither be overwritten nor silently
+       accepted. A refusal STOPS with the EXISTING reason `review_registration_base_moved` (M-7),
+       never a retry against the new tip.
 
-O-8  RECONCILE THE REAL INDEX, FOR EXACTLY THIS OPERATION'S OWN PATHS
-       on the repository's real index, and only for the paths named in O-4:
-           result:    git update-index --add --cacheinfo <new_mode>,<new_oid>,<path>
-           deletion:  git update-index --force-remove <path>
-       so that the person's `git status` is not left describing the committed artifact as both
-       staged-backwards and modified-forwards. NEVER `git reset`, NEVER a whole-index
-       `read-tree`: either would discard index state this operation does not own. O-8 resolves no
-       filesystem path either, and it runs AFTER the commit exists, so it cannot affect what was
-       committed.
+O-7a C-1: DURABLE PROMOTION, ONCE REACHABILITY IS PROVEN
+       `plan.ref` is read back and shown to be PREPARED_COMMIT_ID. Then, durably:
+
+           commit_id = PREPARED_COMMIT_ID
+           applied   = true
+
+       THIS is C-1. Every downstream item — W1, the proof notes, the publication barrier, every
+       push — reads this, never the prepared checkpoint and never the branch tip.
+
+O-8  DISCARD THE ISOLATED INDEX
+       the O-1 index file is removed. It is never reused across commits or across resumes: a
+       partially built index has no standing, and rebuilding it from `plan.parent` is free.
 ```
 
 ```text
@@ -1835,18 +2069,169 @@ NOT PART OF THE PRIMITIVE, and forbidden inside it:
     git add                     resolves working-tree pathnames        (the race, M-34)
     git commit                  resolves working-tree pathnames, runs hooks, honours commit.gpgsign
     git commit --only -- <p>    both of the above
-    git stash / reset / checkout / restore    touch state this operation does not own
-    any `--path` on hash-object               would consult attributes
+    git stash / reset / checkout / restore   touch state this operation does not own
+    any `--path` on hash-object              would consult attributes
+    any read of the working-tree copy of a path the plan already describes
 ```
 
-#### 7.1.2 The environment the sequence runs in
+#### 7.1.3 Crash recovery — the exact resume matrix
+
+Every row is decided from the operation's OWN durable record. **The branch tip never confers
+ownership**, and no row recovers ownership from the observation that the paths no longer differ
+from HEAD. Measured: M-42, M-43.
+
+```text
+A. NO prepared_commit_id, ref == plan.parent
+   nothing of this commit is owned. Rebuild the plan and run O-1..O-7a from the start.
+   Any objects a previous attempt wrote are unreachable and unowned (§7.1.4); they are not
+   searched for, not adopted, and not evidence.
+
+B. prepared_commit_id DURABLE, ref == plan.parent
+   the CAS had not landed. Re-verify THAT object exactly — it exists, it is a commit, its tree
+   equals prepared_tree, its parent equals prepared_parent, its message equals plan.message —
+   and retry the CAS OF THAT ID. MEASURED to succeed (M-42).
+   DO NOT rebuild a new commit and DO NOT adopt any other commit.
+
+C. prepared_commit_id DURABLE, ref == prepared_commit_id
+   the CAS landed and the crash fell between O-7 and O-7a. C-1 is recovered POSITIVELY, from this
+   operation's own durable prepared id compared to the ref it recorded. This is NOT branch-tip
+   inference: the id was written down before the ref moved, and the ref is only being asked
+   whether it holds THAT id.
+
+D. prepared_commit_id DURABLE, ref moved ELSEWHERE (not the prepared id, not an ancestor case)
+   reconcile / fail closed. The prepared commit is NEVER retargeted onto the new tip, never
+   rebuilt against it, and never published. ReconcileRequired, reason
+   review_registration_base_moved.
+
+E. prepared_commit_id DURABLE, the object is MISSING, corrupt or unanswerable
+   fail closed. `git cat-file -e` answering negatively is not permission to rebuild: this
+   operation recorded that it made a specific object, and a repository that no longer has it is a
+   state a person reconciles.
+
+F. prepared_commit_id DURABLE, ref is a DESCENDANT of the prepared id
+   `git merge-base --is-ancestor <prepared> <ref>` answers YES (M-43). Ownership of the prepared
+   OBJECT is still known — this operation made it — but the stage's own conditions do not hold:
+   the branch is no longer at the commit this stage produced, so base-exactness, L-3 and W3 fail.
+   Reconcile. The later branch state is NEVER silently treated as this stage's result.
+
+G. prepared_commit_id DURABLE and PROMOTED (C-1 complete), real-index refresh not done or failed
+   C-1 STANDS. §7.1.4's refresh is non-authoritative and its outcome never un-owns K.
+```
+
+#### 7.1.4 The real index — after C-1, conditional, verified, and never authoritative
+
+An earlier draft reconciled the real index as O-8, INSIDE the commit step and BEFORE the effect was
+durably owned. That is withdrawn for two measured reasons.
+
+```text
+1. IT REPRODUCED THE C-1 GAP. O-7 succeeds, the index step fails or crashes, apply_effect never
+   returns, and commit_id/applied are never saved (M-41). A cosmetic step must not be able to
+   cost the operation its ownership of a commit that is already on the branch.
+
+2. IT COULD OVERWRITE A PERSON'S STAGING INTENT. A person may change the real index during the
+   Review wait without touching the working tree. The working tree still holds the witnessed
+   bytes, so full-witness currentness — an ARTIFACT witness — still passes; K1 correctly commits
+   the witnessed bytes; and a blind `update-index` would then replace the person's staged entry.
+   Owning a PATH is not owning a person's later staging intent, and F3 does not confuse them.
+```
+
+Leaving the index alone is not neutral either, and that is measured rather than assumed:
+
+```text
+M-44: after commit-tree + update-ref with no index write, `git status --short` shows `MM` on the
+path and `git diff --cached` shows it staged-modified — so the person's next ordinary
+`git commit` would record the OLD bytes back over the result just committed. The live `git add`
+primitive updated the real index as a side effect; the object-driven one does not, and that
+difference has to be handled rather than inherited silently.
+```
+
+**FROZEN — the conditional refresh:**
+
+```text
+R-IDX-1  IT RUNS ONLY AFTER O-7a. C-1 is durable before the index is touched at all.
+
+R-IDX-2  IT IS NON-AUTHORITATIVE. Its success is not a precondition of anything: not of C-1, not
+         of C-2, not of the proof note, not of publication, not of completion. Its failure is
+         recorded on the mutation and the operation continues.
+
+R-IDX-3  IT TOUCHES ONLY THIS COMMIT'S OWN PLAN ENTRY PATHS. Never `git reset`, never a
+         whole-index `read-tree`, never `git add`: each would discard or re-resolve state this
+         operation does not own.
+
+R-IDX-4  PER PATH, COMPARE BEFORE WRITING. Read the current entry (`git ls-files --stage -- <path>`)
+         and refresh ONLY where it still equals the entry this operation expected to find there —
+         plan.old_mode / plan.old_oid, the base state. Anything else is a person's staged intent
+         and is LEFT EXACTLY AS IT IS. MEASURED, M-45: our path refreshed and went clean, the
+         person's unrelated staged entry survived byte-identical, and a foreign entry staged on
+         our own path was detected and not overwritten.
+
+R-IDX-5  VERIFY AFTERWARDS, AND RECORD THE OUTCOME. Re-read the entries and record, on the
+         mutation, which paths were refreshed and which were left foreign. A later Workline
+         operation reads that record rather than inferring from the index what happened.
+
+R-IDX-6  THE RESIDUAL IS NAMED, NOT HIDDEN. Git exposes no compare-and-swap for the real index, so
+         R-IDX-4's read and write are two invocations and a person staging in the interval can be
+         overwritten. That window is accepted HERE and was refused for the committed tree, and the
+         difference is principled rather than convenient:
+
+             the committed tree is the reviewed artifact, it is published, it is what every proof
+               is about, and a wrong one is not repairable by the person -> no window is acceptable
+             the real index is local, ephemeral, never published, never read back by Workline as
+               authority, never evidence in any proof, and a person restores it with one ordinary
+               Git command -> a detected, recorded, narrow window is acceptable
+
+         F3 does not claim index-lock atomicity it cannot deliver.
+```
+
+#### 7.1.5 The ref O-7 advances, and detached HEAD
+
+```text
+O-7 advances the EXACT FULL BRANCH REF the operation recorded — `plan.ref`, which is
+declared_base.branch bound before the Git stage (BL-036) and re-checked by BL-038's
+`_require_finalized_branch`.
+
+DETACHED HEAD NEVER REACHES REVIEW-V1 WORK PERSISTENCE. Live START already calls
+`gitops.ensure_git_ready` (gitops.py:151), which returns the current branch and raises
+StopError(code="detached_head") when there is none. F3 introduces NO detached-head semantics.
+
+An earlier draft wrote "the branch bound by BL-036 when on a branch, HEAD itself when detached".
+That second branch is withdrawn: it invented a case the operation cannot be in, and a
+compare-and-swap on a detached HEAD would have been a new and unreviewed behaviour.
+```
+
+#### 7.1.6 Unreachable object residue
+
+```text
+STATED PLAINLY, because "nothing was written" would be FALSE after O-3, O-5 or O-6.
+
+A crash, a STOP at O-2a / O-3 / O-5, or a CAS refusal at O-7 can leave behind:
+
+    blobs    written by `hash-object -w`
+    trees    written by `write-tree`
+    commits  written by `commit-tree`
+
+About them, all of the following hold and none is softened:
+
+    they are CONTROLLED local Git object-database side effects, inside the Project's own .git;
+    they MOVE NO REF and change no branch, no tag and no note;
+    they are NEVER C-1, C-2 or checkpoint evidence;
+    they are NEVER adopted — no step searches the object database for a commit that looks right,
+      and only a DURABLE prepared_commit_id makes an object this operation's own (§7.1.3);
+    ordinary `git gc` may remove them whenever it likes, and nothing depends on their surviving;
+    their existence NEVER authorizes a retry, a push, or any inference about what happened.
+
+Measured support: `hash-object -w --stdin` left HEAD unchanged and `git status` empty (M-40), and
+O-6 moves no ref by construction — the ref moves only at O-7.
+```
+
+#### 7.1.7 The environment the sequence runs in
 
 ```text
 source      GIT_ATTR_NOSYSTEM=1, core.attributesFile = a Workline-owned empty file,
 isolation   GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL = that same empty file,
             every GIT_* variable stripped from the inherited environment except the
             GIT_INDEX_FILE of O-1 and the author/committer identity and date variables
-attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.4>, on every invocation
+attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.9>, on every invocation
 pin         of the sequence
 line        core.autocrlf=false and core.eol=lf, on every invocation. These are CONFIGURATION,
 endings     not attributes: the attribute pin does not touch them, and measured, `core.autocrlf=true`
@@ -1865,18 +2250,21 @@ capability  the running Git is proven to honour the pin, by the probe of §7.7, 
             commit of the sequence
 ```
 
-#### 7.1.3 The staging-byte contract, now true by construction
+#### 7.1.8 The staging-byte contract, now true by construction
 
 ```text
 FROZEN:
 
-    Candidate.new_oid  ==  the object id O-3 wrote        (CHECKED in O-3, or STOP)
+    plan.entry.new_oid ==  the object id O-3 wrote        (CHECKED in O-3, or STOP)
                        ==  the index entry O-4 placed     (BY CONSTRUCTION: --cacheinfo takes
                                                            that id literally)
                        ==  the tree entry O-5 wrote       (BY CONSTRUCTION)
-                       ==  the entry in K1's tree         (BY CONSTRUCTION: O-6 commits that tree)
+                       ==  the entry in the commit's tree (BY CONSTRUCTION: O-6 commits it)
+                       ==  the entry in the tree C-1 owns (BY CONSTRUCTION: O-7a promotes that
+                                                           exact commit id)
 
-for every supported Work result, with no exception and no "usually".
+for EVERY commit class, and for K1 `plan.entry.new_oid` IS `Candidate.new_oid` (§7.1.1) — so for
+every supported Work result, with no exception and no "usually".
 ```
 
 The difference from the earlier draft is the BASIS of that claim. Before, it rested on Git behaving
@@ -1904,7 +2292,7 @@ STILL LOAD-BEARING     for the two-surface entry predicate of §7.8, which is ev
 The pin is not removed on the strength of one platform's measurement of one Git version. It is
 re-classified, and the re-classification is what is frozen.
 
-#### 7.1.4 The two bases, and why they are one persistence basis
+#### 7.1.9 The two bases, and why they are one persistence basis
 
 An earlier draft said "every commit this operation makes, including S-c0, pins to
 `declared_base.base_commit`". That is **circular** and is withdrawn: `declared_base.base_commit` is HEAD
@@ -2012,7 +2400,7 @@ binds all of them.
 ```text
 IMMEDIATELY BEFORE EVERY commit this operation makes with "review-v1-work-local-v1":
 
-  1. determine the EXACT path set that commit will write. Under §7.1.1 that set is COMPUTED,
+  1. determine the EXACT path set that commit will write. Under §7.1.2 that set is COMPUTED,
      not narrowed by a pathspec: it is exactly the paths O-4 places or removes — the Candidate's
      changing entries and its deletions for S-c1, this Run's own Review record paths for a
      generation commit, the event log for S-c0, the terminal paths for S-c2. Never a wider set
@@ -2045,7 +2433,7 @@ IMMEDIATELY BEFORE EVERY commit this operation makes with "review-v1-work-local-
      same, because it is what makes canonical Review records readable back in a fresh clone
      (§7.9.3, PB-3). Two things keep that from contradicting the storage-identity invariant:
      A-5 puts the whole namespace out of reach of any Candidate entry, so no reviewed artifact is
-     ever stored through it; and §7.1.1's O-3 writes this operation's own Review records from
+     ever stored through it; and §7.1.2's O-3 writes this operation's own Review records from
      their exact bytes with no `--path`, so no check-in conversion runs on them either (M-40) —
      Workline's canonical serializer emits LF-only content in any case, making the rule a no-op
      on the bytes it actually governs.
@@ -2148,7 +2536,7 @@ ENTRY REFUSAL — the only transform refusal this contract has
   this contract version. That is a stated v1 boundary, refused before the person has spent
   anything, and it is the same kind of honest limit F2 §13.6 set for Evidence completeness.
 
-  WHY IT IS RETAINED NOW THAT STORAGE NO LONGER NEEDS IT. The object-driven primitive (§7.1.1)
+  WHY IT IS RETAINED NOW THAT STORAGE NO LONGER NEEDS IT. The object-driven primitive (§7.1.2)
   makes the committed object independent of every attribute, so this refusal is no longer what
   protects storage identity. It is retained for two reasons that remain: §7.9's checkout-capability
   claim is a claim about reading the tree back, which filters DO affect; and relaxing it here would
@@ -2167,9 +2555,11 @@ AFTER THE EXECUTOR — no RESULT SHAPE is refused
                     fully expressible and fully reviewable, and cannot be sealed (§7.9). That is
                     authorization being withheld, not a result being refused.
 
-    OWNERSHIP       a result that declares a path inside the reserved Review namespace violates
+    OWNERSHIP       a result that declares a path inside EITHER reserved namespace — the
+                    canonical Review namespace (A-5) or the lifecycle event log (A-6) — violates
                     the review-v1 invocation contract, which bound before the executor ran
-                    (§7.8.4). That is unowned state, which F2 §2.3 expressly permits refusing.
+                    (§7.8.4, §7.8.5). That is unowned state, which F2 §2.3 expressly permits
+                    refusing.
 
   What remains beyond those is only external drift in a non-tree source, which §7.4.1 classifies
   as interference.
@@ -2226,7 +2616,7 @@ works is measured, not argued (M-20):
 
 ```text
 Every commit this operation makes runs with a pinned attribute source — S-c0 to PRE_S_C0_BASE,
-every later commit to declared_base.base_commit, which §7.1.4 proves is the same attribute state —
+every later commit to declared_base.base_commit, which §7.1.9 proves is the same attribute state —
 with the system and global attribute sources neutralized.
 
 Therefore the persistence semantics this operation commits under are FIXED, at the base, before
@@ -2270,8 +2660,8 @@ So the pin closes three things at once, and this is the whole of the architectur
 ```
 
 ```text
-AND THE PRIMITIVE CLOSES ITEM 1 INDEPENDENTLY, which is why §7.1.3 re-classifies the pin rather
-than leaning on it. §7.1.1's O-3 writes the object from the WITNESSED BYTES with no `--path`, so
+AND THE PRIMITIVE CLOSES ITEM 1 INDEPENDENTLY, which is why §7.1.8 re-classifies the pin rather
+than leaning on it. §7.1.2's O-3 writes the object from the WITNESSED BYTES with no `--path`, so
 Git's check-in conversion path is not entered at all and no attribute is consulted (M-40); the
 returned id is then CHECKED against Candidate.new_oid before anything else happens. Identity
 therefore holds even if the pin were ineffective on some Git build the probe failed to catch.
@@ -2428,7 +2818,7 @@ The pin closes this by the same mechanism, applied to the same complete surface:
 
 ```text
 EVERY commit this operation makes is pinned — S-c0 to PRE_S_C0_BASE and every later commit to
-declared_base.base_commit (§7.1.4) — and every persistence evaluation this operation makes is
+declared_base.base_commit (§7.1.9) — and every persistence evaluation this operation makes is
 evaluated UNDER THAT SAME PIN, over exactly the paths that commit writes:
 
     S-c0                        the event log
@@ -2659,7 +3049,7 @@ the system and global sources, which the primitive neutralizes (M-21) and which 
   neutralized rather than assumed.
 ```
 
-By §7.1.4 the conclusion carries unchanged to `declared_base.base_commit`.
+By §7.1.9 the conclusion carries unchanged to `declared_base.base_commit`.
 
 #### 7.8.4 The reserved canonical Review namespace (R21, amendment A-5)
 
@@ -2827,23 +3217,62 @@ LAYER 2 — RESERVED OWNERSHIP CLASSIFICATION.  §5.1 step 5c
           volume serial plus the file index, from the open handle. The declared path's FINAL
           component is not opened at this sub-step and is never traversed through.
 
-      2b  CANONICAL IDENTITIES. Open, the same way, whichever of these exist:
-              .workline/review          a directory
-              .workline/events          a directory
-              .workline/events/events.jsonl   a file, opened with O_NOFOLLOW and NOT read
-          and take their identities.
+      2b  CANONICAL IDENTITIES. Take the identity of whichever of these exist, by the SAME
+          no-follow metadata query 2d uses — never by an O_NOFOLLOW open, so that an indirection
+          standing where a canonical object belongs is IDENTIFIED rather than merely refused:
+              .workline/review          normally a directory
+              .workline/events          normally a directory
+              .workline/events/events.jsonl   normally a plain file, never read here
+          A canonical path that is NOT the plain object kind it should be is a Project state this
+          operation does not repair: its identity is still taken, so 2c/2d stay answerable, and
+          the Review-generation side refuses separately under its own rules (fsafe).
 
       2c  ANCESTOR MATCH. If any opened ancestor of the declared path IS the `.workline/review`
           object, the declaration is RESERVED under A-5, whatever it was spelled.
 
-      2d  FINAL-COMPONENT MATCH, WITHOUT DEREFERENCING IT. If the declared path's final component
-          EXISTS, open it once with no-follow semantics — which does not follow a symlink, it
-          refuses to open one — and take its identity. If that identity is the `.workline/review`
-          object, the declaration is RESERVED under A-5; if it is the `.workline/events/events.jsonl`
-          object, the declaration is RESERVED under A-6. If the final component does not exist,
-          there is no object for an alias to reach and the lexical fold is the whole test for it,
-          which is sound in that state: the canonical event log EXISTS from the moment the
-          mutation is opened (F1-D2), so a non-existent final component cannot be it.
+      2d  FINAL-COMPONENT MATCH, WITHOUT DEREFERENCING IT AND WITHOUT REFUSING AN INDIRECTION.
+          If the declared path's final component EXISTS, take ITS OWN identity — the identity of
+          whatever object the name denotes, be it a regular file, a directory, a symlink or any
+          other reparse point — and compare it to the canonical identities from 2b. If it is the
+          `.workline/review` object the declaration is RESERVED under A-5; if it is the
+          `.workline/events/events.jsonl` object it is RESERVED under A-6.
+
+          THE PRIMITIVE IS A NO-FOLLOW METADATA QUERY, NOT AN OPEN. This is stated exactly because
+          an earlier draft got it wrong:
+
+              POSIX    os.stat(name, dir_fd=<proven parent fd>, follow_symlinks=False)
+                       — fstatat(..., AT_SYMLINK_NOFOLLOW); identity = (st_dev, st_ino), and
+                       S_ISLNK says whether it is a symlink
+              Windows  the `fsafe` NtCreateFile(RootDirectory=<proven parent handle>,
+                       FILE_OPEN_REPARSE_POINT) form followed by GetFileInformationByHandle;
+                       identity = volume serial + file index, and
+                       dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT says whether it is an
+                       indirection. `os.supports_dir_fd` is EMPTY on Windows (M-47), so `dir_fd`
+                       is not available there and this backend is the handle-bound form.
+
+          AN `O_NOFOLLOW` OPEN MUST NOT BE USED HERE. On POSIX it REFUSES a symlink with ELOOP
+          instead of identifying it, so a draft built on it turned every valid F2 mode-120000
+          symlink result into `review_candidate_unavailable` BEFORE layer 3 ever ran — refusing
+          exactly the result shape F2 §6.4 supports and §21.12 records as ACCEPTED. That draft is
+          withdrawn. MEASURED, M-47: the no-follow identity of a reparse point is its OWN identity
+          (`st_ino=11258999074582616`) and differs from its target's (`4785074610237389`), so an
+          indirection can be identified without being followed.
+
+          THE REQUIRED DISTINCTION, frozen:
+
+              FINAL component is a symlink / reparse object
+                  its identity IS established; it is not a canonical reserved object; the
+                  declaration PROCEEDS to layer 3, where F2's symlink result semantics apply and
+                  the link is still never dereferenced
+              ANCESTOR component is a symlink / junction / reparse object
+                  containment failure, fail closed — unchanged
+
+          A valid final symlink is NEVER refused merely for being a symlink.
+
+          If the final component does not exist, there is no object for an alias to reach and the
+          lexical fold is the whole test for it, which is sound in that state: the canonical event
+          log EXISTS from the moment the mutation is opened (F1-D2), so a non-existent final
+          component cannot be it.
 
       2e  UNKNOWN IS NOT A PASS. An identity that cannot be established at 2a, 2b or 2d is a FAIL
           CLOSED (review_candidate_unavailable), never a pass to layer 3.
@@ -2961,7 +3390,7 @@ PER KIND, exactly:
                   permission alone where the platform does not carry one
         identity  the exact bytes, and their RAW Git blob id — `hash_blob` of those bytes, with
                   no attribute or filter machinery consulted, which is what F2 §6.3's new_oid is
-                  and what §7.1.1 O-3 reproduces and checks (M-40)
+                  and what §7.1.2 O-3 reproduces and checks (M-40)
         material  the exact bytes, which become the CandidateSnapshot payload (F2 §9.4)
 
     120000 symlink
@@ -2970,30 +3399,54 @@ PER KIND, exactly:
         material  those same target bytes, as F2 §9.4.1 requires
 
     160000 gitlink
-        identity  THE EXACT REFERENCED COMMIT OID, and its SOURCE IS FROZEN rather than left as
-                  "Git's own view":
+        identity  THE EXACT REFERENCED COMMIT OID, read by HANDLE-BOUND READS ONLY.
 
-                      git -C <the submodule path> rev-parse HEAD
+                  AN EARLIER DRAFT FROZE `git -C <the submodule path> rev-parse HEAD`. THAT IS
+                  WITHDRAWN. `-C` hands a PATHNAME to a second process, which re-resolves it from
+                  the root; a path "assembled from the proven chain" is NOT equivalent to using
+                  that chain's handles. The gap is real cross-platform: `fsafe`'s own analysis
+                  says a POSIX fd "pins nothing - the directory it holds can be renamed anywhere
+                  while it is held", so containment proven at 5d does not keep the PATH pointing
+                  at the proven directory, and `git -C` could be made to read another repository
+                  entirely.
 
-                  — the SUBMODULE REPOSITORY'S HEAD COMMIT, read from that repository. MEASURED,
-                  M-39: after moving a submodule's HEAD, `git add <submodule-path>` staged
-                  `160000 a4937a0df268...` and `rev-parse HEAD` inside it returned exactly
-                  `a4937a0df268...`. So this is the same value Git itself would record, obtained
-                  without invoking any pathname-resolving staging command.
+                  FROZEN — every step is a read relative to a handle already held, and no
+                  pathname is re-resolved at any of them:
+
+                    G-1  the submodule directory handle comes from the SAME proven chain as every
+                         other kind (§7.8.4 layer 3), never from a fresh walk
+                    G-2  read `.git` from that handle. MEASURED, M-46: in a real submodule it is a
+                         FILE holding `gitdir: ../.git/modules/sub` — a RELATIVE path — not a
+                         directory, so this indirection must be resolved and is the only place the
+                         chain could leave the held handles
+                    G-3  resolve that gitdir COMPONENT BY COMPONENT AGAINST THE HELD CHAIN: each
+                         `..` steps back to a handle the chain ALREADY HOLDS, and each name opens
+                         the next component no-follow from the handle before it. An ABSOLUTE
+                         gitdir, a `..` that would step above the Project root, and any component
+                         that is an indirection each FAIL CLOSED. When `.git` is a directory
+                         rather than a gitfile, G-2/G-3 collapse to opening it from G-1's handle
+                    G-4  read `HEAD` from the resulting handle. A raw 40/64-hex line IS the
+                         identity; `ref: <name>` is resolved by reading `<name>` from that same
+                         handle, and failing that the handle's `packed-refs`
+                    G-5  the result must be a full object id. Anything else fails closed
+
+                  MEASURED END TO END, M-46, using `workline.review.fsafe`'s existing
+                  cross-platform handle-bound primitives and NO Git process: the chain yielded
+                  `f600f63fd1c8ea463c51608453299e0a1a9a200c`, which is EXACTLY what
+                  `git -C sub rev-parse HEAD` returns and exactly what `git ls-files --stage sub`
+                  shows as `160000 f600f63f...`. The handle-bound read reproduces Git's own answer
+                  without ever handing a pathname to a second process.
 
                   NOT the superproject's index entry, which still holds the OLD commit until
-                  something stages it — reading it would witness the pre-executor value and the
-                  witness would silently be stale.
-                  NOT a branch name or any symbolic ref, which is not an identity.
+                  something stages it — reading it would witness the pre-executor value.
+                  NOT a branch name or any symbolic ref, which is not an identity; G-4 resolves a
+                  symbolic HEAD to an id and never records the name.
                   NOT derived from the submodule's working-tree contents, which do not determine
                   the referenced commit at all.
+                  NOT a fallback to refusing gitlinks: F2 requires them supported, and this is why
+                  a portable mechanism had to be frozen rather than the kind dropped.
 
-                  CONTAINMENT: the submodule path is reached through the same proven ancestor
-                  handle chain as every other kind, and `-C` is given the path assembled from that
-                  proven chain. A submodule directory whose identity cannot be established fails
-                  closed like any other unprovable entry.
-
-                  This is what F2 §6.3 calls new_oid for this kind, and §7.1.1 O-4 places it
+                  This is what F2 §6.3 calls new_oid for this kind, and §7.1.2 O-4 places it
                   directly with `--cacheinfo 160000,<oid>,<path>` — O-3 writes no object for a
                   gitlink, because the identity already IS a commit id.
         material  NONE. F2 §9.4.1 gives a gitlink no payload; the entry IS the material
@@ -3061,68 +3514,67 @@ So Git does NOT mechanically refuse ancestor indirection at staging on Windows. 
 POSIX result — `fatal: pathspec ... is beyond a symbolic link` — is recorded as THEIR
 measurement; this environment is Windows only and did not reproduce it.
 
-THAT IS WHY THE STAGING PRIMITIVE NO LONGER RESOLVES PATHNAMES AT ALL. §7.1.1 replaces
-`git add`/`git commit --only` with the object-driven sequence: the witnessed BYTES are hashed
-into an object, that object id is checked against Candidate.new_oid, and the index entry is
-written by `update-index --cacheinfo <mode>,<oid>,<path>`, which touches no filesystem.
+THAT IS WHY THE STAGING PRIMITIVE NO LONGER RESOLVES PATHNAMES AT ALL. §7.1.2 replaces
+`git add`/`git commit --only` with the object-driven sequence: the PLAN's material — for K1, the
+witnessed bytes — is hashed into an object, that object id is checked against the plan's new_oid,
+and the index entry is written by `update-index --cacheinfo <mode>,<oid>,<path>`, which touches no
+filesystem.
 
 MEASURED (M-36), same junction, ACTIVE THROUGHOUT: the committed tree held the WITNESSED blob
 `924c75cd`, and the junction target's blob `b2f3ae2a` appeared nowhere in the commit. The witness
 is what reaches K1 even while the redirection is in force.
 
-Therefore F3 does NOT claim the initial witness closes this race, and does NOT claim Git closes
-it. What closes the end-to-end identity invariant is three things together:
+Therefore F3 does NOT claim the initial witness closes this race, and does NOT claim Git closes it.
+**Nor does it claim any longer that a check closes it.** An earlier draft answered with
+"pre-stage containment re-proof + full-witness currentness + C-2(K1)", argued that a redirection
+"either changes the identity — refused before staging — or does not — no breach", and concluded the
+invariant held. **That argument is withdrawn.** Its first branch is false for a swap AFTER the
+check: a check and a later use are two operations, and nothing in that list stood between them. Its
+second branch conceded that a commit could be built through a redirection at all, which is the
+concession the invariant cannot afford. And it ended at "nothing wrong is ever PUBLISHED", which is
+a weaker claim than the one being made.
 
-  1. PRE-STAGE CONTAINMENT RE-PROOF. Immediately before the staging of S-c1 — after the Review,
-     in the same call that stages — the ancestor chain of every path to be staged is re-proven
-     by the layer-3 walk, including the object-identity check. This narrows the window to that
-     call, exactly as the destination locator is re-resolved immediately before a push and for
-     the same reason: the window cannot be closed entirely by a check, only narrowed to the
-     operation.
+Three mechanisms remain, doing three DIFFERENT jobs, and exactly one of them closes the race:
 
-  2. FULL-WITNESS CURRENTNESS, not a single digest. The pre-stage comparison compares the WHOLE
-     witness — kind, git_mode and identity — against what the path holds now. This is what makes
-     a chmod (M-33) and a changed gitlink (M-32) detectable, which the current `_content_digest`
-     string cannot express. See IP-16.
+  1. PRE-STAGE CONTAINMENT RE-PROOF AND FULL-WITNESS CURRENTNESS — AN EARLY REFUSAL, NOT A
+     CLOSURE. Immediately before S-c1 stages, the ancestor chain of every path is re-proven by
+     the layer-3 walk including the object-identity check, and the WHOLE witness — kind, git_mode
+     and identity — is compared against what the path holds now. This is what makes a chmod
+     (M-33) and a changed gitlink (M-32) detectable, which a single `_content_digest` string
+     cannot express (IP-16). What it catches is interference that has ALREADY happened, and it
+     STOPS with review_candidate_unavailable. It is retained because turning a tampered working
+     tree into an early refusal is worth doing — not because it closes anything.
 
-  3. C-2(K1) AS THE MECHANICAL BACKSTOP. W4 and W5 compare the COMMITTED tree entries against the
-     Candidate's entries by kind, mode and object id. A commit that staged anything other than
-     the witnessed artifact fails them and is refused; nothing is proven and nothing is pushed.
+  2. THE OBJECT-DRIVEN COMMIT TREE PLAN — THE REASON A LATER PATHNAME RACE CANNOT ALTER THE
+     COMMITTED TREE. The plan carries the witnessed bytes and identities (§7.1.1); O-3 hashes
+     THOSE bytes and checks the id against the plan's; O-4 places that id under the path STRING
+     with `--cacheinfo`, which opens, stats, traverses and resolves nothing. There is no later
+     pathname resolution left to lose. MEASURED with the redirection ACTIVE THROUGHOUT (M-36):
+     the committed entry was the witnessed blob `924c75cd` and the junction target's `b2f3ae2a`
+     appeared nowhere in the commit.
 
-WHY THAT IS SUFFICIENT, stated as an argument rather than a hope. An ancestor redirection at
-staging time either changes the artifact's identity or it does not:
+  3. C-2(K1) — AN INDEPENDENT PROOF AFTER C-1, NOT A REPAIR. W4 and W5 compare the COMMITTED tree
+     entries against the Candidate's by kind, mode and object id. It would catch a primitive that
+     failed to hold the chain. It does NOT make the chain hold, and it cannot repair a wrong local
+     K: by the time it runs, a wrong K would already exist and already be owned.
 
-    it changes it     -> the full-witness currentness check refuses before staging, and if it
-                         somehow reached the commit, C-2(K1) refuses before any publication.
-                         MEASURED for the byte case (M-35): the digest through the junction
-                         differed from the recorded one, so the path was classified FOREIGN and
-                         nothing was staged.
-    it does not       -> the staged object is byte-for-byte and mode-for-mode the witnessed
-                         object. MEASURED (M-35): with identical content behind the junction the
-                         staged blob was identical. There is no identity breach to detect.
+So the frozen end-to-end invariant holds for the COMMITTED artifact, not merely for the published
+one, and that strengthening is the whole point of the change:
 
-So the frozen end-to-end invariant holds for everything that is ever PUBLISHED:
+    ARTIFACT AT EXECUTOR RETURN == WITNESS == CANDIDATE == PLAN == STAGED == K1
 
-    ARTIFACT AT EXECUTOR RETURN == WITNESS == CANDIDATE == PRE-STAGE CURRENT == STAGED == K1
-
-WHAT REMAINS, AND WHAT DOES NOT. The redirection can still make the PRE-STAGE currentness read
-see foreign content, and that is refused there (review_candidate_unavailable) — a refusal, never a
-wrong commit. What can no longer happen is the case the earlier draft conceded: a commit carrying
-the redirected artifact. Under §7.1.1 the bytes committed are the witnessed bytes, whatever the
-filesystem says at that moment, so there is no "identical content, therefore harmless" residual to
-concede and no platform on which the outcome differs.
-
-THE PROPERTY IS NO LONGER PLATFORM-DEPENDENT, AND IT IS PINNED BY TEST. `review-v1-work-local-v1`
-carries a required regression test over the measured matrix of §21.12, asserting that the committed
-tree entry equals the witnessed identity with an ancestor indirection active — on every platform,
-because the primitive never asks the filesystem. The earlier draft pinned Git's `git add`
-containment behaviour instead; that behaviour is now merely recorded as a measurement (M-34) and
-nothing relies on it.
+THE PROPERTY IS NO LONGER PLATFORM-DEPENDENT, AND IT IS PINNED BY TEST.
+`review-v1-work-local-v1` carries a required regression test over the measured matrix of §21.12,
+asserting that the committed tree entry equals the PLANNED identity with an ancestor indirection
+ACTIVE — on every platform, because the primitive never asks the filesystem. The earlier draft
+pinned Git's `git add` containment behaviour instead; that behaviour is now merely recorded as a
+measurement (M-34) and nothing relies on it.
 ```
 
 ```text
-THE INVARIANT, stated once: START must POSITIVELY prove that a declared path is not the reserved
-Review namespace before it durably asserts ownership of that path. Unknown containment fails
+THE INVARIANT, stated once: START must POSITIVELY prove that a declared path is in NEITHER
+reserved namespace — not the canonical Review namespace (A-5) and not the lifecycle event log
+(A-6) — before it durably asserts ownership of that path. Unknown containment fails
 closed, before declare_own_content.
 ```
 
@@ -3275,7 +3727,7 @@ matters, and nowhere else is claimed.
 ```
 
 ```text
-This is the same argument §7.1.4 makes for the attribute source, and it is now the same argument:
+This is the same argument §7.1.9 makes for the attribute source, and it is now the same argument:
 S-c0 touches one path, that path is reserved, so nothing a Work can declare or read differs
 between the two bases.
 ```
@@ -3654,17 +4106,52 @@ namespace ownership rule §7.8.4 needs.
 
 ### 7.10 C-1: how exact local commit identity becomes durable
 
-```text
-The Mutation Controller records the full object ID of the commit it made beside the effect
-payload, at the moment it makes it, and only when it can prove the new HEAD is a one-parent child
-of the pre-commit HEAD (M-10).
+C-1 is reached in **two durable steps**, not one, and the split is what makes it crash-safe.
 
+```text
+O-6a  PREPARED, durable BEFORE any ref moves
+        prepared_commit_id + parent + tree + ref + contract
+        proves ONLY: this operation created this exact commit object
+        it is NOT C-1, confers no reachability, authorizes no push, satisfies no proof item
+
+O-7a  C-1, durable AFTER the ref is read back holding that id
+        commit_id = prepared_commit_id, applied = true
+        every downstream item reads THIS
+```
+
+Why the split exists, measured rather than argued:
+
+```text
+The live controller records the id only after the commit primitive RETURNS: `_make_commit`
+(mutation.py:1394) calls `controller.apply_effect`, and the caller sets `applied` and saves
+afterwards (mutation.py:501). Under the object-driven primitive `apply_effect` contains BOTH the
+commit and the ref advance, so a crash between them leaves a moved ref and no durable ownership.
+
+And that gap is not benign: live `_classify_commit` (mutation.py:2259) reaches
+
+    changed = gitcmd.changed_against_head(repo, list(payload["paths"]))
+    if head is not None and not changed:
+        return MATCHING          # "nothing left to commit for these paths"
+
+so on retry the effect is classified MATCHING with NO owned commit id (M-41) — the paths are
+already committed, so nothing differs from HEAD. P1 R5 §3.1 / §3.5 forbid precisely that.
+The prepared checkpoint removes the window: after O-6a there is always a durable id, and
+§7.1.3's matrix decides every resume from it.
+```
+
+```text
 A commit this operation cannot positively show it created is NEVER K, however exactly its
 content, tree, parent, branch or message match (R5 §3.1). In particular:
     the branch tip is never K
+    "the paths no longer differ from HEAD" is never K, and is never ownership of anything
     a commit with a matching message is never K
     a byte-identical commit made by another subject is never K
     a commit made by a hook continuing after the primitive's commit is never K
+    an unreachable object this operation wrote but never durably prepared is never K (§7.1.6)
+
+What IS positive proof is the operation's own durable prepared_commit_id, compared against the
+ref it recorded. Reading a ref to ask whether it holds an id written down beforehand is not
+branch-tip inference; inferring an id FROM the tip is, and that is what stays forbidden.
 ```
 
 Where a review-v1 result stage's content reaches committed state without this operation having created the
@@ -3739,7 +4226,7 @@ positively proven before S-c1 is recorded:
 
   L-3  HEAD is on declared_base.branch, by its full ref name, and that branch holds parent(K1).
 
-  L-4  S-c1 is base-exact BY CONSTRUCTION, not by a re-read. §7.1.1 O-2 seeds the isolated index
+  L-4  S-c1 is base-exact BY CONSTRUCTION, not by a re-read. §7.1.2 O-2 seeds the isolated index
        from the EXACT parent(K1) object id, O-6 records that same id as the parent, and O-7
        advances the branch only under compare-and-swap against it. MEASURED, M-38: a wrong
        expected-old is refused and the ref is left untouched. So a branch that moved cannot be
@@ -3833,16 +4320,21 @@ this section with an "empty" Candidate and skip it; the topology never records S
 
 ```text
 W1   OWNERSHIP
-     The S-c1 effect is recorded applied and carries commit_id = K1, the full object id of a
-     commit this mutation made (M-10). Absent or unprovable -> review_commit_unowned. The branch
-     tip, a matching message and byte-identical content are never accepted in its place
-     (R5 §3.1). This item is a precondition of every item below it: W2 ... W12 are checked
-     against an already-owned commit and never confer ownership.
+     The S-c1 effect is recorded applied and carries commit_id = K1 — that is, O-7a completed
+     (§7.10). Absent or unprovable -> review_commit_unowned. The branch tip, a matching message,
+     byte-identical content, and "the declared paths no longer differ from HEAD" are never
+     accepted in its place (R5 §3.1, M-41). This item is a precondition of every item below it:
+     W2 ... W12 are checked against an already-owned commit and never confer ownership.
+
+     A PREPARED COMMIT IS NOT ENOUGH. A durable prepared_commit_id without the O-7a promotion
+     proves the object was created by this operation and nothing more; W1 is not satisfied, no
+     proof note is written and no push may be recorded. §7.1.3 says what a resume does in that
+     state, and in no row does it promote itself.
 
 W2   PERSISTENCE SEMANTICS
      The S-c1 payload names mode "review-v1-work-local-v1", whose frozen behaviour is the
-     OBJECT-DRIVEN sequence of §7.1.1; the commit was made with the attribute source pinned to
-     the tree of declared_base.base_commit (§7.1.2, §7.1.4); and the Git persistence preflight of
+     OBJECT-DRIVEN sequence of §7.1.2; the commit was made with the attribute source pinned to
+     the tree of declared_base.base_commit (§7.1.7, §7.1.9); and the Git persistence preflight of
      §7.3, evaluated UNDER THAT SAME PIN, passed IMMEDIATELY BEFORE the stage was recorded —
      topology step 17b, after the Review completed. Step 9's early run is an optimization and
      never satisfies this item, and an evaluation made against the working tree rather than the
@@ -3851,7 +4343,7 @@ W2   PERSISTENCE SEMANTICS
      WHAT THIS ITEM DOES AND DOES NOT PROVE, stated because the primitive changed. C-2(K1) reads
      COMMITTED OBJECTS; it cannot observe how they were produced, so it cannot verify that O-1
      ... O-8 were the steps taken. It proves the RESULT — W4 and W5 prove the committed tree is
-     exactly the Candidate — while §7.1.1 is what makes that result unreachable by any other
+     exactly the Candidate — while §7.1.2 is what makes that result unreachable by any other
      artifact in the first place. The two are independent, and neither is offered as the other:
      the frozen chain WITNESS == CANDIDATE == PRE-STAGE == STAGED == K1 is held by the primitive,
      and C-2(K1) is the check that would catch a primitive that failed to hold it.
@@ -4657,7 +5149,7 @@ empty
     identical lineage contract of §8.2 (L-1 ... L-5), because there is no K1 (§6.3).
 
 both
-    S-c2 is base-exact BY CONSTRUCTION, exactly as L-4 states for S-c1: §7.1.1 O-2 seeds from the
+    S-c2 is base-exact BY CONSTRUCTION, exactly as L-4 states for S-c1: §7.1.2 O-2 seeds from the
     exact parent(K2) id, O-6 records it, and O-7 advances the branch only under compare-and-swap
     against it (M-38). No HEAD re-read window exists.
     HEAD is on the bound branch by its full ref name, and that branch holds K2.
@@ -5085,7 +5577,7 @@ F3 authorizes none of these. They are named so the work is a known quantity rath
 ```text
 IP-1  Effect.git_commit must accept a CLOSED SET of two persistence modes rather than one
       (_validate_planning_commit, mutation.py:1094-1110), and apply_effect must dispatch
-      "review-v1-work-local-v1" to the OBJECT-DRIVEN primitive of §7.1.1 (IP-17) — NOT to
+      "review-v1-work-local-v1" to the OBJECT-DRIVEN primitive of §7.1.2 (IP-17) — NOT to
       `contained_add`/`contained_commit` (mutation.py:2484), which is the planning mode's
       primitive and resolves working-tree pathnames. An unknown mode must stay a
       ValidationError. (M-5)
@@ -5132,16 +5624,46 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
       tree, at every depth, plus .git/info/attributes — not a path probe. Its supported shape is
       narrow by design and refuses any [attr] macro.
 
-IP-17 THE OBJECT-DRIVEN PERSISTENCE PRIMITIVE of §7.1.1, which is the largest single piece of
+IP-17 THE OBJECT-DRIVEN PERSISTENCE PRIMITIVE of §7.1.2, which is the largest single piece of
       implementation this contract requires and the one that must not be approximated. It
       REPLACES `gitcmd.contained_add` / `contained_commit` for every commit this operation makes:
-      an isolated `GIT_INDEX_FILE`, `read-tree <exact parent>`, `hash-object -w --stdin` from the
-      witnessed bytes with the returned id CHECKED against Candidate.new_oid, `update-index
-      --cacheinfo <mode>,<oid>,<path>` and `--force-remove` for deletions, `write-tree`,
-      `commit-tree --no-gpg-sign -p <exact parent> -m <exact message>`, a compare-and-swap
-      `update-ref <ref> <new> <expected-old>`, and the own-paths-only real-index reconciliation of
-      O-8. All of it is present in Git today and all of it is MEASURED (M-36..M-40); none of it
-      resolves a working-tree pathname.
+      an isolated `GIT_INDEX_FILE`, `read-tree <exact parent>`, parent agreement, `hash-object -w
+      --stdin` from the PLAN's material with the returned id CHECKED against the plan's new_oid,
+      `update-index --cacheinfo <mode>,<oid>,<path>` and `--force-remove` for deletions,
+      `write-tree`, `commit-tree --no-gpg-sign -p <exact parent> -m <exact message>`, and a
+      compare-and-swap `update-ref <ref> <new> <expected-old>`. All of it is present in Git today
+      and all of it is MEASURED (M-36..M-38, M-40, M-42, M-43); none of it resolves a working-tree
+      pathname.
+
+IP-18 THE PREPARED-COMMIT OWNERSHIP CHECKPOINT (§7.1.2 O-6a / O-7a, §7.1.3, §7.10). The
+      git_commit effect must carry `prepared_commit_id` with its parent, tree, ref and contract,
+      saved in its own durable save BEFORE the ref advance, and `commit_id`/`applied` must be
+      promoted in a SECOND save after the ref is read back. `Mutation.apply` and `_make_commit`
+      (mutation.py:501, :1394) currently do one save after `apply_effect` returns, and
+      `_classify_commit` (mutation.py:2259) currently returns MATCHING when the recorded paths no
+      longer differ from HEAD — which, for a not-yet-owned record, is ownership by branch state
+      and must become unreachable for review-v1 Work (M-41). The resume matrix §7.1.3 rows A ... G
+      replaces it. RUNTIME / RECOVERY material only: no canonical Review record and no Candidate
+      schema changes.
+
+IP-19 THE GENERIC COMMIT TREE PLAN (§7.1.1): a plan builder per commit class — Candidate/witness
+      for S-c1, parent blob plus recorded append_event effects for S-c0, the recorded
+      immutable-create bytes for each Review generation commit, and both together for S-c2 — none
+      of which may read the working-tree copy of a path the plan already describes. Includes the
+      append assertion `material.startswith(parent_blob)` for the event log.
+
+IP-20 THE CONDITIONAL REAL-INDEX REFRESH (§7.1.4): entry-compared, own-paths-only, run after
+      durable C-1, non-authoritative, with the outcome recorded on the mutation. MEASURED
+      feasible (M-45); the hazard of omitting it is MEASURED too (M-44).
+
+IP-21 TWO HANDLE-BOUND READERS `fsafe` does not expose yet, both built from primitives it already
+      uses:
+        a NO-FOLLOW FINAL-OBJECT IDENTITY query — `fstatat(..., AT_SYMLINK_NOFOLLOW)` on POSIX,
+          the existing `NtCreateFile(RootDirectory=..., FILE_OPEN_REPARSE_POINT)` +
+          `GetFileInformationByHandle` on Windows — which IDENTIFIES a symlink or reparse point
+          instead of refusing it, so a valid F2 mode-120000 result is not lost (M-47);
+        a HANDLE-BOUND SUBMODULE HEAD READER implementing §7.8.4's G-1 ... G-5 from
+          `SafeDirectory.child` / `.read_file`, which M-46 measured end to end.
 
       ALSO REQUIRED WITH IT:
         the pre-stage containment re-proof of §7.8.4 — immediately before S-c1 stages, the
@@ -5149,7 +5671,7 @@ IP-17 THE OBJECT-DRIVEN PERSISTENCE PRIMITIVE of §7.1.1, which is the largest s
           the object-identity check. It is retained even though the primitive no longer depends
           on it, because it turns a tampered working tree into an early refusal rather than a
           late one;
-        the empty-delta assertion of §7.1.1, which is now a RULE rather than a consequence of
+        the empty-delta assertion of §7.1.2, which is now a RULE rather than a consequence of
           `git commit --only` declining an empty delta, and which carries no new reason value
           because §6.7's discriminator is what prevents the case;
         a required regression test over §21.12's matrix asserting that the committed tree entry
@@ -5282,7 +5804,7 @@ FC-8   No synthetic, placeholder, empty-string or all-zero commit identity is wr
 FC-9   A Review record is never rewritten; an immutable create that finds different bytes at its
        path is reconcile_required.
 
-FC-10  The attribute source of every commit this operation makes is pinned (§7.1.4), so
+FC-10  The attribute source of every commit this operation makes is pinned (§7.1.9), so
        committed object identity equals the Candidate's by construction. A transform assigned by
        the PINNED source itself is refused at START entry, before any mutation exists. No
        transform is ever disabled to obtain a pass, and no result the executor produces is ever
@@ -5548,7 +6070,7 @@ A. S-c0 EXISTS (entry events not yet committed)
    clone      form L holds over the resulting tree
    recovery   ordinary resume at the earliest unsatisfied checkpoint
    NOTE       S-c0 pins to PRE_S_C0_BASE, NOT to declared_base.base_commit, which does not yet
-              exist. The circularity the re-review found is resolved in §7.1.4.
+              exist. The circularity the re-review found is resolved in §7.1.9.
 
 B. S-c0 ABSENT (event log already matches HEAD)
    as A, except PRE_S_C0_BASE == declared_base.base_commit and the distinction collapses. No
@@ -5778,7 +6300,7 @@ C. UNKNOWN CAPABILITY
 
 D. S-c0
    §5.1  step 9a, pinned to PRE_S_C0_BASE — the committed HEAD immediately before it, which
-         exists (§7.1.4). It commits the event log ALONE, which is what makes the two bases one
+         exists (§7.1.9). It commits the event log ALONE, which is what makes the two bases one
          attribute state. Activated as PB-9.
 
 E. EVERY LATER COMMIT
@@ -5971,7 +6493,7 @@ A. RESULT FILE, ALL PARENTS PLAIN
              witness of IP-16 — path, kind "file", git_mode 100644 or 100755, the raw blob id
              and the exact bytes. NOT the existing `_BYTES` digest string, which carries no
              mode (M-33); the earlier draft's "same recorded forms" claim is withdrawn.
-   outcome   ACCEPTED -> step 6 persists the witness, no pathname re-resolution, and §7.1.1 O-3
+   outcome   ACCEPTED -> step 6 persists the witness, no pathname re-resolution, and §7.1.2 O-3
              later hashes THESE bytes rather than rereading the path
 
 B. RESULT FINAL COMPONENT IS A SYMLINK, PARENTS PLAIN
@@ -5980,8 +6502,8 @@ B. RESULT FINAL COMPONENT IS A SYMLINK, PARENTS PLAIN
              themselves. THE LINK IS NEVER FOLLOWED.
    outcome   ACCEPTED. F2 §6.4's symlink result object keeps its semantics exactly. The
              executable bit is carried in the witness's git_mode, and a gitlink's referenced
-             commit OID comes from its own frozen source — `git -C <submodule path> rev-parse
-             HEAD` (§7.8.4, M-39) — so neither is dropped.
+             commit OID comes from its own frozen handle-bound source — G-1..G-5 of §7.8.4,
+             measured end to end with no Git process at all (M-46) — so neither is dropped.
 
 C. RESULT PATH WITH A SYMLINK ANCESTOR
    walk      an existing ancestor is a symlink / junction / reparse point
@@ -5993,7 +6515,7 @@ D. DELETION, PARENT EXISTS, FINAL PATH ABSENT
    witness   declared canonical path + kind "absent" + git_mode 000000 + the tracked identity
              in PRE_S_C0_BASE (§7.8.5, which A-6 makes interchangeable with declared_base at
              every declarable path) + the positive absence
-   outcome   ACCEPTED -> step 6 persists that witness; §7.1.1 O-4 later issues
+   outcome   ACCEPTED -> step 6 persists that witness; §7.1.2 O-4 later issues
              `update-index --force-remove <path>`, which resolves nothing on the filesystem
 
 E. DELETION, IMMEDIATE PARENT ABSENT
@@ -6029,15 +6551,17 @@ H. AN ANCESTOR IS SWAPPED AFTER VALIDATION BUT BEFORE THE OWNERSHIP SNAPSHOT
 I. EXTERNAL CHANGE AFTER THE OWNERSHIP SNAPSHOT
    outcome   the snapshot is NOT redefined retroactively, and the change cannot reach the commit
              at all. The full-witness currentness comparison detects the drift and refuses; and
-             independently of that refusal, §7.1.1 commits the WITNESSED bytes and identities, so
+             independently of that refusal, §7.1.2 commits the WITNESSED bytes and identities, so
              even an undetected change to the working tree is not what gets committed (M-36).
              The earlier draft's formulation — "the Git stage commits the owned paths only while
              they still hold exactly what was recorded" — described a pathname-resolving stage
              that no longer exists.
 
 J. A GITLINK RESULT, SUBMODULE HEAD MOVED BY THE EXECUTOR
-   witness   kind "gitlink", git_mode 160000, identity = `git -C <submodule path> rev-parse HEAD`
-             read through the proven ancestor chain (§7.8.4, M-39); no material
+   witness   kind "gitlink", git_mode 160000, identity read by §7.8.4's handle-bound chain
+             G-1..G-5 — the submodule handle from the proven chain, its `.git` gitfile, the
+             gitdir resolved component-wise against handles already held, then HEAD and its ref
+             (M-46). No `git -C`, no pathname re-resolution, no material
    outcome   ACCEPTED. Measured today this is REFUSED by the live own-content guard, because a
              gitlink digests to `None` against a stored `"unreadable"` (M-32) — that defect is
              IP-16's, and this row holds only once IP-16 lands, which is stated rather than
@@ -6124,7 +6648,7 @@ O. ANCESTOR SWAPPED BETWEEN THE CURRENTNESS CHECK AND THE COMMIT   (the central 
             a redirected object can reach the committed tree at all, WITNESS == ... == K1 is
             broken at its fourth link, and a later refusal reports that rather than preventing
             it.
-   now      the commit is built by §7.1.1's object-driven sequence, which resolves NO
+   now      the commit is built by §7.1.2's object-driven sequence, which resolves NO
             working-tree pathname between the identity proof and the committed tree. The bytes
             come from the witness; `hash-object -w --stdin` turns them into an object; the id is
             CHECKED against Candidate.new_oid; `update-index --cacheinfo` places that id under
@@ -6166,11 +6690,11 @@ S. THE BRANCH MOVES BETWEEN THE STAGE RECORD AND THE COMMIT
             the ref update.
 
 T. CANONICAL FORM-L BASE SOURCE
-   permitted and REQUIRED in the reserved surface (§7.1.2 two-surface rule, §7.9.3), while the
+   permitted and REQUIRED in the reserved surface (§7.1.7 two-surface rule, §7.9.3), while the
    ordinary surface admits no material assignment. A base carrying form-L is not refused at
    entry; one carrying a material rule over ordinary paths is. Under the object-driven primitive
    neither assignment can alter a committed object — the pin is defence in depth for storage
-   (§7.1.3) — but the entry predicate still binds, because it is also what §7.9's
+   (§7.1.8) — but the entry predicate still binds, because it is also what §7.9's
    checkout-capability claim rests on.
 ```
 
@@ -6180,6 +6704,164 @@ which is what the frozen chain is about. It is not a claim that the working tree
 tampered with, that a currentness read cannot see foreign content, or that an executor cannot
 leave the Project in a state this operation then refuses. Those are refusals, and they are
 supposed to happen.
+```
+
+### 21.13 Persistence integration matrix — ownership, recovery, index and commit classes
+
+Every row is decided from the operation's OWN durable record. No row recovers ownership from the
+branch tip or from "the paths no longer differ from HEAD". Measured: M-41 ... M-47.
+
+```text
+A. CRASH BEFORE prepared_commit_id IS SAVED
+   state     objects may exist in the ODB; no ref moved; nothing durable claims them
+   answer    §7.1.3 row A. Rebuild the plan and run O-1...O-7a from the start. The earlier
+             objects are unreachable and unowned (§7.1.6): not searched for, not adopted, not
+             evidence, and `git gc` may remove them whenever it likes.
+
+B. CRASH AFTER prepared_commit_id IS SAVED, BEFORE THE CAS
+   state     ref == plan.parent; a durable id names an object this operation made
+   answer    §7.1.3 row B. Re-verify THAT object exactly — exists, is a commit, tree ==
+             prepared_tree, parent == prepared_parent, message == plan.message — then retry the
+             CAS OF THAT ID. MEASURED to succeed (M-42). Never rebuild, never adopt another
+             commit, and never reconstruct-and-compare.
+
+C. CRASH IMMEDIATELY AFTER THE CAS, BEFORE THE C-1 SAVE
+   state     ref == prepared_commit_id; commit_id/applied not yet written
+   answer    §7.1.3 row C. C-1 is recovered POSITIVELY: the id was written down BEFORE the ref
+             moved, and the ref is only asked whether it holds THAT id. Not branch-tip inference.
+   WITHOUT   the prepared checkpoint this is exactly the P1 R5 §3.1/§3.5 violation: live
+             `_classify_commit` would find the paths no longer differ from HEAD and return
+             MATCHING with no owned id (M-41).
+
+D. CAS REFUSED BECAUSE THE BRANCH MOVED
+   MEASURED  "cannot lock ref ...: is at <actual> but expected <given>", ref unchanged (M-38)
+   answer    §7.1.3 row D. STOP, reason review_registration_base_moved. The prepared commit is
+             never retargeted onto the new tip, never rebuilt against it, never published.
+
+E. PREPARED ID DURABLE, THE OBJECT IS MISSING OR UNREADABLE
+   answer    §7.1.3 row E. FAIL CLOSED. `cat-file -e` answering negatively is not permission to
+             rebuild: this operation recorded that it made a specific object, and a repository
+             that no longer has it is a state a person reconciles.
+
+F. ON RESUME THE REF ALREADY EQUALS THE PREPARED ID
+   answer    row C. This is the ordinary crash-after-CAS recovery and is decided in one
+             comparison against the operation's own record.
+
+F2. THE REF IS A DESCENDANT OF THE PREPARED ID
+   MEASURED  `git merge-base --is-ancestor <prepared> <ref>` -> YES, and ref != prepared (M-43)
+   answer    §7.1.3 row F. The OBJECT's ownership is still known, but the stage's conditions do
+             not hold — base-exactness, L-3 and W3 all fail — so reconcile. The later branch
+             state is NEVER silently treated as this stage's result.
+
+G. A PERSON CHANGES ONLY THE REAL INDEX DURING THE REVIEW WAIT
+   state     working tree = the witnessed bytes; real index = the person's staged bytes
+   witness   full-witness currentness is an ARTIFACT/worktree witness, so it still PASSES —
+             stated plainly rather than hidden
+   K1        commits the WITNESSED bytes, correctly, because the plan carries them
+   index     §7.1.4 R-IDX-4 reads the current entry, sees it is NOT the entry the plan expected,
+             and LEAVES IT EXACTLY AS IT IS. MEASURED (M-45): a foreign `b2f3ae2a` staged on our
+             own path was detected and not overwritten. Owning a path is not owning a person's
+             staging intent.
+
+H. UNRELATED STAGED ENTRIES EXIST
+   MEASURED  the person's `b/g.txt` entry survived the refresh BYTE-IDENTICAL (M-45), because
+             R-IDX-3 touches only this commit's own plan paths and O-1...O-8 never read or write
+             the real index at all.
+
+I. THE REAL-INDEX REFRESH FAILS AFTER C-1
+   answer    §7.1.3 row G. C-1 STANDS. R-IDX-2 makes the refresh non-authoritative: its success
+             is not a precondition of C-1, C-2, the proof note, publication or completion, and
+             its failure is recorded on the mutation.
+
+J. A CRASH DURING THE REFRESH
+   answer    as I. The refresh runs AFTER O-7a, so there is no window in which it can cost the
+             operation a commit that is already on the branch — which is exactly the defect the
+             earlier draft's O-8 had (§7.1.4).
+
+K. S-c0, OBJECT-DRIVEN
+   plan      parent tree's event-log blob ++ the canonical serialization of THIS MUTATION'S
+             already-recorded append_event effects, in recorded order (§7.1.1)
+   proof     no working-tree reread: the mutable event log is a file anything may have appended
+             to, and reading it would make S-c0 commit whatever is there rather than what this
+             mutation recorded. The plan also asserts material.startswith(parent_blob).
+   entries   exactly one, `.workline/events/events.jsonl` — which is why A-6 reserves it
+
+L. A REVIEW GENERATION COMMIT
+   plan      the EXACT BYTES the recorded immutable-create effect carries — the same bytes P1's
+             serializer produced — not a reread of the file that effect wrote
+   proof     no working-tree reread: a record is immutable, so the two are equal when nothing
+             interfered, and committing the recorded bytes means an interference changes nothing
+             about what is committed
+   entries   exactly this generation's Review record paths
+
+M. S-c1 / K1, THE CANDIDATE COMMIT
+   plan      the bound artifact witness and the frozen Candidate; material = witnessed bytes;
+             new_oid = Candidate.new_oid
+   chain     WITNESS == CANDIDATE == PLAN == STAGED == K1
+
+N. S-c2 / K2, TERMINAL
+   plan      parent tree + recorded terminal append_event effects (as K) + the recorded
+             Consumption record effect (as L)
+   proof     no working-tree reread for either entry; §16's exact two-entry delta becomes a
+             property of the PLAN, checkable BEFORE the commit rather than only after it
+
+O. FINAL SYMLINK RESULT
+   layer 2   the final component's OWN identity is taken by a no-follow METADATA QUERY —
+             fstatat(..., AT_SYMLINK_NOFOLLOW) / FILE_OPEN_REPARSE_POINT + handle info — which
+             IDENTIFIES the symlink instead of refusing it. It is not a canonical reserved
+             object, so it PROCEEDS to layer 3.
+   layer 3   witness = the link-target bytes read no-follow, git_mode 120000; the link is never
+             dereferenced
+   outcome   ACCEPTED. MEASURED (M-47): a reparse point's no-follow identity is its own
+             (`11258999074582616`) and differs from its target's (`4785074610237389`).
+   WITHDRAWN the earlier draft opened the final component with O_NOFOLLOW, which on POSIX
+             REFUSES a symlink with ELOOP — turning every valid F2 mode-120000 result into
+             `review_candidate_unavailable` before layer 3 ever ran. A valid final symlink is
+             never refused merely for being a symlink.
+
+P. SYMLINK / JUNCTION ANCESTOR
+   outcome   containment failure, FAIL CLOSED, unchanged. The distinction from O is the point:
+             the final object may be an indirection; an ancestor may not.
+
+Q. THE GITLINK PATH'S ANCESTOR IS SWAPPED BEFORE THE OID IS CAPTURED
+   was       `git -C <path> rev-parse HEAD`, which hands a PATHNAME to a second process. On POSIX
+             a held fd pins nothing (fsafe), so the path could denote another repository by then
+             and `-C` would read IT. WITHDRAWN.
+   now       G-1...G-5 (§7.8.4): the submodule handle comes from the proven chain, its `.git`
+             gitfile is read from that handle, the relative gitdir is resolved COMPONENT BY
+             COMPONENT against handles already held, and HEAD and its ref are read from the
+             resulting handle. An absolute gitdir, a `..` above the Project root, or an
+             indirection in the chain each FAIL CLOSED.
+   MEASURED  M-46: the handle-bound chain yielded `f600f63f...`, EXACTLY what
+             `git -C sub rev-parse HEAD` returns and what `git ls-files --stage sub` records —
+             with no Git process involved at all.
+
+R. THE GITLINK'S OID CHANGES AFTER THE CANDIDATE IS FROZEN
+   caught    by the full-witness currentness comparison, which compares the referenced commit OID
+             rather than a byte digest — something M-32 shows the current `_content_digest` form
+             cannot do at all (IP-16)
+   cannot    reach the commit regardless: O-4 places the plan's frozen OID with
+             `--cacheinfo 160000,<oid>,<path>`, which reads nothing from the filesystem
+
+S. DETACHED HEAD AT START
+   outcome   REFUSED BEFORE ANY PERSISTENCE. Live START calls `gitops.ensure_git_ready`
+             (gitops.py:151), which raises StopError(code="detached_head") when there is no
+             current branch. O-7 therefore always has a full branch ref to advance, and F3
+             introduces NO detached-head semantics (§7.1.5). The earlier draft's "HEAD itself
+             when detached" branch is withdrawn: it invented a case the operation cannot be in.
+```
+
+```text
+FOR EVERY COMMIT CLASS the same four identities are one identity, and each step is checked rather
+than assumed:
+
+    the tree the PLAN determines
+      == the tree `write-tree` returns          O-5 requires it
+      == the tree `commit-tree` commits         O-6 is given that exact tree
+      == the tree of the commit C-1 owns        O-7a promotes that exact id, and W4/W5 read it
+
+and the parent is the plan's parent at O-2, at O-2a's agreement check, at O-6's `-p`, and at
+O-7's compare-and-swap expected-old.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -6334,7 +7016,7 @@ C  true conflict requiring a new forward amendment
     An all-inert Candidate — declared paths, no changing entry — is an ordinary correct outcome
     that those sentences classify as result-bearing and that therefore demands a K1 that may not
     be made — a synthetic empty commit, prohibited by F1 §11.2 and F2 §20.5 and forbidden at
-    §7.1.1 O-5/O-6. The discriminator moves to the complete owned tree delta.
+    §7.1.2 O-5/O-6. The discriminator moves to the complete owned tree delta.
     FORWARD AMENDMENT A-3 (§1.5). §6.6, §6.7.                                                  C
 
 20  Live START's combined Git stages for a derivation, a move or a human-NG move
@@ -6355,15 +7037,15 @@ Six, all to landed F2, all declared in full in §1.5:
     A-4  F2 §10.3, §10.1   checkout capability unbound, and the exact Context     row 22
                            record it has to be added to
     A-5  F2 §6.2 SUPERSEDED, §6.5 EXTENDED, §2.3 RETAINED                         row 23
-                           the reserved Review namespace
-    A-6  F2 §6.2 SUPERSEDED, §6.5 EXTENDED, §2.3 RETAINED                         row 24
-                           the reserved lifecycle event log, which is what makes
-                           PRE_S_C0_BASE and declared_base interchangeable at every
-                           declarable path
                            the reserved Review namespace: the reviewed surface excludes it,
                            and a declaration there is unowned state refused as
                            `review_reserved_namespace` — a third declaration-invalidity case
                            beside §6.5's two, not one of them
+    A-6  F2 §6.2 SUPERSEDED, §6.5 EXTENDED, §2.3 RETAINED                         row 24
+                           the reserved lifecycle event log, refused identically and by the
+                           same reason value — a SECOND INSTANCE of A-5's case, not a fourth
+                           case. It is what makes PRE_S_C0_BASE and declared_base
+                           interchangeable at every declarable path
 
 No P1, P2 or P3 F1 statement is amended.
 No historical P1, P2, F1 or F2 document is edited by this contract.
@@ -6385,14 +7067,18 @@ PB-1  the review-v1 WORK publication rule: a mutation whose durable invocation n
       of its two proof notes names, recorded only after that commit's C-2 passed
 PB-2  current-combined, planning and generation rules are unchanged by PB-1
 PB-3  the commit primitive identity "review-v1-work-local-v1", whose frozen behaviour is the
-      OBJECT-DRIVEN sequence of §7.1.1: the commit is built from object identities, and no
+      OBJECT-DRIVEN sequence of §7.1.2: the commit is built from object identities, and no
       working-tree pathname is resolved between the artifact's identity proof and the committed
       tree. `git add` and `git commit`/`git commit --only` are not used for it. Hooks do not run
       and no signature is applied — a property of `commit-tree` itself (M-37), with
       core.hooksPath / commit.gpgSign retained as defence in depth — and there is no filesystem
       monitor, no background maintenance, and core.autocrlf / core.eol are neutralized.
-      The branch advances only under a compare-and-swap `update-ref` against the exact recorded
-      parent (M-38).
+      Every commit class commits a COMMIT TREE PLAN (§7.1.1), never a reread of the working tree,
+      and the branch advances only under a compare-and-swap `update-ref` against the exact
+      recorded parent (M-38). Ownership is durable BEFORE the ref moves (O-6a) and is promoted to
+      C-1 only after the ref is read back holding that exact id (O-7a). The real index is
+      refreshed only after C-1, only for this commit's own plan paths, only where the entry is
+      still the one the plan expected, and never as a condition of anything (§7.1.4).
       A material transform assigned by the PINNED source to an ORDINARY path is
       review_git_transform, never disabled to obtain a pass. This does NOT reach the reserved
       canonical Review namespace: a rule whose pattern is confined to `.workline/review/**` is
@@ -6400,23 +7086,26 @@ PB-3  the commit primitive identity "review-v1-work-local-v1", whose frozen beha
       every P2-capable Project unusable for P3 Work Review. The two surfaces are distinguished
       by pattern confinement, never by which attribute name appears
 PB-4  base-exact commits: K1 and K2 are built on their EXACT recorded parent object id and the
-      branch advances only under a compare-and-swap against that same id (§7.1.1 O-2/O-7,
-      M-38), so a moved branch is refused rather than committed onto; the
-      independent-HEAD-advance allowance does not apply to them. An orphaned commit object left
-      by a refused ref update is NEVER adopted — C-1 requires recorded AND reachable
+      branch advances only under a compare-and-swap against that same id (§7.1.2 O-2/O-7, M-38),
+      so a moved branch is refused rather than committed onto; the independent-HEAD-advance
+      allowance does not apply to them. Ownership is the operation's own DURABLE
+      prepared_commit_id, recorded before the ref moves and promoted to commit_id only after the
+      ref is read back holding it (§7.1.2 O-6a/O-7a, §7.10). An object this operation wrote but
+      never durably prepared is never adopted, and "the recorded paths no longer differ from
+      HEAD" is never ownership (M-41)
 PB-5  a review-v1 Work START in a Project with a remote requires the running Git to meet
       P2_PUBLICATION_GIT_MIN, refused at entry with review_git_unsupported, because its
       Candidate snapshot permanently takes that Project's pushes off the barrier's fast path
 PB-6  the Git persistence preflight runs immediately before EVERY commit a review-v1 Work
       mutation makes, for exactly that commit's path set, evaluated under the pinned
       attribute source, and a pass never carries between commits (§7.3)
-PB-9  the attribute-source pin, with its TWO bases (§7.1.4): S-c0 is made with attr.tree set
+PB-9  the attribute-source pin, with its TWO bases (§7.1.9): S-c0 is made with attr.tree set
       to the tree of PRE_S_C0_BASE — the committed HEAD immediately before it — and EVERY later
       commit of the mutation with attr.tree set to the tree of declared_base.base_commit. The
       two are proven to represent the SAME attribute state, because S-c0 commits the event log
       alone and so can change no attribute source. In both cases the system and global attribute
       sources are neutralized, so committed object identity equals the Candidate's by
-      construction and no filter program is reachable (§7.1, §7.1.4, §7.4.2)
+      construction and no filter program is reachable (§7.1, §7.1.9, §7.4.2)
 PB-10 an executor-authored change to Git persistence configuration is an ordinary Work
       result, committed and reviewed as an ordinary file entry, and is never refused
       (§7.4.1, §7.4.2)
@@ -6559,19 +7248,33 @@ The operation owner is START, before F3 and after it. Review authorizes; it neve
 
 ```text
 F3-D1   Work local persistence      FROZEN   "review-v1-work-local-v1" — F2's name, F3's
-                                             behaviour: the OBJECT-DRIVEN sequence O-1..O-8
-                                             (§7.1.1), which resolves NO working-tree pathname
-                                             between the identity proof and the committed tree
-                                             and so makes the ancestor-swap race unable to change
-                                             what is committed, measured under active sabotage
-                                             (M-36). Isolated index, exact-parent read-tree,
-                                             hash-object from the WITNESSED bytes with the id
-                                             checked against Candidate.new_oid, update-index
-                                             --cacheinfo / --force-remove, write-tree,
-                                             commit-tree (no hooks, no signature — M-37),
-                                             compare-and-swap update-ref (M-38), own-paths-only
-                                             real-index reconciliation. An empty delta is a STOP,
-                                             not a commit. The ATTRIBUTE SOURCE PIN is RETAINED
+                                             behaviour. Every commit class commits a COMMIT TREE
+                                             PLAN (§7.1.1) built from the witness/Candidate
+                                             (K1), the parent blob plus recorded append_event
+                                             effects (S-c0), the recorded immutable-create bytes
+                                             (generation commits) or both (K2) — never a reread
+                                             of the working tree. The OBJECT-DRIVEN sequence
+                                             O-1..O-8 (§7.1.2) resolves NO working-tree pathname
+                                             between the identity proof and the committed tree,
+                                             so the ancestor-swap race cannot change what is
+                                             committed, measured under active sabotage (M-36).
+                                             Isolated index, exact-parent read-tree, parent
+                                             agreement, hash-object from the PLAN's material with
+                                             the id checked against the plan's new_oid,
+                                             update-index --cacheinfo / --force-remove,
+                                             write-tree, commit-tree (no hooks, no signature —
+                                             M-37). OWNERSHIP IS DURABLE BEFORE THE REF MOVES:
+                                             O-6a records prepared_commit_id, O-7 is a
+                                             compare-and-swap update-ref (M-38), and O-7a
+                                             promotes it to C-1 only after the ref is read back
+                                             holding that id — closing the crash window in which
+                                             live code would have inferred ownership from "the
+                                             paths no longer differ from HEAD" (M-41). §7.1.3
+                                             decides every resume from that durable id. The real
+                                             index is refreshed only after C-1, only for own plan
+                                             paths, only where the entry is still the expected
+                                             one, and never as a condition of anything (§7.1.4,
+                                             M-44, M-45). An empty delta is a STOP, not a commit. The ATTRIBUTE SOURCE PIN is RETAINED
                                              and RE-CLASSIFIED: defence in depth for storage
                                              identity, still load-bearing for §7.9's
                                              checkout-capability claim and §7.8's entry
@@ -6771,17 +7474,19 @@ Stop conditions. An implementation that violates any of them is not implementing
 20. Every commit this operation makes — the entry-events commit, the Review's own generation
     commits, every pre-completion Work commit, K1 and K2 alike — is made with a pinned attribute
     source: S-c0 to PRE_S_C0_BASE and every later commit to declared_base.base_commit, which are
-    the same attribute state because S-c0 commits the event log alone (§7.1.4). The Git
+    the same attribute state because S-c0 commits the event log alone (§7.1.9). The Git
     persistence preflight runs
     immediately before each of them, over exactly that commit's path set, evaluated under that
     same pin. A pass never carries from one commit to another, and an evaluation made against the
     working tree never satisfies it.
 
-23. The staging-byte contract holds exactly: Candidate.new_oid equals the index object after
-    the actual staging and the committed object after the commit, for every supported Work
-    result. It is made true mechanically — the attribute-source pin, the neutralized line-ending
-    configuration, and the universal source predicate together — and never assumed from the
-    absence of a clean filter.
+23. The staging-byte contract holds exactly: the plan's new_oid equals the object written, the
+    index entry placed, the tree entry written and the entry in the tree C-1 owns — for every
+    commit class, and for K1 that id IS Candidate.new_oid. It is made true BY CONSTRUCTION: the
+    object is written from the plan's own material and its id is checked before anything else
+    happens, and every later step carries object ids only. The attribute-source pin, the
+    neutralized line-ending configuration and the universal source predicate are retained as
+    defence in depth (§7.1.8); none of it is ever assumed from the absence of a clean filter.
 
 24. The running Git is proven to honour the attribute pin by a positive capability probe before
     the first pinned commit. A declared version floor is a fast pre-check, never the authority,
@@ -6803,9 +7508,26 @@ Stop conditions. An implementation that violates any of them is not implementing
     is never judged as an opaque word.
 
 27d. The artifact identity is carried unbroken from executor return to K1: witness, Candidate,
-    snapshot material, pre-stage currentness, staged object and K1 tree entry are the same
-    artifact, for every supported kind — file, executable file, symlink, gitlink and deletion.
-    The Candidate is derived from the witness, never from a reread of the working tree.
+    CommitTreePlan, snapshot material, pre-stage currentness, staged object and K1 tree entry are
+    the same artifact, for every supported kind — file, executable file, symlink, gitlink and
+    deletion. The Candidate is derived from the witness, never from a reread of the working tree.
+
+27g. EVERY commit this operation makes commits a PLAN, and no plan's material is a reread of the
+    working-tree copy of a path the plan describes. S-c0 and K2's event entry come from the parent
+    blob plus this mutation's recorded events; a generation commit and K2's Consumption entry come
+    from the bytes the recorded immutable-create effect carries; K1 comes from the artifact
+    witness. A mutable file anything may have touched is never the authority for what is
+    committed.
+
+27h. A commit is owned because this operation DURABLY RECORDED making it, before any ref moved,
+    and never because the branch reached a state consistent with it. "The recorded paths no longer
+    differ from HEAD" is not ownership; neither is the branch tip, a matching message, or a
+    byte-identical commit. An object written but never durably prepared is never adopted.
+
+27i. No cosmetic or local-convenience step can cost the operation a commit it already owns, and no
+    such step may overwrite state the operation does not own. The real-index refresh runs after
+    durable C-1, touches only this commit's own paths, leaves any foreign entry exactly as it is,
+    and its failure changes nothing that is proven.
 
 27e. The witness is per-kind and carries kind, mode and object identity. A single content digest
     cannot express a gitlink's referenced commit or an executable bit, and a contract that relied
@@ -6887,24 +7609,35 @@ are both satisfied.
 
 Implementation prerequisites this contract measured and named, authorizing none. This list is
 the complete set of §21.1 and is never a weaker summary of it:
-  IP-1  a closed set of two git_commit persistence modes
+  IP-1  a closed set of two git_commit persistence modes, the review-v1 one dispatching to the
+        object-driven primitive rather than to contained_add/contained_commit
   IP-2  the "work" branch of the publication discriminator and its validator
   IP-3  _recorded_completion recognizing the three-effect terminal stage, legacy unchanged
   IP-4  F1 Gate 1
   IP-5  F1 Gate 2
   IP-6  the isolated verification materialization primitive (F2's named gap)
   IP-7  F1 Gate 3
-  IP-8  the attribute-source pin on both invocations, with its two bases (§7.1.4)
+  IP-8  the attribute-source pin on both invocations, with its two bases (§7.1.9)
   IP-9  the persistence evaluation made UNDER the pin, not against the working tree
   IP-10 core.autocrlf / core.eol neutralization on both invocations
   IP-11 P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0 and the capability probe that is its actual authority
   IP-12 the universal attribute-source parser: every .gitattributes in the tree at every depth
         plus info/attributes, alias-expanded, narrow supported shape, no user-defined macros
   IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
-  IP-17 the object-driven persistence primitive of §7.1.1 — the replacement for
+  IP-21 two handle-bound readers fsafe does not expose yet: a no-follow final-object identity
+        query that IDENTIFIES a symlink rather than refusing it (M-47), and the handle-bound
+        submodule HEAD reader of §7.8.4 G-1...G-5 (M-46)
+  IP-20 the conditional, entry-compared, non-authoritative real-index refresh of §7.1.4 (M-44,
+        M-45)
+  IP-19 the generic CommitTreePlan of §7.1.1, one builder per commit class, none of which reads
+        the working-tree copy of a path the plan describes
+  IP-18 the prepared-commit ownership checkpoint of §7.1.2 O-6a / O-7a and the §7.1.3 resume
+        matrix — without it a crash between the ref advance and the save is classified MATCHING
+        with no owned commit id (M-41), which P1 R5 §3.1/§3.5 forbid
+  IP-17 the object-driven persistence primitive of §7.1.2 — the replacement for
         contained_add/contained_commit — together with the pre-stage containment re-proof of
-        §7.8.4, the empty-delta refusal, and the regression test over §21.12 that pins the
-        committed tree entry to the witnessed identity under an active ancestor indirection
+        §7.8.4, the empty-delta assertion, and the regression test over §21.12 that pins the
+        committed tree entry to the planned identity under an active ancestor indirection
   IP-16 the per-kind witness runtime form: `_OWN_CONTENT` extended to carry path, kind, git_mode
         and identity, and a currentness comparison over the whole witness — without it a changed
         gitlink (M-32) and a chmod (M-33) are undetectable
