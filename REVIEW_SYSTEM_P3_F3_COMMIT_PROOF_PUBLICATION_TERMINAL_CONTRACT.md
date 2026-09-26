@@ -389,16 +389,37 @@ differ, and the storage-identity invariant — the thing the whole pin architect
 would break. F2 §6.2's unrestricted surface and that invariant cannot both hold once the Review namespace
 carries the rule that makes Review records durable.
 
-**Why the exclusion is not an invented post-executor prohibition.** Checked against primary sources, and
-the gap is real: `completion_precheck` applies no namespace restriction, `declare_own_content` takes any
-path, and no landed rule excludes the namespace — which is exactly why this is declared as an amendment
-rather than assumed. What makes the refusal lawful is that the namespace is already Review's own, by
-landed design: `REVIEW_SUBDIRS` closes it, `require_review_record_path` guards it, and a canonical Review
-record is immutable and written only through `create_file`, with live code refusing a `write_file` to a
-Review path outright (R1 §8). A Work result landing there would write a Review-namespace file through the
-one route that bypasses every one of those controls — the Work forging the records that authorize the
-Work. That is malformed in F2 §6.5's own sense, and it is a different thing from an executor-authored
-`.gitattributes`, which is an ordinary project file a Work may legitimately maintain (§7.4.1).
+**What exactly is added, and to which landed sections.** Stated precisely, because the previous draft
+claimed this was merely F2 §6.5's existing case and that §6.5 was unchanged. **That was not exact and is
+withdrawn.**
+
+```text
+F2 §6.2   SUPERSEDED, by one exclusion: the reviewed surface is result_paths U deleted_paths as
+          declared, MINUS any path inside the canonical Review namespace.
+
+F2 §6.5   EXTENDED, not merely cited. §6.5 names exactly two post-executor declaration failures —
+          a declared path that is a directory, and one that cannot be read — and both are about
+          PROJECTABILITY. F3 adds a THIRD, different declaration-invalidity case, about
+          OWNERSHIP, with its own refusal identity `review_reserved_namespace` (§7.8.4).
+          It is not correct to say §6.5 is unchanged.
+
+F2 §2.3   NOT superseded, and not weakened. §2.3 forbids refusing an ordinary correct outcome for
+          an unsupported RESULT SHAPE. A reserved-namespace declaration is not a shape refusal: it
+          is unowned state, which §2.3 expressly permits refusing, under a rule in force before
+          the executor ran.
+```
+
+**Why this is an ownership rule and not a post-executor prohibition.** The rule binds at invocation, as
+part of what selecting review-v1 means, and the executor is subject to it before it produces anything. The
+refusal fires when a declaration violates a contract that already existed — not when a produced shape
+turns out to be unsupported. The concrete result paths need not be known in advance for the rule to be in
+force, which is exactly why it does not depend on the thing F2 says is unknowable.
+
+**Why the gap has to be closed here.** Checked: `completion_precheck` applies no namespace restriction and
+`declare_own_content` takes any path, so no landed rule excludes the namespace today. And it cannot be left
+open: measured (M-26), a Candidate entry inside that namespace under the canonical form-L rule is stored
+with normalized bytes, so `Candidate.new_oid` and the committed object would differ and the
+storage-identity invariant would break.
 
 ---
 
@@ -1475,11 +1496,24 @@ ENTRY REFUSAL — the only transform refusal this contract has
   this contract version. That is a stated v1 boundary, refused before the person has spent
   anything, and it is the same kind of honest limit F2 §13.6 set for Evidence completeness.
 
-AFTER THE EXECUTOR — nothing the executor produces is refused
+AFTER THE EXECUTOR — no RESULT SHAPE is refused
 
-  The pin makes an executor-authored transform irrelevant to how this operation stores objects
-  (§7.4.2), so there is no post-executor transform refusal at all. What remains post-executor is
-  only external drift in a non-tree source, which §7.4.1 classifies as interference.
+  The pin makes an executor-authored transform irrelevant to how this operation STORES objects
+  (§7.4.2), so there is no post-executor transform refusal at all: such a result is stored
+  exactly, expressed in the Candidate and reviewed.
+
+  Two things are nevertheless decided after the executor returns, and neither is a shape refusal:
+
+    AUTHORIZATION   a result whose RESULTING TREE breaks canonical Review checkout capability is
+                    fully expressible and fully reviewable, and cannot be sealed (§7.9). That is
+                    authorization being withheld, not a result being refused.
+
+    OWNERSHIP       a result that declares a path inside the reserved Review namespace violates
+                    the review-v1 invocation contract, which bound before the executor ran
+                    (§7.8.4). That is unowned state, which F2 §2.3 expressly permits refusing.
+
+  What remains beyond those is only external drift in a non-tree source, which §7.4.1 classifies
+  as interference.
 ```
 
 #### 7.4.1 Operation-owned persistence configuration is a legitimate Work result
@@ -1639,14 +1673,20 @@ a transform already in the base tree, or in a non-tree source, at START entry
     legacy START is available as a separate invocation.
 
 an operation-owned .gitattributes result — ANY of them, whatever it covers
-    PROCEEDS NORMALLY. The pin fixes this operation's persistence semantics at the base, so the
-    result cannot affect how this operation stores any object. It is committed as an ordinary
-    file entry, it is reviewed as one, and the Work completes.                          §7.4.2
+    storage        proceeds normally under the pin. The pin fixes this operation's persistence
+                   semantics at the base, so the result cannot affect how this operation stores
+                   any object, and it is committed as an ordinary file entry.          §7.4.2
+    Candidate      expressible, and reviewed like any other file entry.
+    authorization  decided by the ordinary Review, PLUS the §7.9 checkout-capability seal
+                   condition over the resulting tree. A result that breaks that capability is
+                   reviewed and then not sealed.
+    completion     only after authorization, and then only through the ordinary K1 / K2 /
+                   recorded-completion topology.
 
-    This single row replaces the three the previous draft had. There is no longer a case that
-    depends on WHAT the new attributes cover — not the result paths, not the Review-generation
-    paths, not the terminal paths — because the pin makes the coverage irrelevant to this
-    operation.
+    So the storage question has one answer for every such result, and the authorization question
+    does not: it is NOT the case that every Work with a .gitattributes result completes. What the
+    pin removed is the dependence of STORAGE on what the new attributes cover — not the
+    dependence of AUTHORIZATION on it.
 
 external drift in a non-tree attribute source during the run
     (.git/info/attributes, or a global or system source that the primitive cannot neutralize
@@ -1661,7 +1701,10 @@ NO POST-EXECUTOR REFUSAL OF A SUPPORTED RESULT SHAPE REMAINS.
 Every refusal this contract now states is one of:
     knowable before execution      -> refused at START entry (F2 §20.17)
     external interference          -> reconcile (F2 §2.3's permitted category)
-    malformed input                -> F2 §6.5's own frozen case, unchanged
+    malformed declaration          -> F2 §6.5's two frozen cases, plus the ownership case
+                                      F3 adds with its own identity (§7.8.4, A-5)
+    unowned state                  -> refused (F2 §2.3's permitted category)
+    authorization withheld         -> not a refusal of a result at all (§7.9)
 and none of them is a refusal of what the executor produced.
 
 Architecture blocker: NONE.
@@ -1733,7 +1776,8 @@ The base-tree condition, proven once at entry and re-proven before each commit u
     applies, under the pinned source, to any path this operation will write — result paths, Review record paths, the event log and the
     Consumption path alike.
 
-A base tree that assigns none of those three attributes to anything satisfies this for every path
+A base tree that assigns no material attribute at all — the complete alias-expanded surface of
+§7.8.2 — to anything satisfies this for every path
 at once, including paths whose identifiers are not yet allocated, which is why it is the
 condition the entry refusal (§7.4) actually tests. It is the same shape as the single supported
 configuration P2 already freezes for its own checkout capability (`skills/review`).
@@ -1987,27 +2031,68 @@ forward amendment A-5 (§1.5).
 ```
 
 ```text
-FROZEN: a review-v1 Work may not declare a result path or a deletion path inside the canonical
-Review namespace. A declared owned set containing one cannot be projected to a Candidate, and is
-refused with the existing `review_candidate_unavailable` (F2 §6.5).
+FROZEN, AS AN OWNERSHIP BOUNDARY DECLARED BEFORE EXECUTION:
+
+  The review-v1 Work INVOCATION CONTRACT declares `.workline/review/**` to be a reserved,
+  Review-owned namespace that START's executor may not own as a result path or as a deletion
+  path. This is part of what selecting review-v1 means (F1-D1), it is static, and it is known
+  before the executor runs — the concrete future result path list need not be known for the rule
+  to be in force.
+
+  A Completed outcome that declares a path in that namespace has violated a contract that already
+  bound it. START cannot show ownership of that path for this operation, because the namespace is
+  owned by Review.
+
+  refusal identity:  ReconcileRequired is NOT used. The refusal is a StopError with the frozen
+                     code `review_reserved_namespace`.
 ```
 
-**Why this refusal is lawful where the `.gitattributes` refusal was not.** The earlier draft called an
-executor-authored `.gitattributes` malformed without authority, and that was correctly rejected. This is a
-different case and the authority is citable:
+```text
+Why a NEW code rather than `review_candidate_unavailable`. That code means exactly one thing in
+F2 §6.5 — "the declared owned set cannot be projected exactly" — which is about PROJECTABILITY, a
+property of the bytes at a path. This condition is about OWNERSHIP, which is a property of the
+namespace and is decided without looking at the bytes at all. Overloading one code with two
+unrelated meanings is the ambiguity this contract is supposed to remove, and no existing code
+states it: the contract-argument refusal is about the caller's argument, `review_containment` is
+about where Review's own writes land, and `review_candidate_unavailable` is about projection.
+
+This is the same reasoning F1 used when it introduced `review_not_activated`, and it is the only
+new code F3 introduces.
+```
+
+**Why this refusal does not break the no-trap principle.** It is not a refusal of a RESULT SHAPE, and
+the distinction is exact rather than rhetorical:
 
 ```text
-the canonical Review namespace is Review's own bookkeeping, closed by REVIEW_SUBDIRS and
-  require_review_record_path;
-a canonical Review record is immutable and is written ONLY through create_file, which never
-  updates one — live code refuses a write_file to a Review path in so many words (R1 §8);
-so a Work result landing there would write a Review-namespace file through the one path that
-  bypasses every control the Review system has, and it would be the Work forging the records
-  that authorize the Work.
+F2 §2.3 protects every ordinary correct Work outcome from a post-executor refusal of an
+UNSUPPORTED SHAPE — an object kind, a mode, a byte pattern, something about WHAT the executor
+produced. A reserved-namespace declaration is none of those. The Git object at that path may be a
+perfectly ordinary blob.
 
-That is malformed in F2 §6.5's own sense — a declared owned set that cannot be projected exactly
-— and not an ordinary correct outcome whose shape is being refused. .gitattributes is an ordinary
-project file a Work may legitimately maintain; a gate generation record is not.
+What is refused is a DECLARATION OF OWNERSHIP over a path this operation was never permitted to
+own, under a rule that was in force before the executor started. F2 §2.3 expressly permits
+refusing unowned state; this is exactly that class, and the rule is knowable before execution,
+which is where F2 §20.17 says such a condition belongs.
+
+The executor learns the rule the same way it learns every other part of the review-v1 contract:
+from the invocation contract, before it runs. A Work that needs to change Review records has no
+correct form under review-v1 at all — canonical Review records are immutable and are written only
+through create_file (R1 §8), and live code refuses a generic write_file to a Review path — so
+there is no ordinary correct outcome being taken away.
+```
+
+```text
+The primary-source basis for the namespace being Review's own, cited rather than asserted:
+
+  REVIEW_SUBDIRS closes the canonical Review namespace to seven directories
+  require_review_record_path owns the canonical record path shape
+  canonical Review records are immutable (R1 §8)
+  create_file is the Review create-only primitive
+  live Mutation validation refuses a generic write_file to a Review path outright
+
+What was MISSING from primary sources, and is therefore added here rather than assumed, is only
+the statement that a Work RESULT may not land there: completion_precheck applies no namespace
+restriction and declare_own_content takes any path.
 ```
 
 #### 7.8.5 Defence in depth, not a substitute
@@ -2167,14 +2252,51 @@ THE FAILURE IS AN OPERATION RESULT, NOT A REVIEW RECORD. It is the STOP of the o
   operation's own result and in the mutation's runtime metadata. No canonical Review record
   states it, because none of them can.
 
-RECOVERY IS AN ORDINARY RETRY. The proof is deterministic over the resulting tree, so a retry
-  re-evaluates it and reaches the same answer until something changes. What can change it: the
-  person adds the canonical rule to the Project, or the Work's own result changes, which is a
-  different Candidate and therefore a different Run.
+RECOVERY IS NARROW, AND THE PREVIOUS DRAFT STATED IT TOO BROADLY. The Candidate,
+  declared_base, the resulting tree and the Context are IMMUTABLE for this Run, so a same-Run
+  retry cannot change what the resulting tree is:
 
+      A SAME-RUN RETRY MAY CHANGE THE ANSWER only when the failed proof depended on TRANSIENT,
+      NON-TREE state that can be corrected without touching Candidate or base identity:
+          .git/info/attributes interference removed
+          a local capability query that was unanswerable becomes answerable
+          the effective evaluation of layer 4 restored to form L
+      The Context is not rebuilt and no Context byte changes; the same bound
+      Context.resulting_tree is re-derived and now passes.
+
+      A SAME-RUN RETRY CAN NEVER CHANGE the INTRINSIC capability of the resulting tree. Layers 1,
+      2 and 3 read that tree's committed objects, which are fixed by the Candidate.
+
+      CHANGING the tracked .gitattributes, the Work result, or declared_base produces a DIFFERENT
+      resulting tree, hence a different Candidate and a NEW RUN. The old Run does not retarget
+      itself onto it: its Context binds the old resulting_tree by object id, and F2 §16.1 makes
+      the change invalidating. What becomes of the old Run is F4's.
+```
+
+```text
+SEAL TIMING, frozen: the capability is re-derived BEFORE any generation-3 canonical effect is
+recorded.
+
+On failure, in the same order:
+    no generation-3 record is written
+    no Receipt
+    no authorization
+    no Consumption
+    no K1, and nothing published
+    generation 2 remains the latest generation, and it is `open`
+
+NO PENDING SAME-RUN SEAL MUTATION MAY BLOCK THE RETRY. If an implementation opens a mutation
+before the recheck, it MUST be abandoned atomically on the STOP, so that
+`pending_generation_mutations()` does not report it and R2 §4's "exactly one pending generation
+mutation -> resume it first" rule is not triggered by a seal that never wrote anything. A retry
+must find the Run exactly as it was.
+
+No third GateGeneration status is invented, and no invalidation generation is written (M-27).
+```
+
+```text
 PERMANENT SET-ASIDE IS DEFERRED. Whether an unsealable Run is invalidated, superseded or left
-  pending is F4's recovery matrix (§25). F3 does not decide it, and writes no invalidation
-  generation to imply it.
+  pending is F4's recovery matrix (§25). F3 does not decide it.
 ```
 
 ```text
@@ -2202,13 +2324,11 @@ unknown fields, so the whole replacement record has to be stated. It is:
   git_persistence:              "review-v1-work-local-v1"                F2 §10.3, unchanged
   activation:                   <the activation binding of F2 §11>       unchanged
   review_checkout_capability: {
-      capability_contract:    "review-v1-work-checkout-capability-v1"
-      form:                   "form-L"
-      namespace:              ".workline/review/**"
-      base_tree:              <the full object id of PRE_S_C0_BASE's tree>
-      base_tree_verdict:      "capable"
-      resulting_tree:         <the full object id of the resulting tree, §7.9.2>
-      resulting_tree_verdict: "capable"
+      capability_contract: "review-v1-work-checkout-capability-v1"
+      form:                "form-L"
+      namespace:           ".workline/review/**"
+      base_tree:           <the full object id of PRE_S_C0_BASE's tree>
+      resulting_tree:      <the full object id of the resulting tree, §7.9.2>
   }
 }
 ```
@@ -2218,9 +2338,9 @@ schema          unchanged: "review-work-context". The record kind is the same ki
 version         2. Exactly one field is added to F2 §10.1's nine; the other nine keep their
                 names, their order and their meanings.
 field name      review_checkout_capability
-field type      a mapping of exactly seven keys, all present, none nullable
+field type      a mapping of exactly FIVE keys, all present, none nullable
 field contents  the capability contract identity, the form identity, the namespace the claim is
-                about, and the two tree identities with their verdicts
+                about, and the two exact tree identities the claim is about
 serialization   the existing P1 Review serializer, unchanged: mapping keys in ascending code
                 point order at every depth, sequences in given order, UTF-8, LF. The nested
                 mapping is serialized by the same rule at its own depth.
@@ -2235,27 +2355,47 @@ rejection      reader refuses a record whose field set does not match its versio
                 whose Context is v1 is not a Run of the review-v1 Work contract F3 freezes.
 ```
 
-**Timing, and what the seal actually does.** The re-review's ordering question, answered exactly:
+**The Context binds the PROOF TARGET, never a passing verdict.** The previous draft carried
+`base_tree_verdict` and `resulting_tree_verdict`, both fixed at `"capable"`, and that was a defect: it made
+an unsafe resulting tree **unrepresentable**, so such a Candidate could never build a Context, never reach
+generation 1 and never be reviewed — flatly contradicting §7.9.2's frozen boundary that it stays
+expressible and reviewable, and contradicting case F, case L and invariant 26. Withdrawn.
+
+```text
+The Context says WHICH exact trees, under WHICH capability contract, in WHICH form, over WHICH
+namespace, must be proven.
+
+It does NOT claim that either tree already passed. No verdict is a Context field, so every
+capability outcome — capable, unsafe, unknown — yields the SAME valid, immutable Context, and
+the Review can be launched in all three.
+```
+
+**Timing, and what the seal actually does:**
 
 ```text
 1. The Candidate is frozen first (F2 §5), so `declared_base` and every entry are fixed.
-2. The resulting tree is therefore fully determined BEFORE the Context is built, and before the
-   Review is launched. Its object id is computable at that point.
-3. The Context is built with both verdicts already proven, and becomes IMMUTABLE before
-   generation 1 accepts the task — which is what the TaskInput binds and what the reviewer is
-   shown.
-4. THE SEAL IS A RECHECK, NOT A NEW BINDING. It re-evaluates the four layers of §7.9.3 against
-   the SAME `resulting_tree` object id the Context already bound, and requires the same verdict.
-   It adds no field, changes no Context byte and computes no new review_context_hash.
+2. The resulting tree is therefore fully determined BEFORE the Context is built. Its object id is
+   computable at that point, which is all the Context needs.
+3. The Context is built by naming the two tree ids, and becomes IMMUTABLE before generation 1
+   accepts the task — which is what the TaskInput binds and what the reviewer is shown.
+   It is built and is valid WHATEVER the resulting tree's capability turns out to be.
+4. THE BASE capability remains an ENTRY requirement, unchanged (§7.4, §7.8): a base tree that
+   fails it means no review-v1 Work starts at all, so no Context is reached. That refusal keeps
+   its existing position and is not moved into the Context.
+5. AT SEAL, the capability is DERIVED for exactly `Context.resulting_tree` — the bound object id,
+   not a tree recomputed from anything:
 
-   If the recheck disagrees with the bound verdict, that is a material change under F2 §16.1 and
-   the seal does not issue a Receipt (§7.9.5).
+       capable            the seal may proceed
+       unsafe | unknown   NO Receipt, NO authorization (§7.9.5)
+
+   The seal adds no field, changes no Context byte and computes no new review_context_hash.
 ```
 
 ```text
-So the immutable identity already bound into the Context, and rechecked at seal, is exactly:
-the capability contract identity, the form, the namespace, and the two tree object ids with
-their verdicts. Nothing about the capability is decided for the first time at seal.
+So the immutable identity bound into the Context, and used at seal, is exactly: the capability
+contract identity, the form, the namespace, and the two exact tree object ids. The VERDICT is
+derived, never stored — which is what lets an unsafe Candidate be expressible, reviewable and
+unauthorizable at the same time.
 ```
 
 #### 7.9.7 This requires a forward amendment — A-4
@@ -4124,8 +4264,8 @@ J. CONTEXT v2 BYTES BEFORE GENERATION 1
               cannot confuse them (§7.9.6)
 
 K. SEAL CAPABILITY PASS
-   auth       the recheck agrees with the bound resulting_tree_verdict; the seal issues the
-              Receipt in the ordinary way; no Context byte changes
+   auth       the capability derived for Context.resulting_tree is `capable`; the seal issues
+              the Receipt in the ordinary way; no Context byte changes
 
 L. SEAL CAPABILITY FAILURE
    auth       NO Receipt, NO authorization, NO Consumption, NO K1
@@ -4147,8 +4287,102 @@ M. RECOVERY AFTER SEAL CAPABILITY FAILURE
 ```text
 Every case has a determinate outcome. Every refusal is either at START ENTRY on a condition
 knowable before execution (C), or at SEAL on authorization (F, G, H, L) — never a refusal of what
-the executor produced. The one Candidate-projection refusal (a declared path inside the reserved
-Review namespace, §7.8.4) is malformed in F2 §6.5's own sense and is declared as amendment A-5.
+the executor produced. The one declaration refusal (a declared path inside the reserved Review
+namespace, §7.8.4) is an OWNERSHIP violation of a rule that bound before the executor ran, with
+its own identity `review_reserved_namespace`, declared as amendment A-5.
+```
+
+### 21.7 Capability-representation and namespace-ownership matrices
+
+#### 21.7.1 Resulting-tree capability — every outcome must be representable
+
+The point of these seven rows is that `unsafe` and `unknown` are **first-class**: they build a valid
+Context, reach generation 1, and are reviewed. Only sealing is withheld.
+
+```text
+A. CAPABILITY = CAPABLE
+   Candidate    expressible            Context v2   built, binds both tree oids
+   generation 1 may exist              Review       occurs normally
+   seal         capability re-derived for Context.resulting_tree -> capable -> Receipt issued
+   outcome      ordinary authorization and the ordinary K1/K2 topology
+
+B. CAPABILITY = UNSAFE, from a Candidate-authored root .gitattributes
+   Candidate    EXPRESSIBLE — nothing about the result is refused
+   Context v2   BUILT AND VALID. No verdict is a Context field, so an unsafe resulting tree is
+                representable; this is exactly what the previous verdict-carrying schema made
+                impossible (§7.9.6)
+   generation 1 MAY EXIST; the TaskInput binds this Context
+   Review       OCCURS — an external reviewer judges the Candidate normally
+   seal         re-derives capability for Context.resulting_tree -> UNSAFE
+                -> NO Receipt, NO authorization, NO Consumption, NO K1   (§7.9.5)
+   outcome      EXPRESSIBLE + REVIEWABLE + NOT AUTHORIZABLE, which is the frozen boundary of
+                §7.9.2 and invariant 26
+
+C. CAPABILITY = UNKNOWN
+   identical to B in every row, with `review_checkout_unknown` rather than
+   `review_checkout_unsafe`. Unknown is never read as capable, and never as "invalid Candidate":
+   the Candidate is fine, the authorization is not available.
+
+D. CAPABLE AT CONTEXT-BUILD TIME, TRANSIENT info/attributes MAKES THE SEAL RECHECK UNSAFE
+   Context      unchanged and still valid — it never claimed a verdict
+   seal         layer 4's effective evaluation fails -> no Receipt, no generation-3 record,
+                generation 2 stays latest/open
+   note         this is a TRANSIENT, NON-TREE condition, so it is recoverable within the Run
+
+E. THE TRANSIENT CONDITION IS RESTORED, SAME CANDIDATE RETRIED
+   Context      NOT rebuilt; no Context byte changes; the SAME bound resulting_tree is re-derived
+   seal         now capable -> Receipt issued
+   proof        this is the same-Run recovery §7.9.5 permits, and it is permitted precisely
+                because nothing about the Candidate, the base or the resulting tree moved
+
+F. TRACKED .gitattributes CHANGED AFTER CONTEXT FREEZE
+   retarget     NO. The Context binds `resulting_tree` by object id; a changed tracked source
+                yields a DIFFERENT resulting tree, which that id does not name
+   currency     FAILS: the Candidate's declared base / entries no longer reproduce, and F2 §16.1
+                makes the change invalidating
+   outcome      a NEW Candidate and a new Run are required; the old Run's disposition is F4's
+
+G. CANDIDATE CHANGED AFTER CONTEXT FREEZE
+   identical to F. A different Candidate is a different candidate_hash, a different resulting
+   tree and a different Run. The same Run never silently retargets onto it.
+```
+
+#### 21.7.2 Reserved Review namespace — ownership, not shape
+
+```text
+A. ORDINARY RESULT PATH OUTSIDE .workline/review/**
+   ordinary supported result. Expressible, stored under the pin at exactly Candidate.new_oid,
+   reviewed, and authorizable on the ordinary conditions.
+
+B. .gitattributes RESULT
+   ordinary supported result. Same as A for storage and expressibility (§7.4.2). Its effect on
+   the resulting tree's capability is an AUTHORIZATION question (§21.7.1 B), never a refusal of
+   the result.
+
+C. RESULT PATH EXACTLY INSIDE .workline/review/gates/**
+   violation of the PRE-EXISTING review-v1 executor ownership contract (§7.8.4, A-5).
+   refusal      StopError, code `review_reserved_namespace`
+   framing      this is NOT an unsupported Git result shape. The blob there may be perfectly
+                ordinary. What is refused is a DECLARATION OF OWNERSHIP over a namespace the
+                invocation contract reserved before the executor ran — unowned state, which
+                F2 §2.3 expressly permits refusing.
+   no legacy    the pending review-v1 mutation does not downgrade to legacy (§7.4).
+
+D. DELETION PATH INSIDE .workline/review/**
+   identical to C. The ownership rule names result paths and deletion paths alike, because
+   deleting a canonical Review record is exactly as much an assertion of ownership over it as
+   writing one.
+
+E. THE EXECUTOR DIRTIES THE REVIEW NAMESPACE BUT DOES NOT DECLARE IT
+   not a Candidate entry — the reviewed surface is the DECLARED owned set, and this is not in it.
+   It is therefore UNOWNED / CONTRADICTORY state, and it is never silently absorbed into the
+   Candidate:
+       the dirty-separability check refuses an operation whose pre-existing dirty state overlaps
+         what it commits;
+       `skills/review`'s precondition that every existing Review record reads canonically
+         (`review_namespace_unreadable`) refuses the next Review-record write;
+       and the seal's resulting-tree readability condition (§7.9.4) refuses authorization.
+   It is never taken for a result, and never committed as one.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -4377,7 +4611,7 @@ TM-6  that a proof note is a recovery pointer and never a proof result, and that
       (§10.2)
 TM-7  the no-K1 discriminator of §6.7: artifact_kind is decided by whether any Candidate entry
       is changing, never by the emptiness of entries or of result_paths
-TM-8  the four forward amendments to landed F2 (§1.5), which a reader of F2 alone cannot
+TM-8  the five forward amendments to landed F2 (§1.5), which a reader of F2 alone cannot
       discover from F2
 TM-10 the seal precondition of §7.9: a Review may not seal unless the resulting tree preserves
       canonical Review checkout capability over the Review namespace, proven mechanically
