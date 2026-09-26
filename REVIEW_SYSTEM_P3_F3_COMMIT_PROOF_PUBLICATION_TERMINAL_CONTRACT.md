@@ -60,7 +60,7 @@ implementation lands are listed in §23 and are not written by this document.
 P1 R1-R12          inherited; specialized, never weakened
 P2 integration     inherited; the publication barrier is preserved exactly (§12)
 P3 F1              inherited without change (F1-D1 ... F1-D11)
-P3 F2              inherited EXCEPT the explicit forward amendments of §1.5 (A-1 ... A-8)
+P3 F2              inherited EXCEPT the seven explicit forward amendments of §1.5 (A-1 ... A-7)
                    (F2-D1 ... F2-D17 otherwise unchanged)
 F3                 this document: physical topology, proof, publication, terminal stage
 F4                 deferred (§25)
@@ -70,7 +70,8 @@ Where F3 appears to say something an earlier freeze also says, F3 is a **special
 never widens. Every apparent collision was audited item by item in §22.
 
 ```text
-F3 semantic forward amendments: YES - eight (A-1 ... A-8), all stated in §1.5.
+F2 forward amendments:  YES - SEVEN (A-1 ... A-7), all stated in §1.5.
+F3-only corrections:    ONE (C3-1), stated in §1.5, superseding nothing in F2.
 ```
 
 They are declared there in full, with the exact superseded sentences and the narrow replacement.
@@ -79,8 +80,8 @@ same discipline F1 used for its amendments to P1 R4 and R5.
 
 ### 1.4 F1 and F2 decisions F3 preserves without change
 
-Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the
-statements named in §1.5 (A-1 ... A-8), and nothing else.
+Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the seven
+statements named in §1.5 (A-1 ... A-7), and nothing else.
 
 ```text
 review-v1 START is explicit per-invocation opt-in; the default is legacy        F1-D1
@@ -112,8 +113,24 @@ the invalidation boundary                                                       
 
 ### 1.5 Forward amendments to landed F2
 
-F3 supersedes seven statements of the landed F2 contract, and declares one further correction
-(A-8) to a live-code assumption it had made. Each is named exactly, with the sentence
+TWO CATEGORIES, and they are not mixed. An earlier draft counted "eight amendments" while C3-1's
+own text said it "supersedes nothing in F2" — which cannot both be true. The categories are now
+distinct in name as well as in count:
+
+```text
+F2 FORWARD AMENDMENTS          A-1 ... A-7                            COUNT = SEVEN
+                               each supersedes a NAMED SENTENCE of the landed F2 contract
+
+F3-ONLY CORRECTIONS            C3-1  the generation mode dispatch     COUNT = ONE
+                               supersedes NOTHING in F2. It corrects an assumption F3 itself
+                               made about live code (`gitops.review_commit_effect` sets the
+                               planning mode unconditionally), and it is recorded here only
+                               because a reader comparing recorded modes must be able to find it.
+                               The label A-8 is RETIRED; this is C3-1.
+```
+
+F3 supersedes seven statements of the landed F2 contract. The F2 file is not edited by either
+category. Each is named exactly, with the sentence
 superseded, the replacement, and why the two cannot both stand. **The F2 file is not edited.** This is the
 mechanism F1 §11.3 already used for P1 R4 §2 and R5 §8: the amendment is declared in the new contract, and
 the historical freeze keeps its bytes.
@@ -568,7 +585,7 @@ THE FIELD'S VALUE      CHANGED, from "review-v1-work-local-v1" to "review-v1-wor
 F2 §10.3               SUPERSEDED as to the VALUE and as to the sentence that the identity denotes
                        the contained commit primitive. Everything else in §10.3 is retained.
 THE PLANNING IDENTITY  UNTOUCHED. "review-v1-planning-local-v1" keeps its exact meaning and its
-                       exact behaviour for every P2 planning Run (§7.1.7, A-8).
+                       exact behaviour for every P2 planning Run (§7.1.7, C3-1).
 ```
 
 ```text
@@ -588,7 +605,7 @@ version makes. The strict reader refuses it as it refuses a v1 field set.
 
 ---
 
-#### A-8 — the Work Review's own generation commits are Work-persisted
+#### C3-1 — F3-ONLY CORRECTION (not an F2 amendment): the Work Review's own generation commits
 
 ```text
 Live `_finish_generation` (roadmap_review.py:1447) records its generation commit through
@@ -615,10 +632,12 @@ THIS IS NOT A GLOBAL REDEFINITION. No planning Run's behaviour changes, no plann
 mode changes, and the planning identity keeps its meaning. What changes is which of the two
 identities a WORK generation commit names.
 
-Whether this is an amendment to landed F2 at all is arguable — F2 does not legislate
-`_finish_generation` — so it is declared here rather than argued about: it supersedes nothing in
-F2 and it corrects a live-code assumption F3 §7.6 had silently made. It is listed with the
-amendments because a reader comparing recorded modes needs to find it.
+THIS IS NOT AN AMENDMENT TO F2, and it is no longer counted as one. F2 does not legislate
+`_finish_generation`, so there is no F2 sentence to supersede: what this corrects is an assumption
+F3 §7.6 itself made about live code. An earlier draft labelled it A-8 and counted it among the
+forward amendments while simultaneously saying it superseded nothing — a contradiction, now
+resolved by giving it its own class. It is still recorded in full, because a reader comparing
+recorded persistence modes must be able to find it.
 ```
 
 ---
@@ -859,6 +878,68 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-57  GIT'S REVISION VIEW IS NOT THE COMMIT OBJECT, AND GRAFTS PROVE IT. MEASURED on a linear
+      chain C1 <- C2 <- C3 <- C4, with `.git/info/grafts` holding "C4 C1":
+
+          rev-list --parents -n 1 C4        -> C1        <- the walker is LIED TO
+          merge-base --is-ancestor C2 C4    -> FALSE     <- C2 genuinely IS an ancestor
+          cat-file commit C4  | parent      -> C3        <- the stored object is UNAFFECTED
+
+      The live helpers are exactly these two: `gitcmd.commit_parents` runs `rev-list --parents`
+      (gitcmd.py:399) and `gitcmd.descends_from` runs `merge-base --is-ancestor` (gitcmd.py:412).
+      So a graft file silently changes what every lineage answer built on them would say, and a
+      one-time entry check cannot help — the file can be written at any moment during the Run.
+
+M-58  A REPLACEMENT REF CHANGES `cat-file commit` TOO, SO THE RAW READER MUST CARRY THE SETTING.
+      MEASURED, with `git replace -f C4 C1` active:
+
+          cat-file commit C4  | parent                      -> (none: it read C1, a root)
+          GIT_NO_REPLACE_OBJECTS=1 cat-file commit C4        -> C3, the true parent
+
+      Reading the object is only raw when the replace mechanism is off for that invocation.
+
+M-59  A SHALLOW BOUNDARY MAKES THE WALKER REPORT A ROOT WHILE THE OBJECT HOLDS PARENTS. MEASURED
+      in a `--depth 1` clone whose HEAD is a merge commit:
+
+          .git/shallow                      holds HEAD
+          rev-parse --is-shallow-repository -> true
+          rev-list --parents -n 1 HEAD      -> HEAD alone, NO parents   <- looks like a ROOT
+          rev-list --count HEAD             -> 1
+          GIT_NO_REPLACE_OBJECTS=1 cat-file commit HEAD
+                                            -> TWO `parent` headers, b1296f37 and a9af4324
+          cat-file -e <that parent>         -> ABSENT locally
+
+      So the honest raw answer is "this commit has two parents and I cannot see them" — UNKNOWN,
+      fail closed — and never "this commit is a root". A walker-based predicate would have
+      concluded the latter.
+
+M-60  RAW PARENT HEADERS SURVIVE A MERGE INTACT. MEASURED: a merge commit's
+      `GIT_NO_REPLACE_OBJECTS=1 cat-file commit` printed exactly two `parent` headers, in order,
+      equal to the two commits merged. Parsing the literal headers preserves count and order.
+
+M-61  HOSTILE INHERITED GIT_* VARIABLES CHANGE THE OUTCOME, SO STRIPPING IS LOAD-BEARING.
+      MEASURED, each one alone:
+
+          GIT_AUTHOR_NAME="Attacker" GIT_AUTHOR_EMAIL="evil@x" commit-tree
+              -> the commit carried `author Attacker <evil@x>`, although the Project's configured
+                 identity was "Real Person <real@t>". Injecting the captured identity explicitly
+                 overrode it back to "Real Person <real@t>".
+          GIT_INDEX_FILE inherited
+              -> silently redirects every index command to that file
+          GIT_OBJECT_DIRECTORY pointed elsewhere
+              -> `cat-file -e HEAD` EXIT 1: the repository's own commit became invisible
+
+      GIT_AUTHOR_* beat configuration, which is why "inherited GIT_AUTHOR_* survive" and
+      "user.name/user.email are captured and injected" cannot both be said: §7.1.9 says only the
+      second.
+
+M-62  A LOCKFILE CARRIES NO OWNER. MEASURED: an `O_CREAT|O_EXCL` `.git/index.lock` created by this
+      session is ZERO BYTES — no pid, no host, no identity of any kind. Git's own protocol writes
+      the NEW INDEX into that file and renames it over `index`, so a lock that is merely held is
+      indistinguishable from any other. Nothing in the file, its name, its age, or the absence of
+      a process proves whose it is, which is why §7.1.4 treats an existing lock as UNKNOWN and
+      never deletes one.
+
 M-48  THE EMPTY HOOKS DIRECTORY CONTAINS THE HOOKS THE NEW COMMANDS ACTUALLY REACH, AND THOSE
       HOOKS ARE REAL. MEASURED BOTH WAYS, with executable marker hooks installed in the default
       `.git/hooks` for pre-commit, commit-msg, reference-transaction, post-index-change and
@@ -888,7 +969,7 @@ M-49  A REPLACEMENT REF SILENTLY SUBSTITUTES AN OBJECT FOR AN EXACT OID. MEASURE
 
       So without the setting, "the object named by this OID" is not what the plan means by it:
       a parent, tree, blob or commit id can be read as another object entirely, and every
-      identity this contract compares would be comparing the replaced view. §7.1.8 binds the
+      identity this contract compares would be comparing the replaced view. §7.1.9 binds the
       setting for every command.
 
 M-50  DEFAULT PATHSPEC SEMANTICS EXPAND A LEGAL FILENAME INTO ANOTHER PATH. MEASURED. With two
@@ -913,7 +994,7 @@ M-51  NEUTRALIZING CONFIG REMOVES THE COMMIT IDENTITY, AND commit-tree THEN REFU
                                      author/committer "Global Person <global@example.com>"
 
       So an ordinary Project would have become uncommittable purely because F3 neutralizes config
-      for persistence safety. §7.1.8 freezes capturing the effective identity BEFORE
+      for persistence safety. §7.1.9 freezes capturing the effective identity BEFORE
       neutralization and supplying it explicitly.
 
 M-52  GIT'S INDEX TRANSACTION IS AN O_EXCL LOCKFILE, AND HOLDING IT EXCLUDES EVERY ORDINARY GIT
@@ -1025,7 +1106,7 @@ M-43  THE FOUR RESUME STATES ARE DISTINGUISHABLE FROM THE PREPARED ID ALONE. MEA
           ref == expected parent      -> CAS not yet applied              (case B)
           ref == PREPARED             -> the CAS landed                   (case C)
           ref != PREPARED and
-            `git merge-base --is-ancestor <PREPARED> <ref>` -> YES         (case F, descendant)
+            raw_descends_from(<ref>, <PREPARED>) -> YES                    (case F, descendant)
           CAS with a stale expected-old -> refused, "is at <actual> but expected <given>", and
             the ref was left unchanged                                     (case D)
       A missing or unreadable object answers `cat-file -e` negatively, which is case E.
@@ -2086,7 +2167,7 @@ string is what would have made a landed sentence false — and would have left e
 recorded modes against semantics that no longer exist. The FIELD is untouched: same record, same key,
 same position, same meaning, so A-4's "nine fields unchanged in name, order and meaning" still holds.
 Only the VALUE moves to `review-v1-work-local-v2`. The planning identity
-`review-v1-planning-local-v1` is not redefined and no planning Run changes (A-8, §7.1.7).
+`review-v1-planning-local-v1` is not redefined and no planning Run changes (C3-1, §7.1.7).
 
 #### 7.1.0 Why the contained primitive could not be retained
 
@@ -2227,7 +2308,7 @@ COMMITS             the material is THE EXACT BYTES THAT EFFECT CARRIES — the 
                     `_finish_generation` already builds its expectation this way
                     (`expected = {path: content.encode("utf-8")}`, roadmap_review.py:1450).
                     entries = exactly this generation's Review record paths.
-                    WHICH IDENTITY these commits carry is §7.1.7 (A-8): the Work identity for a
+                    WHICH IDENTITY these commits carry is §7.1.7 (C3-1): the Work identity for a
                     Work Review Run, the planning identity for every planning Run.
 
 S-c1 / K1           SOURCE: the bound artifact witness (§7.8.4) and the frozen Candidate.
@@ -2399,7 +2480,9 @@ E. prepared_commit_id DURABLE, the object is MISSING, corrupt or unanswerable
    state a person reconciles.
 
 F. prepared_commit_id DURABLE, ref is a DESCENDANT of the prepared id
-   `git merge-base --is-ancestor <prepared> <ref>` answers YES (M-43). Ownership of the prepared
+   `raw_descends_from(<ref>, <prepared>)` answers YES — the §7.1.8 RAW walk, never
+   `merge-base --is-ancestor`, which a graft or a shallow boundary would answer differently
+   (M-57, M-59). Ownership of the prepared
    OBJECT is still known — this operation made it — but the stage's own conditions do not hold:
    the branch is no longer at the commit this stage produced, so base-exactness, L-3 and W3 fail.
    Reconcile. The later branch state is NEVER silently treated as this stage's result.
@@ -2451,16 +2534,30 @@ R-IDX-2  IT IS NON-AUTHORITATIVE FOR OWNERSHIP. Its outcome never un-owns K, nev
 R-IDX-3  EXCLUSIVE OWNERSHIP OF THE TRANSACTION, BY GIT'S OWN PROTOCOL.
              create `<git-dir>/index.lock` with O_CREAT|O_EXCL
          MEASURED (M-52): while it is held, `git add` and `git update-index` both fail with
-         "Unable to create ... index.lock: File exists". If the create fails, ANOTHER Git process
-         owns the index right now: this is contention, not an error in the operation — wait and
-         retry a bounded number of times, then R-IDX-8. Never steal or delete a lock this
-         operation did not create.
+         "Unable to create ... index.lock: File exists".
+
+         IF THE CREATE FAILS, OWNERSHIP OF THAT LOCK IS **UNKNOWN**, and it is never guessed.
+         MEASURED (M-62): a lockfile is ZERO BYTES — no pid, no host, no identity of any kind —
+         and Git's own protocol writes the new index into it and renames, so a held lock is
+         indistinguishable from any other. The lock may belong to a live Git process, to a
+         crashed one, or to an earlier crashed attempt of THIS operation, and nothing available
+         distinguishes them.
+
+         THEREFORE, and this is exhaustive:
+             the lock is NEVER deleted automatically, and never "stolen";
+             ownership is NEVER inferred from the filename, the file's age, the absence of a
+               process, the current index contents, or the existence of a pending mutation —
+               none of those is a proof, and an earlier draft's "another Git process owns the
+               index right now" asserted one of them without evidence;
+             a bounded number of retries is attempted, because ordinary contention is common and
+               brief;
+             if it still exists, the operation STOPS at INDEX LOCK RECONCILIATION (R-IDX-8).
 
 R-IDX-4  UNDER THAT SAME LOCK, AND WITH NO GAP ANYWHERE INSIDE IT:
              a  snapshot the exact current index to a Workline-owned temporary file inside the
                 Git directory, so the publish in R-IDX-6 is a same-directory rename
              b  read the exact entries from the SNAPSHOT (GIT_INDEX_FILE=<snapshot>
-                `ls-files --stage`), under the hermetic environment of §7.1.8
+                `ls-files --stage`), under the hermetic environment of §7.1.9
              c  for each of THIS COMMIT'S OWN plan paths, compare the snapshot entry against the
                 entry the plan expected to find there — plan.old_mode / plan.old_oid
              d  write, into the SNAPSHOT only, the new entry for a path whose current entry still
@@ -2484,22 +2581,48 @@ R-IDX-7  NEVER `git reset`, NEVER a whole-index `read-tree` against HEAD, NEVER 
          not own; the third is the gap this rule exists to remove.
 
 R-IDX-8  A CLEANUP FAILURE DOES NOT UN-OWN K, AND DOES NOT SILENTLY COMPLETE EITHER.
-         Two different outcomes, and the distinction is the point:
+         The outcomes are exhaustive, and the first is the ordinary one:
 
              the own path's entry is FOREIGN
                  -> the person staged there deliberately. Nothing is owed. Record it and
                     CONTINUE; this is an ordinary, correct completion.
+
              the own path's entry is still the operation's expected STALE OLD entry, and the
-             transaction could not complete (lock contention exhausted, rename failed, crash)
+             transaction could not complete
                  -> the measured trap is live: `git status` shows the path staged-backwards and
                     the person's next ordinary `git commit` would revert K (M-44). The operation
-                    does NOT return completed as though nothing were owed. It STOPS at a local
-                    cleanup checkpoint that a resume retries, with C-1 and everything proven
-                    about K fully intact.
+                    does NOT return completed as though nothing were owed. It STOPS at a LOCAL
+                    CLEANUP CHECKPOINT, with C-1 and everything proven about K fully intact.
 
-         So "non-authoritative" means it cannot un-own K — not that its failure is invisible.
+             the lock could not be acquired, or this operation crashed while holding it
+                 -> INDEX LOCK RECONCILIATION, a STOP with its own exact identity. Stated
+                    plainly, because an earlier draft said a resume simply "retries" and that is
+                    NOT TRUE of this case: a resume re-attempting O_EXCL finds the file and gets
+                    UNKNOWN again (M-62), so retrying alone can never clear a lock this
+                    operation itself left behind. The loop only ends when a person or F4 removes
+                    or reconciles the stale Git lock — which is an ordinary Git housekeeping act,
+                    the same one anyone performs after any Git process dies mid-write.
 
-R-IDX-9  NO NEW DURABLE CARRIER, AND NO LATER-OPERATION DEPENDENCE ON THE MUTATION RECORD. An
+         WHAT IS TRUE WHILE IT IS STOPPED, and it is the whole point of the ordering:
+
+             C-1 REMAINS VALID. K is owned, on the branch, and provable.
+             NO proof and NO publication ownership is lost. W1, the proof note, the barrier and
+               every push right stand exactly where they stood.
+             the mutation remains pending, so nothing is abandoned and nothing is re-decided.
+             after reconciliation, the SAME pending operation resumes at the SAME cleanup
+               checkpoint and finishes the transaction.
+
+         So "non-authoritative" means it cannot un-own K — not that its failure is invisible, and
+         not that every failure resolves itself.
+
+R-IDX-9  NO CRASH-RESUMABLE LOCK-OWNERSHIP PROTOCOL IS INVENTED. One could be built — write an
+         owner record durably before creating the lock — but it would have its own gap between
+         that write and the O_EXCL create, and a gap is exactly what this section exists to
+         remove. Since R-IDX-8's stop is safe, bounded and leaves nothing lost, the simpler
+         honest answer is taken instead. If a future version wants automatic recovery, it must
+         MEASURE that no acquisition-to-ownership-record gap exists, not assume it.
+
+R-IDX-10 NO NEW DURABLE CARRIER, AND NO LATER-OPERATION DEPENDENCE ON THE MUTATION RECORD. An
          earlier draft said "a later Workline operation reads that record rather than inferring
          from the index". That is withdrawn: `Mutation.complete()` calls `_drop_own_record()`, so
          the completed runtime record is taken away and no later operation can read it. Nothing
@@ -2566,7 +2689,7 @@ Measured support: `hash-object -w --stdin` left HEAD unchanged and `git status` 
 O-6 moves no ref by construction — the ref moves only at O-7.
 ```
 
-#### 7.1.7 Which persistence identity a generation commit carries (A-8)
+#### 7.1.7 Which persistence identity a generation commit carries (C3-1)
 
 ```text
 MEASURED IN LIVE CODE, not assumed. `_finish_generation` (roadmap_review.py:1447) records its
@@ -2579,7 +2702,7 @@ Work persistence primitive. Both cannot hold for a Work Review Run, and the earl
 did not notice the conflict.
 ```
 
-**FROZEN — forward amendment A-8:**
+**FROZEN — F3-only correction C3-1:**
 
 ```text
 THE DISCRIMINATOR IS DURABLE INVOCATION DATA, never a guess and never the calling code path.
@@ -2615,14 +2738,139 @@ WHAT THIS DOES NOT CHANGE: the Review record BYTES are the same either way — t
 changes. This is a change of persistence mechanism and recorded mode, nothing else.
 ```
 
-#### 7.1.8 The environment the sequence runs in
+#### 7.1.8 RAW ANCESTRY — the only authority for parentage, range and descent
 
 ```text
-source      GIT_ATTR_NOSYSTEM=1, core.attributesFile = a Workline-owned empty file,
-isolation   GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL = that same empty file,
-            every GIT_* variable stripped from the inherited environment except the
-            GIT_INDEX_FILE of O-1 and the author/committer identity and date variables
-attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.10>, on every invocation
+MEASURED, not argued. Git has TWO different answers to "what are this commit's parents":
+
+    THE REVISION VIEW      what `rev-list`, `log`, `merge-base` and every revision walker say,
+                           after applying refs/replace, `.git/info/grafts` and `.git/shallow`
+    THE COMMIT OBJECT      the literal `parent <oid>` headers stored in the object itself
+
+They differ, and the difference is attacker-controllable. M-57: with `.git/info/grafts` holding
+"C4 C1", `rev-list --parents -n 1 C4` returned C1 and `merge-base --is-ancestor C2 C4` returned
+FALSE for a commit that genuinely IS an ancestor, while `cat-file commit C4` still named C3.
+M-59: in a shallow clone the walker reported HEAD as a ROOT with no parents, while the object
+held two `parent` headers.
+
+The live helpers are on the wrong side of that line: `gitcmd.commit_parents` runs
+`rev-list --parents` (gitcmd.py:399) and `gitcmd.descends_from` runs `merge-base --is-ancestor`
+(gitcmd.py:412).
+```
+
+**FROZEN — every security-critical ancestry answer in this contract is a RAW-OBJECT answer:**
+
+```text
+RAW_PARENTS(commit_oid)
+
+    read THE ACTUAL COMMIT OBJECT named by commit_oid:
+
+        GIT_NO_REPLACE_OBJECTS=1
+        GIT_NO_LAZY_FETCH=1
+        git cat-file commit <commit_oid>
+
+    parse its literal `parent <oid>` headers, in order, from the header block that ends at the
+    first empty line. Those headers, and ONLY those headers, are the commit's parents for every
+    P3 proof.
+
+    the object is not present, is not a commit, or cannot be parsed -> UNKNOWN, FAIL CLOSED
+
+    GIT_NO_REPLACE_OBJECTS IS REQUIRED HERE, not inherited from the general environment by
+    assumption: MEASURED (M-58), with a replacement active, plain `cat-file commit C4` showed NO
+    parent because it read the replacement, and only the setting restored the true C3.
+```
+
+```text
+Every ancestry predicate this contract relies on is built from RAW_PARENTS and nothing else:
+
+    raw_parent(commit)                  RAW_PARENTS(commit), exactly
+    raw_descends_from(commit, ancestor) commit == ancestor, or a walk of RAW_PARENTS from commit
+                                        reaches ancestor
+    raw_range(base, head)               the commits on the RAW_PARENTS walk from head down to,
+                                        and excluding, base
+
+    ANY unreachable step — a named parent whose object is locally unavailable — makes the whole
+    answer UNKNOWN and FAILS CLOSED. It is NEVER read as "the walk ended, so this is a root".
+    M-59 is exactly that case: the shallow boundary's commit names two parents that are not here.
+
+    A walk is bounded: it stops at `base`, at a genuine root (a commit with NO parent header at
+    all), or at UNKNOWN. A cycle is impossible in a content-addressed store, and a walk that
+    exceeds a frozen step budget is UNKNOWN rather than an infinite loop.
+```
+
+```text
+FORBIDDEN as an authority, in §8.2's lineage rule, in C-2's items, in §7.1.3's resume matrix and
+anywhere else a proof depends on the answer:
+
+    git rev-list --parents          the graft/shallow view (M-57, M-59)
+    git merge-base --is-ancestor    the same view (M-57 returned FALSE for a real ancestor)
+    gitcmd.commit_parents           built on the first
+    gitcmd.descends_from            built on the second
+    any other revision walker, unless it is MECHANICALLY PROVEN for that exact invocation to
+      ignore replace, grafts and shallow — and this contract proves that for none of them
+
+They may still be used for non-proof convenience, such as a hint in a message, provided nothing
+a proof reads is derived from them.
+```
+
+```text
+WHY THE ENTRY CHECK IS NOT ENOUGH, and why §7.1.9's grafts refusal is now DEFENCE IN DEPTH rather
+than the mechanism. An earlier draft refused a non-empty `.git/info/grafts` at entry and said
+nothing about shallow at all. Both gaps are real:
+
+    the graft file can be created or changed at ANY moment during the Run, by anyone with write
+      access to the Git directory, and nothing re-reads it;
+    a shallow repository was never considered, and its boundary makes the walker report a root.
+
+Under RAW_PARENTS neither matters to correctness: the stored headers do not change when a graft
+file appears, and a shallow boundary becomes a locally-unavailable parent, which is UNKNOWN. The
+entry refusal for a non-empty grafts file is RETAINED anyway — it is cheap, and a Project using
+grafts is one a person should know about — and an entry check for
+`rev-parse --is-shallow-repository` is added on the same footing. Neither is load-bearing.
+```
+
+#### 7.1.9 The environment the sequence runs in
+
+```text
+environment ONE MECHANICAL RULE, in this order, for EVERY Git invocation of this operation:
+
+              1. STRIP EVERY INHERITED `GIT_*` VARIABLE. Not "except" anything: the inherited
+                 environment contributes NOTHING. This includes GIT_DIR, GIT_WORK_TREE,
+                 GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+                 GIT_REPLACE_REF_BASE, GIT_CEILING_DIRECTORIES, GIT_NAMESPACE, GIT_AUTHOR_*,
+                 GIT_COMMITTER_*, and every other name beginning `GIT_`, known or unknown.
+              2. INJECT EXACTLY the allowlist below, and nothing else.
+
+            MEASURED (M-61) that step 1 is load-bearing: an inherited GIT_AUTHOR_NAME /
+            GIT_AUTHOR_EMAIL put `author Attacker <evil@x>` on a commit in a Project configured
+            to "Real Person"; an inherited GIT_INDEX_FILE silently redirects every index command;
+            and an inherited GIT_OBJECT_DIRECTORY made `cat-file -e HEAD` EXIT 1 — the
+            repository's own commit invisible.
+
+allowlist   GIT_ATTR_NOSYSTEM=1              always
+            GIT_CONFIG_NOSYSTEM=1            always
+            GIT_CONFIG_GLOBAL=<empty file>   always, a Workline-owned empty file
+            GIT_NO_LAZY_FETCH=1              always
+            GIT_NO_REPLACE_OBJECTS=1         always
+            GIT_LITERAL_PATHSPECS=1          always
+            GIT_AUTHOR_NAME                  \
+            GIT_AUTHOR_EMAIL                  | on commit-tree only, from the capture below
+            GIT_AUTHOR_DATE                   |
+            GIT_COMMITTER_NAME                |
+            GIT_COMMITTER_EMAIL               |
+            GIT_COMMITTER_DATE               /
+            GIT_INDEX_FILE                   ONLY on the commands that need the isolated index
+                                             of O-1 or the §7.1.4 snapshot; absent everywhere
+                                             else, so no command touches an index by accident
+            Any further variable a final design needs must be added to this list explicitly. A
+            variable that is not on it is not set, and a variable that is inherited is not kept.
+
+identity    ONE ANSWER, and it is the capture — inherited GIT_AUTHOR_* / GIT_COMMITTER_* do NOT
+precedence  survive, because step 1 removes them. Before the configuration above is neutralized,
+            the EFFECTIVE identity is read by Git's ordinary rules (`git var GIT_AUTHOR_IDENT` /
+            `GIT_COMMITTER_IDENT`, or equivalently the resolved `user.name` / `user.email`), and
+            that captured result is what step 2 injects. Nothing else contributes.
+attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.11>, on every invocation
 pin         of the sequence
 line        core.autocrlf=false and core.eol=lf, on every invocation. These are CONFIGURATION,
 endings     not attributes: the attribute pin does not touch them, and measured, `core.autocrlf=true`
@@ -2644,9 +2892,16 @@ semantics                              It is never an implicit fetch, never a tr
                                        view. MEASURED (M-49): without it, `cat-file -p <P>` and
                                        `rev-parse <P>^{tree}` returned the REPLACEMENT's tree
                                        `0b996586` instead of the true `8b00ff5b`. Legacy
-                                       `.git/info/grafts` is refused the same way: if it exists
-                                       and is non-empty, STOP, because it rewrites parentage and
-                                       this contract's lineage proofs are about real parentage.
+                                       Legacy `.git/info/grafts` and a SHALLOW repository
+                                       (`rev-parse --is-shallow-repository`) are checked at entry
+                                       and STOP, as DEFENCE IN DEPTH ONLY: correctness does not
+                                       depend on either check, because §7.1.8's RAW_PARENTS reads
+                                       the stored commit object, which neither mechanism alters
+                                       (M-57, M-59). The checks are retained because a graft file
+                                       or a shallow clone is something a person should be told
+                                       about, and because a graft file can appear at any later
+                                       moment — which is precisely why it cannot be the
+                                       mechanism.
             GIT_LITERAL_PATHSPECS=1    a declared path addresses exactly itself. MEASURED (M-50):
                                        without it, `ls-files -- 'd/a[1].txt'` ALSO matched
                                        `d/a1.txt`. Bound for EVERY command that consumes a
@@ -2701,7 +2956,7 @@ capability  the running Git is proven to honour the pin, by the probe of §7.7, 
             commit of the sequence
 ```
 
-#### 7.1.9 The staging-byte contract, now true by construction
+#### 7.1.10 The staging-byte contract, now true by construction
 
 ```text
 FROZEN:
@@ -2743,7 +2998,7 @@ STILL LOAD-BEARING     for the two-surface entry predicate of §7.8, which is ev
 The pin is not removed on the strength of one platform's measurement of one Git version. It is
 re-classified, and the re-classification is what is frozen.
 
-#### 7.1.10 The two bases, and why they are one persistence basis
+#### 7.1.11 The two bases, and why they are one persistence basis
 
 An earlier draft said "every commit this operation makes, including S-c0, pins to
 `declared_base.base_commit`". That is **circular** and is withdrawn: `declared_base.base_commit` is HEAD
@@ -3075,7 +3330,7 @@ works is measured, not argued (M-20):
 
 ```text
 Every commit this operation makes runs with a pinned attribute source — S-c0 to PRE_S_C0_BASE,
-every later commit to declared_base.base_commit, which §7.1.10 proves is the same attribute state —
+every later commit to declared_base.base_commit, which §7.1.11 proves is the same attribute state —
 with the system and global attribute sources neutralized.
 
 Therefore the persistence semantics this operation commits under are FIXED, at the base, before
@@ -3119,7 +3374,7 @@ So the pin closes three things at once, and this is the whole of the architectur
 ```
 
 ```text
-AND THE PRIMITIVE CLOSES ITEM 1 INDEPENDENTLY, which is why §7.1.9 re-classifies the pin rather
+AND THE PRIMITIVE CLOSES ITEM 1 INDEPENDENTLY, which is why §7.1.10 re-classifies the pin rather
 than leaning on it. §7.1.2's O-3 writes the object from the WITNESSED BYTES with no `--path`, so
 Git's check-in conversion path is not entered at all and no attribute is consulted (M-40); the
 returned id is then CHECKED against Candidate.new_oid before anything else happens. Identity
@@ -3277,7 +3532,7 @@ The pin closes this by the same mechanism, applied to the same complete surface:
 
 ```text
 EVERY commit this operation makes is pinned — S-c0 to PRE_S_C0_BASE and every later commit to
-declared_base.base_commit (§7.1.10) — and every persistence evaluation this operation makes is
+declared_base.base_commit (§7.1.11) — and every persistence evaluation this operation makes is
 evaluated UNDER THAT SAME PIN, over exactly the paths that commit writes:
 
     S-c0                        the event log
@@ -3508,7 +3763,7 @@ the system and global sources, which the primitive neutralizes (M-21) and which 
   neutralized rather than assumed.
 ```
 
-By §7.1.10 the conclusion carries unchanged to `declared_base.base_commit`.
+By §7.1.11 the conclusion carries unchanged to `declared_base.base_commit`.
 
 #### 7.8.4 The reserved canonical Review namespace (R21, amendment A-5)
 
@@ -4221,7 +4476,7 @@ matters, and nowhere else is claimed.
 ```
 
 ```text
-This is the same argument §7.1.10 makes for the attribute source, and it is now the same argument:
+This is the same argument §7.1.11 makes for the attribute source, and it is now the same argument:
 S-c0 touches one path, that path is reserved, so nothing a Work can declare or read differs
 between the two bases.
 ```
@@ -4721,6 +4976,9 @@ positively proven before S-c1 is recorded:
        Supersession, or anything at all outside the Review namespace — makes the commit foreign.
 
   L-3  HEAD is on declared_base.branch, by its full ref name, and that branch holds parent(K1).
+       "Holds" is `raw_descends_from` over RAW_PARENTS (§7.1.8), never `merge-base
+       --is-ancestor`: a graft file or a shallow boundary changes the latter's answer (M-57,
+       M-59) and changes nothing about the stored objects.
 
   L-4  S-c1 is base-exact BY CONSTRUCTION, not by a re-read. §7.1.2 O-2 seeds the isolated index
        from the EXACT parent(K1) object id, O-6 records that same id as the parent, and O-7
@@ -4830,7 +5088,7 @@ W1   OWNERSHIP
 W2   PERSISTENCE SEMANTICS
      The S-c1 payload names mode "review-v1-work-local-v2", whose frozen behaviour is the
      OBJECT-DRIVEN sequence of §7.1.2; the commit was made with the attribute source pinned to
-     the tree of declared_base.base_commit (§7.1.8, §7.1.10); and the Git persistence preflight of
+     the tree of declared_base.base_commit (§7.1.9, §7.1.11); and the Git persistence preflight of
      §7.3, evaluated UNDER THAT SAME PIN, passed IMMEDIATELY BEFORE the stage was recorded —
      topology step 17b, after the Review completed. Step 9's early run is an optimization and
      never satisfies this item, and an evaluation made against the working tree rather than the
@@ -5694,7 +5952,7 @@ T1   OWNERSHIP
 T2   PERSISTENCE SEMANTICS
      The S-c2 payload names mode "review-v1-work-local-v2" — the identity A-7 freezes, never
      "review-v1-work-local-v1" and never the planning identity — and the Git persistence
-     preflight of §7.3 passed for the terminal paths, under the hermetic environment of §7.1.8.
+     preflight of §7.3 passed for the terminal paths, under the hermetic environment of §7.1.9.
      As with W2, this item reads COMMITTED OBJECTS and so proves the RESULT rather than the steps
      taken; §7.1.2 is what makes any other result unreachable.
 
@@ -6105,18 +6363,44 @@ IP-6  The isolated verification materialization primitive of F2 §13.4 V-2 does 
 
 IP-7  F1 Gate 3, the activation producer, still fails closed until IP-4 and IP-5 both land.
 
-IP-8  The commit primitive must pass the attribute-source pin on BOTH invocations — `attr.tree`
-      (or GIT_ATTR_SOURCE) set to the base commit's tree, GIT_ATTR_NOSYSTEM=1, an empty
-      core.attributesFile, GIT_CONFIG_NOSYSTEM=1, an empty GIT_CONFIG_GLOBAL, and a GIT_*-stripped
-      environment. The mechanism is already proven live in review/checkout.py:171-215 (M-21); what
-      is new is applying it to `git add` and `git commit` rather than only to `git check-attr`.
-      This requires Git >= P3_WORK_ATTR_PIN_GIT_MIN (2.43.0), NOT 2.40: `check-attr --source`
-      at 2.40 does not establish that attr.tree governs `git add` (§7.7.1). The capability
-      probe of §7.7 is the binding authority regardless of the declared floor.
+IP-8  THE ENVIRONMENT IS PER-INVOCATION, NOT "BOTH INVOCATIONS". An earlier draft said the pin
+      applies "on BOTH invocations" and that what was new was "applying it to `git add` and
+      `git commit`" — that describes the v1 contained primitive, which v2 PROHIBITS (§7.1.0).
+      There is no pair of invocations any more: the sequence is O-1 ... O-8 and the §7.1.4
+      transaction, and the requirement is stated over each of them by class.
 
-IP-10 The primitive must set core.autocrlf=false and core.eol=lf on both invocations. Measured,
-      without them a CRLF result is normalized on check-in even with the attribute pin in place
-      (M-23), and Git for Windows enables autocrlf globally by default.
+      THE THREE CLASSES, and every Git invocation of this operation belongs to at least the first:
+
+        (a) EVERY INVOCATION — the hermetic environment of §7.1.9, applied as ONE mechanical
+            rule: strip every inherited `GIT_*`, then inject exactly the allowlist
+            (GIT_ATTR_NOSYSTEM, GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL, GIT_NO_LAZY_FETCH,
+            GIT_NO_REPLACE_OBJECTS, GIT_LITERAL_PATHSPECS, and nothing else by default), with
+            core.hooksPath at the empty directory, core.fsmonitor=false, commit.gpgSign=false,
+            gc.auto=0, maintenance.auto=false. MEASURED that the strip is load-bearing (M-61).
+
+        (b) EVERY INVOCATION THAT RESOLVES ATTRIBUTES — the attribute-source pin: `attr.tree`
+            (or GIT_ATTR_SOURCE) set to this commit's persistence basis (§7.1.11), plus the empty
+            core.attributesFile that (a) already provides. The mechanism is proven live in
+            review/checkout.py:171-215 (M-21). Under v2 the pin is DEFENCE IN DEPTH for storage
+            identity (§7.1.10) and load-bearing for §7.9's checkout claim, so this class is the
+            Git persistence preflight and the capability machinery — NOT a staging command,
+            because v2 runs none.
+
+        (c) EVERY INVOCATION CONSUMING AN EXACT DECLARED PATH — GIT_LITERAL_PATHSPECS, which (a)
+            already sets for all of them, called out because it is the one that silently
+            mis-addresses a legal filename otherwise (M-50).
+
+      NO IMPLEMENTATION PREREQUISITE ASKS FOR `git add`, `git commit` OR `git commit --only`.
+      They are prohibited for this identity (§7.1.2) and remain the PLANNING mode's primitive,
+      untouched. Git >= P3_WORK_ATTR_PIN_GIT_MIN (2.43.0) is still required for class (b), and
+      the capability probe of §7.7 is the binding authority regardless of the declared floor.
+
+IP-10 The line-ending configuration core.autocrlf=false and core.eol=lf is set on EVERY invocation
+      of class (a) above, not on "both invocations". Measured, without them a CRLF result is
+      normalized on check-in even with the attribute pin in place (M-23), and Git for Windows
+      enables autocrlf globally by default. Under v2 no check-in conversion path is entered at
+      all (O-3 passes no `--path`), so this is belt-and-braces — retained so the sequence stays
+      safe if a future step ever reads a file through Git.
 
 IP-11 The capability probe of §7.7 must exist and must run before the first pinned commit of every
       review-v1 Work operation. `rules/git` gains P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0 as its
@@ -6158,7 +6442,29 @@ IP-20 THE CONDITIONAL REAL-INDEX REFRESH (§7.1.4): entry-compared, own-paths-on
       durable C-1, non-authoritative, with the outcome recorded on the mutation. MEASURED
       feasible (M-45); the hazard of omitting it is MEASURED too (M-44).
 
-IP-25 THE HERMETIC GIT ENVIRONMENT of §7.1.8, applied to EVERY invocation rather than to the
+IP-26 THE RAW COMMIT ANCESTRY READER of §7.1.8, which must NOT be built from, or quietly
+      delegated to, the existing revision-view helpers. `gitcmd.commit_parents` (gitcmd.py:399)
+      runs `rev-list --parents` and `gitcmd.descends_from` (gitcmd.py:412) runs
+      `merge-base --is-ancestor`; both are changed by grafts and by a shallow boundary (M-57,
+      M-59) and neither may back any P3 proof. The reader must provide:
+
+          RAW_PARENTS(oid)      `GIT_NO_REPLACE_OBJECTS=1 GIT_NO_LAZY_FETCH=1 git cat-file commit
+                                <oid>`, parsing the literal `parent <oid>` headers from the header
+                                block that ends at the first blank line, in order. The replace
+                                setting is REQUIRED here specifically: without it a replacement
+                                changes the answer (M-58).
+          raw_descends_from     a walk over RAW_PARENTS only
+          raw_range(base, head) the RAW_PARENTS walk from head down to and excluding base
+          NO interpretation of refs/replace, `.git/info/grafts` or `.git/shallow` anywhere
+          LOCALLY UNAVAILABLE PARENT -> UNKNOWN, FAIL CLOSED, and never "this is a root" (M-59)
+          FULL OID WIDTHS for both hashes: 40 hex for SHA-1 and 64 hex for SHA-256, matched
+            exactly, with no abbreviation accepted or produced anywhere
+          a frozen step budget, beyond which the answer is UNKNOWN rather than an unbounded walk
+
+      Every lineage, range, descent and parentage question in §8.2, §9, §15, §16 and §7.1.3 is
+      answered by this reader and by nothing else.
+
+IP-25 THE HERMETIC GIT ENVIRONMENT of §7.1.9, applied to EVERY invocation rather than to the
       commit path alone: GIT_NO_LAZY_FETCH=1, GIT_NO_REPLACE_OBJECTS=1, GIT_LITERAL_PATHSPECS=1,
       the promisor-configuration read and the grafts refusal at entry, and the author/committer
       identity captured BEFORE config neutralization and supplied explicitly with its dates.
@@ -6333,7 +6639,7 @@ FC-8   No synthetic, placeholder, empty-string or all-zero commit identity is wr
 FC-9   A Review record is never rewritten; an immutable create that finds different bytes at its
        path is reconcile_required.
 
-FC-10  The attribute source of every commit this operation makes is pinned (§7.1.10), so
+FC-10  The attribute source of every commit this operation makes is pinned (§7.1.11), so
        committed object identity equals the Candidate's by construction. A transform assigned by
        the PINNED source itself is refused at START entry, before any mutation exists. No
        transform is ever disabled to obtain a pass, and no result the executor produces is ever
@@ -6527,7 +6833,7 @@ contract of §7.1.
 
  8. core.autocrlf = true  (or input)
     why it bites configuration, not an attribute: the pin does not reach it. MEASURED, M-23
-    handling     the primitive sets core.autocrlf=false and core.eol=lf on both invocations
+    handling     the primitive sets core.autocrlf=false and core.eol=lf on every invocation
                  (§7.1), which restores raw identity.                  MEASURED, M-23
     committed id == Candidate.new_oid.
     outcome      SUPPORTED. This is the DEFAULT condition on Git for Windows, so it had to be.
@@ -6599,7 +6905,7 @@ A. S-c0 EXISTS (entry events not yet committed)
    clone      form L holds over the resulting tree
    recovery   ordinary resume at the earliest unsatisfied checkpoint
    NOTE       S-c0 pins to PRE_S_C0_BASE, NOT to declared_base.base_commit, which does not yet
-              exist. The circularity the re-review found is resolved in §7.1.10.
+              exist. The circularity the re-review found is resolved in §7.1.11.
 
 B. S-c0 ABSENT (event log already matches HEAD)
    as A, except PRE_S_C0_BASE == declared_base.base_commit and the distinction collapses. No
@@ -6829,7 +7135,7 @@ C. UNKNOWN CAPABILITY
 
 D. S-c0
    §5.1  step 9a, pinned to PRE_S_C0_BASE — the committed HEAD immediately before it, which
-         exists (§7.1.10). It commits the event log ALONE, which is what makes the two bases one
+         exists (§7.1.11). It commits the event log ALONE, which is what makes the two bases one
          attribute state. Activated as PB-9.
 
 E. EVERY LATER COMMIT
@@ -6928,7 +7234,8 @@ H. CRASH AFTER GENERATION 1
 ### 21.10 Declared-path identity matrix
 
 Every row is a declared result or deletion path, judged by §7.8.4's three layers at §5.1 steps 5b,
-5c and 5d — all of them before `declare_own_content`. Outcomes are exactly four: **accepted**, `review_reserved_namespace`,
+5c and 5d — all of them before `declare_own_content`. Outcomes are exactly four: **accepted**,
+`review_reserved_namespace`,
 **malformed** (`review_candidate_unavailable`), or **containment unknown** (fail closed, which is reported
 as malformed because no identity was established).
 
@@ -7225,11 +7532,11 @@ S. THE BRANCH MOVES BETWEEN THE STAGE RECORD AND THE COMMIT
             the ref update.
 
 T. CANONICAL FORM-L BASE SOURCE
-   permitted and REQUIRED in the reserved surface (§7.1.8 two-surface rule, §7.9.3), while the
+   permitted and REQUIRED in the reserved surface (§7.1.9 two-surface rule, §7.9.3), while the
    ordinary surface admits no material assignment. A base carrying form-L is not refused at
    entry; one carrying a material rule over ordinary paths is. Under the object-driven primitive
    neither assignment can alter a committed object — the pin is defence in depth for storage
-   (§7.1.9) — but the entry predicate still binds, because it is also what §7.9's
+   (§7.1.10) — but the entry predicate still binds, because it is also what §7.9's
    checkout-capability claim rests on.
 ```
 
@@ -7283,7 +7590,10 @@ F. ON RESUME THE REF ALREADY EQUALS THE PREPARED ID
              comparison against the operation's own record.
 
 F2. THE REF IS A DESCENDANT OF THE PREPARED ID
-   MEASURED  `git merge-base --is-ancestor <prepared> <ref>` -> YES, and ref != prepared (M-43)
+   MEASURED  the descendant relation is detectable and distinct from ref == prepared (M-43,
+             measured with `merge-base --is-ancestor`). The FROZEN predicate is
+             `raw_descends_from` (§7.1.8), because the walker's answer is changed by grafts and
+             by a shallow boundary (M-57, M-59) while the raw walk's is not.
    answer    §7.1.3 row F. The OBJECT's ownership is still known, but the stage's conditions do
              not hold — base-exactness, L-3 and W3 all fail — so reconcile. The later branch
              state is NEVER silently treated as this stage's result.
@@ -7406,7 +7716,7 @@ the row says so instead of claiming a measurement.
 
 ```text
 A. PARTIAL CLONE, A BLOB MISSING LOCALLY
-   bound     GIT_NO_LAZY_FETCH=1 on every invocation (§7.1.8), plus a promisor-configuration read
+   bound     GIT_NO_LAZY_FETCH=1 on every invocation (§7.1.9), plus a promisor-configuration read
              at entry
    required  a locally absent object is LOCAL UNAVAILABLE and fails closed: no implicit fetch, no
              transport helper, no credential helper, no network
@@ -7459,7 +7769,7 @@ H. EXPECTED-OLD ENTRY PRESENT, CLEANUP CANNOT COMPLETE
 I. WORK-RESULT GENERATION 1
    required  the generation mutation's invocation carries review_kind "work-result-v1", so its
              commit effect names "review-v1-work-local-v2" and is built by CommitTreePlan /
-             O-1...O-8 (§7.1.7, A-8)
+             O-1...O-8 (§7.1.7, C3-1)
    source    the recorded `create_file` bytes, never a reread of the file that effect wrote
 
 J. AN ORDINARY P2 PLANNING GENERATION
@@ -7481,7 +7791,87 @@ L. A PATH F2 LEGITIMATELY ACCEPTS THAT IS NOT NFC
    required  ACCEPTED. §5.1 step 5b is exactly the landed predicate, so no NFC rule, no NUL rule
              and no "Git-reserved name" rule refuses it. Adding any of them would have been a
              post-executor refusal of a supported result shape (F2 §2.3), and no amendment beyond
-             A-7 and A-8 is taken for path grammar.
+             A-7 and C3-1 is taken for path grammar.
+```
+
+### 21.15 Raw-ancestry and recovery matrix
+
+Every ancestry row compares Git's REVISION VIEW against the RAW COMMIT OBJECT. The frozen authority
+is always the raw one (§7.1.8).
+
+```text
+A. `.git/info/grafts` SUPPLIES A FAKE PARENT
+   MEASURED  on C1 <- C2 <- C3 <- C4 with grafts holding "C4 C1" (M-57):
+                 rev-list --parents -n 1 C4       -> C1      the walker is LIED TO
+                 merge-base --is-ancestor C2 C4   -> FALSE   for a genuine ancestor
+                 cat-file commit C4 | parent      -> C3      the object is UNAFFECTED
+   frozen    RAW_PARENTS(C4) == {C3}. The graft file changes no P3 answer.
+   live gap  `gitcmd.commit_parents` and `gitcmd.descends_from` ARE the two lied-to calls, which
+             is why IP-26 forbids delegating to them.
+
+B. A GRAFT FILE APPEARS AFTER THE OPERATION HAS ENTERED
+   frozen    nothing changes. RAW_PARENTS re-reads the stored object every time it is asked, so
+             there is no window in which an earlier check is relied upon. The entry refusal is
+             retained as DEFENCE IN DEPTH only (§7.1.9) — correctness never depended on it, which
+             is what makes a mid-Run graft harmless rather than a blocker.
+
+C. A SHALLOW CLONE / SHALLOW BOUNDARY
+   MEASURED  in a `--depth 1` clone whose HEAD is a merge commit (M-59):
+                 rev-parse --is-shallow-repository -> true
+                 rev-list --parents -n 1 HEAD      -> HEAD alone: LOOKS LIKE A ROOT
+                 rev-list --count HEAD             -> 1
+                 RAW cat-file commit HEAD          -> TWO parent headers
+                 cat-file -e <that parent>         -> ABSENT locally
+   frozen    the raw object is the authority, so HEAD has two parents; they are locally
+             unavailable, so the answer is UNKNOWN and FAILS CLOSED.
+             NEVER "this commit is a root". That is the exact misreading the walker produces, and
+             a lineage proof built on it would conclude a commit had no history at all.
+
+D. A MERGE COMMIT
+   MEASURED  `GIT_NO_REPLACE_OBJECTS=1 cat-file commit <merge>` printed exactly TWO `parent`
+             headers, in order, equal to the two merged commits (M-60)
+   frozen    RAW_PARENTS preserves count and order. Nothing in this contract assumes one parent
+             where the object has two; where a proof REQUIRES one parent (W3, T3), it requires it
+             of the raw headers and refuses a second.
+
+E. refs/replace OVER A COMMIT WHOSE PARENTAGE IS BEING READ
+   MEASURED  plain `cat-file commit C4` showed NO parent, because it read the replacement (a
+             root); `GIT_NO_REPLACE_OBJECTS=1` showed the true C3 (M-58)
+   frozen    the setting is part of RAW_PARENTS itself, not merely of the ambient environment, so
+             reading the object is raw even if some future caller forgets the global rule.
+
+F. A CRASH IMMEDIATELY AFTER `index.lock` O_EXCL ACQUISITION
+   MEASURED  a lockfile is ZERO BYTES — no pid, no host, no owner of any kind (M-62)
+   frozen    ONE recovery class: ownership is UNKNOWN, the lock is NEVER deleted automatically,
+             and the operation STOPS at INDEX LOCK RECONCILIATION (R-IDX-8). Ownership is not
+             inferred from the filename, the file's age, the absence of a process, the index
+             contents, or the existence of a pending mutation.
+   NOT       that "a resume retries and it resolves". A resume re-attempting O_EXCL finds the
+   CLAIMED   same file and gets UNKNOWN again, so retrying alone can never clear a lock this
+             operation itself left. A person or F4 removes the stale Git lock — ordinary Git
+             housekeeping after any process dies mid-write — and the same pending operation then
+             resumes at the same cleanup checkpoint.
+
+G. A STALE OWN `index.lock` FOUND ON RESUME
+   frozen    C-1 REMAINS OWNED. K is on the branch and provable; W1, the proof note, the barrier
+             and every publication right stand exactly where they stood; the mutation stays
+             pending so nothing is abandoned or re-decided. Only the cosmetic index refresh is
+             outstanding, and R-IDX-8 refuses to call the operation complete while the measured
+             revert trap (M-44) is live.
+
+H. A HOSTILE INHERITED GIT ENVIRONMENT
+   MEASURED  each alone (M-61):
+                 GIT_AUTHOR_NAME/EMAIL inherited -> the commit carried `Attacker <evil@x>`
+                                                    although the Project was configured otherwise
+                 GIT_INDEX_FILE inherited        -> silently redirects every index command
+                 GIT_OBJECT_DIRECTORY inherited  -> `cat-file -e HEAD` EXIT 1: the repository's
+                                                    own commit invisible
+   frozen    §7.1.9's ONE rule: strip EVERY inherited `GIT_*` — including GIT_DIR, GIT_WORK_TREE,
+             GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
+             GIT_REPLACE_REF_BASE, GIT_CEILING_DIRECTORIES, GIT_NAMESPACE, GIT_AUTHOR_*,
+             GIT_COMMITTER_* and every unknown `GIT_` name — then inject EXACTLY the allowlist.
+             The author/committer identity is the one CAPTURED before neutralization; inherited
+             GIT_AUTHOR_* do not survive, and the contract says only that.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -7563,7 +7953,7 @@ C  true conflict requiring a new forward amendment
     puts the Review's own generation commits under the Work primitive. Resolved by the durable
     `review_kind` discriminator: "work-result-v1" -> the Work identity, every other kind ->
     planning, unchanged. The planning identity is never redefined.
-    FORWARD AMENDMENT A-8 (§1.5). §7.1.7.                                                   C
+    F3-ONLY CORRECTION C3-1 (§1.5) — NOT an F2 amendment. §7.1.7.                            C
 
 25  F2 §10.3 — `git_persistence = "review-v1-work-local-v1"`, described there as denoting the
     contained commit primitive. F3 §7.1.2 replaces that primitive, so the value must change or a
@@ -7608,7 +7998,7 @@ C  true conflict requiring a new forward amendment
     semantics and make the Run's own records unreadable in a fresh clone. §10.3 names "a Context
     version change" as the mechanism, and F3 uses exactly that.
     FORWARD AMENDMENT A-4 (§1.5), which also supersedes §10.1's exact Context record
-    because a field cannot be added to a frozen exact schema otherwise. §7.9, §7.9.6.                                                        C
+    because a field cannot be added to a frozen exact schema otherwise. §7.9, §7.9.6.        C
 
 15  F2 §13.4 V-2  the verification workspace is materialized from base + snapshot material and
     NEVER from a future K1. F3 keeps K1 strictly after the Review and never makes verification
@@ -7663,7 +8053,7 @@ C  true conflict requiring a new forward amendment
 ```text
 Forward amendment required: YES
 
-Eight, declared in full in §1.5:
+Seven F2 amendments (A-1 ... A-7) and one F3-only correction (C3-1), declared in full in §1.5:
     A-1  F2 §5.3           base_commit's timing, and that it is K1's parent       row 19
     A-2  F2 §14.4, §16.1   the unqualified "every HEAD advance" consequence       row 3
     A-3  F2 §7.1/7.2/7.3   the result-bearing / no-K1 discriminator               row 21
@@ -7683,9 +8073,13 @@ Eight, declared in full in §1.5:
                            "review-v1-work-local-v2". The field's MEANING is unchanged
                            and A-4 stands; the behaviour it names is no longer the
                            contained commit primitive, so the identity cannot be
-    A-8  (no F2 sentence)  a Work Review Run's own generation commits use the Work     row 26
+
+AND, IN ITS OWN CLASS, superseding no F2 sentence:
+
+    C3-1 F3-ONLY CORRECTION  a Work Review Run's own generation commits use the Work  row 26
                            persistence identity, discriminated by the durable
-                           review_kind; every planning Run is untouched
+                           review_kind; every planning Run is untouched. NOT an F2
+                           amendment and NOT counted among the seven.
 
 No P1, P2 or P3 F1 statement is amended.
 No historical P1, P2, F1 or F2 document is edited by this contract.
@@ -7708,7 +8102,7 @@ PB-1  the review-v1 WORK publication rule: a mutation whose durable invocation n
 PB-2  current-combined, planning and generation rules are unchanged by PB-1
 PB-3  the commit primitive identity "review-v1-work-local-v2" — a NEW semantics identity (A-7),
       because the behaviour is no longer F2 §10.3's contained commit primitive, and the planning
-      identity "review-v1-planning-local-v1" is NOT redefined (A-8). Its frozen behaviour is the
+      identity "review-v1-planning-local-v1" is NOT redefined (C3-1). Its frozen behaviour is the
       OBJECT-DRIVEN sequence of §7.1.2: the commit is built from object identities, and no
       working-tree pathname is resolved between the artifact's identity proof and the committed
       tree. `git add` and `git commit`/`git commit --only` are not used for it. Hooks do not run
@@ -7722,7 +8116,7 @@ PB-3  the commit primitive identity "review-v1-work-local-v2" — a NEW semantic
       refreshed only after C-1, under an O_EXCL `index.lock` held across the whole compare and
       write, only for this commit's own plan paths, only where the entry is still the one the
       plan expected, published by an atomic rename, and never able to un-own K (§7.1.4). Every
-      invocation runs under the hermetic environment of §7.1.8 — GIT_NO_LAZY_FETCH,
+      invocation runs under the hermetic environment of §7.1.9 — GIT_NO_LAZY_FETCH,
       GIT_NO_REPLACE_OBJECTS, GIT_LITERAL_PATHSPECS, an empty core.hooksPath that is measured to
       contain `reference-transaction` and `post-index-change` (M-48), and an author/committer
       identity captured before config neutralization.
@@ -7746,13 +8140,13 @@ PB-5  a review-v1 Work START in a Project with a remote requires the running Git
 PB-6  the Git persistence preflight runs immediately before EVERY commit a review-v1 Work
       mutation makes, for exactly that commit's path set, evaluated under the pinned
       attribute source, and a pass never carries between commits (§7.3)
-PB-9  the attribute-source pin, with its TWO bases (§7.1.10): S-c0 is made with attr.tree set
+PB-9  the attribute-source pin, with its TWO bases (§7.1.11): S-c0 is made with attr.tree set
       to the tree of PRE_S_C0_BASE — the committed HEAD immediately before it — and EVERY later
       commit of the mutation with attr.tree set to the tree of declared_base.base_commit. The
       two are proven to represent the SAME attribute state, because S-c0 commits the event log
       alone and so can change no attribute source. In both cases the system and global attribute
       sources are neutralized, so committed object identity equals the Candidate's by
-      construction and no filter program is reachable (§7.1, §7.1.10, §7.4.2)
+      construction and no filter program is reachable (§7.1, §7.1.11, §7.4.2)
 PB-10 an executor-authored change to Git persistence configuration is an ordinary Work
       result, committed and reviewed as an ordinary file entry, and is never refused
       (§7.4.1, §7.4.2)
@@ -7842,7 +8236,8 @@ TM-6  that a proof note is a recovery pointer and never a proof result, and that
       (§10.2)
 TM-7  the no-K1 discriminator of §6.7: artifact_kind is decided by whether any Candidate entry
       is changing, never by the emptiness of entries or of result_paths
-TM-8  the eight forward amendments of §1.5, which a reader of F2 alone cannot
+TM-8  the seven F2 forward amendments of §1.5, and the one F3-only correction C3-1 beside
+      them, which a reader of F2 alone cannot
       discover from F2
 TM-10 the seal precondition of §7.9: a Review may not seal unless the resulting tree preserves
       canonical Review checkout capability over the Review namespace, proven mechanically
@@ -7896,7 +8291,8 @@ The operation owner is START, before F3 and after it. Review authorizes; it neve
 ```text
 F3-D1   Work local persistence      FROZEN   "review-v1-work-local-v2" — a NEW semantics
                                              identity (A-7), because the behaviour is no longer
-                                             F2 §10.3's contained commit primitive. Every commit class commits a COMMIT TREE
+                                             F2 §10.3's contained commit primitive. Every
+                                             commit class commits a COMMIT TREE
                                              PLAN (§7.1.1) built from the witness/Candidate
                                              (K1), the parent blob plus recorded append_event
                                              effects (S-c0), the recorded immutable-create bytes
@@ -7922,7 +8318,14 @@ F3-D1   Work local persistence      FROZEN   "review-v1-work-local-v2" — a NEW
                                              index is refreshed only after C-1, only for own plan
                                              paths, only where the entry is still the expected
                                              one, and never as a condition of anything (§7.1.4,
-                                             M-44, M-45). An empty delta is a STOP, not a commit. The ATTRIBUTE SOURCE PIN is RETAINED
+                                             M-44, M-45). An empty delta is a STOP, not a
+                                             commit. Parentage, range and descent come from the
+                                             stored commit object's literal `parent` headers
+                                             (§7.1.8), never Git's revision view, which grafts
+                                             and shallow change (M-57, M-59); and every
+                                             invocation strips all inherited GIT_* and injects
+                                             only an exact allowlist (§7.1.9, M-61).
+                                             The ATTRIBUTE SOURCE PIN is RETAINED
                                              and RE-CLASSIFIED: defence in depth for storage
                                              identity, still load-bearing for §7.9's
                                              checkout-capability claim and §7.8's entry
@@ -8122,7 +8525,7 @@ Stop conditions. An implementation that violates any of them is not implementing
 20. Every commit this operation makes — the entry-events commit, the Review's own generation
     commits, every pre-completion Work commit, K1 and K2 alike — is made with a pinned attribute
     source: S-c0 to PRE_S_C0_BASE and every later commit to declared_base.base_commit, which are
-    the same attribute state because S-c0 commits the event log alone (§7.1.10). The Git
+    the same attribute state because S-c0 commits the event log alone (§7.1.11). The Git
     persistence preflight runs
     immediately before each of them, over exactly that commit's path set, evaluated under that
     same pin. A pass never carries from one commit to another, and an evaluation made against the
@@ -8134,7 +8537,7 @@ Stop conditions. An implementation that violates any of them is not implementing
     object is written from the plan's own material and its id is checked before anything else
     happens, and every later step carries object ids only. The attribute-source pin, the
     neutralized line-ending configuration and the universal source predicate are retained as
-    defence in depth (§7.1.9); none of it is ever assumed from the absence of a clean filter.
+    defence in depth (§7.1.10); none of it is ever assumed from the absence of a clean filter.
 
 24. The running Git is proven to honour the attribute pin by a positive capability probe before
     the first pinned commit. A declared version floor is a fast pre-check, never the authority,
@@ -8170,7 +8573,17 @@ Stop conditions. An implementation that violates any of them is not implementing
 
 27l. Every Git invocation of this operation means the object its OID names, addresses the exact
     path it is given, reaches no network, and runs no hook. None of that is left to the ambient
-    configuration.
+    configuration: every inherited `GIT_*` variable is stripped and only an exact allowlist is
+    injected.
+
+27m. Parentage, range and descent are read from the literal `parent` headers of the stored commit
+    object. Git's revision view is not the authority, because refs/replace, `.git/info/grafts`
+    and `.git/shallow` change it and change no object; a named parent that is not locally
+    available is UNKNOWN and fails closed, and is never read as a root.
+
+27n. Ownership of a lock is never inferred. A lock this operation did not provably create is
+    UNKNOWN, is never deleted automatically, and stops the operation at a reconciliation
+    checkpoint that costs it nothing it had already proven.
 
 27g. EVERY commit this operation makes commits a PLAN, and no plan's material is a reread of the
     working-tree copy of a path the plan describes. S-c0 and K2's event entry come from the parent
@@ -8254,7 +8667,8 @@ Stop conditions. An implementation that violates any of them is not implementing
 Contract status              FROZEN (repaired through successive independent reviews)
 Architecture blocker         NONE
 HUMAN decision               NONE
-Forward amendment required   YES - eight (A-1 ... A-8), declared in §1.5
+F2 forward amendments        SEVEN (A-1 ... A-7), declared in §1.5
+F3-only corrections          ONE (C3-1), superseding nothing in F2
 Implementation authorized    NO
 P3 implementation            NOT STARTED
 F4 started                   NO
@@ -8277,15 +8691,22 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-5  F1 Gate 2
   IP-6  the isolated verification materialization primitive (F2's named gap)
   IP-7  F1 Gate 3
-  IP-8  the attribute-source pin on both invocations, with its two bases (§7.1.10)
+  IP-8  the per-invocation environment classes of §7.1.9 — hermetic on every invocation, the
+        attribute pin with its two bases (§7.1.11) on every invocation that resolves attributes,
+        literal pathspecs on every invocation consuming a declared path. NOT "both invocations",
+        and never `git add` / `git commit`
   IP-9  the persistence evaluation made UNDER the pin, not against the working tree
-  IP-10 core.autocrlf / core.eol neutralization on both invocations
+  IP-10 core.autocrlf / core.eol neutralization on every invocation
   IP-11 P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0 and the capability probe that is its actual authority
   IP-12 the universal attribute-source parser: every .gitattributes in the tree at every depth
         plus info/attributes, alias-expanded, narrow supported shape, no user-defined macros
   IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
-  IP-25 the hermetic Git environment of §7.1.8 on every invocation, including the
-        author/committer identity captured before config neutralization (M-51)
+  IP-26 the RAW commit ancestry reader of §7.1.8 — raw parent headers only, no replace/graft/
+        shallow interpretation, locally-unavailable parent -> fail closed, both OID widths. It
+        must not be delegated to gitcmd.commit_parents / descends_from (M-57, M-59)
+  IP-25 the hermetic Git environment of §7.1.9 on every invocation — strip ALL inherited GIT_*,
+        inject exactly the allowlist, and capture the author/committer identity before config
+        neutralization (M-51, M-61)
   IP-24 the atomic index transaction of §7.1.4 (O_EXCL index.lock, snapshot, entry-wise compare,
         atomic rename, R-IDX-8 cleanup checkpoint)
   IP-23 the generation mode dispatch of §7.1.7: review_kind "work-result-v1" -> the Work
