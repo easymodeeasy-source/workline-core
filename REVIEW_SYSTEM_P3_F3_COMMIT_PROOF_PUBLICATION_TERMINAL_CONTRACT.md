@@ -60,7 +60,7 @@ implementation lands are listed in §23 and are not written by this document.
 P1 R1-R12          inherited; specialized, never weakened
 P2 integration     inherited; the publication barrier is preserved exactly (§12)
 P3 F1              inherited without change (F1-D1 ... F1-D11)
-P3 F2              inherited EXCEPT the three explicit forward amendments of §1.5
+P3 F2              inherited EXCEPT the four explicit forward amendments of §1.5
                    (F2-D1 ... F2-D17 otherwise unchanged)
 F3                 this document: physical topology, proof, publication, terminal stage
 F4                 deferred (§25)
@@ -70,7 +70,7 @@ Where F3 appears to say something an earlier freeze also says, F3 is a **special
 never widens. Every apparent collision was audited item by item in §22.
 
 ```text
-F3 semantic forward amendments: YES - three, all to landed F2, all stated in §1.5.
+F3 semantic forward amendments: YES - four, all to landed F2, all stated in §1.5.
 ```
 
 They are declared there in full, with the exact superseded sentences and the narrow replacement.
@@ -79,7 +79,7 @@ same discipline F1 used for its amendments to P1 R4 and R5.
 
 ### 1.4 F1 and F2 decisions F3 preserves without change
 
-Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the three
+Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the four
 statements named in §1.5, and nothing else.
 
 ```text
@@ -110,7 +110,7 @@ the invalidation boundary                                                       
 
 ### 1.5 Forward amendments to landed F2
 
-F3 supersedes three statements of the landed F2 contract. Each is named exactly, with the sentence
+F3 supersedes four statements of the landed F2 contract. Each is named exactly, with the sentence
 superseded, the replacement, and why the two cannot both stand. **The F2 file is not edited.** This is the
 mechanism F1 §11.3 already used for P1 R4 §2 and R5 §8: the amendment is declared in the new contract, and
 the historical freeze keeps its bytes.
@@ -307,6 +307,52 @@ opposite of what §6.7 freezes. There is no reading of them that admits an all-i
 
 ---
 
+#### A-4 — F2 §10.3: checkout capability is not bound in the Work Context
+
+```text
+F2 §10.3 says
+
+    "Checkout capability is not bound in the Work Context. P2 binds it because planning writes
+     canonical Review records whose committed bytes must reproduce exactly; a Work result's
+     bytes are the executor's, and the Candidate binds them by Git object identity (§6.3), which
+     is the identity Git itself will store. A later contract version that needs a
+     checkout-capability claim adds it as a Context version change."
+
+F3 supersedes the first sentence, by the exact mechanism the last sentence names.
+```
+
+The narrow replacement, frozen in §7.9:
+
+```text
+1. The Work Review Context gains a bound checkout-capability claim over the CANONICAL REVIEW
+   NAMESPACE — not over the Work result. F2's reason for excluding it stands untouched for the
+   result: a result's bytes are the executor's and are bound by Git object identity.
+
+2. The claim is a Context field, so `review_context_hash` covers it and the Context's version is
+   raised. A Run whose Context does not carry it is not a Run of this contract version.
+
+3. It is proven at SEAL, over the RESULTING TREE, by the committed attribute evaluation of M-21:
+   no material attribute applies to this Run's canonical Review record paths or to the
+   Consumption path.
+
+4. It is a SEAL precondition, never a Candidate refusal. The Candidate stays expressible and
+   reviewable; what it cannot do is receive authorization (§7.9.2).
+```
+
+**Why both cannot stand.** F2 §10.3's reason for excluding checkout capability is that a Work result's
+bytes are the executor's and are bound by object identity — which is true of the *result* and false of the
+*Review records*. Those records are Workline's own canonical bytes, P1 requires them to remain exactly
+readable from a fresh clone, and a Work result can now be shown to make them unreadable there. Leaving the
+claim unbound would mean a review-v1 Work could authorize its own terminalization while destroying the
+readability of the very records that authorize it. The two sentences cannot both hold once the result is
+allowed to change persistence semantics, which is what §7.4.1 established.
+
+**Why this is an amendment and not a reinterpretation.** §10.3 states the exclusion as a decision, gives
+its reason, and names "a Context version change" as what a later version must do to add it. F3 does
+exactly that, and says so, rather than reading the exclusion as if it had been conditional all along.
+
+---
+
 #### What these amendments do NOT change
 
 ```text
@@ -480,9 +526,14 @@ M-18  state.py contains no reference to Review of any kind. The pin F2 §20.12 r
 M-20  ATTRIBUTE-SOURCE PINNING WORKS, AND IT IS MEASURED, NOT ASSUMED.
       Git reads a path's attributes from the WORKING TREE's .gitattributes at `git add` time, so
       an executor that writes .gitattributes changes how this operation's own commits store
-      objects. Git 2.40 added `attr.tree` / `GIT_ATTR_SOURCE`, which replaces the tree source with
-      a named tree-ish. `P2_REVIEW_GIT_MIN` is exactly 2.40.0, and live code already uses the
-      related `git check-attr --source=<tree-ish>` (review/checkout.py:209).
+      objects. `attr.tree` / `GIT_ATTR_SOURCE` replaces the tree source with a named tree-ish.
+
+      CORRECTION, and it matters: an earlier draft of this contract argued that because
+      `git check-attr --source` exists at `P2_REVIEW_GIT_MIN` (2.40.0), the pin needs no new
+      minimum. That inference is withdrawn. `--source` on `check-attr` does not establish that
+      `attr.tree` governs attribute resolution for `git add` and `git commit`, and the version at
+      which the attribute subsystem honours `attr.tree` is LATER than 2.40. §7.7 freezes the
+      minimum and the capability probe that makes the contract safe regardless.
 
       Measured on git 2.54.0, in the live primitive's own shape (`git add` then
       `git commit --only --no-verify --no-gpg-sign -- <paths>`), with a clean filter configured,
@@ -506,6 +557,32 @@ M-21  The live committed-attribute evaluation already demonstrates full source c
       `GIT_ATTR_NOSYSTEM=1`, `GIT_CONFIG_NOSYSTEM=1`, an empty `GIT_CONFIG_GLOBAL`, an empty
       `core.attributesFile`, and every `GIT_*` variable stripped from the environment. The same
       technique neutralizes the system and global attribute sources for a commit.
+
+M-23  THE PIN DOES NOT COVER core.autocrlf / core.eol. MEASURED, git 2.54.
+      `core.autocrlf` is CONFIGURATION, not an attribute, so pinning the attribute source does
+      not touch it. Measured with a CRLF working-tree file whose raw identity is c30dea8a:
+
+          pinned, core.autocrlf=true   staged 422c2b7a   NORMALIZED  != Candidate new_oid
+          pinned, core.autocrlf=input  staged 422c2b7a   NORMALIZED  != Candidate new_oid
+          pinned, core.autocrlf=false  staged c30dea8a   RAW         == hash-object --no-filters
+
+      So the primitive must set `core.autocrlf=false` (and `core.eol`) explicitly, exactly as it
+      already sets `commit.gpgSign=false`. Git for Windows ships `core.autocrlf=true` globally,
+      so this is the DEFAULT condition on that platform, not an exotic one.
+
+M-24  THE PIN COVERS WORKING-TREE text/eol/encoding, BUT NOT THE BASE'S OWN. MEASURED, git 2.54.
+
+          working tree says `*.txt text`, base tree clean, pinned   staged RAW      c30dea8a
+          the same, UNPINNED                                        staged NORMALIZED 422c2b7a
+          BASE TREE itself says `*.txt text`, pinned                staged NORMALIZED 422c2b7a
+          BASE TREE says `working-tree-encoding=UTF-16`, pinned     staged re-encoded, not raw
+          base tree clean, pinned                                   staged RAW      c30dea8a
+
+      Two frozen conclusions. The pin is load-bearing: unpinned, an executor-authored `text` rule
+      changes the committed object. And the pin cannot rescue a base tree that carries such a
+      rule itself, because the pin faithfully honours the base — which is precisely why the entry
+      predicate of §7.8 must be proven over the attribute SOURCE, and why `filter`/`ident`/
+      `working-tree-encoding` alone was an incomplete surface (§7.7.2).
 
 M-22  `require_effective_evaluation` (review/checkout.py:222) evaluates attributes with NO
       `--source`, i.e. against the WORKING TREE. That is why an executor-authored .gitattributes
@@ -1070,19 +1147,35 @@ attribute   attr.tree = <the tree of declared_base.base_commit>, on BOTH invocat
 source      GIT_ATTR_NOSYSTEM=1, core.attributesFile = a Workline-owned empty file,
             GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL = that same empty file,
             every GIT_* variable stripped from the inherited environment
+line        core.autocrlf=false and core.eol=lf, on BOTH invocations.
+endings     These are CONFIGURATION, not attributes: the attribute pin does not touch them, and
+            measured, `core.autocrlf=true` normalizes CRLF check-in content even with the pin in
+            place (M-23). Git for Windows sets it globally by default, so this is the ordinary
+            condition on that platform.
 staging     `git add` with core.hooksPath = a Workline-owned empty plain directory,
-            core.fsmonitor=false, and the attribute-source pin above
+            core.fsmonitor=false, and the attribute-source and line-ending pins above
 commit      `git commit --only --no-verify --no-gpg-sign -m <message> -- <paths>`
             with core.hooksPath = that same directory
                 commit.gpgSign=false
                 core.fsmonitor=false
                 gc.auto=0
                 maintenance.auto=false
-                the attribute-source pin above
+                the attribute-source and line-ending pins above
 hooks dir   proven to be an empty plain directory immediately before use, or STOP
             (review_hooks_path_invalid)
-base tree   proven, before each commit, to assign no filter, ident or working-tree-encoding to
-            any path that commit will write (§7.3)
+capability  the running Git is proven to honour the pin, by the probe of §7.7, before the first
+            pinned commit
+source      the pinned attribute source is proven to carry no material attribute at all, by the
+predicate   finite proof over the source itself of §7.8 — not by probing paths
+```
+
+```text
+THE STAGING-BYTE CONTRACT, frozen, and this is what the whole primitive exists to make true:
+
+    Candidate.new_oid  ==  the index object after the actual contained_add
+                       ==  the committed object after contained_commit
+
+for every supported Work result, with no exception and no "usually".
 ```
 
 The attribute-source pin is the part that is new in this contract version, and §7.6 is why it exists. It
@@ -1153,13 +1246,20 @@ IMMEDIATELY BEFORE EVERY commit this operation makes with "review-v1-work-local-
      Evaluating against the working tree instead would let the evaluation and the storage
      disagree, which is precisely the defect M-22 records in the live effective evaluation;
 
-  3. require "unspecified" or "unset" for filter, ident and working-tree-encoding on every one of
-     those paths, and require that the effective configuration define no filter driver named
-     "unset" or "unspecified";
+  3. require "unspecified" or "unset" for EVERY material attribute — filter, ident,
+     working-tree-encoding, text and eol (M-23, M-24) — on every one of those paths, and require
+     that the effective configuration define no filter driver named "unset" or "unspecified";
+
+  3a. require that the invocation carry core.autocrlf=false and core.eol=lf. These are
+     configuration rather than attributes, so the attribute pin does not reach them, and measured
+     they change check-in bytes on their own (M-23);
 
   4. hooks, signing, the filesystem monitor and background maintenance are MECHANICALLY DENIED by
      the primitive itself, re-established by each invocation rather than assumed from a previous
      one; and under the pin no filter, ident or encoding program is reachable at all (M-20);
+
+  4a. the running Git is proven to honour the pin, by the capability probe of §7.7, before the
+     first pinned commit of the operation;
 
   5. a question Git cannot answer is a REFUSAL, not a pass;
 
@@ -1214,20 +1314,25 @@ ENTRY REFUSAL — the only transform refusal this contract has
   At START entry, before the Project execution lock and before any mutation is opened, a review-v1
   Work START is refused unless BOTH hold:
 
-    the base tree assigns no filter, ident or working-tree-encoding attribute to anything
-      — evaluated under the pinned source, which is what every commit of this operation will use;
+    the UNIVERSAL SOURCE PREDICATE of §7.8 passes: every attribute source of the pinned
+      configuration — every .gitattributes in the base tree at every depth, plus
+      .git/info/attributes — is parsed, and none of them ASSIGNS any material attribute
+      (filter, ident, working-tree-encoding, text, eol) and none defines an [attr] macro.
+      The predicate is over the SOURCE, not over paths, so it covers result paths that do not
+      exist yet;
 
-    .git/info/attributes assigns none either, and the primitive's neutralization of the system and
-      global sources is shown to hold (M-21).
+    the primitive's neutralization of the system and global sources is shown to hold (M-21);
+
+    the running Git honours the pin, proven by the capability probe of §7.7.
 
     code      review_git_transform
     effect    nothing is written, no mutation exists, no event, no commit, no Review record.
               The Project is exactly as it was, and legacy START is fully available for it as a
               separate invocation.
 
-  The base-tree condition covers every path at once, including paths whose identifiers are not yet
-  allocated — Review record paths and the Consumption path among them — which is why it is stated
-  over the tree rather than over a path list (§7.6).
+  The source predicate covers every path at once, including result paths the executor has not
+  produced yet and Review record paths whose identifiers are not yet allocated, which is why it is
+  stated over the attribute SOURCE rather than over a path list (§7.8).
 
   Consequence, stated rather than hidden: a Project that genuinely uses a content filter — Git LFS,
   a clean/smudge pair, ident expansion, working-tree re-encoding — cannot use review-v1 Work at
@@ -1497,18 +1602,256 @@ configuration P2 already freezes for its own checkout capability (`skills/review
 ```
 
 ```text
-Future checkouts are a different question, and F3 does not claim to answer it. After the Work
-lands, a fresh clone checks out with the NEW attributes, so a result that makes .workline/**
-subject to a checkout transform would degrade later readability of the Review records.
+Future checkouts are a SEPARATE question from storage, and the previous draft answered it badly.
+After the Work lands, a fresh clone checks out with the NEW attributes, so a result that makes
+.workline/review/** subject to a checkout transform would make this Run's own canonical records
+unreadable in a fresh clone — the CandidateSnapshot, the TaskInput, the gates, the Receipt and
+the Consumption that authorize the very transition being performed.
 
-F2 §10.3 deliberately scoped checkout capability OUT of the Work Context, and F3 does not reopen
-that. What F3 relies on instead is that the decision is REVIEWED: .gitattributes is a declared
-result path, its new content is an entry in the Candidate, and the reviewer sees the exact rule
-being introduced and can refuse it. A contract refusal is neither needed nor permitted here; the
-Review is the control.
+That draft left it to the reviewer's discretion. A reviewer is not a mechanical safety property,
+and P1 requires those records to remain exactly readable from a fresh clone. §7.9 replaces the
+discretion with a proof: the Candidate stays fully expressible and reviewable, and the SEAL
+cannot issue a Receipt unless the RESULTING TREE preserves canonical Review checkout capability.
+That is forward amendment A-4 (§1.5), by the Context-version mechanism F2 §10.3 itself names.
 ```
 
-### 7.7 C-1: how exact local commit identity becomes durable
+### 7.7 The pin mechanism, its Git minimum, and the capability probe (R13)
+
+#### 7.7.1 The inference that was withdrawn
+
+```text
+An earlier draft argued: `git check-attr --source` exists at P2_REVIEW_GIT_MIN (2.40.0),
+therefore the attr.tree pin needs no new minimum.
+
+That is a non-sequitur and it is withdrawn. `--source` is an option of check-attr. It does not
+establish that `attr.tree` governs attribute resolution for `git add` and `git commit`, which is
+a different subsystem path and landed later. The independent re-review reports the attribute
+subsystem learned to honour `attr.tree` at Git 2.43.
+```
+
+```text
+The measurements of M-20, M-23 and M-24 were taken on git 2.54.0. They prove the MECHANISM —
+that a pinned source plus neutralized line-ending configuration yields exactly
+`git hash-object --no-filters`, and that the filter program never runs. They prove NOTHING about
+2.40, 2.41 or 2.42, and this contract does not claim they do. Only git 2.54 was available in the
+environment where they were taken, so Option 1 of the re-review — measure the exact primitive on
+2.40.x — could not be discharged and was not selected.
+```
+
+#### 7.7.2 Frozen decision — Option 2, with a probe that makes the floor non-load-bearing
+
+```text
+A. A NEW THRESHOLD is introduced, owned by `rules/git` alongside the two P2 ones:
+
+       P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0
+
+   the first version at which the attribute subsystem honours attr.tree. This contract adopts
+   2.43.0 on the independent re-review's report of upstream release notes; it is NOT a fact this
+   contract measured.
+
+B. THE FLOOR IS NOT THE AUTHORITY. Before the first pinned commit of a review-v1 Work
+   operation, the running Git is PROVEN to honour the pin, positively, by a capability probe:
+
+       in a throwaway scratch directory under .workline/runtime/** — the same containment the
+       live committed-attribute evaluation already uses (M-21) — create a repository, commit a
+       tree that carries NO attributes, then write a working-tree .gitattributes that assigns a
+       transform to a probe path, stage that probe path with the exact pin the primitive uses,
+       and require the staged object id to equal `git hash-object --no-filters` of the probe
+       bytes.
+
+       pass  -> the running Git honours the pin, measured on this machine, this run
+       fail  -> review_git_unsupported; nothing is opened and nothing is written
+       unanswerable -> the same refusal; not knowing is not a yes
+
+   The probe uses no filter program that does anything: the transform it assigns need only be
+   one whose application is detectable, so the probe itself has no external side effect.
+
+C. BOTH ERROR DIRECTIONS ARE SAFE, which is why a version number this contract did not measure
+   is acceptable as a floor:
+
+       floor too HIGH  -> a Git that would have worked is refused at entry. Conservative, and it
+                          costs availability, never correctness.
+       floor too LOW   -> the probe fails on that Git and the operation refuses. The floor never
+                          authorizes an unpinned commit by itself.
+
+   No combination of a wrong floor and a passing probe can produce a commit whose object
+   identity differs from the Candidate's, because the probe tests exactly that equality.
+
+D. INTERACTION WITH THE EXISTING THRESHOLDS. They are unchanged and independent:
+
+       P2_PUBLICATION_GIT_MIN   2.31.0   the publication barrier proof (§12.4)
+       P2_REVIEW_GIT_MIN        2.40.0   review-v1 planning Git semantics
+       P3_WORK_ATTR_PIN_GIT_MIN 2.43.0   the review-v1 WORK attribute pin
+
+   A review-v1 Work START's effective minimum is the greatest of those that apply to it. With a
+   remote that is 2.43.0, since 2.43.0 > 2.31.0; without a remote it is also 2.43.0, because the
+   pin is required whether or not anything is published.
+
+E. REFUSAL CODE. `review_git_unsupported`, the existing live code that `rules/git` already owns
+   for a Git below a review-v1 threshold. F3 introduces no new code.
+```
+
+---
+
+### 7.8 The universal predicate over the attribute source (R16)
+
+#### 7.8.1 Why a path-wise check cannot work
+
+```text
+The result path set is unknown before the executor runs (F2 §6.2). So a predicate of the shape
+"no material attribute applies to any path this operation will write" cannot be evaluated at
+entry, where the refusal has to happen, because the paths do not exist yet.
+
+Rules that must not escape, and that a path-wise probe at entry would miss entirely:
+
+    generated/**  filter=x
+    **/*.txt      text
+    new/**        working-tree-encoding=UTF-16
+    [attr]macro   text filter=y        and then `foo/** macro`
+```
+
+The predicate is therefore frozen over the **attribute source itself**, which is finite, and not over
+paths, which are not.
+
+#### 7.8.2 The frozen supported shape
+
+```text
+THE MATERIAL ATTRIBUTES, and this list is exactly the staging-byte surface of M-23 and M-24:
+
+    filter    ident    working-tree-encoding    text    eol
+
+THE SOURCES, enumerated completely and finitely at entry:
+
+    every .gitattributes blob in the base tree, at the root and at EVERY nested depth, found by
+      enumerating the tree rather than by guessing at locations;
+    .git/info/attributes;
+    the system and global sources, which the primitive neutralizes (M-21) and which are proven
+    neutralized rather than assumed.
+
+THE SUPPORTED SHAPE. Across all of those sources, taken together:
+
+    no line ASSIGNS or SETS any material attribute
+        refused:  `*.txt text`, `text=auto`, `eol=lf`, `*.bin filter=lfs`, `ident`,
+                  `working-tree-encoding=UTF-16`
+    an explicit UNSET or UNSPECIFIED of a material attribute is PERMITTED
+        allowed:  `* -text`, `-filter`, `!text`
+        because unset provably means "no transform", and refusing it would refuse the SAFEST
+        configuration a repository can have, which would be perverse;
+    NO macro definition exists at all
+        refused:  any `[attr]name ...` line, anywhere in any source.
+        A macro can expand to a material attribute, so permitting macros would require expansion
+        analysis; this contract version does not do that analysis and refuses the construct
+        instead of reasoning about it.
+
+Anything the parser cannot classify — an unreadable blob, a line it does not understand, a
+source it cannot enumerate — is a REFUSAL. Not knowing is not a yes.
+```
+
+```text
+This is deliberately a NARROW SUPPORTED SHAPE, which the re-review names as an acceptable
+approach. It over-refuses: a base tree with `docs/** text` is refused even though no Work result
+may ever land under docs/. That is a stated availability cost, never a correctness one, and it
+is decided at START ENTRY where a knowable condition belongs (F2 §20.17).
+```
+
+#### 7.8.3 Defence in depth, not a substitute
+
+```text
+After the source parse passes, the entry check ALSO evaluates `check-attr` under the pinned
+source over the paths that ARE known — the event log, the Review namespace prefixes, and the
+Project's tracked paths — inside the contained evaluation of M-21.
+
+The parse is what makes the predicate universal and covers unborn paths. The evaluation is a
+second, independent mechanism over the paths that exist. Neither replaces the other, and a
+disagreement between them is a refusal.
+```
+
+---
+
+### 7.9 Fresh-clone durability of the canonical Review records (R15)
+
+#### 7.9.1 The problem the previous draft left open
+
+```text
+The previous §7.6 permitted a Work result to introduce attributes covering .workline/review/**
+and said a fresh clone might then read those records transformed, with "the reviewer sees the
+rule" as the control.
+
+That is not sufficient. The Work has ALREADY created canonical Review records by then — the
+CandidateSnapshot, the TaskInput, the gate generations and the Receipt — and it is about to
+create the Consumption. P1 requires those records to remain exactly readable from a fresh clone;
+that is the whole reason they are canonical rather than runtime. Leaving it to reviewer
+discretion is not a mechanical safety property, and a reviewer cannot be the proof.
+```
+
+#### 7.9.2 The frozen rule — expressible, reviewable, but not authorizable
+
+The rule is placed so that it does **not** recreate the F2 no-trap failure:
+
+```text
+A Candidate that introduces such attributes REMAINS FULLY EXPRESSIBLE. It is frozen, its
+material is built, it is verified and it is reviewed, exactly like any other Candidate. Nothing
+about the executor's result is refused, so F2 §2.3 and §20.17 are untouched.
+
+What it cannot do is receive AUTHORIZATION:
+
+    SEAL PRECONDITION, added to the seal prerequisites of F2 §15.3:
+
+        the RESULTING TREE preserves canonical Review checkout capability for the canonical
+        Review namespace.
+
+    resulting tree = the base tree with this Candidate's entries applied — every changing entry
+                     at its new kind, mode and object id, every deletion absent. It is fully
+                     determined by the Candidate and declared_base, so it is computable BEFORE
+                     K1 exists, which is what lets this be a seal condition at all.
+
+    the proof     = the committed attribute evaluation of M-21, run with --source = that
+                    resulting tree, inside the contained scratch repository, over the canonical
+                    Review record paths of this Run plus the Consumption path: no material
+                    attribute (§7.8.2's five) applies to any of them.
+
+    failure       = the Review does not seal. No Receipt is issued, no terminalization is
+                    authorized, and the Run ends unsealed with the reason recorded.
+```
+
+```text
+Why this is not a post-executor refusal of a supported result shape: the result IS supported,
+IS expressed, and IS reviewed. What the contract declines to do is AUTHORIZE a transition whose
+own bookkeeping would become unreadable in a fresh clone. F2 §2.3 governs expressibility as a
+Candidate; it does not require that every expressible Candidate be authorizable — a reviewer
+rejecting a Candidate is the ordinary case of exactly that.
+```
+
+#### 7.9.3 What the proof covers
+
+```text
+root .gitattributes             covered: it is part of the resulting tree
+nested .gitattributes           covered at every depth: the resulting tree is enumerated, not
+                                sampled, so a rule the executor added deep in the tree counts
+newly ADDED .gitattributes      covered: it is an entry of the Candidate, so it is in the
+                                resulting tree
+DELETED .gitattributes          covered, and this direction matters too: deleting a source can
+                                UNCOVER a rule from a parent directory that the deleted file had
+                                overridden. The proof is over the resulting tree as a whole, so
+                                it sees the net effect rather than the diff
+text / eol                      material (M-24); a `text` rule over .workline/review/** would
+                                normalize record bytes on checkout
+filter / ident /
+working-tree-encoding           material, for the same reason
+fresh clone semantics           the evaluation is `--source=<resulting tree>` inside a scratch
+                                repository with system and global sources neutralized, which is
+                                exactly what a fresh clone of that tree evaluates. It is not the
+                                current working tree and not this machine's configuration
+```
+
+#### 7.9.4 This requires a forward amendment — A-4
+
+F2 §10.3 does not merely omit checkout capability; it states its absence and names the mechanism for
+adding it. So this is a declared amendment and not a reinterpretation. See §1.5 A-4.
+
+---
+
+### 7.10 C-1: how exact local commit identity becomes durable
 
 ```text
 The Mutation Controller records the full object ID of the commit it made beside the effect
@@ -2957,6 +3300,23 @@ IP-8  The commit primitive must pass the attribute-source pin on BOTH invocation
       is new is applying it to `git add` and `git commit` rather than only to `git check-attr`.
       This requires Git >= 2.40, which review-v1 already requires (P2_REVIEW_GIT_MIN).
 
+IP-10 The primitive must set core.autocrlf=false and core.eol=lf on both invocations. Measured,
+      without them a CRLF result is normalized on check-in even with the attribute pin in place
+      (M-23), and Git for Windows enables autocrlf globally by default.
+
+IP-11 The capability probe of §7.7 must exist and must run before the first pinned commit of every
+      review-v1 Work operation. `rules/git` gains P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0 as its
+      declared floor.
+
+IP-12 The universal source predicate of §7.8 requires a parser over every .gitattributes blob in a
+      tree, at every depth, plus .git/info/attributes — not a path probe. Its supported shape is
+      narrow by design and refuses any [attr] macro.
+
+IP-13 The seal precondition of §7.9 requires composing the resulting tree from the base tree and
+      the Candidate's entries, and evaluating attributes with --source against it inside the
+      contained scratch repository of M-21. The Work Review Context gains the bound
+      checkout-capability claim of amendment A-4, which raises its version.
+
 IP-9  The persistence evaluation must be made under the pin. The live
       require_effective_evaluation evaluates with no --source, i.e. against the working tree
       (M-22); the Work path needs the pinned-source form so that evaluation and storage cannot
@@ -3172,6 +3532,93 @@ produced. The only transform refusal this contract has is at START entry, on a c
 knowable before execution (§7.4) — which is exactly where F2 §20.17 puts it.
 ```
 
+### 21.5 Persistence-semantics case matrix
+
+Every case the second re-review named, traced to an exact outcome. "committed id" means the object id Git
+actually stores; it must equal `Candidate.new_oid` in every supported case, which is the staging-byte
+contract of §7.1.
+
+```text
+ 1. GIT AT EXACTLY P3_WORK_ATTR_PIN_GIT_MIN (2.43.0)
+    entry        the floor passes; the capability probe of §7.7 then runs and must PASS on this
+                 machine. The floor alone never authorizes anything.
+    committed id == Candidate.new_oid, because the probe proved the pin holds here.
+    outcome      SUPPORTED. Ordinary topology throughout.
+
+ 2. GIT ONE VERSION BELOW THE MINIMUM (2.42.x)
+    entry        REFUSED, review_git_unsupported, before the Project execution lock and before
+                 any mutation is opened. No event, no commit, no Review record.
+    note         even if the floor were mis-stated, the probe would refuse this Git independently
+                 (§7.7 item C). Both error directions are safe.
+
+ 3. WORKING-TREE .gitattributes ADDS A CLEAN FILTER (executor-authored)
+    Candidate    .gitattributes is an ordinary file entry; its new content is reviewed
+    committed id == hash-object --no-filters == Candidate.new_oid.   MEASURED, M-20/M-24
+    filter       never invoked.                                      MEASURED, M-20
+    outcome      SUPPORTED. No refusal of any kind.
+
+ 4. THE NEW FILTER TARGETS A RESULT PATH          same as 3. SUPPORTED, no refusal.
+ 5. THE NEW FILTER TARGETS A REVIEW-GENERATION PATH
+                 the generation commits are pinned too, so storage is unaffected (§7.6).
+                 SUPPORTED for storage; case 10 governs whether it can be AUTHORIZED.
+ 6. THE NEW FILTER TARGETS A TERMINAL PATH        same as 5. SUPPORTED, no refusal.
+
+ 7. BASE TREE CARRIES text / eol NORMALIZATION
+    why it bites the pin honours the BASE, so a base rule DOES apply.  MEASURED, M-24
+    entry        REFUSED by the universal source predicate (§7.8.2), before the lock.
+    outcome      UNSUPPORTED BASE CONDITION, refused at entry, never post-executor.
+
+ 8. core.autocrlf = true  (or input)
+    why it bites configuration, not an attribute: the pin does not reach it. MEASURED, M-23
+    handling     the primitive sets core.autocrlf=false and core.eol=lf on both invocations
+                 (§7.1), which restores raw identity.                  MEASURED, M-23
+    committed id == Candidate.new_oid.
+    outcome      SUPPORTED. This is the DEFAULT condition on Git for Windows, so it had to be.
+
+ 9. CRLF EXECUTOR BYTES
+    Candidate    new_oid = hash_blob(the CRLF bytes as the executor left them), F2 §6.3
+    committed id identical, because no text/eol attribute applies (case 7 refused those at
+                 entry) and autocrlf is neutralized (case 8).          MEASURED, M-23
+    outcome      SUPPORTED. The CRLF bytes are stored exactly, not normalized.
+
+10. THE NEW .gitattributes WOULD MAKE .workline/review/** NON-CANONICAL ON A FRESH CLONE
+    Candidate    FULLY EXPRESSIBLE. Frozen, material built, verified, reviewed. Nothing about the
+                 executor's result is refused, so F2 §2.3 is untouched.
+    seal         REFUSED. The seal precondition of §7.9.2 evaluates the RESULTING TREE and finds
+                 a material attribute over this Run's canonical Review record paths.
+    consequence  no Receipt, no authorization, no terminalization. The Run ends unsealed with the
+                 reason recorded.
+    outcome      EXPRESSIBLE AND REVIEWABLE, NOT AUTHORIZABLE. That distinction is the whole
+                 point of placing the rule at seal rather than at Candidate freeze.
+
+11. NESTED .gitattributes INTRODUCED BY THE EXECUTOR
+    storage      unaffected: the pin resolves attributes from the base tree, at every depth.
+    authorization the §7.9.2 proof enumerates the RESULTING TREE, so a nested source the executor
+                 added is covered at whatever depth it sits (§7.9.3). A DELETED source is covered
+                 too, because the proof is over the resulting tree rather than over the diff, so
+                 a parent rule it had been overriding is seen once it is uncovered.
+    outcome      SUPPORTED for storage; case 10's rule decides authorization.
+
+12. A FUTURE / NOT-YET-EXISTING RESULT PATH MATCHED BY A BASE WILDCARD RULE
+    e.g.         the base tree holds `generated/** filter=x` and the executor creates
+                 generated/out.bin, a path that did not exist at entry.
+    why a path-wise check fails  at entry the path does not exist, so probing paths finds nothing.
+    entry        REFUSED by the universal source predicate (§7.8): the predicate parses the
+                 SOURCE and refuses the `filter=x` assignment itself, regardless of which paths
+                 will ever match it. `**/*.txt text`, `new/** working-tree-encoding=UTF-16` and
+                 any `[attr]` macro are refused by the same rule.
+    outcome      UNSUPPORTED BASE CONDITION, refused at entry, before the lock.
+```
+
+```text
+Every SUPPORTED case has exact committed object identity equal to the Candidate's.
+Every UNSUPPORTED BASE condition is refused at START ENTRY, before the mutation is opened.
+The one case that is neither — case 10 — stays expressible and reviewable and is stopped at
+authorization, which is not a refusal of a result shape.
+
+No case is refused after the executor returns for what the executor produced.
+```
+
 ## 22. Consistency audit against P1 / P2 / F1 / F2
 
 Every point at which F3 touches an earlier freeze, classified.
@@ -3242,7 +3689,16 @@ C  true conflict requiring a new forward amendment
     OID. §9.                                                                                   A
 
 14  F2 §10.3  git_persistence identity bound in the Context; "its use at commit time is F3".
-    F3 uses it at commit time and adds no Context field. §7.1.                                 A
+    F3 uses it at commit time, and extends what that identity denotes: the attribute-source
+    pin and the line-ending configuration are part of the frozen primitive. That is the part
+    §10.3 left to F3. §7.1.                                 A
+
+22  F2 §10.3  "Checkout capability is not bound in the Work Context."
+    F3 binds a checkout-capability claim over the CANONICAL REVIEW NAMESPACE - not over the Work
+    result, where §10.3's reason stands - because a Work result can now change persistence
+    semantics and make the Run's own records unreadable in a fresh clone. §10.3 names "a Context
+    version change" as the mechanism, and F3 uses exactly that.
+    FORWARD AMENDMENT A-4 (§1.5). §7.9.                                                        C
 
 15  F2 §13.4 V-2  the verification workspace is materialized from base + snapshot material and
     NEVER from a future K1. F3 keeps K1 strictly after the Review and never makes verification
@@ -3287,10 +3743,11 @@ C  true conflict requiring a new forward amendment
 ```text
 Forward amendment required: YES
 
-Three, all to landed F2, all declared in full in §1.5:
+Four, all to landed F2, all declared in full in §1.5:
     A-1  F2 §5.3          base_commit's timing, and that it is K1's parent        row 19
     A-2  F2 §14.4, §16.1  the unqualified "every HEAD advance" consequence        row 3
     A-3  F2 §7.1/7.2/7.3  the result-bearing / no-K1 discriminator                row 21
+    A-4  F2 §10.3         checkout capability unbound in the Work Context         row 22
 
 No P1, P2 or P3 F1 statement is amended.
 No historical P1, P2, F1 or F2 document is edited by this contract.
@@ -3329,6 +3786,12 @@ PB-9  the attribute-source pin: every commit of a review-v1 Work mutation is mad
 PB-10 an executor-authored change to Git persistence configuration is an ordinary Work
       result, committed and reviewed as an ordinary file entry, and is never refused
       (§7.4.1, §7.4.2)
+PB-11 P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0, and the capability probe that is the actual
+      authority for whether the running Git honours the pin (§7.7)
+PB-12 the primitive neutralizes core.autocrlf and core.eol, because they change check-in
+      bytes and the attribute pin does not reach them (§7.1, M-23)
+PB-13 the universal predicate over the attribute source, parsed rather than probed, which is
+      what covers result paths that do not exist yet (§7.8)
 PB-7  a review-v1 Work START is refused at entry, before the lock, when the PINNED source —
       the base tree, or a non-tree source — assigns any filter, ident or working-tree-encoding
       (review_git_transform, §7.4). This is the only transform refusal the contract has.
@@ -3370,8 +3833,11 @@ TM-6  that a proof note is a recovery pointer and never a proof result, and that
       (§10.2)
 TM-7  the no-K1 discriminator of §6.7: artifact_kind is decided by whether any Candidate entry
       is changing, never by the emptiness of entries or of result_paths
-TM-8  the three forward amendments to landed F2 (§1.5), which a reader of F2 alone cannot
+TM-8  the four forward amendments to landed F2 (§1.5), which a reader of F2 alone cannot
       discover from F2
+TM-10 the seal precondition of §7.9: a Review may not seal unless the resulting tree preserves
+      canonical Review checkout capability over the Review namespace, proven mechanically
+      over that tree and never left to reviewer discretion
 ```
 
 ### 23.4 `registry.md` routing
@@ -3397,11 +3863,13 @@ The operation owner is START, before F3 and after it. Review authorizes; it neve
 F3-D1   Work local persistence      FROZEN   "review-v1-work-local-v1": the contained commit
                                              primitive with the ATTRIBUTE SOURCE PINNED to the
                                              base tree, hooks, signing and every filter program
-                                             mechanically denied (measured, M-20), distinct
-                                             identity from the planning primitive. The preflight
+                                             mechanically denied (measured, M-20), line-ending
+                                             configuration neutralized (M-23), a capability probe
+                                             before the first pinned commit, and a universal
+                                             predicate over the attribute source. The preflight
                                              binds every commit the operation makes — the
-                                             Review's own generation commits included —
-                                             evaluated under that same pin.           §7.1-§7.7
+                                             Review's own generation commits included.
+                                                                                    §7.1-§7.10
 
 F3-D2   K1 lineage                  FROZEN   parent(K1) is reached from
                                              declared_base.base_commit by OWN-REVIEW COMMITS
@@ -3595,7 +4063,27 @@ Stop conditions. An implementation that violates any of them is not implementing
     same pin. A pass never carries from one commit to another, and an evaluation made against the
     working tree never satisfies it.
 
-23. No supported result shape is ever refused after the executor returns. An executor-authored
+23. The staging-byte contract holds exactly: Candidate.new_oid equals the index object after
+    the actual staging and the committed object after the commit, for every supported Work
+    result. It is made true mechanically — the attribute-source pin, the neutralized line-ending
+    configuration, and the universal source predicate together — and never assumed from the
+    absence of a clean filter.
+
+24. The running Git is proven to honour the attribute pin by a positive capability probe before
+    the first pinned commit. A declared version floor is a fast pre-check, never the authority,
+    and no combination of a wrong floor and a passing probe can produce a commit whose identity
+    differs from the Candidate's.
+
+25. The condition that decides whether a Project may run a review-v1 Work is proven over the
+    ATTRIBUTE SOURCE itself, finitely and completely, never by probing paths — because the result
+    paths do not exist when the decision has to be made.
+
+26. A Candidate whose resulting tree would destroy canonical Review checkout capability over the
+    Review namespace remains fully expressible and reviewable, and cannot be sealed. Authorization
+    is withheld by mechanical proof over the resulting tree; it is never left to reviewer
+    discretion, and it is never a refusal of the Candidate.
+
+27. No supported result shape is ever refused after the executor returns. An executor-authored
     change to Git persistence configuration is an ordinary Work result, committed and reviewed as
     an ordinary file entry; the pin makes what it covers irrelevant to this operation. The only
     transform refusal is at START entry, on the pinned source, which is knowable before
@@ -3614,10 +4102,10 @@ Stop conditions. An implementation that violates any of them is not implementing
 ## 27. Implementation readiness
 
 ```text
-Contract status              FROZEN (repaired after independent review, three times)
+Contract status              FROZEN (repaired after independent review, four times)
 Architecture blocker         NONE
 HUMAN decision               NONE
-Forward amendment required   YES - three, to landed F2 only, declared in §1.5
+Forward amendment required   YES - four, to landed F2 only, declared in §1.5
 Implementation authorized    NO
 P3 implementation            NOT STARTED
 F4 started                   NO
