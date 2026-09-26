@@ -1,6 +1,7 @@
 # Review System P3 — F3 Commit Proof / Publication / Terminal Topology Contract Freeze
 
-Status: **CONTRACT FROZEN** / ARCHITECTURE BLOCKER: NONE / HUMAN DECISION: NONE /
+Status: **CONTRACT FROZEN / REPAIRED AFTER INDEPENDENT REVIEW** / ARCHITECTURE BLOCKER: NONE /
+HUMAN DECISION: NONE / **FORWARD AMENDMENTS TO LANDED F2: THREE (§1.5)** /
 **IMPLEMENTATION NOT AUTHORIZED** / **P3 IMPLEMENTATION NOT STARTED**
 
 F3 freezes the physical Git topology of a review-v1 Work completion: how the local commits are made, what
@@ -68,8 +69,12 @@ Where F3 appears to say something an earlier freeze also says, F3 is a **special
 never widens. Every apparent collision was audited item by item in §22.
 
 ```text
-F3 semantic forward amendments: NONE
+F3 semantic forward amendments: YES - three, all to landed F2, all stated in §1.5.
 ```
+
+They are declared there in full, with the exact superseded sentences and the narrow replacement.
+**No historical file is edited**: F2 keeps its bytes, and the amendment lives here, which is the
+same discipline F1 used for its amendments to P1 R4 and R5.
 
 ### 1.4 F1 and F2 decisions F3 preserves without change
 
@@ -99,6 +104,197 @@ the invalidation boundary                                                       
 
 ---
 
+### 1.5 Forward amendments to landed F2
+
+F3 supersedes three statements of the landed F2 contract. Each is named exactly, with the sentence
+superseded, the replacement, and why the two cannot both stand. **The F2 file is not edited.** This is the
+mechanism F1 §11.3 already used for P1 R4 §2 and R5 §8: the amendment is declared in the new contract, and
+the historical freeze keeps its bytes.
+
+An amendment is declared here — rather than called a specialization — whenever F3's rule would make a
+sentence of F2 **false as written**. A specialization narrows what an under-determined sentence permits; an
+amendment replaces a sentence that says something definite and different. The first draft of this contract
+classified A-1 and A-2 as specializations. That was wrong, and the correction is recorded rather than
+quietly applied: F2 §5.3 does not merely under-determine K1's parent, it *names* it, and F2 §16.1's row
+states a consequence *without qualification*. Calling either a specialization would have been exactly the
+"inherits" understatement the F1 repair was made to eliminate.
+
+---
+
+#### A-1 — F2 §5.3: what `declared_base.base_commit` is, and that it is K1's parent
+
+```text
+F2 §5.3 says
+
+    "base_commit is HEAD at the moment the completion is decided, which is the same commit F3
+     will later require as K1's parent for a result-bearing Work."
+
+F3 supersedes BOTH clauses:
+
+  the timing clause    base_commit is the exact committed base HEAD holds after S-c0 (§4.3) and
+                       immediately before the Candidate is frozen — not HEAD at the instant the
+                       executor returned. S-c0 commits this Work's entry lifecycle events, so the
+                       committed state the Candidate declares is one in which the Work is already
+                       started and holds its target.
+
+  the parentage clause parent(K1) is NOT required to be base_commit. It is required to be reached
+                       from base_commit by this Run's own canonical Review-generation commits
+                       alone, under the exact range proof of §8.2 L-1 ... L-5.
+```
+
+**Why both cannot stand.** P1 R3 §10, enforced live by `gate.require_persisted`, requires an accepted
+task's canonical records to be committed before the external launch boundary. The Review gate therefore
+commits generation 1 (accept), generation 2 (settle) and generation 3 (seal) in its own mutations, each of
+which advances HEAD on the same branch, before K1 can exist. `parent(K1) == base_commit` is therefore
+satisfiable only by committing K1 on an older base, which forks the branch and is prohibited throughout P1
+and `rules/git`. F2's sentence describes a topology that cannot be built.
+
+**Why this is an amendment and not a reinterpretation.** F2 §5.3 does not leave K1's parent open for F3 to
+fill in; it states what F3 will require. F3 requires something else. The honest form of that is a named
+supersession, not a reading.
+
+---
+
+#### A-2 — F2 §14.4 and §16.1: that every HEAD advance requires a new Candidate
+
+```text
+F2 §16.1 lists, among the material facts that invalidate a Work Review:
+
+    "HEAD advances    §14.4, which at this contract version always requires a new Candidate"
+
+and F2 §14.4 states the consequence unqualified:
+
+    "An intervening HEAD advance therefore resolves as: closure completeness unknown -> prior
+     Review is not reused -> freeze a NEW Candidate against the new HEAD -> perform fresh
+     verification and review as required."
+
+F3 supersedes the UNQUALIFIED scope of that consequence, and nothing else about it.
+```
+
+The narrow replacement, frozen:
+
+```text
+1. declared_base.base_commit is the exact post-S-c0, pre-Candidate committed base, for as long as
+   S-c0 remains the selected topology (§4.3, A-1).
+
+2. This Run's own canonical Review-generation commits — the commits that write this exact Review's
+   own records as part of producing it — MAY occur after the Candidate is frozen and before K1
+   and K2.
+
+3. They are NOT generic reusable-Review HEAD advancement. They are internal to the production of
+   the Review being authorized, not a later state a finished Review is being reused against.
+
+4. They are accepted ONLY under the exact own-Review range proof of §8.2 L-2, every condition
+   required together:
+       the exact Run           the commits write this Run's records and no other's
+       exact derived paths     the path set is derived from this Run's validated chain,
+                               never hardcoded and never widened
+       status A                every delta entry is an addition
+       mode 100644             every delta entry is a regular file
+       one parent              no merge anywhere in the range
+       complete delta          the whole delta is enumerated, never a path allowlist
+       no foreign commit       every commit in the range satisfies all of the above
+
+5. EVERY other intervening advance — a person's commit, another tool's, another operation's,
+   another Run's, or any commit failing any condition of item 4 — remains governed by F2 §14.4 in
+   full: the prior Review is not reused, a NEW Candidate is frozen against the new HEAD, and fresh
+   verification and review are performed.
+
+6. The positive general HEAD-reuse branch remains UNREACHABLE while Work Evidence completeness is
+   unknown (F2 §13.6, §14.4). Nothing here makes may_reuse answer "reusable", nothing here
+   establishes completeness, and nothing here deletes the fast-path predicate.
+```
+
+**Why both cannot stand.** Read literally and applied to the Review's own generation commits, F2 §16.1
+invalidates the Candidate that generation 1 has just accepted — so generation 2 could never be reached and
+no review-v1 Work Review could ever seal. The unqualified consequence is not implementable.
+
+**Why this is an amendment and not a reinterpretation.** §14.4's own wording is about reuse of a *prior*
+Review, which suggests the narrower reading, and the first draft of this contract relied on that
+suggestion. But §16.1's row carries no such qualification: it lists "HEAD advances" flatly as invalidating.
+A rule that admits a class of advances which a landed invalidation row lists flatly is a change to that
+row, whatever §14.4's prose suggests. Declaring it is the only way a reader of F2 alone can discover it.
+
+---
+
+#### A-3 — F2 §7.1, §7.2 and §7.3: the result-bearing / no-K1 boundary
+
+```text
+F2 §7.1 says
+
+    "Exactly when the owned change set is empty - result_paths and deleted_paths are both empty,
+     so START makes no result commit at all (M-13)."
+
+F2 §7.2 freezes that Candidate's content with
+
+    entries: []
+    emptiness_proof.declared_result_paths:  []
+    emptiness_proof.declared_deleted_paths: []
+
+F2 §7.3 says
+
+    "An empty-artifact Candidate is refused if any declared path exists, which makes the two
+     artifact kinds mutually exclusive by construction rather than by convention."
+
+F3 supersedes the DISCRIMINATOR in all three: the boundary moves from
+"is the declared path set empty?" to "is the complete owned tree delta empty?".
+```
+
+The narrow replacement is frozen in §6.7, and the reason it is forced is in §6.6. Everything else about
+F2 §7 stands unchanged: the positive emptiness proof, the prohibition on a fake or synthesized K1, the rule
+that a reader never infers the kind from the emptiness of `entries`, and the independence of the
+Candidate's and the Consumption's `artifact_kind`.
+
+**Why both cannot stand.** F2 §6.3 keeps an inert entry — one whose `old_kind`/`old_mode`/`old_oid` equal
+its `new_*` — in the Candidate, "because what the executor declared is part of what is reviewed". So a Work
+whose executor declares a result path it did not actually change has a non-empty `result_paths` and a
+Candidate every one of whose entries is inert. Under F2 §7.1 that is not the empty kind, so it is
+`result_commit`, so F3 would require a K1 — but the complete owned tree delta is empty, and the frozen
+primitive `git commit --only ... -- <paths>` creates no commit from an empty delta. Live START does not
+even record the stage (`_commit` filters by `changed_against_head` and returns when nothing is left).
+The Candidate would demand a commit that cannot exist.
+
+**Why the alternatives were rejected.**
+
+```text
+keep artifact_kind = result_commit and allow a result-bearing Candidate with no K1
+    rejected: F1 §11.3 freezes authorized_result_commit_sha as a full commit id IFF
+    artifact_kind == "result_commit". This would break a landed F1 rule instead of an F2 one, and
+    it would create the third, ambiguous category — "result_commit, but no commit" — that must
+    not exist.
+
+synthesize the commit with --allow-empty
+    rejected: F1 §11.2 rejected exactly this as Option A. Nothing in the system creates an empty
+    commit, and manufacturing Git history to satisfy a schema field is what that decision
+    forbade.
+
+refuse the outcome
+    rejected: it is an ordinary correct outcome discovered only after the executor returned, which
+    is the trap F1-D10 and F2 §2.3 both reject.
+```
+
+**Why this is an amendment and not a reinterpretation.** F2 §7.1 says "Exactly when", and §7.3 says an
+empty-artifact Candidate "is refused if any declared path exists". Those are definite, and they are the
+opposite of what §6.7 freezes. There is no reading of them that admits an all-inert Candidate.
+
+---
+
+#### What these amendments do NOT change
+
+```text
+no P1, P2 or P3 F1 statement is amended by F3
+no historical file is edited
+the Candidate is still frozen before any K1 (F2 §20.3)
+no fake, placeholder, synthesized or all-zero commit identity exists anywhere (F2 §20.5)
+the Candidate still preserves exactly what the executor declared (F2 §6.3)
+the Candidate's and the Consumption's artifact_kind remain independent statements, both read and
+  compared, neither derived from the other (F2 §7.6, §14 here)
+Evidence completeness remains unknown, and reuse remains refused (F2 §13.6)
+the positive HEAD-reuse branch remains unreachable (F2 §14.4)
+```
+
+---
+
 ## 2. F3 scope and non-scope
 
 ### 2.1 In scope — frozen here
@@ -107,7 +303,7 @@ the invalidation boundary                                                       
 F3-D1   the review-v1 Work commit-only primitive and its persistence-semantics identity
 F3-D2   K1 lineage: the exact parent rule and what may lie between the base and that parent
 F3-D3   the complete result-bearing physical topology and its durable-intent boundaries
-F3-D4   the complete empty-artifact physical topology, with no K1 of any kind
+F3-D4   the complete no-K1 physical topology: no declared path, and all-inert
 F3-D5   what C-2(K1) proves, item by item
 F3-D6   the C-2 durability model and why it is Option A
 F3-D7   the review-v1-split-v1 validator for the Work path
@@ -262,8 +458,9 @@ M-19  records.WorkTerminalActivation is a schema and a reader with no producer a
 ### 4.1 The commits
 
 ```text
-K1   the result commit. Exists only for a result-bearing Candidate (F2 §6).
-     Carries the ReviewedArtifactProjection and nothing else.
+K1   the result commit. Exists only when artifact_kind is "result_commit" — that is, only when
+     at least one Candidate entry is CHANGING (§6.7). Carries the ReviewedArtifactProjection and
+     nothing else.
 
 K2   the terminal commit. Exists for EVERY completed review-v1 Work, result-bearing or empty.
      Carries the AuthorizedTransitionProjection and the terminal OperationMetadataProjection,
@@ -271,7 +468,7 @@ K2   the terminal commit. Exists for EVERY completed review-v1 Work, result-bear
 ```
 
 `K2` in this document always means the **ordinary Work terminal commit**. The special metadata-only commit
-of P1 R7 §6 is never called K2 here; it is written `K2-A` and it is F4's (§19).
+of P1 R7 §6 is never called K2 here; it is written `K2-A` and it is F4's (§25).
 
 ### 4.2 The checkpoints
 
@@ -296,8 +493,8 @@ A crash at any point resumes at the earliest unsatisfied checkpoint.
 ```text
 S-c0   <W>:entry:<n>                    commit-only, the entry events   only when they are
                                                                         not already committed
-S-c1   <W>:results:<n>                  commit-only, makes K1        result-bearing only
-S-p1   <W>:results-publication:<n>      push-only, publishes K1      result-bearing, with a remote
+S-c1   <W>:results:<n>                  commit-only, makes K1        result_commit only
+S-p1   <W>:results-publication:<n>      push-only, publishes K1      result_commit, with a remote
 S-t    <W>:lifecycle:<n>                the terminal stage           always
 S-c2   <W>:finalize:<n>                 commit-only, makes K2        always
 S-p2   <W>:finalize-publication:<n>     push-only, publishes K2      with a remote
@@ -439,13 +636,14 @@ below it is attempted.
  1  START entry, review-v1 selected                       F1-D1
  2  destination pin verified, before the lock             registry.md, Push destination
  2a publication capability check, with a remote           §12.4
+ 2b transform-configuration entry refusal                 §7.4
  3  Project execution lock; activation verified           F1-D4, F1 §6.4
  4  durable  mutation opened with both markers            F1-D2
  5  the Work cycle runs; the executor returns Completed
  6  declare_own_content over result_paths U deleted_paths start.py:884, unchanged
  7  completion_precheck passes                            skills/start, unchanged
  8  dirty separability over the owned set                 gitops.ensure_separable, unchanged
- 9  Git persistence preflight over the owned set          §7.3
+ 9  Git persistence preflight over the owned set (early)  §7.3
  9a durable  S-c0 recorded and applied, if anything is uncommitted in the event log   §4.3
 10  the Work Candidate is frozen                          F2 §5, §6
 11  the CandidateSnapshot material envelope is built      F2 §9.3
@@ -456,6 +654,8 @@ below it is attempted.
 15  durable  gate generation 2: settle                    -> committed by its own mutation
 16  durable  gate generation 3: seal, issuing the Receipt -> committed by its own mutation
 17  the lineage precondition is proven                    §8.2
+17a Git persistence preflight over the Candidate's entry paths, AGAIN, after the Review;
+    this is the run W2 binds, not step 9's                §7.3
 18  durable  S-c1 recorded: the commit-only stage for K1  §7
 19           S-c1 applied -> K1 made -> C-1(K1)           M-7, M-10
 20  C-2(K1): items W1 ... W12                             §9
@@ -467,6 +667,7 @@ below it is attempted.
 26  durable  S-t recorded: two events, then the Consumption  §13.3
 27           S-t applied, in recorded order
 28  Git persistence preflight over the terminal paths     §7.3
+    (and the same preflight ran before S-c0 and before every pre-completion Work commit)
 29  durable  S-c2 recorded: the commit-only stage for K2  §15.1
 30           S-c2 applied -> K2 made -> C-1(K2)
 31  C-2(K2): items T1 ... T12                             §16
@@ -474,7 +675,7 @@ below it is attempted.
 33  the publication barrier is checked for K2             §12
 34  durable  S-p2 recorded: the push-only stage for K2    §11
 35           S-p2 applied: exact K2 pushed
-36  the recorded-completion proof                         §18
+36  the recorded-completion proof                         §19
 37  mutation.complete(); START returns "completed"
 ```
 
@@ -522,7 +723,18 @@ after 9a, before 18           nothing physical happened since; the flow continue
 
 ---
 
-## 6. Empty-artifact physical topology (F3-D4)
+## 6. No-K1 physical topology (F3-D4)
+
+This section covers **both** Candidates that carry no result commit. They are one topology and one
+`artifact_kind`, not two, because the thing that decides them is the same fact — the complete owned tree
+delta is empty — and because a third category would be exactly the ambiguity F2 §7.5 forbids.
+
+```text
+no declared path      the executor declared no result path and no deleted path (F2 §7.1's
+                      original case)
+all-inert             the executor declared paths, and every Candidate entry is inert: its
+                      old_kind/old_mode/old_oid equal its new_* (§6.6)
+```
 
 ### 6.1 The mandatory invariant
 
@@ -534,11 +746,13 @@ empty-string or otherwise fabricated commit identity, anywhere, at any point, fo
 ```
 
 This is F1 §11.2, F1 invariant 8 and F2 §7.6 and §20.4/§20.5, restated because F3 is where a commit would
-have been created if anywhere.
+have been created if anywhere. It holds for both cases above, and it is what forces the amendment A-3:
+an all-inert Candidate cannot have a K1, because `git commit --only` makes no commit from an empty delta.
 
 ### 6.2 The frozen sequence
 
-Identical to §5.1 with steps 6, 8, 9, 18-24 **absent**, and nothing substituted for them:
+For the **no declared path** case, identical to §5.1 with steps 6, 8, 9, 18-24 **absent**, and nothing
+substituted for them:
 
 ```text
  1 ...  5   as §5.1; the executor returns Completed with an empty owned set
@@ -553,6 +767,11 @@ Identical to §5.1 with steps 6, 8, 9, 18-24 **absent**, and nothing substituted
 18 ... 24   ABSENT. No K1 stage, no K1 proof, no K1 publication.
 25 ... 37   as §5.1, with artifact_kind "empty" throughout
 ```
+
+For the **all-inert** case the sequence is §5.1's exactly — steps 6, 8 and 9 all run, because there are
+declared paths to protect, to separate and to preflight — up to and including step 10, and then steps
+**18-24 are absent** for the same reason and with the same consequences. The difference between the two
+cases is entirely before the Candidate is frozen; from the Candidate onward they are one topology.
 
 ### 6.3 Terminal parentage when there is no K1
 
@@ -585,7 +804,7 @@ and nothing else.
 The Consumption carries `artifact_kind = "empty"` and `authorized_result_commit_sha = null`, which is
 F1 §11.3's exact frozen repair, and §14 proves that against the Candidate's `content.artifact_kind`.
 
-### 6.5 Prohibited in the empty topology
+### 6.5 Prohibited in the no-K1 topology
 
 ```text
 creating an empty commit so that a K1 exists
@@ -594,6 +813,124 @@ treating the terminal commit K2 as the K1 of an empty Candidate
 writing any commit id into authorized_result_commit_sha
 omitting the artifact_kind key rather than writing it as "empty"
 reporting "no commit" as "no Candidate", or as a refusal of review-v1
+treating an all-inert Candidate as result-bearing, and so demanding a K1 that cannot exist
+using --allow-empty, or any other flag or mechanism, to bring a commit into being for one
+```
+
+### 6.6 The all-inert Candidate — the fact that forces amendment A-3
+
+Measured, and reachable without anything unusual happening:
+
+```text
+F2 §6.3 keeps an entry whose old_* equals its new_* in the Candidate, "because what the executor
+declared is part of what is reviewed". Such an entry is INERT: it declares a result path whose
+Git object identity the executor did not change.
+
+F2 §7.1 makes the empty kind apply "Exactly when" result_paths and deleted_paths are both empty.
+
+So a Work whose executor declares result paths and changes none of their object identities has:
+    result_paths           non-empty
+    every Candidate entry  inert
+    the complete owned tree delta against base_commit   EMPTY
+```
+
+Under the unamended boundary that Candidate is `result_commit`, and §5.1 would require a K1. No K1 can
+exist:
+
+```text
+the frozen primitive is `git commit --only --no-verify --no-gpg-sign -m <msg> -- <paths>`,
+  which makes no commit when the complete delta is empty;
+live START does not even record the stage: _commit computes
+  `dirty = changed_against_head(root, owned)` and returns when nothing is left (start.py:446);
+F1 §11.2 rejected manufacturing an empty commit as Option A, so --allow-empty is not available;
+and a placeholder or all-zero identity is prohibited everywhere (F2 §20.5).
+```
+
+This is an **ordinary correct outcome** — a Work that touched a declared path and left its content as it
+was, or that re-wrote a file with identical bytes — discovered only when the executor returns. Refusing it
+is the trap F1-D10 and F2 §2.3 both reject. So the boundary moves.
+
+### 6.7 The frozen representation of an all-inert Candidate
+
+```text
+DISCRIMINATOR, replacing F2 §7.1 (amendment A-3)
+
+    artifact_kind = "result_commit"   IFF at least one Candidate entry is CHANGING
+    artifact_kind = "empty"           IFF no Candidate entry is changing
+
+    An entry is CHANGING when any of old_kind/old_mode/old_oid differs from the corresponding
+    new_*. It is INERT when none does. "No declared entry at all" is the degenerate case of
+    "no changing entry", which is why the two cases of §6 are one kind.
+
+    The discriminator is the complete owned tree delta, which is exactly what decides whether a
+    physical commit can exist. It is never the emptiness of `entries`, never the length of
+    result_paths, and never inferred from the Consumption.
+```
+
+```text
+CONTENT, replacing F2 §7.2 for the all-inert case
+
+content = {
+  artifact_kind: "empty"
+  entries: [ <every declared entry, inert, in the exact shape of F2 §6.3, sorted by the path's
+              UTF-8 bytes — nothing is dropped> ]
+  emptiness_proof: {
+      base_commit:                     <the same commit as declared_base.base_commit>
+      declared_result_paths:           [ <exactly what the executor declared> ]
+      declared_deleted_paths:          [ <exactly what the executor declared> ]
+      owned_paths_differing_from_base: []
+  }
+}
+
+`message` is absent: there is no result commit to carry one, and a message that no commit will
+carry is not part of what was reviewed.
+```
+
+Frozen answers to each question the boundary raises:
+
+```text
+how an all-inert declared result is represented
+    as an "empty" Candidate whose entries are the declared entries, every one inert.
+
+whether inert declared entries remain represented
+    YES, all of them, unchanged in shape. F2 §6.3's rule is preserved rather than weakened: this
+    amendment is the only way an all-inert declaration can be both kept and terminalized.
+
+artifact_kind
+    "empty". There is no third value and no third category.
+
+emptiness proof
+    owned_paths_differing_from_base is [] — and it is now doing real work rather than being
+    trivially empty. It is the positive statement that no declared path differs from the base,
+    which is precisely the condition under which no commit can be made. It is proven by
+    enumerating the declared set against base_commit's tree, never by absence of evidence, and it
+    is cross-checked against the entries: an "empty" Candidate holding a CHANGING entry is
+    malformed and fails closed.
+
+Consumption artifact_kind
+    "empty", independently determined and then compared (§14). Never derived from the Candidate.
+
+authorized_result_commit_sha
+    null, present as null, never omitted (F1 §11.3).
+
+physical topology
+    §6.2's all-inert variant: no S-c1, no C-2(K1), no S-p1. K2 is the only commit of the
+    completion, and its parent follows §6.3.
+
+C-2(K2) proof
+    T1 ... T12 unchanged, with T12 taking its "empty" branch: no commit of this mutation carries
+    a ReviewedArtifact delta, and authorized_result_commit_sha is null.
+
+the no-K1 invariant
+    unchanged and absolute (§6.1).
+```
+
+```text
+Why the declared entries are kept rather than emptied to match F2 §7.2 exactly:
+dropping them would discard what the executor declared, which F2 §6.3 requires the Candidate to
+preserve, and would make two materially different Works — one that declared nothing and one that
+declared three paths it did not change — produce the identical Candidate and the identical
+candidate_hash. The reviewer would be shown less than was actually claimed.
 ```
 
 ---
@@ -660,24 +997,62 @@ commit is a later explicit contract version that must positively bind signing fo
 agent, key and helper identity first. F3 does not infer such safety.
 ```
 
-### 7.3 The Git persistence preflight
+### 7.3 The Git persistence preflight — before EVERY commit of the primitive
+
+P1 R5 §4 requires **every** external executable or process Git can invoke on the exact staging and local
+commit path to be classified before the commit. §11.3 puts every Git stage of a review-v1 Work mutation
+under this primitive, so the preflight binds every one of them — not only the two that carry K1 and K2.
 
 ```text
-Before S-c1 is recorded, over the Candidate's entry paths:
-Before S-c2 is recorded, over the terminal paths (the event log and the Consumption path):
+IMMEDIATELY BEFORE EVERY git_commit stage recorded with mode "review-v1-work-local-v1":
 
-    `git check-attr filter ident working-tree-encoding` MUST print "unspecified" or "unset"
-    for every path and every attribute;
-    the effective configuration MUST define no filter driver named "unset" or "unspecified";
-    a question Git cannot answer is a refusal, not a pass.
+  1. determine the EXACT path set that stage will commit — the paths the stage's payload will
+     name, after the same changed-against-HEAD narrowing the stage itself applies, and never a
+     wider or a nominal set;
+
+  2. run the complete persistence / external-process preflight for exactly those paths:
+       hooks, signing, filesystem monitor and background maintenance are MECHANICALLY DENIED by
+         the primitive itself (§7.1, §7.2) — the denial is re-established by the invocation, not
+         assumed from a previous stage;
+       `git check-attr filter ident working-tree-encoding` MUST print "unspecified" or "unset"
+         for every one of those paths and every one of those attributes;
+       the effective configuration MUST define no filter driver named "unset" or "unspecified";
+
+  3. a question Git cannot answer is a REFUSAL, not a pass;
+
+  4. an applicable or unsupported transform FAILS CLOSED before that commit is recorded and
+     therefore before it is made.
 
 Refusal code: review_git_transform (the existing live code; F3 introduces no new code here).
 ```
 
-This is the live `gitops.require_no_planning_transform` rule applied to the Work path. It is required
-because F2 §6.3 froze the Candidate's `new_oid` as `gitcmd.hash_blob` of the executor's bytes, which is
-`git hash-object --no-filters`: if a clean filter applied, Git would store a different object and
-C-2(K1)'s tree proof (§9, W4/W5) would fail after the commit already existed.
+This binds, explicitly and without exception:
+
+```text
+S-c0                              the entry-events commit
+S-c1                              the result commit K1
+S-c2                              the terminal commit K2
+every pre-completion Work Git commit
+                                  a derived registration, a move, a human-NG move — every
+                                  commit-only stage the Work cycle records under §11.3
+```
+
+```text
+A preflight passed for one stage NEVER carries to another stage. Each stage's path set is its
+own, the Project's attributes and configuration can change between stages, and a pass proven for
+paths A says nothing about paths B.
+```
+
+**S-c1 specifically is preflighted twice, and the second time is the one W2 binds.** Topology step 9 runs
+it as an early refusal, before the Candidate is frozen, so the operation does not pay for a whole Review
+before discovering a transform. But the Review runs between step 9 and step 18, and it can take arbitrarily
+long, during which the Project's attributes or configuration can change. So the preflight is run **again**
+immediately before S-c1 is recorded, after the Review has completed (step 17a), and it is that later run
+that C-2(K1) item W2 requires. The early run is an optimization and never satisfies W2.
+
+The preflight is required at all because F2 §6.3 froze the Candidate's `new_oid` as `gitcmd.hash_blob` of
+the executor's bytes, which is `git hash-object --no-filters`: if a clean filter applied, Git would store a
+different object and C-2(K1)'s tree proof (§9, W4/W5) would fail after the commit already existed.
 
 ```text
 Checkout capability is NOT bound for the Work path. F2 §10.3 froze that boundary: a Work result's
@@ -685,24 +1060,82 @@ bytes are the executor's and are bound by Git object identity, not by a reproduc
 F3 does not add it.
 ```
 
-### 7.4 Recoverability of a transform refusal, stated plainly
+### 7.4 Where a transform refusal happens, and what it is not
 
-This refusal fires **after the executor returned** and before anything is committed. It is not a trap, and
-the reasoning is recorded so it is not re-litigated:
+F2 §20.17 governs this exactly: *an ordinary, correct Work outcome is always expressible as a Candidate;
+where an outcome is outside the expressible domain and the condition is knowable before the executor runs,
+the refusal happens at START entry.* A Project's effective transform configuration **is** knowable before
+the executor runs, even though which result paths it will touch is not. So the refusal is split, and the
+knowable part is moved to the only non-trapping point:
 
 ```text
-nothing physical has happened when it fires: no commit, no event, no push
-the refusal is the person's to resolve, exactly like dirty_overlap: they change the Project's
-  attribute or filter configuration, which is their configuration and not Workline's to edit
-START already saves a refused result and continues from it without re-running the executor,
-  so resolving the configuration lets the same START proceed from the same result
+ENTRY REFUSAL — the knowable condition, before anything exists
+
+  At START entry, before the Project execution lock and before any mutation is opened, a review-v1
+  Work START is refused when the Project's effective Git configuration or attributes define ANY
+  filter, ident or working-tree-encoding that could apply to a working-tree path.
+
+    code      review_git_transform
+    effect    nothing is written, no mutation exists, no event, no commit, no Review record.
+              The Project is exactly as it was, and legacy START is fully available for it as a
+              separate invocation.
+
+  Consequence, stated rather than hidden: a Project that genuinely uses a content filter — Git LFS,
+  a clean/smudge pair, ident expansion, working-tree re-encoding — cannot use review-v1 Work at
+  this contract version. That is a stated v1 boundary, refused before the person has spent
+  anything, and it is the same kind of honest limit F2 §13.6 set for Evidence completeness.
+
+RESIDUAL — the unknowable condition, after the executor returned
+
+  The executor itself wrote a .gitattributes or changed Git configuration during the run, so a
+  transform that did not exist at entry now applies.
+
+    disposition  the per-commit preflight (§7.3) fails closed before that commit is recorded.
+    character    this is a MALFORMED RUN, not an ordinary outcome: an executor that changes the
+                 Project's Git persistence configuration during a Work has changed the ground the
+                 Candidate's object identities were computed on. It is the same class as F2 §6.5's
+                 declared path that is a directory, and it reconciles.
 ```
 
-The residual, stated rather than hidden: **if the transform is intended Project configuration for that
-result path, review-v1 cannot complete that Work at this contract version.** The recourse is legacy START,
-which remains available and unchanged in an activated Project (F1 §10.3, F1 invariant 1). F3 does not
-weaken the byte-identity requirement to accommodate it, because doing so would make the Candidate's
-`new_oid` a claim about bytes Git does not store.
+#### A pending review-v1 mutation never downgrades to legacy
+
+This must not be read as a recovery mechanism, and the earlier draft's phrase "the recourse is legacy
+START" invited exactly that misreading. The frozen statement:
+
+```text
+A pending review-v1 mutation NEVER becomes a legacy mutation. F1 §5.2 case 4 refuses a legacy
+retry of a pending review-v1 record with ReconcileRequired / review_marker_mismatch, and F1
+invariant 2 freezes that a pending mutation's semantic contract never changes on retry.
+
+Legacy availability in an activated Project (F1 §10.3, F1 invariant 1) is a property of a
+SEPARATE, LATER INVOCATION. It is not a fallback for, and says nothing about, a mutation that is
+already pending under review-v1.
+
+If the Project's configuration is changed so that the preflight passes, the SAME review-v1
+mutation resumes from its saved result: START already records the executor's result and continues
+from it without re-running the executor, exactly as it does after a dirty_overlap refusal.
+
+If the condition cannot be changed, what recovery or abandonment would permit a later invocation
+is NOT invented here. That belongs to the F4 recovery authority (§25), and F3 defers it rather
+than implying a path that does not exist.
+```
+
+#### No-trap re-check after this repair
+
+```text
+the knowable case      refused at START entry, before any mutation exists -> no pending mutation
+                       is stranded, because none was ever opened
+the unknowable case    a malformed run, which F2 §2.3 already permits to be a post-executor
+                       reconcile
+the resolvable case    the same review-v1 mutation continues from its saved result once the
+                       configuration is changed
+
+No ordinary correct outcome is left with a pending mutation and no lawful continuation, so the
+F2 §20.17 no-trap invariant holds after this repair. Architecture blocker: NONE.
+```
+
+F3 does not weaken the byte-identity requirement to accommodate any of this, because doing so would make
+the Candidate's `new_oid` a claim about bytes Git does not store.
 
 ### 7.5 C-1: how exact local commit identity becomes durable
 
@@ -872,6 +1305,13 @@ against nothing else. Every item is required. A failure is `reconcile_required`;
 weaker check and no item is skipped because another passed.
 
 ```text
+C-2(K1) exists only where K1 exists — that is, only when artifact_kind is "result_commit" (§6.7).
+For an "empty" Candidate there is no K1, no C-2(K1) and no result publication, and the absence of
+this proof is not a gap: there is nothing for it to be about. What is NOT permitted is to reach
+this section with an "empty" Candidate and skip it; the topology never records S-c1 at all.
+```
+
+```text
 W1   OWNERSHIP
      The S-c1 effect is recorded applied and carries commit_id = K1, the full object id of a
      commit this mutation made (M-10). Absent or unprovable -> review_commit_unowned. The branch
@@ -881,7 +1321,9 @@ W1   OWNERSHIP
 
 W2   PERSISTENCE SEMANTICS
      The S-c1 payload names mode "review-v1-work-local-v1", and the Git persistence preflight of
-     §7.3 passed for every Candidate entry path immediately before the stage was recorded.
+     §7.3 passed for every path S-c1 will commit, in the run made IMMEDIATELY BEFORE the stage was
+     recorded — topology step 17a, after the Review completed. Step 9's early run is an
+     optimization and never satisfies this item.
 
 W3   LINEAGE
      parent(K1) is exactly the recorded base_head; K1 has exactly one parent; L-1 ... L-5 of §8.2
@@ -1007,17 +1449,65 @@ COMPLETE
   reader cannot answer FAILS; unanswerable is never a pass.
 
 DURABLE
-  Durability is a property of the INPUTS, not of a stored verdict. Every input is immutable:
-  a committed Git object cannot change, and a canonical Review record is immutable by
-  construction (create_file never updates one; R1 §8). A proof over immutable inputs yields the
-  same result at every later evaluation, from any clone, after any process loss — which is a
-  strictly stronger durability than a saved verdict, because a saved verdict can survive the
-  facts it was about while a re-execution cannot.
+  Durability is a property of the INPUTS, not of a stored verdict. Every input is durable and
+  independently addressable: the exact committed Git objects of K and its parent, which cannot
+  change once written, and the canonical Review records, which are immutable by construction
+  (create_file never updates one; R1 §8) and are read at an exact commit. Nothing the proof reads
+  lives only in runtime state, so the proof is re-executable from any clone, after any process
+  loss, for as long as C-1 names K.
 
 EXACT-K-BOUND
   Every item names the exact K of C-1 and evaluates against it alone. W1 refuses to proceed
   without that identity. No item reads a branch, a tip, a ref or a message.
 ```
+
+#### Durable checkpoint completion is NOT timeless current validity
+
+This distinction is frozen, and the earlier draft got it wrong by claiming a proof over immutable inputs
+"yields the same result at every later evaluation". That is false, and believing it would defeat the very
+recheck R5 §12.4 requires:
+
+```text
+The committed objects are immutable. The SET of canonical facts is not.
+
+Between a completed C-2 and a later boundary, new canonical facts can appear in the Review
+namespace and change the answer:
+
+    a Supersession of the Receipt
+    an invalidation generation of the Run
+    a Consumption of that Receipt
+    a change in bound authority, Context, Policy or Evidence identity where applicable
+
+Each of these is an addition, not a mutation of anything already written — and each of them makes
+a previously passing C-2 FAIL on re-evaluation, correctly.
+```
+
+The frozen model:
+
+```text
+1. The exact-K proof is deterministically RE-EXECUTABLE from durable identities and canonical
+   committed facts. It is never read from a stored verdict.
+
+2. A durable note or pointer binds WHICH exact K and which checkpoint was reached, for recovery.
+   It is never proof authority and never a proof result (§10.4).
+
+3. CURRENT VALIDITY is re-derived at every required boundary: before a publication effect is
+   recorded, and again before it is applied (R5 §12.4 — "Passing the check once at record time
+   does not carry to apply time").
+
+4. A later canonical fact can make a previously completed proof STALE. That is expected behaviour
+   of a current-validity predicate, not a defect and not a contradiction.
+
+5. Staleness causes FAIL-CLOSED / reconcile. It is never read as the proof having disappeared,
+   never as a reason to fall back to a weaker contract, and never as evidence that a push
+   authorizes itself.
+
+6. "The checkpoint was reached" and "the authorization is valid now" are two different questions.
+   The note answers only the first. Only re-execution answers the second.
+```
+
+This is also the decisive reason Option B is refused (§10.5 item 3): a stored verdict answers the first
+question and silently presents it as an answer to the second.
 
 ### 10.3 Recovery of the exact K identity after runtime loss — the honest answer
 
@@ -1163,12 +1653,25 @@ V-5  GIT AGREES
      recorded branch still holds K.
 
 V-6  THE ROLE-SPECIFIC DELTA
-     result publication    commit_delta(parent(K), K) equals the Candidate's entries exactly
-                           (§9 W4), and this mutation holds no Work terminal append_event
-                           effect recorded before the commit effect that made K.
+     result publication    permitted ONLY when artifact_kind is "result_commit" (§11.3.1).
+                           commit_delta(parent(K), K) equals the Candidate's CHANGING entries
+                           exactly (§9 W4), and this mutation holds no Work terminal
+                           append_event effect recorded before the commit effect that made K.
+                           A result publication in an "empty" operation is refused: there is no
+                           K1, so a push claiming to be one names a commit that is not one.
      terminal publication  commit_delta(parent(K), K) is exactly the terminal delta of §17.2,
                            the terminal stage is recorded and applied, and the Consumption
                            effect is recorded and applied.
+
+V-6a THE CARDINALITY FOR THIS CASE
+     The number of git_push effects recorded in this mutation is consistent with what §11.3.1
+     requires for this operation's case — computed from the destination pin and the CANDIDATE's
+     content.artifact_kind, before any stage is examined — and at the terminal publication it
+     equals that number exactly. Any excess push, and any push of a kind the case does not
+     allow, is a refusal whichever individual pushes would otherwise validate.
+     At a result publication the required count is not yet reached, which is expected and is not
+     a defect: the check at that point is that no push beyond the case's allowance exists and
+     that this one is the result publication the case permits.
 
 V-7  C-2 IS STILL CURRENT
      The full C-2 of §9 or §16, for exactly K, is re-evaluated immediately before the push
@@ -1186,8 +1689,8 @@ LEGAL
   a commit-only stage holding exactly one git_commit with mode "review-v1-work-local-v1" —
     S-c0, S-c1, S-c2, and every Git stage the Work cycle records before the completion
     (a derived registration, a move, a human-NG move)
-  EXACTLY TWO push-only stages, S-p1 and S-p2, each holding exactly one git_push naming a
-    commit one of the two proof notes names
+  push-only stages, each holding exactly one git_push naming a commit one of the two proof notes
+    names, in the exact cardinality of §11.3.1
   the terminal stage of §13.3
   the non-Git stages the Work cycle already records (lifecycle events, registrations, relation
     writes) — unchanged from legacy
@@ -1196,17 +1699,74 @@ ILLEGAL — each fails closed, publishes nothing, and reconciles
   a stage holding a git_commit and a git_push together
   a push whose stage holds any other effect
   a push naming a commit no proof note names, or that both notes name
-  a third push, or any push outside S-p1 and S-p2
+  any push beyond the exact cardinality of §11.3.1 for this operation's case
   a push recorded before the C-2 of its commit is complete
   a git_commit with no mode, or with the planning mode, in a Work mutation
   a git_push in a generation mutation (live, unchanged)
   any push at all while the markers are partial, unknown or contradictory
 ```
 
+#### 11.3.1 Push cardinality — exact, per case
+
+The earlier draft said "exactly two push-only stages" as the general legal shape. That was wrong: it
+contradicts both the no-K1 topology (§6), which has no K1 to publish, and the no-remote topology (§20),
+which publishes nothing at all. The exact frozen cardinality:
+
 ```text
-A review-v1 Work mutation therefore holds AT MOST TWO pushes, and never one that is not a
-publication of K1 or K2. Every other commit it makes is local, and reaches the destination only
-as the proven history of one of those two.
+remote present, artifact_kind = "result_commit"    EXACTLY 2 pushes:  S-p1(K1), S-p2(K2)
+remote present, artifact_kind = "empty"            EXACTLY 1 push:    S-p2(K2)
+no remote, either artifact_kind                    EXACTLY 0 pushes
+
+every case                                         AT MOST 2, and no git_push effect anywhere
+                                                   in the mutation other than the ones this table
+                                                   allows for that case
+```
+
+```text
+The case is selected from TWO durable facts, and from nothing else:
+
+  whether a remote exists     the Project's approved push destination pin, verified at entry
+                              before the lock (registry.md, Push destination)
+
+  which artifact_kind         the Candidate's content.artifact_kind — a durable field of a record
+                              that exists from the moment the Candidate is frozen, which is before
+                              any publication stage of either kind
+```
+
+```text
+The Consumption's artifact_kind is NOT an input to this selection, and deliberately so: the
+Consumption does not exist when S-p1 is recorded. It is created by the terminal stage, which runs
+after the result publication. A validator that tried to read it at S-p1 would be reading a record
+that has not been written.
+
+Its role is a SEPARATE and later one, and it is not weakened by being later:
+
+  as soon as the Consumption exists, §14's comparison runs — both fields read on their own, then
+  compared — and agreement is a PRECONDITION of recording S-p2;
+  a disagreement fails closed at that point, so an operation whose two records disagree never
+  reaches its terminal publication;
+  and the agreement is proven again from committed state at C-2(K2) item T8 and at the
+  recorded-completion proof P-5.
+
+So the cardinality is fixed from the Candidate at the first publication and independently
+confirmed against the Consumption before the second. Neither field is ever derived from the
+other (§14.1).
+```
+
+```text
+The cardinality is NEVER inferred from what the mutation's stages look like.
+
+Stage shape does not select the publication contract (R5 §12.3.2, §11.1) and it does not select
+the case within it either. The validator computes the expected cardinality from the two durable
+facts above and then checks the recorded stages against it — never the reverse. A mutation whose
+stages happen to hold one push is not thereby an empty-artifact operation, and one that happens
+to hold two is not thereby result-bearing: either mismatch is a refusal.
+```
+
+```text
+A review-v1 Work mutation therefore holds at most two pushes, and never one that is not the
+publication of K1 or of K2. Every other commit it makes is local, and reaches the destination
+only as the proven history of one of those.
 ```
 
 ### 11.4 The fail-closed matrix
@@ -1451,11 +2011,22 @@ result-bearing
     Consumption.authorized_result_commit_sha      == K1, a full object id
     and K1 is exactly the commit C-1 names and C-2(K1) proved
 
-empty
+empty  (both cases of §6: no declared path, and all-inert)
     Candidate.content.artifact_kind               == "empty"
     Consumption.artifact_kind                     == "empty"
     Consumption.authorized_result_commit_sha      == null, present as null, never omitted
     and no result commit exists anywhere in this operation
+```
+
+```text
+The Candidate's side of this agreement is determined by §6.7's discriminator — at least one
+CHANGING entry, or none — and never by the length of `entries` or of result_paths. An all-inert
+Candidate therefore agrees with an "empty" Consumption while still carrying every declared entry,
+and a Candidate holding a changing entry can never agree with one.
+
+A Candidate that says "empty" while holding a CHANGING entry, or says "result_commit" while every
+entry is inert, is malformed: it fails closed here and at C-2(K2) item T8, and it is never
+repaired by recomputing the field from the entries.
 ```
 
 ### 14.3 Where it is proven
@@ -1466,7 +2037,7 @@ before the terminal stage is recorded   the Consumption's content is built and c
                                         stage is never recorded
 at C-2(K2), item T8                     both records are read back from committed state at K2
                                         and compared
-at the recorded-completion proof, §18   read back once more from the committed Review namespace
+at the recorded-completion proof, §19   read back once more from the committed Review namespace
 ```
 
 ### 14.4 Fail-closed
@@ -1612,7 +2183,11 @@ T12  RESULT BINDING
      result-bearing   K1 is in K2's history, exactly and unchanged, and
                       Consumption.authorized_result_commit_sha == K1.
      empty            no commit of this mutation carries a ReviewedArtifact delta, and
-                      Consumption.authorized_result_commit_sha is null.
+                      Consumption.authorized_result_commit_sha is null. For an ALL-INERT
+                      Candidate this is proven positively rather than by absence: every declared
+                      entry resolves in K2's tree to exactly the identity the Candidate records
+                      for it (tree_entries over the declared paths), and the complete delta from
+                      declared_base.base_commit to K2 holds no declared path at all.
 ```
 
 ---
@@ -1838,8 +2413,12 @@ checkpoint (§5.3), exactly as the live Terminal finalization rule already requi
 ```text
 S-p1 is not recorded.
 S-p2 is not recorded.
+The mutation holds EXACTLY ZERO git_push effects (§11.3.1), and a push recorded anyway is a
+  refusal rather than an anomaly.
 The publication barrier is not evaluated, because nothing is published.
 The publication capability check of §12.4 does not apply.
+The transform-configuration entry refusal of §7.4 still applies: it is about what Git stores
+  locally, not about publication.
 ```
 
 ### 20.2 What is NOT omitted
@@ -1999,12 +2578,14 @@ C  true conflict requiring a new forward amendment
     delta is impossible: a canonical Review record is immutable and created once. §17.3.       A
 
  3  F2 §14.4 / §16.1  "HEAD advances -> a new Candidate".
-    F3 freezes that this Run's own generation commits are inside the Review, not a prior
-    Review's reuse across an advance. §14.4's subject is explicitly "prior Review validity" and
-    its layer 2 compares two closures, which exist only once Evidence exists — after the
-    generation commits. F3 is STRICTER than the live planning rule in every other respect: it
-    tolerates no foreign commit at all, where planning tolerates one that touches no owned
-    path. §8.3, §8.4.                                                                          A
+    §16.1's invalidation row states that consequence flatly and without qualification, and F3
+    admits a class of advances it does not cover — this Run's own generation commits, which must
+    be able to happen or no Review could ever seal. §14.4's own prose is about reuse of a PRIOR
+    Review, which is why the first draft called this a specialization; but a rule that carves an
+    exception out of a flat invalidation row changes that row. FORWARD AMENDMENT A-2 (§1.5).
+    F3 remains STRICTER than the live planning rule in every other respect: it tolerates no
+    foreign commit at all, where planning tolerates one that touches no owned path. §8.2 ... §8.4.
+                                                                                               C
 
  4  R4 §6  terminal stage ordering: events, then the Consumption immutable create, all durable
     before apply. F3 freezes the physical form of exactly that. §13.                           A
@@ -2065,13 +2646,20 @@ C  true conflict requiring a new forward amendment
     no new refspec form, no new adoption rule and no new destination behaviour. It adds one
     entry-time capability refusal using the existing threshold and the existing code. §12.4.   A
 
-19  F2 §5.3  "base_commit is HEAD at the moment the completion is decided".
-    F3 fixes that moment physically: immediately after S-c0 and immediately before the Candidate
-    is frozen. Every NORMATIVE clause of §5.3 still holds — a full commit id of HEAD, every
-    declared_base field read from its committed state through the canonical loader, the lineage
-    the result is measured against — and the entries' old_* are unaffected because the event log
-    is never a result path. The clause specialized is a timing description in a section whose
-    normative content is what is read and from where. §4.3.                                    A
+19  F2 §5.3  "base_commit is HEAD at the moment the completion is decided, which is the same
+    commit F3 will later require as K1's parent for a result-bearing Work."
+    BOTH clauses are superseded. The timing clause is refixed to the post-S-c0, pre-Candidate
+    base; the parentage clause names something F3 cannot require, because the gate's own
+    generation commits necessarily lie between. §5.3 does not leave K1's parent open for F3 to
+    fill in — it states what F3 will require — so this is not a timing specialization, which is
+    what the first draft wrongly called it. FORWARD AMENDMENT A-1 (§1.5). §4.3, §8.1.          C
+
+21  F2 §7.1 / §7.2 / §7.3  the result-bearing / empty Candidate boundary, "Exactly when
+    result_paths and deleted_paths are both empty", and "refused if any declared path exists".
+    An all-inert Candidate — declared paths, no changing entry — is an ordinary correct outcome
+    that those sentences classify as result-bearing and that therefore demands a K1 which
+    `git commit --only` cannot make. The discriminator moves to the complete owned tree delta.
+    FORWARD AMENDMENT A-3 (§1.5). §6.6, §6.7.                                                  C
 
 20  Live START's combined Git stages for a derivation, a move or a human-NG move
     (start.py:572-579).  In a review-v1 Work mutation every Git stage is commit-only except the
@@ -2082,7 +2670,14 @@ C  true conflict requiring a new forward amendment
 ```
 
 ```text
-Forward amendment required: NO
+Forward amendment required: YES
+
+Three, all to landed F2, all declared in full in §1.5:
+    A-1  F2 §5.3          base_commit's timing, and that it is K1's parent        row 19
+    A-2  F2 §14.4, §16.1  the unqualified "every HEAD advance" consequence        row 3
+    A-3  F2 §7.1/7.2/7.3  the result-bearing / no-K1 discriminator                row 21
+
+No P1, P2 or P3 F1 statement is amended.
 No historical P1, P2, F1 or F2 document is edited by this contract.
 ```
 
@@ -2109,6 +2704,15 @@ PB-4  base-exact commits: K1 and K2 are made only while HEAD is still exactly th
 PB-5  a review-v1 Work START in a Project with a remote requires the running Git to meet
       P2_PUBLICATION_GIT_MIN, refused at entry with review_git_unsupported, because its
       Candidate snapshot permanently takes that Project's pushes off the barrier's fast path
+PB-6  the Git persistence preflight runs immediately before EVERY commit stage of a review-v1
+      Work mutation, for exactly that stage's path set, and a pass never carries between
+      stages (§7.3)
+PB-7  a review-v1 Work START is refused at entry, before the lock, when the Project's
+      effective configuration or attributes define any filter, ident or working-tree-encoding
+      that could apply to a working-tree path (review_git_transform, §7.4)
+PB-8  the push cardinality of a review-v1 Work mutation is 2, 1 or 0 by case, computed from
+      the destination pin and the independently agreed artifact_kind, never from stage shape
+      (§11.3.1)
 ```
 
 ### 23.2 `skills/start`
@@ -2125,6 +2729,8 @@ PR-4  the recorded-completion proof of §19, and that Receipt existence, K2 exis
       publication are each insufficient
 PR-5  the no-remote topology of §20, and that it never collapses into the combined legacy shape
 PR-6  the resume points of §5.3, and that a resume re-derives and never re-decides
+PR-7  that a pending review-v1 mutation never downgrades to legacy, and that legacy
+      availability is a property of a separate later invocation (§7.4)
 ```
 
 ### 23.3 `skills/review`
@@ -2136,13 +2742,20 @@ TM-2  C-2(K1) items W1 ... W12 and C-2(K2) items T1 ... T12
 TM-3  the three-projection physical allocation of §17 and its exact deltas
 TM-4  the artifact_kind consistency rule of §14: both read, compared, neither derived
 TM-5  the recursion cutoff of §18 and the ordinary-K2 / Class-A-K2 distinction
-TM-6  that a proof note is a recovery pointer and never a proof result
+TM-6  that a proof note is a recovery pointer and never a proof result, and that a completed
+      C-2 is a durable checkpoint rather than timeless validity: current validity is
+      re-derived at every boundary and a later canonical fact makes a passed proof stale
+      (§10.2)
+TM-7  the no-K1 discriminator of §6.7: artifact_kind is decided by whether any Candidate entry
+      is changing, never by the emptiness of entries or of result_paths
+TM-8  the three forward amendments to landed F2 (§1.5), which a reader of F2 alone cannot
+      discover from F2
 ```
 
 ### 23.4 `registry.md` routing
 
 ```text
-TM-7  Work publication and Work commit-proof statements route to skills/review for record
+TM-9  Work publication and Work commit-proof statements route to skills/review for record
       meaning and to skills/start for operation flow; the Mutation Controller enforces the
       publication contract mechanically from the durable invocation alone
 ```
@@ -2162,7 +2775,9 @@ The operation owner is START, before F3 and after it. Review authorizes; it neve
 F3-D1   Work local persistence      FROZEN   "review-v1-work-local-v1": the contained commit
                                              primitive, hooks and signing mechanically denied,
                                              filters proven absent and never disabled, distinct
-                                             identity from the planning primitive.        §7
+                                             identity from the planning primitive. The preflight
+                                             binds EVERY commit stage of the mutation, and S-c1's
+                                             binding run is the one after the Review.  §7.1-§7.4
 
 F3-D2   K1 lineage                  FROZEN   parent(K1) is reached from
                                              declared_base.base_commit by OWN-REVIEW COMMITS
@@ -2177,22 +2792,29 @@ F3-D3   result-bearing topology     FROZEN   the full ordered sequence with expl
                                              Candidate before K1; no terminal event before
                                              C-2(K1).                              §5, §4.3
 
-F3-D4   empty topology              FROZEN   no K1 of any kind; K2 takes the identical lineage
-                                             rule measured from the Candidate's base.      §6
+F3-D4   no-K1 topology              FROZEN   ONE kind and one topology for both cases — no
+                                             declared path, and all-inert. The discriminator is
+                                             the complete owned tree delta, not the declared path
+                                             set (forward amendment A-3). No K1 of any kind; K2
+                                             takes the identical lineage rule.    §6, §6.6, §6.7
 
 F3-D5   K1 exact proof              FROZEN   W1 ... W12, exact-K-bound, complete tree-entry
                                              delta, no path allowlist.                     §9
 
 F3-D6   C-2 durability              FROZEN   Option A: deterministic re-executable proof over
-                                             immutable inputs; runtime state caches C-1 and a
-                                             recovery pointer only; runtime loss resolves as
-                                             no-owned-K, never as branch-tip inference.   §10
+                                             durable inputs; runtime state caches C-1 and a
+                                             recovery pointer only; durable checkpoint completion
+                                             is NOT timeless validity — a later canonical fact
+                                             makes a passed proof stale and that fails closed;
+                                             runtime loss resolves as no-owned-K, never as
+                                             branch-tip inference.                        §10
 
-F3-D7   split publication validator FROZEN   "review-v1-work-publication-v1": V-1 ... V-8,
-                                             push-only stages, exactly one proof note naming
-                                             the pushed commit, contract from durable metadata
-                                             alone; at most two pushes in the whole mutation
-                                             and every other Git stage commit-only.  §11, §4.3
+F3-D7   split publication validator FROZEN   "review-v1-work-publication-v1": V-1 ... V-8 plus
+                                             V-6a, push-only stages, exactly one proof note
+                                             naming the pushed commit, contract AND case from
+                                             durable metadata alone; cardinality 2 / 1 / 0 by
+                                             case (§11.3.1); every other Git stage commit-only.
+                                                                                 §11, §4.3
 
 F3-D8   P2 barrier composition      FROZEN   two independent authorities, ordered, neither
                                              substituting for the other; the fast-path
@@ -2282,8 +2904,10 @@ Stop conditions. An implementation that violates any of them is not implementing
 
  3. Publication is exact-SHA only, never forced, never a branch tip, never a pattern.
 
- 4. An empty-artifact Work has no K1: no physical commit, no synthetic commit, no placeholder
-    identity, anywhere.
+ 4. A Work whose complete owned tree delta is empty has no K1 — whether it declared no path at
+    all or declared paths it did not change: no physical commit, no synthetic commit, no
+    --allow-empty commit, no placeholder identity, anywhere. There is no third artifact_kind and
+    no "result_commit without a commit".
 
  5. The Candidate is frozen before K1 and K1 is never moved earlier to satisfy any requirement.
 
@@ -2328,9 +2952,21 @@ Stop conditions. An implementation that violates any of them is not implementing
 18. F3 defines no Class A/B/C behaviour, no adoption, no stale-generation mechanics and no
     recovery matrix.
 
-19. A review-v1 Work mutation holds at most two pushes — the publication of K1 and the
-    publication of K2 — and every other Git stage it records is commit-only. No commit of that
-    mutation reaches the destination except as the proven history of one of those two.
+19. A review-v1 Work mutation holds exactly the number of pushes its case requires — 2 with a
+    remote and a result commit, 1 with a remote and none, 0 without a remote — computed from the
+    destination pin and the independently agreed artifact_kind, never from stage shape. Every
+    other Git stage it records is commit-only, and no commit of that mutation reaches the
+    destination except as the proven history of a published K.
+
+20. The Git persistence preflight runs immediately before EVERY commit stage of the mutation, for
+    exactly that stage's path set, and a pass never carries from one stage to another.
+
+21. A pending review-v1 mutation never downgrades to legacy. Legacy availability is a property of
+    a separate later invocation, never a recovery mechanism for a mutation already pending.
+
+22. A completed C-2 is a durable checkpoint, not timeless validity. Current validity is re-derived
+    at every required boundary, a later canonical fact can make a passed proof stale, and
+    staleness fails closed rather than being read as the proof having disappeared.
 ```
 
 ---
@@ -2338,10 +2974,10 @@ Stop conditions. An implementation that violates any of them is not implementing
 ## 27. Implementation readiness
 
 ```text
-Contract status              FROZEN
+Contract status              FROZEN (repaired after independent review)
 Architecture blocker         NONE
 HUMAN decision               NONE
-Forward amendment required   NO
+Forward amendment required   YES - three, to landed F2 only, declared in §1.5
 Implementation authorized    NO
 P3 implementation            NOT STARTED
 F4 started                   NO
