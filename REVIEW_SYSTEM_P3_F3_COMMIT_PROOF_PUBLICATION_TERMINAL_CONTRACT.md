@@ -899,12 +899,31 @@ below it is attempted.
  9a durable  S-c0 recorded and applied, if anything is uncommitted in the event log   §4.3
 10  the Work Candidate is frozen                          F2 §5, §6
 11  the CandidateSnapshot material envelope is built      F2 §9.3
+11a the RESULTING TREE identity becomes computable: base tree + the Candidate's entries,
+    fully determined by what step 10 froze                §7.9.2
+11b durable  the Work Review Context v2 is built and becomes IMMUTABLE       §7.9.6
+             it binds capability_contract, form, namespace, base_tree, resulting_tree —
+             the proof TARGET, never a verdict, so a Context is built and valid whatever
+             the resulting tree's capability turns out to be
 12  isolated verification runs against the exact Candidate F2 §13.4 V-1 ... V-5
+             under that Context: F2 §13.4 V-4 binds review_context_hash into the Evidence
+             identity, which is why the Context precedes this step and not the reverse
 13  durable  gate generation 1: accept, with the snapshot and the TaskInput  R3, M-12
              -> its own generation mutation commits them and proves them persisted
+             the TaskInput binds review_context_hash (M-2), so the Context is already frozen
 14  the reviewer is launched and returns                  F2 §12
 15  durable  gate generation 2: settle                    -> committed by its own mutation
+15a THE CHECKOUT-CAPABILITY DECISION, before ANY generation-3 canonical effect is recorded:
+    derive the capability for exactly Context.resulting_tree, by the four layers of §7.9.3
+
+        capable          -> step 16 may proceed
+        unsafe|unknown   -> STOP exactly as §7.9.5: no generation-3 record, no Receipt, no
+                            authorization, no Consumption, no K1, nothing published;
+                            generation 2 remains the latest generation and stays `open`;
+                            the Candidate stays expressible and reviewed, and this operation
+                            ends without authorization
 16  durable  gate generation 3: seal, issuing the Receipt -> committed by its own mutation
+             reached only on `capable` at 15a
 17  the lineage precondition is proven                    §8.2
 17a the Consumption identifier is reserved                              §13.2
 17b Git persistence preflight, AGAIN after the Review, under the pin, over exactly the
@@ -964,8 +983,17 @@ F3 freezes the resume **point**; F4 owns what to do when the state found there d
 before 9a                     nothing of the completion is committed; the flow continues
 9a recorded, not applied      S-c0 replays; when the event log already matches HEAD it is a
                               no-op and the Candidate is frozen against the same base
-after 9a, before 18           nothing physical happened since; the flow continues from the
-                              Candidate, and a Review already sealed is used as it stands
+after 9a, before 11b          nothing physical happened since; the Candidate is re-frozen or
+                              reused and the Context is built
+11b recorded, before 16       the Context is immutable and is NOT rebuilt; the flow resumes at
+                              the earliest unfinished gate generation
+after 15, before 16           the pre-seal boundary: the capability of Context.resulting_tree is
+                              derived again, from committed objects, and decides whether the
+                              seal proceeds. A previous pass does not carry, and a previous
+                              failure is not final — §7.9.5 says exactly which retries can
+                              change it
+after 16, before 18           nothing physical happened since the seal; the flow continues from
+                              the sealed Review as it stands
 18 recorded, 19 not applied   S-c1 is classified first; base_exact refuses a moved HEAD (M-7)
 19 applied, 20 not reached    C-2(K1) runs; it is a re-execution, so a retry repeats it in full
 21 noted, 23 not recorded     the barrier and S-p1 are attempted again
@@ -1019,7 +1047,10 @@ substituted for them:
 11          the material envelope is built: payloads = [] for the no-declared-path case
             (F2 §7.2), and one payload per inert file / symlink entry for the all-inert
             case under F2 §9.4's uniform coverage rule (§6.7, amendment A-3)
-12 ... 16   isolated verification, accept, launch, settle, seal     as §5.1
+11a ... 16  the resulting tree identity, the immutable Context v2, isolated verification,
+            accept, launch, settle, the 15a checkout-capability decision and the seal —
+            all exactly as §5.1, including that an unsafe or unknown capability at 15a stops
+            the operation before any generation-3 effect and before any K2
 17          the lineage precondition is proven, measured to K2      §8.5, §6.3
 18 ... 24   ABSENT. No K1 stage, no K1 proof, no K1 publication.
 25 ... 37   as §5.1, with artifact_kind "empty" throughout
@@ -3869,6 +3900,12 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
       tree, at every depth, plus .git/info/attributes — not a path probe. Its supported shape is
       narrow by design and refuses any [attr] macro.
 
+IP-14 The reserved-namespace ownership boundary of A-5 needs three things: the pre-execution
+      binding in the review-v1 invocation contract (PR-8), a post-Completed validation of every
+      declared result and deletion path against the canonical Review namespace, and the new
+      StopError code `review_reserved_namespace` registered in the error and reason catalogue
+      alongside the review-v1 codes. It is the only new code F3 introduces.
+
 IP-13 The seal precondition of §7.9 requires composing the resulting tree from the base tree and
       the Candidate's entries, and evaluating attributes with --source against it inside the
       contained scratch repository of M-21. The Work Review Context gains the bound
@@ -4143,8 +4180,11 @@ contract of §7.1.
                  executor's result is refused, so F2 §2.3 is untouched.
     seal         REFUSED. The seal precondition of §7.9.2 evaluates the RESULTING TREE and finds
                  a material attribute over this Run's canonical Review record paths.
-    consequence  no Receipt, no authorization, no terminalization. The Run ends unsealed with the
-                 reason recorded.
+    consequence  generation 2 remains the latest generation and stays `open`; NO generation-3
+                 record is written; no Receipt, no authorization, no Consumption, no K1 and
+                 nothing published. The failure is an operation STOP only — there is NO
+                 canonical reason record, because GateGeneration has no field that could hold
+                 one (M-27).
     outcome      EXPRESSIBLE AND REVIEWABLE, NOT AUTHORIZABLE. That distinction is the whole
                  point of placing the rule at seal rather than at Candidate freeze.
 
@@ -4385,6 +4425,63 @@ E. THE EXECUTOR DIRTIES THE REVIEW NAMESPACE BUT DOES NOT DECLARE IT
    It is never taken for a result, and never committed as one.
 ```
 
+### 21.8 End-to-end propagation trace
+
+Each row is traced through the **frozen sequence of §5.1 as repaired**, so that the sequence, the
+authority plan and the matrices cannot drift apart again.
+
+```text
+A. SAFE CANDIDATE, CAPABILITY CAPABLE
+   §5.1  10 Candidate frozen -> 11 material -> 11a resulting tree id -> 11b Context v2 immutable
+         -> 12 isolated verification under that Context -> 13 gen 1 accept + TaskInput
+         -> 14 reviewer -> 15 gen 2 settle
+         -> 15a capability derived for Context.resulting_tree = CAPABLE
+         -> 16 gen 3 seal + Receipt
+         -> 17 lineage -> 17a Consumption id -> 17b preflight -> 18 S-c1 -> K1
+         -> terminal stage -> S-c2 -> K2 -> recorded completion (§19)
+   result  ordinary authorization and the ordinary K1/K2 topology
+
+B. UNSAFE RESULTING TREE
+   §5.1  identical through step 15. The Context at 11b IS BUILT AND VALID — it binds the proof
+         target and carries no verdict (§7.9.6, TM-11) — so generation 1 exists, the TaskInput
+         binds review_context_hash, and the external Review occurs normally.
+   15a   capability derived for Context.resulting_tree = UNSAFE
+   then  NO step 16: no generation-3 record, no Receipt, no authorization, no Consumption,
+         no K1, nothing published. Generation 2 remains latest and `open`. Operation STOP
+         (review_checkout_unsafe) with NO canonical reason record (§7.9.5, M-27).
+   result  EXPRESSIBLE + REVIEWED + NOT AUTHORIZED, which is invariant 26
+
+C. UNKNOWN CAPABILITY
+   identical to B in every step, with review_checkout_unknown. Unknown is never read as capable
+   and never as an invalid Candidate.
+
+D. S-c0
+   §5.1  step 9a, pinned to PRE_S_C0_BASE — the committed HEAD immediately before it, which
+         exists (§7.1.1). It commits the event log ALONE, which is what makes the two bases one
+         attribute state. Activated as PB-9.
+
+E. EVERY LATER COMMIT
+   the generation commits of 13 / 15 / 16, every pre-completion Work commit, S-c1 at 18 and
+   S-c2: all pinned to declared_base.base_commit, with core.autocrlf / core.eol neutralized and
+   the per-commit preflight under that same pin (§7.3, PB-3, PB-9).
+
+F. RESULT PATH INSIDE .workline/review/**
+   bound   before the executor ran, by the review-v1 invocation contract (PR-8)
+   at 10   the Candidate cannot be projected: the declaration violates that pre-bound ownership
+           rule
+   refusal StopError `review_reserved_namespace` — unowned state, which F2 §2.3 permits refusing
+   not     an unsupported Git result shape; not review_candidate_unavailable; never legacy
+   same    for a DELETION path inside the namespace
+
+G. ORDINARY .gitattributes RESULT
+   storage       proceeds under the pin; the committed object equals Candidate.new_oid (M-20)
+   Candidate     expressible; reviewed as an ordinary file entry
+   11a/11b       the resulting tree it produces is what the Context binds
+   15a           capability decides: capable -> A; unsafe/unknown -> B
+   completion    only via A, and then only through the ordinary K1/K2/recorded-completion
+                 topology. It is NOT the case that every such Work completes (§7.4.4).
+```
+
 ## 22. Consistency audit against P1 / P2 / F1 / F2
 
 Every point at which F3 touches an earlier freeze, classified.
@@ -4459,12 +4556,27 @@ C  true conflict requiring a new forward amendment
     pin and the line-ending configuration are part of the frozen primitive. That is the part
     §10.3 left to F3. §7.1.                                 A
 
-23  F2 §6.2  "The reviewed surface is exactly result_paths U deleted_paths as the executor
-    declared them."
-    F3 excludes the canonical Review namespace from it, because the canonical Review checkout
-    rule normalizes check-in bytes there (M-26) and a Candidate entry in that namespace would
-    break the storage-identity invariant. No landed rule excludes it today - checked - so this
-    is declared rather than assumed. FORWARD AMENDMENT A-5 (§1.5). §7.8.4.                     C
+23  F2 §6.2, §6.5 and §2.3 — the reserved Review namespace. A-5 touches three sections and
+    each one differently, so each is stated:
+
+    §6.2  "The reviewed surface is exactly result_paths U deleted_paths as the executor declared
+          them."  SUPERSEDED by one exclusion: minus any path inside the canonical Review
+          namespace. Required because the canonical Review checkout rule normalizes check-in
+          bytes there (M-26), so a Candidate entry in that namespace would break the
+          storage-identity invariant.                                                          C
+
+    §6.5  EXTENDED, and it is NOT correct to call it unchanged. §6.5 names exactly two
+          post-executor declaration failures — a declared path that is a directory, and one that
+          cannot be read — both about PROJECTABILITY. F3 adds a third, about OWNERSHIP, with its
+          own refusal identity `review_reserved_namespace`.                                    C
+
+    §2.3  RETAINED in full, and not weakened. §2.3 forbids refusing an ordinary correct outcome
+          for an unsupported RESULT SHAPE; a reserved-namespace declaration is unowned state,
+          which §2.3 expressly permits refusing, under a rule bound before the executor ran
+          (PR-8).                                                                              A
+
+    No landed rule excludes the namespace today — checked — so the exclusion is declared rather
+    than assumed. FORWARD AMENDMENT A-5 (§1.5). §7.8.4.
 
 22  F2 §10.3 and §10.1  "Checkout capability is not bound in the Work Context.\"
     F3 binds a checkout-capability claim over the CANONICAL REVIEW NAMESPACE - not over the Work
@@ -4487,9 +4599,18 @@ C  true conflict requiring a new forward amendment
     shape is preserved deliberately (§4.3). The Skill is not edited; the statement is listed
     for activation in §23.                                                                     A
 
-18  registry.md Commit / push, Push destination, Git versions.  F3 introduces no new threshold,
-    no new refspec form, no new adoption rule and no new destination behaviour. It adds one
-    entry-time capability refusal using the existing threshold and the existing code. §12.4.   A
+18  registry.md Commit / push, Push destination, Git versions.
+    F3 introduces no new refspec form, no new adoption rule and no new destination behaviour,
+    and the publication-capability refusal of §12.4 uses the existing P2_PUBLICATION_GIT_MIN
+    and the existing code. It DOES introduce one new threshold, and the earlier claim that it
+    introduced none is corrected here:
+
+        P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0    the review-v1 Work attribute pin (§7.7)
+
+    It is owned by rules/git alongside the two P2 thresholds, it does not alter either of them,
+    and it is not the authority for anything on its own — the capability probe of §7.7 is
+    (PB-11). Adding a threshold is an extension of what rules/git owns, not a change to a rule
+    it already states, so this stays a specialization.                                         A
 
 19  F2 §5.3  "base_commit is HEAD at the moment the completion is decided, which is the same
     commit F3 will later require as K1's parent for a result-bearing Work."
@@ -4523,7 +4644,11 @@ Five, all to landed F2, all declared in full in §1.5:
     A-3  F2 §7.1/7.2/7.3   the result-bearing / no-K1 discriminator               row 21
     A-4  F2 §10.3, §10.1   checkout capability unbound, and the exact Context     row 22
                            record it has to be added to
-    A-5  F2 §6.2           the reviewed surface excludes the Review namespace     row 23
+    A-5  F2 §6.2 SUPERSEDED, §6.5 EXTENDED, §2.3 RETAINED                         row 23
+                           the reserved Review namespace: the reviewed surface excludes it,
+                           and a declaration there is unowned state refused as
+                           `review_reserved_namespace` — a third declaration-invalidity case
+                           beside §6.5's two, not one of them
 
 No P1, P2 or P3 F1 statement is amended.
 No historical P1, P2, F1 or F2 document is edited by this contract.
@@ -4545,8 +4670,13 @@ PB-1  the review-v1 WORK publication rule: a mutation whose durable invocation n
       of its two proof notes names, recorded only after that commit's C-2 passed
 PB-2  current-combined, planning and generation rules are unchanged by PB-1
 PB-3  the commit primitive identity "review-v1-work-local-v1": no hook, no signing, no
-      filesystem monitor, no background maintenance; a transform on a committed path is
-      review_git_transform, never disabled to obtain a pass
+      filesystem monitor, no background maintenance, and core.autocrlf / core.eol neutralized.
+      A material transform assigned by the PINNED source to an ORDINARY path is
+      review_git_transform, never disabled to obtain a pass. This does NOT reach the reserved
+      canonical Review namespace: a rule whose pattern is confined to `.workline/review/**` is
+      the form-L rule the capability claim REQUIRES (§7.8.4, §7.9.3), and refusing it would make
+      every P2-capable Project unusable for P3 Work Review. The two surfaces are distinguished
+      by pattern confinement, never by which attribute name appears
 PB-4  base-exact commits: K1 and K2 are made only while HEAD is still exactly their recorded
       parent, and the independent-HEAD-advance allowance does not apply to them
 PB-5  a review-v1 Work START in a Project with a remote requires the running Git to meet
@@ -4555,10 +4685,13 @@ PB-5  a review-v1 Work START in a Project with a remote requires the running Git
 PB-6  the Git persistence preflight runs immediately before EVERY commit a review-v1 Work
       mutation makes, for exactly that commit's path set, evaluated under the pinned
       attribute source, and a pass never carries between commits (§7.3)
-PB-9  the attribute-source pin: every commit of a review-v1 Work mutation is made with
-      attr.tree set to the tree of declared_base.base_commit and the system and global
-      attribute sources neutralized, so committed object identity equals the Candidate's by
-      construction and no filter program is reachable (§7.1, §7.4.2)
+PB-9  the attribute-source pin, with its TWO bases (§7.1.1): S-c0 is made with attr.tree set
+      to the tree of PRE_S_C0_BASE — the committed HEAD immediately before it — and EVERY later
+      commit of the mutation with attr.tree set to the tree of declared_base.base_commit. The
+      two are proven to represent the SAME attribute state, because S-c0 commits the event log
+      alone and so can change no attribute source. In both cases the system and global attribute
+      sources are neutralized, so committed object identity equals the Candidate's by
+      construction and no filter program is reachable (§7.1, §7.1.1, §7.4.2)
 PB-10 an executor-authored change to Git persistence configuration is an ordinary Work
       result, committed and reviewed as an ordinary file entry, and is never refused
       (§7.4.1, §7.4.2)
@@ -4594,6 +4727,24 @@ PR-5  the no-remote topology of §20, and that it never collapses into the combi
 PR-6  the resume points of §5.3, and that a resume re-derives and never re-decides
 PR-7  that a pending review-v1 mutation never downgrades to legacy, and that legacy
       availability is a property of a separate later invocation (§7.4)
+PR-8  THE RESERVED REVIEW NAMESPACE, BOUND BEFORE EXECUTION. Selecting review-v1 binds, as part
+      of the invocation contract and BEFORE the executor runs, that
+
+          .workline/review/**
+
+      is a reserved Review-owned namespace which START's executor may not own — not as a result
+      path and not as a deletion path. The rule is static and in force from selection; the
+      concrete future path list need not be known for it to bind.
+
+      A `Completed` outcome declaring a path there has violated a pre-existing ownership
+      contract. It is UNOWNED STATE, refused with StopError code `review_reserved_namespace`.
+      It is NOT an unsupported Git result shape, NOT `review_candidate_unavailable` (which means
+      projectability), and NEVER a fallback to legacy.
+
+      This statement is load-bearing: it is what makes the refusal lawful under F2 §2.3, which
+      permits refusing unowned state while forbidding a post-executor refusal of a supported
+      result shape. Without it in the executor contract, the same refusal would be a discovery
+      made during Candidate projection, which §2.3 does not permit (§7.8.4, A-5)
 ```
 
 ### 23.3 `skills/review`
@@ -4616,6 +4767,31 @@ TM-8  the five forward amendments to landed F2 (§1.5), which a reader of F2 alo
 TM-10 the seal precondition of §7.9: a Review may not seal unless the resulting tree preserves
       canonical Review checkout capability over the Review namespace, proven mechanically
       over that tree and never left to reviewer discretion
+TM-11 THE WORK REVIEW CONTEXT, VERSION 2, and its target-only capability record:
+
+          schema:  "review-work-context"
+          version: 2
+
+          review_checkout_capability: {
+              capability_contract: "review-v1-work-checkout-capability-v1"
+              form:                "form-L"
+              namespace:           ".workline/review/**"
+              base_tree:           <full object id>
+              resulting_tree:      <full object id>
+          }
+
+      Exactly five keys, and NO VERDICT FIELD of any kind. Also activating:
+
+        the Context is IMMUTABLE before generation 1 accepts the task, and is what the TaskInput
+          and every gate generation bind through review_context_hash;
+        a Context whose resulting tree is UNSAFE or UNKNOWN is a VALID Context — it is built,
+          generation 1 may exist and the external Review occurs normally;
+        the verdict is DERIVED, only at seal, for exactly Context.resulting_tree;
+        only `capable` may issue a Receipt; unsafe and unknown withhold authorization (§7.9.5);
+        the seal changes no Context byte and computes no new review_context_hash.
+
+      A schema in which only the passing outcome is representable is the defect this replaces:
+      it would make an unsafe resulting tree unable to reach Review at all
 ```
 
 ### 23.4 `registry.md` routing
@@ -4903,7 +5079,7 @@ Stop conditions. An implementation that violates any of them is not implementing
 ## 27. Implementation readiness
 
 ```text
-Contract status              FROZEN (repaired after independent review, five times)
+Contract status              FROZEN (repaired through successive independent reviews)
 Architecture blocker         NONE
 HUMAN decision               NONE
 Forward amendment required   YES - five, to landed F2 only, declared in §1.5
@@ -4919,7 +5095,8 @@ F1 ordered prerequisites, unchanged and still binding:
 Freezing F3 authorizes no Gate. The activation producer still fails closed until Gates 1 and 2
 are both satisfied.
 
-Implementation prerequisites this contract measured and named, authorizing none:
+Implementation prerequisites this contract measured and named, authorizing none. This list is
+the complete set of §21.1 and is never a weaker summary of it:
   IP-1  a closed set of two git_commit persistence modes
   IP-2  the "work" branch of the publication discriminator and its validator
   IP-3  _recorded_completion recognizing the three-effect terminal stage, legacy unchanged
@@ -4927,6 +5104,17 @@ Implementation prerequisites this contract measured and named, authorizing none:
   IP-5  F1 Gate 2
   IP-6  the isolated verification materialization primitive (F2's named gap)
   IP-7  F1 Gate 3
+  IP-8  the attribute-source pin on both invocations, with its two bases (§7.1.1)
+  IP-9  the persistence evaluation made UNDER the pin, not against the working tree
+  IP-10 core.autocrlf / core.eol neutralization on both invocations
+  IP-11 P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0 and the capability probe that is its actual authority
+  IP-12 the universal attribute-source parser: every .gitattributes in the tree at every depth
+        plus info/attributes, alias-expanded, narrow supported shape, no user-defined macros
+  IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
+  IP-14 the reserved-namespace ownership boundary of A-5: the pre-execution binding in the
+        review-v1 invocation contract, the post-Completed validation of every declared result
+        and deletion path against the canonical Review namespace, and the new StopError code
+        `review_reserved_namespace` registered in the error and reason catalogue
 
 Not implemented by this contract:
   any commit primitive, proof, validator, terminal stage, publication or postcheck code
