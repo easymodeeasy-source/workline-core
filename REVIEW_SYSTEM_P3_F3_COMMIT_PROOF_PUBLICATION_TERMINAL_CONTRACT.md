@@ -390,7 +390,7 @@ exactly that, and says so, rather than reading the exclusion as if it had been c
 
 ---
 
-#### A-5 — F2 §6.2: the reviewed surface excludes the canonical Review namespace
+#### A-5 — F2 §6.2 superseded, §6.5 extended, §2.3 retained: the reserved Review namespace
 
 ```text
 F2 §6.2 says
@@ -401,10 +401,25 @@ F2 §6.2 says
 
 F3 supersedes it by ONE exclusion, and nothing else:
 
-    a review-v1 Work may not declare a result path or a deletion path inside the canonical
-    Review namespace (`.workline/review/**`). A declared owned set containing one cannot be
-    projected to a Candidate, and is refused with the existing `review_candidate_unavailable`
-    (F2 §6.5).
+    A review-v1 Work may not declare a result path or a deletion path inside
+    `.workline/review/**`.
+
+    A Completed outcome that does so violates the pre-bound ownership contract (PR-8) and is
+    refused as:
+
+        ReconcileRequired(
+            reason = "review_reserved_namespace"
+        )
+
+    recovery class   reconcile_required
+    code             reconcile_required
+    reason           review_reserved_namespace
+
+    The refusal happens BEFORE declare_own_content (§5.1 step 5b), so no ownership of the
+    reserved path is ever asserted. No Candidate is built from that declaration.
+
+    It is NOT `review_candidate_unavailable`, NOT a new StopError code, NOT a new exception
+    class, and NOT a refusal of an unsupported Git result shape.
 ```
 
 **Why both cannot stand.** Measured (M-26): with the canonical Review checkout rule in the base tree, a
@@ -921,7 +936,21 @@ below it is attempted.
  3  Project execution lock; activation verified           F1-D4, F1 §6.4
  4  durable  mutation opened with both markers            F1-D2
  5  the Work cycle runs; the executor returns Completed
- 6  declare_own_content over result_paths U deleted_paths start.py:884, unchanged
+ 5a normalize the declared result_paths and deleted_paths  start.py:876, unchanged
+ 5b THE RESERVED REVIEW NAMESPACE OWNERSHIP CHECK          §7.8.4, A-5, PR-8
+    inspect every declared result path and every declared deletion path.
+    If ANY lies inside `.workline/review/**`:
+
+        ReconcileRequired(reason = "review_reserved_namespace")  and STOP, with
+            no declare_own_content        no _OWN_CONTENT note
+            no completion_precheck        no dirty-separability check
+            no Candidate projection       no Review of any kind
+
+    This MUST precede step 6, and the precedence is the point: declare_own_content writes the
+    _OWN_CONTENT note through set_note, which calls _save() (measured), so it is a DURABLE
+    assertion that these paths are START's own. A path the invocation contract says START may
+    never own must not first be durably recorded as START-owned and only then refused.
+ 6  declare_own_content over the valid declared paths      start.py:884, unchanged
  7  completion_precheck passes                            skills/start, unchanged
  8  dirty separability over the owned set                 gitops.ensure_separable, unchanged
  9  Git persistence preflight over the owned set, under the pin  §7.3
@@ -931,7 +960,7 @@ below it is attempted.
 11a the RESULTING TREE identity becomes computable: base tree + the Candidate's entries,
     fully determined by what step 10 froze                §7.9.2
 11b          the Work Review Context v2 is built. It is NOT a durable checkpoint yet: its
-             first canonical durable binding is generation 1 (§5.4)            §7.9.6
+             first canonical durable binding is generation 1 (§5.3)            §7.9.6
              it binds capability_contract, form, namespace, base_tree, resulting_tree —
              the proof TARGET, never a verdict, so a Context is built and valid whatever
              the resulting tree's capability turns out to be
@@ -1001,6 +1030,10 @@ R-5  Terminal events are NEVER carried by K1. K1's physical delta is the Candida
      and are proven at K1 by exact tree containment instead (§9, item W5; §17.2).
 R-6  Identifiers are reserved and content is durable before the stage that applies them
      (R4 §6, §13.2).
+R-6a OWNERSHIP VALIDATION PRECEDES OWNERSHIP ASSERTION. The reserved-namespace check of step 5b
+     runs before declare_own_content, before completion_precheck and before any dirty-separability
+     check, because declare_own_content durably records the declared paths as this mutation's own.
+     No refusal of a declaration may follow a durable assertion of the very ownership it refuses.
 R-7  Each step marked `durable` completes its save before the step below it runs. An interruption
      between them resumes at the earliest unsatisfied checkpoint and re-derives, never re-decides.
 ```
@@ -1020,22 +1053,49 @@ BEFORE GENERATION 1
     one.
 
     A crash before generation 1 has durably committed the TaskInput and gate 1 therefore loses
-    the Context, and the resume:
-        recomputes the Candidate and the Context from the same frozen inputs,
-        reruns the isolated verification under the recomputed Context,
-        and claims NO prior Context survived.
-    Because every input is fixed — the base, the Candidate, the resulting tree, the authority
-    digests — recomputation is deterministic and yields the same review_context_hash, so this is
-    a repetition of work rather than a change of identity.
+    the Context. The resume:
+        1. re-establishes the still-valid Candidate and base ownership facts;
+        2. recomputes the CURRENT exact Context;
+        3. reruns the isolated verification under THAT recomputed Context;
+        4. generation 1 then makes that Context the first durable binding.
 
+    THE RECOMPUTED review_context_hash MAY DIFFER from the lost in-memory one. The previous
+    draft claimed sameness was guaranteed "because every input is fixed"; that is too strong and
+    is withdrawn. Two Context fields are content identities of the configured Workline root's
+    CURRENT working tree, not of committed or pinned state:
+
+        loader_identity    the content identity of the running implementation package
+        authority          the digests of registry.md and the bound Skills (F2 §10.2)
+
+    The live implementation-identity check proves the running package comes from the configured
+    root. It does NOT prove that root is committed, clean, unchanged or a fixed release. So an
+    authority or loader update between the crash and the retry changes the recomputed hash.
+
+    That is NOT reuse of a prior Review and NOT a retarget: no Review Context had been durably
+    bound yet, so there is nothing to reuse or retarget. It is the first binding, taken from
+    current authority.
+```
+
+```text
 GENERATION 1 IS THE FIRST CANONICAL DURABLE BINDING
     the TaskInput carries `review_context_hash` (M-2) and the gate generation carries it too
     (M-3), and the generation mutation commits both and proves them persisted (M-12).
 
-AFTER GENERATION 1
-    the Context is IMMUTABLE. It is never rebuilt, never recomputed and never retargeted, and a
-    resume reads it rather than deriving it again. A Context that disagreed with the bound
-    `review_context_hash` would be a material change under F2 §16.1.
+AFTER GENERATION 1 — recovery has an exact, concrete source
+    F2 §12.3 freezes that the request envelope contains `context: <the whole Work Review Context
+    record>`, and the TaskInput binds that envelope (M-2). Therefore:
+
+        the exact Context BYTES are durably recoverable from
+            TaskInput.request_envelope.context
+        `review_context_hash` verifies and binds those bytes;
+        a resume READS that exact Context;
+        it NEVER reconstructs the Context from the hash, and never recomputes it.
+
+    The Context is IMMUTABLE from here: never rebuilt, never recomputed, never retargeted.
+
+    If current authority differs from what those bytes record, that is ordinary Context /
+    current-validity drift under F2 §16.1 — an invalidation question — and NOT permission to
+    rebuild the bound Context.
 ```
 
 ```text
@@ -1051,15 +1111,22 @@ launched under exactly it. What it is not, before generation 1, is DURABLE.
 F3 freezes the resume **point**; F4 owns what to do when the state found there does not match.
 
 ```text
+before 5b                     the executor has returned and nothing is recorded; a retry asks the
+                              executor again or reuses a saved result, exactly as today
+5b refused                    NOTHING was written: no note, no effect, no record changed. A retry
+                              re-runs the same check and reaches the same answer while the
+                              declaration is the same; a person reconciles (reconcile_required)
 before 9a                     nothing of the completion is committed; the flow continues
 9a recorded, not applied      S-c0 replays; when the event log already matches HEAD it is a
                               no-op and the Candidate is frozen against the same base
 after 9a, before 11b          nothing physical happened since; the Candidate is re-frozen or
                               reused and the Context is built
 after 11b, before 13          the Context exists in memory only and NO durable carrier holds
-                              it. A crash here loses it, and §5.4 says exactly what a resume
-                              does: recompute it from the same frozen inputs, rerun the
-                              isolated verification, and claim no prior Context survived
+                              it. A crash here loses it, and §5.3 says exactly what a resume
+                              does: recompute the CURRENT Context, rerun the isolated
+                              verification under it, and claim no prior Context survived. The
+                              recomputed review_context_hash may differ, legitimately, if the
+                              loader or authority files changed in between
 13 recorded, before 16        generation 1 has durably bound the Context through the TaskInput
                               and the gate record. From here the Context is IMMUTABLE and is
                               never rebuilt or retargeted; the flow resumes at the earliest
@@ -1116,6 +1183,9 @@ substituted for them:
 
 ```text
  1 ...  5   as §5.1; the executor returns Completed with an empty owned set
+ 5b         the reserved-namespace ownership check is VACUOUS for the no-declared-path case:
+            there is no declared path to inspect. For the ALL-INERT case it still runs in full,
+            before step 6, because declared paths exist                           §5.1, §7.8.4
  6          no declare_own_content: there is no owned path         (start.py:880, unchanged)
  7          completion_precheck passes
  8, 9       not applicable: there is no owned path to separate or to preflight
@@ -2151,6 +2221,11 @@ FROZEN, AS AN OWNERSHIP BOUNDARY DECLARED BEFORE EXECUTION:
   bound it. START cannot show ownership of that path for this operation, because the namespace is
   owned by Review.
 
+  THE CHECK RUNS BEFORE declare_own_content (§5.1 step 5b). declare_own_content writes the
+  _OWN_CONTENT note through set_note, which calls _save(), so it durably asserts that the
+  declared paths are this mutation's own. Refusing after that would mean durably claiming
+  ownership of a path the contract says may never be owned, and only then rejecting it.
+
   refusal identity:  ReconcileRequired, carrying the frozen reason
 
                          ReconcileRequired(reason = "review_reserved_namespace")
@@ -2182,8 +2257,9 @@ unrelated meanings is the ambiguity this contract is supposed to remove, and no 
 states it: the contract-argument refusal is about the caller's argument, `review_containment` is
 about where Review's own writes land, and `review_candidate_unavailable` is about projection.
 
-This is the same reasoning F1 used when it introduced `review_not_activated`, and it is the only
-new code F3 introduces.
+This is the same reasoning F1 used when it introduced `review_not_activated`, and
+`review_reserved_namespace` is the only new ReconcileRequired REASON VALUE F3 introduces. It is not
+a new code and not a new exception class: the code stays `reconcile_required`.
 ```
 
 **Why this refusal does not break the no-trap principle.** It is not a refusal of a RESULT SHAPE, and
@@ -4015,7 +4091,9 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
 
 IP-14 The reserved-namespace ownership boundary of A-5 needs three things: the pre-execution
       binding in the review-v1 invocation contract (PR-8), a post-Completed validation of every
-      declared result and deletion path against the canonical Review namespace, and the new
+      declared result and deletion path against the canonical Review namespace WHICH MUST RUN
+      BEFORE declare_own_content (§5.1 step 5b, because that call durably records ownership),
+      and the new
       reason value `review_reserved_namespace` registered in the reason catalogue alongside the
       review-v1 planning reasons, carried through ReconcileRequired. It is the only new reason F3
       introduces, and it needs no new exception class.
@@ -4522,6 +4600,7 @@ B. .gitattributes RESULT
 
 C. RESULT PATH EXACTLY INSIDE .workline/review/gates/**
    violation of the PRE-EXISTING review-v1 executor ownership contract (§7.8.4, A-5).
+   when         §5.1 step 5b, before declare_own_content
    refusal      ReconcileRequired(reason = "review_reserved_namespace")
    framing      this is NOT an unsupported Git result shape. The blob there may be perfectly
                 ordinary. What is refused is a DECLARATION OF OWNERSHIP over a namespace the
@@ -4589,8 +4668,8 @@ E. EVERY LATER COMMIT
 
 F. RESULT PATH INSIDE .workline/review/**
    bound   before the executor ran, by the review-v1 invocation contract (PR-8)
-   at 10   the Candidate cannot be projected: the declaration violates that pre-bound ownership
-           rule
+   at 5b   the ownership check refuses BEFORE declare_own_content: no _OWN_CONTENT note, no
+           completion_precheck, no dirty-separability check, no Candidate projection, no Review
    refusal ReconcileRequired(reason="review_reserved_namespace") — unowned state, which F2 §2.3
            permits refusing, and refusing as a reconcile is what §2.3 says it is
    not     an unsupported Git result shape; not review_candidate_unavailable; never legacy
@@ -4603,6 +4682,56 @@ G. ORDINARY .gitattributes RESULT
    15a           capability decides: capable -> A; unsafe/unknown -> B
    completion    only via A, and then only through the ordinary K1/K2/recorded-completion
                  topology. It is NOT the case that every such Work completes (§7.4.4).
+```
+
+### 21.9 Ownership-ordering and Context-recovery trace
+
+```text
+A. ORDINARY RESULT OUTSIDE THE REVIEW NAMESPACE
+   5 Completed -> 5a normalize -> 5b ownership check PASSES (no declared path is inside
+   .workline/review/**) -> 6 declare_own_content -> 7 completion_precheck -> ... -> 10 Candidate
+   result  ordinary supported result; the Candidate is built
+
+B. RESULT PATH INSIDE .workline/review/**
+   5 Completed -> 5a normalize -> 5b ownership check FAILS
+   refusal ReconcileRequired(reason = "review_reserved_namespace")
+   NOT run  declare_own_content, the _OWN_CONTENT note, completion_precheck,
+            dirty-separability, Candidate projection, any Review
+   why      declare_own_content writes the note through set_note -> _save(), a DURABLE ownership
+            assertion. Refusing after it would durably claim ownership of a path that may never
+            be owned, and only then reject it.
+   legacy   never. The pending review-v1 mutation does not downgrade (§7.4).
+
+C. DELETION PATH INSIDE THE REVIEW NAMESPACE
+   identical to B. The ownership rule names result paths and deletion paths alike.
+
+D. ALL-INERT ORDINARY RESULT
+   5b runs IN FULL — declared paths exist, they are simply inert — and passes.
+   -> 6 declare_own_content -> ... -> all-inert Candidate, artifact_kind "empty", NO K1 (§6.7)
+
+E. NO DECLARED PATH
+   5b is VACUOUS: there is no declared path to inspect. No declare_own_content either
+   (start.py:880). -> empty Candidate, NO K1.
+
+F. CRASH AFTER CONTEXT BUILD, BEFORE GENERATION 1, AUTHORITY FILES UNCHANGED
+   the Context had NO durable carrier, so it is lost. The resume re-establishes the Candidate and
+   base facts, recomputes the CURRENT Context, reruns isolated verification, and generation 1
+   binds that Context. The recomputed review_context_hash may happen to equal the lost one —
+   but SAMENESS IS NOT AN INVARIANT and nothing depends on it (§5.3).
+
+G. SAME CRASH, BUT loader_identity OR AUTHORITY FILES CHANGED
+   the recomputed hash DIFFERS, legitimately: those two fields are content identities of the
+   configured root's CURRENT working tree, and the implementation-identity check proves only that
+   the running package comes from that root — not that the root is committed, clean or pinned.
+   No prior durable Context is claimed, because none existed. This is the FIRST binding, taken
+   from current authority — not reuse, not retarget.
+
+H. CRASH AFTER GENERATION 1
+   the exact Context BYTES are recovered from `TaskInput.request_envelope.context` (F2 §12.3,
+   M-2), and `review_context_hash` verifies them. The resume READS that Context; it never
+   recomputes it and never reconstructs it from the hash, and it NEVER retargets to a newly
+   recomputed Context. Authority that differs now is ordinary current-validity drift under
+   F2 §16.1 — an invalidation question, not a licence to rebuild.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -4859,6 +4988,9 @@ PR-8  THE RESERVED REVIEW NAMESPACE, BOUND BEFORE EXECUTION. Selecting review-v1
       is a reserved Review-owned namespace which START's executor may not own — not as a result
       path and not as a deletion path. The rule is static and in force from selection; the
       concrete future path list need not be known for it to bind.
+
+      The check runs at §5.1 step 5b, BEFORE declare_own_content, so this operation never
+      durably asserts ownership of a path it may not own.
 
       A `Completed` outcome declaring a path there has violated a pre-existing ownership
       contract. It is UNOWNED STATE, refused as
@@ -5170,6 +5302,10 @@ Stop conditions. An implementation that violates any of them is not implementing
     the built-in macro binary, and the configuration variables core.autocrlf and core.eol. A name
     is never judged as an opaque word.
 
+27a. The reserved-namespace ownership check runs before declare_own_content, so a path the
+    invocation contract says START may never own is never durably recorded as START-owned and
+    only then refused. Ownership validation always precedes ownership assertion.
+
 28. The canonical Review namespace is reserved: no Candidate entry lies inside it, and the
     canonical form-L checkout rule is required there rather than refused. Those two together are
     what let the storage-identity invariant and canonical Review durability both hold.
@@ -5239,9 +5375,9 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
   IP-14 the reserved-namespace ownership boundary of A-5: the pre-execution binding in the
         review-v1 invocation contract, the post-Completed validation of every declared result
-        and deletion path against the canonical Review namespace, and the new StopError code
-        reason `review_reserved_namespace` registered in the reason catalogue, carried through
-        ReconcileRequired (no new exception class is needed)
+        and deletion path — running BEFORE declare_own_content — and the new ReconcileRequired
+        reason value `review_reserved_namespace` registered in the reason catalogue (no new code
+        and no new exception class is needed)
 
 Not implemented by this contract:
   any commit primitive, proof, validator, terminal stage, publication or postcheck code
