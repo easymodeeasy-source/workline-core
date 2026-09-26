@@ -878,6 +878,43 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-64  THE CONFIG-NEUTRALIZATION VARIABLES MAKE THE IDENTITY CAPTURE IMPOSSIBLE, AND THE STRIP
+      ALONE ALREADY PROTECTS IT. MEASURED, in a Project whose identity lives ONLY in global
+      config — `user.name = Global Person`, `user.email = global@example.com`, with NO
+      repository-local `user.name` or `user.email` — and with hostile inherited GIT_AUTHOR_NAME,
+      GIT_AUTHOR_EMAIL, GIT_COMMITTER_NAME, GIT_COMMITTER_EMAIL, GIT_INDEX_FILE,
+      GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES and
+      GIT_CONFIG_COUNT / GIT_CONFIG_KEY_0=user.name / GIT_CONFIG_VALUE_0=ConfigEnvAttacker:
+
+          STRIP EVERY INHERITED GIT_* ONLY, no injection
+              git -C <root> config --get user.name   -> EXIT 0, "Global Person"
+              git -C <root> config --get user.email  -> EXIT 0, "global@example.com"
+
+          THE SAME, PLUS GIT_CONFIG_NOSYSTEM=1 AND GIT_CONFIG_GLOBAL=<empty file>
+              git -C <root> config --get user.name   -> EXIT 1, EMPTY
+              git -C <root> config --get user.email  -> EXIT 1, EMPTY
+
+      So a universal allowlist that marks those two variables "always" makes §7.1.9 phase A
+      IMPOSSIBLE for an ordinary Project. The two classes of §7.1.9 exist for exactly this.
+
+      NOTE WHAT THE STRIP ALONE ALREADY DOES: the hostile `GIT_CONFIG_COUNT` /
+      `GIT_CONFIG_KEY_0` / `GIT_CONFIG_VALUE_0` triple is itself `GIT_*`, so it is stripped and
+      never reaches the capture — an environment-injected `user.name` cannot poison it either.
+
+      PRECEDENCE IS PRESERVED BY THE CAPTURE. With a repository-local identity added, the same
+      stripped capture returned `Real Person` / `real@proj`; with it removed again, `Global
+      Person` / `global@example.com`. Ordinary system -> global -> local precedence, untouched.
+
+      END TO END, global-only identity with all of the hostile variables above inherited: class A
+      captured `Global Person` / `global@example.com`; class B then neutralized configuration,
+      injected those values and ran commit-tree; and the raw commit object, read back under a
+      stripped environment, held
+
+          author    Global Person <global@example.com>
+          committer Global Person <global@example.com>
+
+      with no hostile value anywhere in it.
+
 M-63  `git var ...IDENT` CONSUMES THE INHERITED ENVIRONMENT; `config --get` UNDER THE STRIP DOES
       NOT. MEASURED, in a Project configured `user.name = Real Person`,
       `user.email = real@proj`, whose global config says `Global Person`, with hostile inherited
@@ -2867,29 +2904,66 @@ grafts is one a person should know about — and an entry check for
 #### 7.1.9 The environment the sequence runs in
 
 ```text
-environment ONE MECHANICAL RULE, in this order, for EVERY Git invocation of this operation:
+environment TWO RULES, NOT ONE, AND THE DIFFERENCE IS EXACT. An earlier draft stated a single
+            mechanical rule — strip, then inject the allowlist — "for EVERY Git invocation of
+            this operation", with `GIT_CONFIG_NOSYSTEM=1` and `GIT_CONFIG_GLOBAL=<empty file>`
+            marked "always". That made the identity capture of §7.1.9 phase A IMPOSSIBLE, because
+            phase A exists precisely to read the configuration those two variables hide.
 
-              1. STRIP EVERY INHERITED `GIT_*` VARIABLE. Not "except" anything: the inherited
-                 environment contributes NOTHING. This includes GIT_DIR, GIT_WORK_TREE,
-                 GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES,
-                 GIT_REPLACE_REF_BASE, GIT_CEILING_DIRECTORIES, GIT_NAMESPACE, GIT_AUTHOR_*,
-                 GIT_COMMITTER_*, and every other name beginning `GIT_`, known or unknown.
-              2. INJECT EXACTLY the allowlist below, and nothing else.
+            MEASURED (M-64), in a Project whose identity lives ONLY in global config:
+                strip inherited GIT_* only
+                    config --get user.name  -> EXIT 0, "Global Person"
+                    config --get user.email -> EXIT 0, "global@example.com"
+                strip PLUS GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL=<empty file>
+                    config --get user.name  -> EXIT 1, empty
+                    config --get user.email -> EXIT 1, empty
 
-            MEASURED (M-61) that step 1 is load-bearing: an inherited GIT_AUTHOR_NAME /
+            So the two halves of the old "one rule" are separated. THE STRIP IS UNIVERSAL; THE
+            CONFIG-NEUTRALIZATION ALLOWLIST IS NOT. There are exactly TWO classes and no others:
+
+            CLASS A — THE IDENTITY CAPTURE INVOCATION (§7.1.9 phase A). Exactly the two
+                      `config --get` commands, and nothing else, ever.
+                        1. start from the parent process environment;
+                        2. REMOVE EVERY INHERITED `GIT_*` VARIABLE — the same strip as class B,
+                           with no exception;
+                        3. DO NOT inject the configuration-neutralization variables yet;
+                        4. ordinary Git configuration resolution stays intact, with its ordinary
+                           precedence: system -> global -> repository-local;
+                        5. the Project root is given as a COMMAND ARGUMENT (`git -C <root>`),
+                           never through an ambient Git environment variable.
+
+            CLASS B — EVERY OTHER GIT INVOCATION OF THIS OPERATION: plan construction, O-1...O-8,
+                      prepared-commit verification, RAW_PARENTS (§7.1.8), C-2, lineage and delta
+                      proof, the Git persistence preflight, and the §7.1.4 index transaction.
+                        1. REMOVE EVERY INHERITED `GIT_*` VARIABLE;
+                        2. INJECT EXACTLY the class B allowlist below, and nothing else.
+
+            BOTH CLASSES STRIP EVERYTHING INHERITED. The strip is what protects against a hostile
+            environment, and no invocation of this operation is exempt from it. What class A
+            omits is only the configuration NEUTRALIZATION — and it omits it for the one purpose
+            that requires the configuration to be readable.
+
+            MEASURED (M-61) that the strip is load-bearing: an inherited GIT_AUTHOR_NAME /
             GIT_AUTHOR_EMAIL put `author Attacker <evil@x>` on a commit in a Project configured
             to "Real Person"; an inherited GIT_INDEX_FILE silently redirects every index command;
             and an inherited GIT_OBJECT_DIRECTORY made `cat-file -e HEAD` EXIT 1 — the
-            repository's own commit invisible.
+            repository's own commit invisible. MEASURED (M-64) that the strip alone already
+            protects class A: with hostile GIT_AUTHOR_*, GIT_COMMITTER_*, GIT_INDEX_FILE,
+            GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES and
+            GIT_CONFIG_COUNT/KEY_0/VALUE_0 all set, the stripped capture still returned the
+            configured identity and none of the hostile values.
 
-allowlist   GIT_ATTR_NOSYSTEM=1              always
-            GIT_CONFIG_NOSYSTEM=1            always
-            GIT_CONFIG_GLOBAL=<empty file>   always, a Workline-owned empty file
-            GIT_NO_LAZY_FETCH=1              always
-            GIT_NO_REPLACE_OBJECTS=1         always
-            GIT_LITERAL_PATHSPECS=1          always
+allowlist   THE CLASS B ALLOWLIST. Class A injects NONE of these; it strips and injects nothing.
+
+            GIT_ATTR_NOSYSTEM=1              every class B invocation
+            GIT_CONFIG_NOSYSTEM=1            every class B invocation — NOT class A
+            GIT_CONFIG_GLOBAL=<empty file>   every class B invocation — NOT class A;
+                                             a Workline-owned empty file
+            GIT_NO_LAZY_FETCH=1              every class B invocation
+            GIT_NO_REPLACE_OBJECTS=1         every class B invocation
+            GIT_LITERAL_PATHSPECS=1          every class B invocation
             GIT_AUTHOR_NAME                  \
-            GIT_AUTHOR_EMAIL                  | on commit-tree only, from the capture below
+            GIT_AUTHOR_EMAIL                  | on commit-tree only, from the class A capture
             GIT_AUTHOR_DATE                   |
             GIT_COMMITTER_NAME                |
             GIT_COMMITTER_EMAIL               |
@@ -2899,6 +2973,8 @@ allowlist   GIT_ATTR_NOSYSTEM=1              always
                                              else, so no command touches an index by accident
             Any further variable a final design needs must be added to this list explicitly. A
             variable that is not on it is not set, and a variable that is inherited is not kept.
+            Nothing is added to class A: its environment is the stripped parent environment and
+            nothing more.
 
 identity    ONE MECHANISM, in TWO ORDERED PHASES. An earlier draft offered
 precedence  `git var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT` and the resolved
@@ -2908,44 +2984,68 @@ precedence  `git var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT` and the resolved
             GIT_COMMITTER_EMAIL, `git var GIT_AUTHOR_IDENT` returned `Attacker <evil@x>` and
             `git var GIT_COMMITTER_IDENT` returned `AttackerC <evilc@x>`. Because the capture
             necessarily runs BEFORE the configuration is neutralized, a poisoned capture would
-            then be re-injected by step 2 as an ALLOWLISTED value — so the hostile identity would
+            then be re-injected into class B as an ALLOWLISTED value — so the hostile identity would
             survive through the very rule that claims to remove it. `git var ...IDENT` is
             WITHDRAWN as an authorized capture mechanism.
 
-            PHASE A — CONFIGURATION CAPTURE. Run, with step 1's strip ALREADY APPLIED to this
-            invocation and the Project root given on the command line rather than through the
-            environment:
+            PHASE A — CONFIGURATION CAPTURE. This invocation is CLASS A of the environment rule
+            above: every inherited `GIT_*` variable is already removed, and the
+            configuration-neutralization variables are NOT yet set. The Project root is given on
+            the command line rather than through the environment:
 
                 git -C <project root> config --get user.name
                 git -C <project root> config --get user.email
 
+            and nothing else is ever run in class A.
+
             `--get` reads the MERGED configuration with ordinary precedence, so system, global
             and repository-local settings decide exactly as they always did; `-C` survives the
-            strip because it is an argument, not a variable. MEASURED (M-63): under the hostile
-            environment above this returns `Real Person` / `real@proj`, the repository-local
-            values, while the global `Global Person` is correctly overridden — the person's
-            intended configured identity, unpoisoned.
+            strip because it is an argument, not a variable.
+            MEASURED (M-63): with repository-local identity present this returns `Real Person` /
+            `real@proj`, the global `Global Person` correctly overridden.
+            MEASURED (M-64): with identity ONLY in global config — no repository-local
+            `user.name` or `user.email` — and hostile GIT_AUTHOR_*, GIT_COMMITTER_*,
+            GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY, GIT_ALTERNATE_OBJECT_DIRECTORIES and
+            GIT_CONFIG_COUNT/KEY_0/VALUE_0 all inherited, the stripped capture returned
+            `Global Person` / `global@example.com` and none of the hostile values. The same
+            capture run with the class B neutralization variables set returned EXIT 1 and empty
+            output for both fields — which is why class A must not set them.
             Either lookup failing is STOP AT ENTRY (the same condition ordinary Git reports),
-            raised before anything is written. MEASURED (M-63): with no identity configured
-            anywhere, `config --get` exits 1 with EMPTY output and invents nothing, where
-            `git var` exits 128 — so removing `git var` loses no capability here.
+            raised before anything is written. There is no fallback: no `git var ...IDENT`, no
+            OS or hostname identity synthesis, and an empty value is never accepted. MEASURED
+            (M-63): with no identity configured anywhere, `config --get` exits 1 with EMPTY
+            output and invents nothing, where `git var` exits 128 — so removing `git var` loses
+            no capability here.
 
-            PHASE B — HERMETIC EXECUTION. Step 1's strip stays in force, the configuration above
-            is neutralized, and step 2 injects the PHASE A values — and only those — as
+            PHASE B — HERMETIC EXECUTION. Every invocation from here is CLASS B: the same strip
+            stays in force, the configuration above IS NOW neutralized, and the class B allowlist
+            injects the PHASE A values — and only those — as
             GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL, with
             the dates. Nothing else contributes to author or committer.
 
             THE ORDER IS THE MECHANISM, and it is stated once so it cannot be read either way:
-            the strip precedes the capture, the capture precedes the neutralization, and the
-            neutralization precedes every commit. There is no point at which an inherited
-            identity variable is visible to a Git invocation of this operation.
+
+                STRIP  ->  CAPTURE  ->  NEUTRALIZE  ->  HERMETIC EXECUTION
+
+                1. strip every inherited `GIT_*` for the class A capture invocation
+                2. capture the configured identity under ordinary Git configuration resolution
+                3. STOP AT ENTRY if either identity field is unavailable
+                4. activate the configuration neutralization
+                5. construct the class B hermetic environment
+                6. explicitly inject the captured identity
+                7. execute every commit and proof Git operation
+
+            NOT capture-then-strip, and NOT strip-then-neutralize-then-capture: the first leaves
+            the capture poisonable (M-63), the second makes it impossible (M-64). There is no
+            point at which an inherited identity variable is visible to any Git invocation of
+            this operation, in either class.
             MEASURED END TO END (M-63): with GIT_AUTHOR_*, GIT_COMMITTER_*, GIT_OBJECT_DIRECTORY
             and GIT_INDEX_FILE all hostile, the raw commit carried
             `author Real Person <real@proj>` and `committer Real Person <real@proj>`, with no
             hostile value anywhere in the object.
-attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.11>, on every invocation
-pin         of the sequence
-line        core.autocrlf=false and core.eol=lf, on every invocation. These are CONFIGURATION,
+attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.11>, on every CLASS B
+pin         invocation of the sequence that resolves attributes
+line        core.autocrlf=false and core.eol=lf, on every CLASS B invocation. These are CONFIGURATION,
 endings     not attributes: the attribute pin does not touch them, and measured, `core.autocrlf=true`
             normalizes CRLF check-in content even with the pin in place (M-23). Git for Windows
             sets it globally by default, so this is the ordinary condition on that platform.
@@ -2980,18 +3080,20 @@ semantics                              It is never an implicit fetch, never a tr
                                        `d/a1.txt`. Bound for EVERY command that consumes a
                                        declared path, not chosen per command, because which
                                        command globs is not something to rely on.
-            All three are set for EVERY Git invocation of this operation — plan construction,
-            O-1...O-8, prepared-commit verification, C-2, lineage/tree/delta proof, the Git
-            persistence preflight, and the §7.1.4 index transaction.
-identity    the effective author and committer identity is CAPTURED BEFORE the configuration
-            above is neutralized — `user.name` and `user.email` as the Project actually resolves
-            them — and supplied explicitly as GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL /
-            GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL to `commit-tree`. MEASURED (M-51): with the
-            identity only in global config, neutralized config makes `commit-tree` fail with
-            EXIT 128 "Author identity unknown", and an ordinary Project would have become
-            uncommittable purely because F3 neutralized config for persistence safety. If no
-            identity can be resolved before neutralization, STOP at entry — the same condition
-            ordinary Git reports, raised before anything is written rather than mid-commit.
+            All three are set for EVERY CLASS B invocation — plan construction, O-1...O-8,
+            prepared-commit verification, RAW_PARENTS (§7.1.8), C-2, lineage/tree/delta proof,
+            the Git persistence preflight, and the §7.1.4 index transaction. Class A sets none of
+            them; it runs only the two `config --get` commands, which fetch no object, follow no
+            promisor remote and consume no pathspec.
+identity    THE ONE RULE IS `identity precedence` ABOVE, and this row adds nothing to it. It is
+            kept only to say WHY the identity has to be injected at all: MEASURED (M-51), with
+            the identity only in global config, neutralized configuration makes `commit-tree`
+            fail with EXIT 128 "Author identity unknown", so an ordinary Project would have
+            become uncommittable purely because F3 neutralizes config for persistence safety.
+            The capture that prevents that is class A's, in the order `identity precedence`
+            freezes — strip, then capture, then neutralize — and an earlier version of THIS row
+            said only "captured before the configuration above is neutralized", which left the
+            position of the strip unstated. It is not a second rule and never was.
 dates       GIT_AUTHOR_DATE and GIT_COMMITTER_DATE are supplied explicitly, both equal to the one
             timestamp this commit is recorded with, so the commit identity does not depend on
             when within the operation `commit-tree` happens to run. They are part of the commit's
@@ -3777,7 +3879,7 @@ the decision, never matched as opaque words
     binary                      ==  -diff -merge -text   built-in macro; only UNSETS text: SAFE
 
 CONFIG VARIABLES — not attributes at all, so the attribute pin does not reach them; the primitive
-neutralizes them on every invocation (§7.1)
+neutralizes them on every CLASS B invocation (§7.1, §7.1.9)
 
     core.autocrlf               MEASURED material (M-23)
     core.eol                    neutralized with it; material for checkout semantics
@@ -6442,14 +6544,33 @@ IP-8  THE ENVIRONMENT IS PER-INVOCATION, NOT "BOTH INVOCATIONS". An earlier draf
       There is no pair of invocations any more: the sequence is O-1 ... O-8 and the §7.1.4
       transaction, and the requirement is stated over each of them by class.
 
-      THE THREE CLASSES, and every Git invocation of this operation belongs to at least the first:
+      TWO ENVIRONMENT CLASSES, and every Git invocation of this operation is in exactly one of
+      them. An earlier draft put EVERY invocation into one hermetic class that always injected
+      GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL=<empty file>; that made §7.1.9 phase A impossible
+      for a Project whose identity lives in global config (M-64), and it is corrected here.
 
-        (a) EVERY INVOCATION — the hermetic environment of §7.1.9, applied as ONE mechanical
-            rule: strip every inherited `GIT_*`, then inject exactly the allowlist
-            (GIT_ATTR_NOSYSTEM, GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL, GIT_NO_LAZY_FETCH,
-            GIT_NO_REPLACE_OBJECTS, GIT_LITERAL_PATHSPECS, and nothing else by default), with
-            core.hooksPath at the empty directory, core.fsmonitor=false, commit.gpgSign=false,
-            gc.auto=0, maintenance.auto=false. MEASURED that the strip is load-bearing (M-61).
+        (a1) THE IDENTITY CAPTURE INVOCATION — class A of §7.1.9. Exactly
+             `git -C <root> config --get user.name` and `user.email`, and nothing else, ever.
+             Strip every inherited `GIT_*`; inject NOTHING; leave ordinary Git configuration
+             resolution intact so the configured identity can be read; take the Project root
+             from the command line. MEASURED (M-64): the strip alone already defeats hostile
+             GIT_AUTHOR_*, GIT_COMMITTER_*, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,
+             GIT_ALTERNATE_OBJECT_DIRECTORIES and GIT_CONFIG_COUNT/KEY_0/VALUE_0, while the same
+             command WITH the neutralization variables returns EXIT 1 and empty.
+
+        (a2) EVERY OTHER INVOCATION — class B of §7.1.9, which is the hermetic environment:
+             strip every inherited `GIT_*`, then inject exactly the class B allowlist
+             (GIT_ATTR_NOSYSTEM, GIT_CONFIG_NOSYSTEM, GIT_CONFIG_GLOBAL, GIT_NO_LAZY_FETCH,
+             GIT_NO_REPLACE_OBJECTS, GIT_LITERAL_PATHSPECS, and nothing else by default), with
+             core.hooksPath at the empty directory, core.fsmonitor=false, commit.gpgSign=false,
+             gc.auto=0, maintenance.auto=false. MEASURED that the strip is load-bearing (M-61).
+
+        BOTH strip everything inherited; only (a2) neutralizes configuration. The strip is what
+        protects against a hostile environment and has no exception; the neutralization is what
+        (a1) must not have, for the one purpose that requires the configuration to be readable.
+
+      Classes (b) and (c) below qualify (a2) invocations only: class A resolves no attributes and
+      consumes no declared path, because the only two commands it ever runs do neither.
 
         (b) EVERY INVOCATION THAT RESOLVES ATTRIBUTES — the attribute-source pin: `attr.tree`
             (or GIT_ATTR_SOURCE) set to this commit's persistence basis (§7.1.11), plus the empty
@@ -6467,9 +6588,11 @@ IP-8  THE ENVIRONMENT IS PER-INVOCATION, NOT "BOTH INVOCATIONS". An earlier draf
       They are prohibited for this identity (§7.1.2) and remain the PLANNING mode's primitive,
       untouched. Git >= P3_WORK_ATTR_PIN_GIT_MIN (2.43.0) is still required for class (b), and
       the capability probe of §7.7 is the binding authority regardless of the declared floor.
+      No further environment class exists: (a1) and (a2) are exhaustive over the invocations
+      this operation makes.
 
-IP-10 The line-ending configuration core.autocrlf=false and core.eol=lf is set on EVERY invocation
-      of class (a) above, not on "both invocations". Measured, without them a CRLF result is
+IP-10 The line-ending configuration core.autocrlf=false and core.eol=lf is set on EVERY CLASS B
+      invocation — class (a2) above — not on "both invocations". Measured, without them a CRLF result is
       normalized on check-in even with the attribute pin in place (M-23), and Git for Windows
       enables autocrlf globally by default. Under v2 no check-in conversion path is entered at
       all (O-3 passes no `--path`), so this is belt-and-braces — retained so the sequence stays
@@ -6537,14 +6660,17 @@ IP-26 THE RAW COMMIT ANCESTRY READER of §7.1.8, which must NOT be built from, o
       Every lineage, range, descent and parentage question in §8.2, §9, §15, §16 and §7.1.3 is
       answered by this reader and by nothing else.
 
-IP-25 THE HERMETIC GIT ENVIRONMENT of §7.1.9, applied to EVERY invocation rather than to the
-      commit path alone: GIT_NO_LAZY_FETCH=1, GIT_NO_REPLACE_OBJECTS=1, GIT_LITERAL_PATHSPECS=1,
+IP-25 THE HERMETIC GIT ENVIRONMENT of §7.1.9, applied to EVERY CLASS B invocation rather than
+      to the commit path alone — and the GIT_* STRIP applied to class A as well, which is the
+      one thing both classes share (§7.1.9, IP-8 (a1)/(a2)):
+      GIT_NO_LAZY_FETCH=1, GIT_NO_REPLACE_OBJECTS=1, GIT_LITERAL_PATHSPECS=1,
       the promisor-configuration read and the grafts refusal at entry, and the author/committer
       identity captured BEFORE config neutralization but AFTER the GIT_* strip, by
       `git -C <root> config --get user.name` / `user.email` and by no other mechanism (§7.1.9
       phase A), then supplied explicitly with its dates. Without the capture an ordinary Project
       becomes uncommittable (M-51); with the capture in the wrong order a hostile inherited
-      GIT_AUTHOR_* would be captured and re-injected (M-63).
+      GIT_AUTHOR_* would be captured and re-injected (M-63); and with the class B neutralization
+      applied to the capture itself, a global-only identity cannot be read at all (M-64).
 
 IP-24 THE ATOMIC INDEX TRANSACTION of §7.1.4: an O_CREAT|O_EXCL `<git-dir>/index.lock`, a snapshot
       of the real index, entry-wise comparison against the plan's expected old entries, writes
@@ -6909,7 +7035,7 @@ contract of §7.1.
 
  8. core.autocrlf = true  (or input)
     why it bites configuration, not an attribute: the pin does not reach it. MEASURED, M-23
-    handling     the primitive sets core.autocrlf=false and core.eol=lf on every invocation
+    handling     the primitive sets core.autocrlf=false and core.eol=lf on every class B invocation
                  (§7.1), which restores raw identity.                  MEASURED, M-23
     committed id == Candidate.new_oid.
     outcome      SUPPORTED. This is the DEFAULT condition on Git for Windows, so it had to be.
@@ -7792,7 +7918,7 @@ the row says so instead of claiming a measurement.
 
 ```text
 A. PARTIAL CLONE, A BLOB MISSING LOCALLY
-   bound     GIT_NO_LAZY_FETCH=1 on every invocation (§7.1.9), plus a promisor-configuration read
+   bound     GIT_NO_LAZY_FETCH=1 on every class B invocation (§7.1.9), plus a promisor-configuration read
              at entry
    required  a locally absent object is LOCAL UNAVAILABLE and fails closed: no implicit fetch, no
              transport helper, no credential helper, no network
@@ -7828,6 +7954,27 @@ D2. HOSTILE INHERITED GIT_AUTHOR_* / GIT_COMMITTER_* AT CAPTURE TIME
    required  the capture runs AFTER the strip and uses `config --get` only; `git var ...IDENT` is
              withdrawn. End to end the raw commit carried the configured identity and no hostile
              value (M-63). Configuration precedence is preserved: repository-local beat global.
+
+D3. GLOBAL-ONLY IDENTITY + HOSTILE INHERITED GIT_* + EXACT PHASE A ENVIRONMENT
+   setup     global config `user.name = Global Person`, `user.email = global@example.com`; NO
+             repository-local user.name or user.email; hostile inherited GIT_AUTHOR_*,
+             GIT_COMMITTER_*, GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,
+             GIT_ALTERNATE_OBJECT_DIRECTORIES and GIT_CONFIG_COUNT/KEY_0/VALUE_0
+   class A   strip every inherited `GIT_*`; do NOT activate configuration neutralization; run
+             `git -C <root> config --get user.name` / `user.email`
+   MEASURED  -> EXIT 0, `Global Person` / `global@example.com` (M-64)
+   CONTROL   the SAME capture with GIT_CONFIG_NOSYSTEM=1 and GIT_CONFIG_GLOBAL=<empty file> set
+             -> EXIT 1 and EMPTY for both fields (M-64). THIS REGRESSION FAILS under a universal
+             allowlist that applies the class B neutralization to class A, which is exactly what
+             it exists to catch.
+   class B   neutralize configuration, inject the captured `Global Person` /
+             `global@example.com`, then commit-tree
+   MEASURED  the raw commit read back cleanly held
+                 author    Global Person <global@example.com>
+                 committer Global Person <global@example.com>
+             and NO hostile value anywhere in the object (M-64)
+   required  a Project whose identity lives only in global configuration completes normally, and
+             no hostile inherited value reaches the commit.
 
 E. MALICIOUS reference-transaction HOOK
    MEASURED  with the default hooks directory it ran THREE TIMES for one `update-ref`; under the
@@ -8656,10 +8803,16 @@ Stop conditions. An implementation that violates any of them is not implementing
     convenience, on an own path or an unrelated one, and the comparison that decides is made
     under the same exclusive lock as the write, so no gap exists between them.
 
-27l. Every Git invocation of this operation means the object its OID names, addresses the exact
-    path it is given, reaches no network, and runs no hook. None of that is left to the ambient
-    configuration: every inherited `GIT_*` variable is stripped and only an exact allowlist is
-    injected.
+27l. EVERY Git invocation of this operation strips EVERY inherited `GIT_*` variable. That rule
+    has no exception, and it is what protects the operation from a hostile ambient environment.
+
+    What the class B invocations ADD to it — an exact allowlist, configuration neutralization,
+    and with them the guarantees that an OID means the object it names, a path addresses exactly
+    itself, no network is reached and no hook runs — is NOT part of the strip and does not apply
+    to the one class A invocation, whose declared purpose is to read the configuration those
+    additions hide (§7.1.9, M-64). Stripping inherited `GIT_*` on every invocation and injecting
+    the post-capture hermetic allowlist on every invocation are two different rules; only the
+    first is universal.
 
 27m. Parentage, range and descent are read from the literal `parent` headers of the stored commit
     object. Git's revision view is not the authority, because refs/replace, `.git/info/grafts`
@@ -8776,12 +8929,14 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-5  F1 Gate 2
   IP-6  the isolated verification materialization primitive (F2's named gap)
   IP-7  F1 Gate 3
-  IP-8  the per-invocation environment classes of §7.1.9 — hermetic on every invocation, the
-        attribute pin with its two bases (§7.1.11) on every invocation that resolves attributes,
-        literal pathspecs on every invocation consuming a declared path. NOT "both invocations",
-        and never `git add` / `git commit`
+  IP-8  the per-invocation environment classes of §7.1.9 — the GIT_* STRIP on EVERY invocation
+        including the class A capture, the hermetic allowlist and configuration neutralization on
+        every CLASS B invocation only, the attribute pin with its two bases (§7.1.11) on every
+        class B invocation that resolves attributes, literal pathspecs on every class B
+        invocation consuming a declared path. NOT "both invocations", and never
+        `git add` / `git commit`
   IP-9  the persistence evaluation made UNDER the pin, not against the working tree
-  IP-10 core.autocrlf / core.eol neutralization on every invocation
+  IP-10 core.autocrlf / core.eol neutralization on every class B invocation
   IP-11 P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0 and the capability probe that is its actual authority
   IP-12 the universal attribute-source parser: every .gitattributes in the tree at every depth
         plus info/attributes, alias-expanded, narrow supported shape, no user-defined macros
@@ -8789,9 +8944,10 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-26 the RAW commit ancestry reader of §7.1.8 — raw parent headers only, no replace/graft/
         shallow interpretation, locally-unavailable parent -> fail closed, both OID widths. It
         must not be delegated to gitcmd.commit_parents / descends_from (M-57, M-59)
-  IP-25 the hermetic Git environment of §7.1.9 on every invocation — strip ALL inherited GIT_*,
-        inject exactly the allowlist, and capture the author/committer identity before config
-        neutralization (M-51, M-61)
+  IP-25 the hermetic Git environment of §7.1.9 on every CLASS B invocation — strip ALL
+        inherited GIT_* (which class A does too), inject exactly the class B allowlist, and
+        capture the author/committer identity AFTER the strip and BEFORE config neutralization,
+        by `config --get` alone (M-51, M-61, M-63, M-64)
   IP-24 the atomic index transaction of §7.1.4 (O_EXCL index.lock, snapshot, entry-wise compare,
         atomic rename, R-IDX-8 cleanup checkpoint)
   IP-23 the generation mode dispatch of §7.1.7: review_kind "work-result-v1" -> the Work
