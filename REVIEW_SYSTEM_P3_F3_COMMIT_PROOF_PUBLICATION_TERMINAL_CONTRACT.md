@@ -477,6 +477,41 @@ M-17  start._recorded_completion (start.py:1394) requires the completion's lifec
 M-18  state.py contains no reference to Review of any kind. The pin F2 §20.12 requires still
       holds exactly.
 
+M-20  ATTRIBUTE-SOURCE PINNING WORKS, AND IT IS MEASURED, NOT ASSUMED.
+      Git reads a path's attributes from the WORKING TREE's .gitattributes at `git add` time, so
+      an executor that writes .gitattributes changes how this operation's own commits store
+      objects. Git 2.40 added `attr.tree` / `GIT_ATTR_SOURCE`, which replaces the tree source with
+      a named tree-ish. `P2_REVIEW_GIT_MIN` is exactly 2.40.0, and live code already uses the
+      related `git check-attr --source=<tree-ish>` (review/checkout.py:209).
+
+      Measured on git 2.54.0, in the live primitive's own shape (`git add` then
+      `git commit --only --no-verify --no-gpg-sign -- <paths>`), with a clean filter configured,
+      a working-tree .gitattributes assigning it, and the filter instrumented to record every
+      execution:
+
+          UNPINNED                committed object ebdd5f79  (filtered - NOT the Candidate's id)
+                                  filter program executed 3 times
+          PINNED attr.tree=<base> committed object f92b6422  (EXACTLY `git hash-object
+                                  --no-filters`, which is F2 §6.3's new_oid)
+                                  filter program executed ZERO times
+          both cases              .gitattributes itself committed, with its new content
+
+      So pinning simultaneously (a) makes the committed object identity equal the Candidate's by
+      construction, and (b) mechanically prevents the filter program from running at all, which is
+      containment rather than the prohibited disabling of a filter that materially defines
+      committed bytes (P1 R5 §6). This is the measurement §7.6 is built on.
+
+M-21  The live committed-attribute evaluation already demonstrates full source containment
+      (review/checkout.py:171-215): a fresh bare repository borrowing this one's object store,
+      `GIT_ATTR_NOSYSTEM=1`, `GIT_CONFIG_NOSYSTEM=1`, an empty `GIT_CONFIG_GLOBAL`, an empty
+      `core.attributesFile`, and every `GIT_*` variable stripped from the environment. The same
+      technique neutralizes the system and global attribute sources for a commit.
+
+M-22  `require_effective_evaluation` (review/checkout.py:222) evaluates attributes with NO
+      `--source`, i.e. against the WORKING TREE. That is why an executor-authored .gitattributes
+      can make a Review-generation commit refuse after the executor returned: the refusal is real
+      and it is not on the K1 path at all. §7.6 closes it by pinning that evaluation too.
+
 M-19  records.WorkTerminalActivation is a schema and a reader with no producer anywhere in src/.
       Its activation_base_head is validated as `[0-9a-f]{40}` — SHA-1 width only — while
       Consumption.authorized_result_commit_sha accepts 40 or 64. That asymmetry belongs to F1
@@ -676,7 +711,7 @@ below it is attempted.
  6  declare_own_content over result_paths U deleted_paths start.py:884, unchanged
  7  completion_precheck passes                            skills/start, unchanged
  8  dirty separability over the owned set                 gitops.ensure_separable, unchanged
- 9  Git persistence preflight over the owned set (early)  §7.3
+ 9  Git persistence preflight over the owned set, under the pin  §7.3
  9a durable  S-c0 recorded and applied, if anything is uncommitted in the event log   §4.3
 10  the Work Candidate is frozen                          F2 §5, §6
 11  the CandidateSnapshot material envelope is built      F2 §9.3
@@ -687,10 +722,9 @@ below it is attempted.
 15  durable  gate generation 2: settle                    -> committed by its own mutation
 16  durable  gate generation 3: seal, issuing the Receipt -> committed by its own mutation
 17  the lineage precondition is proven                    §8.2
-17a the Consumption identifier is reserved, so S-c2's paths are known    §7.4.2, §13.2
-17b Git persistence preflight, AGAIN after the Review, over the UNION of every path this
-    operation will ever commit: the Candidate's entry paths, the event log and the
-    Consumption path. This is the run W2 binds, not step 9's      §7.3, §7.4.2
+17a the Consumption identifier is reserved                              §13.2
+17b Git persistence preflight, AGAIN after the Review, under the pin, over exactly the
+    paths S-c1 will write. This is the run W2 binds, not step 9's       §7.3
 18  durable  S-c1 recorded: the commit-only stage for K1  §7
 19           S-c1 applied -> K1 made -> C-1(K1)           M-7, M-10
 20  C-2(K1): items W1 ... W12                             §9
@@ -1032,17 +1066,30 @@ Its behaviour is frozen as the contained commit primitive, identical in mechanis
 primitive (M-6) and carrying a **distinct identity**:
 
 ```text
+attribute   attr.tree = <the tree of declared_base.base_commit>, on BOTH invocations
+source      GIT_ATTR_NOSYSTEM=1, core.attributesFile = a Workline-owned empty file,
+            GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL = that same empty file,
+            every GIT_* variable stripped from the inherited environment
 staging     `git add` with core.hooksPath = a Workline-owned empty plain directory,
-            core.fsmonitor=false, and nothing else
+            core.fsmonitor=false, and the attribute-source pin above
 commit      `git commit --only --no-verify --no-gpg-sign -m <message> -- <paths>`
             with core.hooksPath = that same directory
                 commit.gpgSign=false
                 core.fsmonitor=false
                 gc.auto=0
                 maintenance.auto=false
+                the attribute-source pin above
 hooks dir   proven to be an empty plain directory immediately before use, or STOP
             (review_hooks_path_invalid)
+base tree   proven, before each commit, to assign no filter, ident or working-tree-encoding to
+            any path that commit will write (§7.3)
 ```
+
+The attribute-source pin is the part that is new in this contract version, and §7.6 is why it exists. It
+is part of the frozen `review-v1-work-local-v1` identity, so it is bound into the Context (F2 §10.3) and
+into Review validity through R6/R11: a Review is valid under the persistence semantics it was taken with,
+and those semantics are now named exactly rather than inherited from whatever the working tree happens to
+hold when the commit runs.
 
 ```text
 The identity is distinct from "review-v1-planning-local-v1" even though the behaviour is the
@@ -1064,10 +1111,14 @@ mechanically denied by the primitive
       by configuration (commit.gpgSign=false) and by the flag (--no-gpg-sign)
     the filesystem monitor
     background gc and maintenance
+    every clean, process, LFS or ident program the WORKING TREE's attributes would select,
+      because the attribute source is pinned to the base tree and the system and global sources
+      are neutralized. Measured: under the pin the filter program is invoked zero times where
+      the unpinned commit invokes it three times (M-20)
 
 proven absent, never disabled
-    clean filters, process filters, LFS clean/process filters, ident expansion and
-      working-tree re-encoding
+    a clean filter, process filter, ident expansion or working-tree re-encoding assigned by the
+      PINNED source itself — the base tree, or a non-tree source
 ```
 
 R5 §6 is explicit that a filter which materially defines committed bytes **cannot simply be disabled to
@@ -1082,31 +1133,37 @@ commit is a later explicit contract version that must positively bind signing fo
 agent, key and helper identity first. F3 does not infer such safety.
 ```
 
-### 7.3 The Git persistence preflight — before EVERY commit of the primitive
+### 7.3 The Git persistence preflight — before EVERY commit, under the pin
 
 P1 R5 §4 requires **every** external executable or process Git can invoke on the exact staging and local
 commit path to be classified before the commit. §11.3 puts every Git stage of a review-v1 Work mutation
-under this primitive, so the preflight binds every one of them — not only the two that carry K1 and K2.
+under this primitive, and §7.6 puts the Review's own generation commits under it too, so the preflight
+binds all of them.
 
 ```text
-IMMEDIATELY BEFORE EVERY git_commit stage recorded with mode "review-v1-work-local-v1":
+IMMEDIATELY BEFORE EVERY commit this operation makes with "review-v1-work-local-v1":
 
-  1. determine the EXACT path set that stage will commit — the paths the stage's payload will
-     name, after the same changed-against-HEAD narrowing the stage itself applies, and never a
-     wider or a nominal set;
+  1. determine the EXACT path set that commit will write — after the same changed-against-HEAD
+     narrowing the stage itself applies, and never a wider or a nominal set;
 
-  2. run the complete persistence / external-process preflight for exactly those paths:
-       hooks, signing, filesystem monitor and background maintenance are MECHANICALLY DENIED by
-         the primitive itself (§7.1, §7.2) — the denial is re-established by the invocation, not
-         assumed from a previous stage;
-       `git check-attr filter ident working-tree-encoding` MUST print "unspecified" or "unset"
-         for every one of those paths and every one of those attributes;
-       the effective configuration MUST define no filter driver named "unset" or "unspecified";
+  2. evaluate the attributes of exactly those paths UNDER THE PINNED SOURCE — the same
+     attr.tree = <tree of declared_base.base_commit>, the same neutralized system and global
+     sources, that the commit itself will run with (§7.1).
 
-  3. a question Git cannot answer is a REFUSAL, not a pass;
+     Evaluating against the working tree instead would let the evaluation and the storage
+     disagree, which is precisely the defect M-22 records in the live effective evaluation;
 
-  4. an applicable or unsupported transform FAILS CLOSED before that commit is recorded and
-     therefore before it is made.
+  3. require "unspecified" or "unset" for filter, ident and working-tree-encoding on every one of
+     those paths, and require that the effective configuration define no filter driver named
+     "unset" or "unspecified";
+
+  4. hooks, signing, the filesystem monitor and background maintenance are MECHANICALLY DENIED by
+     the primitive itself, re-established by each invocation rather than assumed from a previous
+     one; and under the pin no filter, ident or encoding program is reachable at all (M-20);
+
+  5. a question Git cannot answer is a REFUSAL, not a pass;
+
+  6. anything that does apply FAILS CLOSED before that commit is recorded.
 
 Refusal code: review_git_transform (the existing live code; F3 introduces no new code here).
 ```
@@ -1115,72 +1172,73 @@ This binds, explicitly and without exception:
 
 ```text
 S-c0                              the entry-events commit
+generation 1 / 2 / 3              the Review's own record commits                     §7.6
+every pre-completion Work Git commit
+                                  a derived registration, a move, a human-NG move
 S-c1                              the result commit K1
 S-c2                              the terminal commit K2
-every pre-completion Work Git commit
-                                  a derived registration, a move, a human-NG move — every
-                                  commit-only stage the Work cycle records under §11.3
 ```
 
 ```text
-AND, before S-c1 only, the UNION check of §7.4.2: the same preflight over the complete set of
-paths this operation will ever commit — the Candidate's entry paths, the event log, and the
-Consumption path — so that a transform the executor itself introduced is discovered before any
-result commit exists rather than at S-c2, when K1 might already be published.
+A preflight passed for one commit NEVER carries to another. Each commit's path set is its own,
+and a pass proven for paths A says nothing about paths B.
+
+Under the pin the tree source cannot change beneath the operation, so what this per-commit check
+actually catches is drift in a NON-TREE source — .git/info/attributes, or a global or system
+source — arriving mid-run. That is external interference (§7.4.1), and it reconciles.
 ```
 
-```text
-A preflight passed for one stage NEVER carries to another stage. Each stage's path set is its
-own, the Project's attributes and configuration can change between stages, and a pass proven for
-paths A says nothing about paths B.
-```
-
-**S-c1 specifically is preflighted twice, and the second time is the one W2 binds.** Topology step 9 runs
-it as an early refusal, before the Candidate is frozen, so the operation does not pay for a whole Review
-before discovering a transform. But the Review runs between step 9 and step 18, and it can take arbitrarily
-long, during which the Project's attributes or configuration can change. So the preflight is run **again**
-immediately before S-c1 is recorded, after the Review has completed (step 17a), and it is that later run
-that C-2(K1) item W2 requires. The early run is an optimization and never satisfies W2.
-
-The preflight is required at all because F2 §6.3 froze the Candidate's `new_oid` as `gitcmd.hash_blob` of
-the executor's bytes, which is `git hash-object --no-filters`: if a clean filter applied, Git would store a
-different object and C-2(K1)'s tree proof (§9, W4/W5) would fail after the commit already existed.
+The preflight exists at all because F2 §6.3 froze the Candidate's `new_oid` as `gitcmd.hash_blob` of the
+executor's bytes, which is `git hash-object --no-filters`. Under the pin that equality is what Git
+actually produces (M-20); the preflight is what proves the base tree itself carries no rule that would
+break it.
 
 ```text
 Checkout capability is NOT bound for the Work path. F2 §10.3 froze that boundary: a Work result's
 bytes are the executor's and are bound by Git object identity, not by a reproduction claim.
-F3 does not add it.
+F3 does not add it. §7.6 states what that leaves open and why the Review is the control.
 ```
 
 ### 7.4 Where a transform refusal happens, and what it is not
 
 F2 §20.17 governs this exactly: *an ordinary, correct Work outcome is always expressible as a Candidate;
 where an outcome is outside the expressible domain and the condition is knowable before the executor runs,
-the refusal happens at START entry.* A Project's effective transform configuration **is** knowable before
-the executor runs, even though which result paths it will touch is not. So the refusal is split, and the
-knowable part is moved to the only non-trapping point:
+the refusal happens at START entry.* Under the attribute-source pin of §7.1 there is exactly ONE condition
+left that can break the Candidate's object identity, and it is **entirely knowable before execution**:
+whether the pinned source itself — the base tree, plus the non-tree sources the primitive cannot
+neutralize — carries a transform. So there is one refusal, and it is at entry.
 
 ```text
-ENTRY REFUSAL — the knowable condition, before anything exists
+ENTRY REFUSAL — the only transform refusal this contract has
 
   At START entry, before the Project execution lock and before any mutation is opened, a review-v1
-  Work START is refused when the Project's effective Git configuration or attributes define ANY
-  filter, ident or working-tree-encoding that could apply to a working-tree path.
+  Work START is refused unless BOTH hold:
+
+    the base tree assigns no filter, ident or working-tree-encoding attribute to anything
+      — evaluated under the pinned source, which is what every commit of this operation will use;
+
+    .git/info/attributes assigns none either, and the primitive's neutralization of the system and
+      global sources is shown to hold (M-21).
 
     code      review_git_transform
     effect    nothing is written, no mutation exists, no event, no commit, no Review record.
               The Project is exactly as it was, and legacy START is fully available for it as a
               separate invocation.
 
+  The base-tree condition covers every path at once, including paths whose identifiers are not yet
+  allocated — Review record paths and the Consumption path among them — which is why it is stated
+  over the tree rather than over a path list (§7.6).
+
   Consequence, stated rather than hidden: a Project that genuinely uses a content filter — Git LFS,
   a clean/smudge pair, ident expansion, working-tree re-encoding — cannot use review-v1 Work at
   this contract version. That is a stated v1 boundary, refused before the person has spent
   anything, and it is the same kind of honest limit F2 §13.6 set for Evidence completeness.
 
-POST-EXECUTOR — a transform that did not exist at entry now applies
+AFTER THE EXECUTOR — nothing the executor produces is refused
 
-  This is NOT one condition. It is two, with different causes and different lawful dispositions,
-  and §7.4.1 separates them.
+  The pin makes an executor-authored transform irrelevant to how this operation stores objects
+  (§7.4.2), so there is no post-executor transform refusal at all. What remains post-executor is
+  only external drift in a non-tree source, which §7.4.1 classifies as interference.
 ```
 
 #### 7.4.1 Operation-owned persistence configuration is a legitimate Work result
@@ -1220,72 +1278,91 @@ EXTERNAL persistence-config drift
        operation decided on, and it reconciles. F4 owns what recovery is attempted (§25).
 ```
 
-#### 7.4.2 The lawful topology for an operation-owned change
+#### 7.4.2 The pin, and why no post-executor refusal is needed
 
-The danger the classification was reaching for is real, but it is a SCOPE problem, not a validity
-problem: a new transform introduced by the executor can apply to paths this same operation has yet to
-commit — including the terminal paths — and by the time S-c2 discovered it, K1 could already exist and
-even be published.
+The earlier draft answered this by widening *when* the preflight runs, and then refusing when an
+executor-introduced transform covered a path this operation commits. **That refusal is withdrawn.** It was
+a post-executor refusal of a supported result shape, which F2 §2.3 prohibits outright, and calling it an
+"expressibility boundary" did not change what it was. The draft's claim that such a refusal happens
+"before any commit" was also simply false: by the time S-c1 is reached, S-c0 and three Review-generation
+commits have already been made (§7.5).
 
-That is closed by widening *when* and *over what* the preflight runs, not by prohibiting the result:
+The architecture that actually removes the refusal is the attribute-source pin of §7.1, and the reason it
+works is measured, not argued (M-20):
 
 ```text
-BEFORE S-c1 IS RECORDED, the preflight runs over the COMPLETE set of paths this operation will
-ever commit, evaluated against the post-executor working tree — which already holds whatever
-.gitattributes the executor produced:
+Every commit this operation makes runs with attr.tree pinned to the tree of
+declared_base.base_commit, with the system and global attribute sources neutralized.
 
-    the Candidate's entry paths                     (S-c1's set)
-  U .workline/events/events.jsonl                   (S-c2's event log)
-  U .workline/review/consumptions/<consumption_id>.yaml   (S-c2's Consumption)
+Therefore the persistence semantics this operation commits under are FIXED, at the base, before
+the executor runs — the same base the Candidate's object identities were computed against.
 
-The Consumption path is knowable at this point: its identifier is reserved under the
-deterministic, replay-stable key `review-consumption:<receipt_id>` (R2 §2), and the Receipt exists
-from the seal, which precedes S-c1. F3 therefore requires that reservation to happen at or after
-the seal and BEFORE S-c1 (§13.2), which is earlier than R4 §6 demands and strictly safe.
+An executor-authored .gitattributes is therefore an ORDINARY RESULT and nothing more. It is
+committed, with its new content, as an ordinary file entry (F2 §6.4's rule for .gitmodules,
+applied to the same question). It does not change how this operation stores any object, so it
+cannot make any commit of this operation deviate from the Candidate, and there is nothing to
+refuse.
+```
+
+Measured, in the live primitive's shape, with a clean filter that the new `.gitattributes` assigns to the
+result path (M-20):
+
+```text
+unpinned    committed object != Candidate.new_oid, and the filter program ran 3 times
+pinned      committed object == `git hash-object --no-filters` == Candidate.new_oid EXACTLY,
+            and the filter program ran ZERO times
+```
+
+So the pin closes three things at once, and this is the whole of the architecture:
+
+```text
+1. IDENTITY.  reviewed object identity == committed object identity, by construction rather than
+   by preflight. F2 §6.3's new_oid = hash_blob(bytes) becomes a statement Git makes true, not a
+   hope the preflight guards.
+
+2. EXTERNAL-PROCESS SAFETY.  The filter program is never invoked. P1 R5 §4 requires every
+   external process reachable on the staging/commit path to be classified before commit_local;
+   here it is mechanically DENIED, measurably, alongside hooks, signing, fsmonitor and
+   maintenance. This is containment, not the prohibited disabling of a filter that materially
+   defines committed bytes (R5 §6): under the pinned semantics no filter is applicable to this
+   operation at all, so none materially defines its committed bytes.
+
+3. NO POST-EXECUTOR REFUSAL.  There is no outcome shape the executor can produce that the pin
+   turns into a refusal, so F2 §2.3 and §20.17 are satisfied without any appeal to malformedness,
+   to legacy, or to F4.
+```
+
+#### 7.4.3 What the pin deliberately does NOT do, stated plainly
+
+```text
+The repository ends up holding the result object stored under the BASE semantics, while the
+newly committed .gitattributes describes different semantics for it going forward.
+```
+
+This is deliberate, and it is the correct behaviour for a Review system:
+
+```text
+the committed object is EXACTLY what the reviewer judged. The alternative — running the new
+  filter — would commit an object the reviewer never saw and never authorized, which is the
+  failure a Review system exists to prevent;
+
+it is ordinary Git behaviour, not an invention: attributes apply when content is staged, and
+  changing them later does not retroactively re-clean objects already stored. That is what
+  `git add --renormalize` exists for;
+
+and the decision itself is REVIEWED. Because .gitattributes is a declared result path, its new
+  content is an entry in the Candidate and the reviewer sees exactly which rule is being
+  introduced. Nothing is hidden behind a contract refusal: the control is the Review.
 ```
 
 ```text
-Consequence, and this is the point of the widening: a transform the executor introduced that
-would affect the terminal commit is discovered BEFORE K1 exists. Nothing is committed, nothing is
-published, and the operation refuses at a point where refusing costs a Review and no history.
+Renormalizing other paths under the new semantics is a separate Work, with its own Candidate and
+its own Review. F3 neither performs it nor forbids it.
 
-A transform the executor introduced that affects NOTHING this operation commits does not refuse
-at all. The .gitattributes change is committed as an ordinary result, the Work completes
-normally, and later operations see the new semantics — which is exactly the lawful outcome the
-re-review asked for.
-```
-
-The per-stage preflight of §7.3 remains, unchanged, as the backstop before every later commit: it catches
-external drift arriving after the union check passed.
-
-#### 7.4.3 The one bounded case that still refuses, named precisely
-
-```text
-The executor's new transform applies to a path THIS SAME OPERATION commits.
-
-Then the Candidate cannot faithfully describe the artifact: F2 §6.3 freezes new_oid as
-gitcmd.hash_blob of the executor's bytes, which is `git hash-object --no-filters`, and Git would
-store a different object. The Candidate would assert an identity Git does not hold.
-
-Disposition: refuse BEFORE S-c1 is recorded, code review_git_transform. No commit exists, nothing
-is published, and the Review that was performed is the only cost.
-```
-
-```text
-This is an EXPRESSIBILITY boundary of the Candidate at this contract version, and it is stated
-rather than hidden. It is NOT called malformed, and it is not a claim that the outcome is wrong:
-the Work may be perfectly correct. What is true is only that F2 §6.3's object identity cannot
-describe it.
-
-Lifting it would require amending F2 §6.3 so that new_oid is the FILTERED object identity — which
-changes what the reviewer is shown, changes content_sha256's meaning, and interacts with
-declare_own_content's own-bytes digest. That is a larger architecture change than this contract's
-findings call for, and F3 deliberately does not make it. It is named here so a later contract
-version does not have to rediscover it.
-
-It is not an architecture blocker: the topology is lawful and complete for every other case, the
-refusal happens before any physical effect, and the general operation-owned case — the one the
-re-review raised — proceeds normally.
+A LATER review-v1 Work in that Project then starts from a base whose committed attributes hold
+the new rule, so §7.4's entry refusal applies to it in the ordinary way, before anything is
+written. That boundary is unchanged by this repair and remains a stated v1 limit rather than a
+trap: it is decided at entry, where F2 §20.17 says a knowable condition belongs.
 ```
 
 #### A pending review-v1 mutation never downgrades to legacy
@@ -1314,30 +1391,36 @@ than implying a path that does not exist.
 #### 7.4.4 No-trap re-check, case by case
 
 ```text
-a transform configured at START entry
-    refused at entry, before any mutation exists. Nothing is stranded because nothing was opened,
-    and legacy START is available as a separate invocation.        F2 §20.17, knowable condition
+a transform already in the base tree, or in a non-tree source, at START entry
+    refused AT ENTRY, before the lock and before any mutation exists. Knowable before execution,
+    so F2 §20.17 puts the refusal exactly here. Nothing is opened, nothing is stranded, and
+    legacy START is available as a separate invocation.
 
-an operation-owned .gitattributes result affecting nothing this operation commits
-    PROCEEDS NORMALLY. Ordinary file entry, ordinary Candidate, ordinary K1, ordinary completion.
-    This is the case the re-review raised, and it is lawful.                            §7.4.2
+an operation-owned .gitattributes result — ANY of them, whatever it covers
+    PROCEEDS NORMALLY. The pin fixes this operation's persistence semantics at the base, so the
+    result cannot affect how this operation stores any object. It is committed as an ordinary
+    file entry, it is reviewed as one, and the Work completes.                          §7.4.2
 
-an operation-owned .gitattributes result affecting the TERMINAL paths
-    caught by the union preflight BEFORE S-c1. No K1, nothing published, no stranded published
-    result. The Work can be restructured and re-run.                                    §7.4.2
+    This single row replaces the three the previous draft had. There is no longer a case that
+    depends on WHAT the new attributes cover — not the result paths, not the Review-generation
+    paths, not the terminal paths — because the pin makes the coverage irrelevant to this
+    operation.
 
-an operation-owned transform covering this operation's OWN result paths
-    refused before S-c1, at an expressibility boundary that is named, bounded and pre-physical.
-    Not called malformed, not called invalid.                                           §7.4.3
-
-external drift after the union check passed
-    the per-stage preflight refuses before the affected commit; this is foreign interference and
-    it reconciles. What recovery is attempted is F4's.                                  §7.4.1
+external drift in a non-tree attribute source during the run
+    (.git/info/attributes, or a global or system source that the primitive cannot neutralize
+    retroactively). Not producible as a Work result: a result is a tracked repository path, and
+    these are not. Foreign interference, detected by the per-commit preflight (§7.3) before the
+    affected commit, and it reconciles. What recovery is attempted is F4's.             §7.4.1
 ```
 
 ```text
-No ordinary correct outcome is left with a pending mutation and no lawful continuation that F3
-itself creates, and no post-executor prohibition is invented by naming an outcome malformed.
+NO POST-EXECUTOR REFUSAL OF A SUPPORTED RESULT SHAPE REMAINS.
+
+Every refusal this contract now states is one of:
+    knowable before execution      -> refused at START entry (F2 §20.17)
+    external interference          -> reconcile (F2 §2.3's permitted category)
+    malformed input                -> F2 §6.5's own frozen case, unchanged
+and none of them is a refusal of what the executor produced.
 
 Architecture blocker: NONE.
 ```
@@ -1345,7 +1428,87 @@ Architecture blocker: NONE.
 F3 does not weaken the byte-identity requirement to accommodate any of this, because doing so would make
 the Candidate's `new_oid` a claim about bytes Git does not store.
 
-### 7.5 C-1: how exact local commit identity becomes durable
+### 7.5 "Before S-c1" is NOT "before any physical effect"
+
+This correction is recorded because the previous draft's reasoning depended on the opposite being true,
+and it was wrong. By the time S-c1 is reached, this operation has already made commits:
+
+```text
+S-c0                          the entry lifecycle events commit                     §4.3
+Candidate freeze              (no commit)
+generation 1 commit           the CandidateSnapshot, the TaskInput and gate 1       M-12
+   external reviewer launch
+generation 2 commit           gate 2, the settlement
+generation 3 commit           gate 3 and the Receipt
+
+S-c1                          <- four commits already exist on the branch by here
+```
+
+```text
+Therefore a refusal "before S-c1" strands a pending mutation that has already applied lifecycle
+events and made four commits. It is not pre-physical, nothing about it is free, and no statement
+of this contract may claim otherwise.
+
+Every statement equivalent to "K.2 / K.3 refuse before any commit, so nothing is stranded" has
+been removed. The architecture no longer needs them, because §7.4.2 removes the refusals
+themselves rather than arguing they are cheap.
+```
+
+### 7.6 The whole physical path surface, not only K1 and K2
+
+The second half of this finding is that the Review's OWN commits are exposed. Measured (M-22):
+`require_effective_evaluation` evaluates attributes with **no** `--source`, i.e. against the working tree,
+and the live generation flow runs the persistence preflight over the Review record paths before each
+generation commit. So an executor-authored `.gitattributes` covering `.workline/review/**` would make the
+**Review-generation commit** refuse — after the executor returned, and on a path that has nothing to do
+with K1.
+
+The pin closes this by the same mechanism, applied to the same complete surface:
+
+```text
+EVERY commit this operation makes is pinned, and every persistence evaluation this operation
+makes is evaluated UNDER THE PIN, over exactly the paths that commit writes:
+
+    S-c0                        the event log
+    generation 1 / 2 / 3        .workline/review/candidate-snapshots/**
+                                .workline/review/task-inputs/**
+                                .workline/review/gates/**
+                                .workline/review/receipts/**
+    every pre-completion Work Git commit
+    S-c1                        the Candidate's entry paths
+    S-c2                        the event log and .workline/review/consumptions/**
+
+The evaluation and the storage therefore agree by construction: both are governed by the base
+tree. An evaluation that read the working tree while the commit stored under the pin would be
+the two disagreeing, which is the defect M-22 names.
+```
+
+```text
+The base-tree condition, proven once at entry and re-proven before each commit under the pin:
+
+    no filter, ident or working-tree-encoding attribute applies, under the pinned source, to any
+    path this operation will write — result paths, Review record paths, the event log and the
+    Consumption path alike.
+
+A base tree that assigns none of those three attributes to anything satisfies this for every path
+at once, including paths whose identifiers are not yet allocated, which is why it is the
+condition the entry refusal (§7.4) actually tests. It is the same shape as the single supported
+configuration P2 already freezes for its own checkout capability (`skills/review`).
+```
+
+```text
+Future checkouts are a different question, and F3 does not claim to answer it. After the Work
+lands, a fresh clone checks out with the NEW attributes, so a result that makes .workline/**
+subject to a checkout transform would degrade later readability of the Review records.
+
+F2 §10.3 deliberately scoped checkout capability OUT of the Work Context, and F3 does not reopen
+that. What F3 relies on instead is that the decision is REVIEWED: .gitattributes is a declared
+result path, its new content is an entry in the Candidate, and the reviewer sees the exact rule
+being introduced and can refuse it. A contract refusal is neither needed nor permitted here; the
+Review is the control.
+```
+
+### 7.7 C-1: how exact local commit identity becomes durable
 
 ```text
 The Mutation Controller records the full object ID of the commit it made beside the effect
@@ -1528,12 +1691,12 @@ W1   OWNERSHIP
      against an already-owned commit and never confer ownership.
 
 W2   PERSISTENCE SEMANTICS
-     The S-c1 payload names mode "review-v1-work-local-v1", and the Git persistence preflight of
-     §7.3 passed IMMEDIATELY BEFORE the stage was recorded — topology step 17b, after the Review
-     completed — over the UNION of every path this operation will ever commit: the Candidate's
-     entry paths, the event log and the Consumption path (§7.4.2). Step 9's early run is an
-     optimization and never satisfies this item, and a preflight over S-c1's paths alone does not
-     satisfy it either.
+     The S-c1 payload names mode "review-v1-work-local-v1"; the commit was made with the
+     attribute source pinned to the tree of declared_base.base_commit (§7.1); and the Git
+     persistence preflight of §7.3, evaluated UNDER THAT SAME PIN, passed IMMEDIATELY BEFORE the
+     stage was recorded — topology step 17b, after the Review completed. Step 9's early run is an
+     optimization and never satisfies this item, and an evaluation made against the working tree
+     rather than the pinned source never satisfies it at all.
 
 W3   LINEAGE
      parent(K1) is exactly the recorded base_head; K1 has exactly one parent; L-1 ... L-5 of §8.2
@@ -2189,9 +2352,9 @@ Reserved EARLIER — at or after the seal, and before S-c1 is recorded (§7.4.2)
   review-consumption:<receipt_id>  ->  the Consumption id
 
   This is earlier than R4 §6 requires and is strictly safe: the key is deterministic and
-  replay-stable (R2 §2), so reserving it sooner cannot change what it yields. It is required
-  sooner because the union preflight of §7.4.2 must know the Consumption's path before any
-  result commit is made.
+  replay-stable (R2 §2), so reserving it sooner cannot change what it yields. It is reserved
+  sooner so that S-c2's exact path set is known — which the per-commit preflight of §7.3 needs
+  for that commit, and which lets the reservation be replayed rather than re-decided.
 
 The first two keys are the live reservation keys START already uses (ops.event_effects), and
 start._recorded_completion already proves a recorded completion by them. The third is R2 §2's
@@ -2786,6 +2949,18 @@ IP-6  The isolated verification materialization primitive of F2 §13.4 V-2 does 
       primitive exports a Work result tree. This is F2's named gap and F3 does not close it.
 
 IP-7  F1 Gate 3, the activation producer, still fails closed until IP-4 and IP-5 both land.
+
+IP-8  The commit primitive must pass the attribute-source pin on BOTH invocations — `attr.tree`
+      (or GIT_ATTR_SOURCE) set to the base commit's tree, GIT_ATTR_NOSYSTEM=1, an empty
+      core.attributesFile, GIT_CONFIG_NOSYSTEM=1, an empty GIT_CONFIG_GLOBAL, and a GIT_*-stripped
+      environment. The mechanism is already proven live in review/checkout.py:171-215 (M-21); what
+      is new is applying it to `git add` and `git commit` rather than only to `git check-attr`.
+      This requires Git >= 2.40, which review-v1 already requires (P2_REVIEW_GIT_MIN).
+
+IP-9  The persistence evaluation must be made under the pin. The live
+      require_effective_evaluation evaluates with no --source, i.e. against the working tree
+      (M-22); the Work path needs the pinned-source form so that evaluation and storage cannot
+      disagree.
 ```
 
 ```text
@@ -2841,8 +3016,11 @@ FC-8   No synthetic, placeholder, empty-string or all-zero commit identity is wr
 FC-9   A Review record is never rewritten; an immutable create that finds different bytes at its
        path is reconcile_required.
 
-FC-10  A transform that would make committed bytes differ from the Candidate's object identity
-       fails closed before any commit is made, and is never disabled to obtain a pass.
+FC-10  The attribute source of every commit this operation makes is pinned to the base tree, so
+       committed object identity equals the Candidate's by construction. A transform assigned by
+       the PINNED source itself is refused at START entry, before any mutation exists. No
+       transform is ever disabled to obtain a pass, and no result the executor produces is ever
+       refused for what it does to persistence semantics.
 
 FC-11  The publication barrier is never bypassed, weakened or substituted by C-2, and C-2 is
        never substituted by the barrier.
@@ -2928,24 +3106,48 @@ I. NO REMOTE + RESULT-BEARING   0 pushes. Every proof, both C-2s and the recorde
 J. NO REMOTE + NO-K1            0 pushes. Same.                                 §20
 
 K. OPERATION-OWNED .gitattributes CHANGE                         <- the R9 case
-   classification   a legitimate Work result, NOT malformed                     §7.4.1
+   classification   a legitimate ordinary Work result. NOT malformed, NOT refused.   §7.4.1
    Candidate        .gitattributes is an ordinary file entry, exactly as F2 §6.4 says
-                    .gitmodules is
-   K.1  the new transform affects NOTHING this operation commits
-        -> proceeds normally, as case A or B. The change is committed as an ordinary result and
-           later operations see the new semantics.                     LAWFUL, no refusal
-   K.2  the new transform affects the TERMINAL paths
-        -> caught by the union preflight BEFORE S-c1 (§7.4.2). No K1 exists, nothing is
-           published, nothing is stranded.                            refuse, pre-physical
-   K.3  the new transform covers this operation's OWN result paths
-        -> refused before S-c1 at the named expressibility boundary of F2 §6.3 (§7.4.3).
-           Bounded, stated, pre-physical. Not malformed, not invalid.  refuse, pre-physical
-   trap             none: K.1 completes, K.2 and K.3 refuse before any commit exists
+                    .gitmodules is; its new content is IN the Candidate and is reviewed
+   material         an ordinary payload for it, like any other file entry
+   why no case split
+                    the pin (§7.1) fixes this operation's persistence semantics at the base
+                    tree, so WHAT the new attributes cover does not matter to this operation.
+                    The previous draft's K.1 / K.2 / K.3 split is gone with the refusals it
+                    described.
+   K.1  covers nothing this operation writes   -> proceeds as case A or B
+   K.2  covers the TERMINAL paths              -> proceeds as case A or B
+   K.3  covers this operation's RESULT paths   -> proceeds as case A or B
+   Review-gen       generation commits are pinned too, so they are unaffected       §7.6
+   K1               exists exactly as the artifact_kind says; its object ids equal the
+                    Candidate's, measured, because the filter never runs               M-20
+   C-2(K1)/C-2(K2)  W1...W12 and T1...T12 in full, unchanged
+   publication      by the ordinary cardinality of §11.3.1
+   Consumption      by the ordinary artifact_kind rules
+   completion       P-1 ... P-6
+   trap             NONE. There is no refusal in this case at all.
 
-L. EXTERNAL .gitattributes / config DRIFT
-   classification   foreign interference, not this operation's product          §7.4.1
-   disposition      the per-stage preflight refuses before the affected commit; reconcile.
-                    What recovery is attempted is F4's (§25).
+K'. OPERATION-OWNED .gitattributes COVERING THE REVIEW-GENERATION PATHS
+   the second half of R9, called out separately because it is not on the K1 path
+   classification   same as K: an ordinary result
+   Review-gen       the generation commits are made under the pin, and their persistence
+                    evaluation is made under the SAME pin, so evaluation and storage agree.
+                    The live defect this closes is M-22: require_effective_evaluation reads the
+                    WORKING TREE, which is what would otherwise refuse here.            §7.6
+   disposition      PROCEEDS. No refusal after the executor returned.
+   future checkout  a later clone checks out under the new attributes; F2 §10.3 scoped checkout
+                    capability out of the Work Context, and the control is that the reviewer sees
+                    the exact rule in the Candidate and may refuse it.                  §7.6
+   trap             NONE
+
+L. EXTERNAL DRIFT IN A NON-TREE ATTRIBUTE SOURCE
+   classification   foreign interference, not this operation's product. Not producible as a Work
+                    result: a result is a tracked repository path, and .git/info/attributes,
+                    global and system sources are not.                                §7.4.1
+   scope            the tree source cannot drift under the operation at all, because it is
+                    pinned. Only non-tree sources remain.
+   disposition      the per-commit preflight (§7.3) refuses before the affected commit;
+                    reconcile. What recovery is attempted is F4's (§25).
    trap             none created by F3
 
 M. RUNTIME MUTATION RECORD SURVIVES A CRASH
@@ -2963,8 +3165,11 @@ N. RUNTIME MUTATION RECORD IS LOST
 ```
 
 ```text
-Architecture blocker: NONE. Every case above has a lawful continuation, and the two that refuse
-(K.2, K.3) refuse before any commit, any event and any publication.
+Architecture blocker: NONE.
+
+Every case above has a lawful continuation, and NO case is a refusal of what the executor
+produced. The only transform refusal this contract has is at START entry, on a condition that is
+knowable before execution (§7.4) — which is exactly where F2 §20.17 puts it.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -3114,12 +3319,19 @@ PB-4  base-exact commits: K1 and K2 are made only while HEAD is still exactly th
 PB-5  a review-v1 Work START in a Project with a remote requires the running Git to meet
       P2_PUBLICATION_GIT_MIN, refused at entry with review_git_unsupported, because its
       Candidate snapshot permanently takes that Project's pushes off the barrier's fast path
-PB-6  the Git persistence preflight runs immediately before EVERY commit stage of a review-v1
-      Work mutation, for exactly that stage's path set, and a pass never carries between
-      stages (§7.3)
-PB-7  a review-v1 Work START is refused at entry, before the lock, when the Project's
-      effective configuration or attributes define any filter, ident or working-tree-encoding
-      that could apply to a working-tree path (review_git_transform, §7.4)
+PB-6  the Git persistence preflight runs immediately before EVERY commit a review-v1 Work
+      mutation makes, for exactly that commit's path set, evaluated under the pinned
+      attribute source, and a pass never carries between commits (§7.3)
+PB-9  the attribute-source pin: every commit of a review-v1 Work mutation is made with
+      attr.tree set to the tree of declared_base.base_commit and the system and global
+      attribute sources neutralized, so committed object identity equals the Candidate's by
+      construction and no filter program is reachable (§7.1, §7.4.2)
+PB-10 an executor-authored change to Git persistence configuration is an ordinary Work
+      result, committed and reviewed as an ordinary file entry, and is never refused
+      (§7.4.1, §7.4.2)
+PB-7  a review-v1 Work START is refused at entry, before the lock, when the PINNED source —
+      the base tree, or a non-tree source — assigns any filter, ident or working-tree-encoding
+      (review_git_transform, §7.4). This is the only transform refusal the contract has.
 PB-8  the push cardinality of a review-v1 Work mutation is 2, 1 or 0 by case, computed from
       the destination pin and the independently agreed artifact_kind, never from stage shape
       (§11.3.1)
@@ -3183,11 +3395,13 @@ The operation owner is START, before F3 and after it. Review authorizes; it neve
 
 ```text
 F3-D1   Work local persistence      FROZEN   "review-v1-work-local-v1": the contained commit
-                                             primitive, hooks and signing mechanically denied,
-                                             filters proven absent and never disabled, distinct
+                                             primitive with the ATTRIBUTE SOURCE PINNED to the
+                                             base tree, hooks, signing and every filter program
+                                             mechanically denied (measured, M-20), distinct
                                              identity from the planning primitive. The preflight
-                                             binds EVERY commit stage of the mutation, and S-c1's
-                                             binding run is the one after the Review.  §7.1-§7.4
+                                             binds every commit the operation makes — the
+                                             Review's own generation commits included —
+                                             evaluated under that same pin.           §7.1-§7.7
 
 F3-D2   K1 lineage                  FROZEN   parent(K1) is reached from
                                              declared_base.base_commit by OWN-REVIEW COMMITS
@@ -3374,8 +3588,18 @@ Stop conditions. An implementation that violates any of them is not implementing
     other Git stage it records is commit-only, and no commit of that mutation reaches the
     destination except as the proven history of a published K.
 
-20. The Git persistence preflight runs immediately before EVERY commit stage of the mutation, for
-    exactly that stage's path set, and a pass never carries from one stage to another.
+20. Every commit this operation makes — the entry-events commit, the Review's own generation
+    commits, every pre-completion Work commit, K1 and K2 alike — is made with the attribute source
+    pinned to the tree of declared_base.base_commit, and the Git persistence preflight runs
+    immediately before each of them, over exactly that commit's path set, evaluated under that
+    same pin. A pass never carries from one commit to another, and an evaluation made against the
+    working tree never satisfies it.
+
+23. No supported result shape is ever refused after the executor returns. An executor-authored
+    change to Git persistence configuration is an ordinary Work result, committed and reviewed as
+    an ordinary file entry; the pin makes what it covers irrelevant to this operation. The only
+    transform refusal is at START entry, on the pinned source, which is knowable before
+    execution.
 
 21. A pending review-v1 mutation never downgrades to legacy. Legacy availability is a property of
     a separate later invocation, never a recovery mechanism for a mutation already pending.
@@ -3390,7 +3614,7 @@ Stop conditions. An implementation that violates any of them is not implementing
 ## 27. Implementation readiness
 
 ```text
-Contract status              FROZEN (repaired after independent review, twice)
+Contract status              FROZEN (repaired after independent review, three times)
 Architecture blocker         NONE
 HUMAN decision               NONE
 Forward amendment required   YES - three, to landed F2 only, declared in §1.5
