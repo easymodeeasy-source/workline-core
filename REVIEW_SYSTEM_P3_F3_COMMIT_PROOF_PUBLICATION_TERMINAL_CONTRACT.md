@@ -60,7 +60,8 @@ implementation lands are listed in §23 and are not written by this document.
 P1 R1-R12          inherited; specialized, never weakened
 P2 integration     inherited; the publication barrier is preserved exactly (§12)
 P3 F1              inherited without change (F1-D1 ... F1-D11)
-P3 F2              inherited without change (F2-D1 ... F2-D17)
+P3 F2              inherited EXCEPT the three explicit forward amendments of §1.5
+                   (F2-D1 ... F2-D17 otherwise unchanged)
 F3                 this document: physical topology, proof, publication, terminal stage
 F4                 deferred (§25)
 ```
@@ -77,6 +78,9 @@ They are declared there in full, with the exact superseded sentences and the nar
 same discipline F1 used for its amendments to P1 R4 and R5.
 
 ### 1.4 F1 and F2 decisions F3 preserves without change
+
+Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the three
+statements named in §1.5, and nothing else.
 
 ```text
 review-v1 START is explicit per-invocation opt-in; the default is legacy        F1-D1
@@ -231,6 +235,10 @@ F2 §7.2 freezes that Candidate's content with
     emptiness_proof.declared_result_paths:  []
     emptiness_proof.declared_deleted_paths: []
 
+and its reconstruction material with
+
+    material.payloads: []
+
 F2 §7.3 says
 
     "An empty-artifact Candidate is refused if any declared path exists, which makes the two
@@ -238,7 +246,27 @@ F2 §7.3 says
 
 F3 supersedes the DISCRIMINATOR in all three: the boundary moves from
 "is the declared path set empty?" to "is the complete owned tree delta empty?".
+
+F3 ALSO supersedes the `payloads: []` consequence of F2 §7.2, and ONLY for the all-inert case.
+The no-declared-path case keeps `entries: []` and `payloads: []` exactly as F2 froze them.
 ```
+
+**Why the payload consequence has to move with the discriminator.** F2 §9.4.1 freezes a *uniform* coverage
+rule that is deliberately indifferent to whether an entry changed anything:
+
+```text
+F2 §9.4.1, Uniform coverage rule
+
+    "An entry whose old and new Git identity are equal still carries its payload when its
+     new_kind is file or symlink. Reconstruction never depends on noticing that the bytes happen
+     to match the base and fetching them from there instead."
+```
+
+F2 §7.2's `payloads: []` is not a competing rule — it is simply what the uniform rule *yields* when there
+are no entries at all. Once A-3 admits an "empty" Candidate that **has** entries, the two texts would give
+opposite answers for those entries, and taking `payloads: []` literally would be exactly the
+match-the-base shortcut §9.4.1 exists to forbid. So the uniform rule governs, and §7.2's empty payload list
+is superseded for that case alone.
 
 The narrow replacement is frozen in §6.7, and the reason it is forced is in §6.6. Everything else about
 F2 §7 stands unchanged: the positive emptiness proof, the prohibition on a fake or synthesized K1, the rule
@@ -329,8 +357,13 @@ HEAD-reuse branch
 ### 2.3 What F3 does not redesign
 
 F3 does not move K1 earlier, does not make Review the operation owner, does not give Review records
-lifecycle authority, does not change the Candidate, and does not change the legacy path. Legacy START
-behaves at every point exactly as it does at this baseline.
+lifecycle authority, and does not change the legacy path. Legacy START behaves at every point exactly as it
+does at this baseline.
+
+F3 does not redesign the Candidate **except for the narrow A-3 forward amendment** (§1.5), which moves the
+result-bearing / no-K1 discriminator and, for the all-inert case only, the content and payload consequences
+that followed from it. The Candidate's schema, its entry shape, its object-kind support, its base lineage,
+its identity rule and its reconstruction criterion are all inherited unchanged.
 
 ---
 
@@ -654,8 +687,10 @@ below it is attempted.
 15  durable  gate generation 2: settle                    -> committed by its own mutation
 16  durable  gate generation 3: seal, issuing the Receipt -> committed by its own mutation
 17  the lineage precondition is proven                    §8.2
-17a Git persistence preflight over the Candidate's entry paths, AGAIN, after the Review;
-    this is the run W2 binds, not step 9's                §7.3
+17a the Consumption identifier is reserved, so S-c2's paths are known    §7.4.2, §13.2
+17b Git persistence preflight, AGAIN after the Review, over the UNION of every path this
+    operation will ever commit: the Candidate's entry paths, the event log and the
+    Consumption path. This is the run W2 binds, not step 9's      §7.3, §7.4.2
 18  durable  S-c1 recorded: the commit-only stage for K1  §7
 19           S-c1 applied -> K1 made -> C-1(K1)           M-7, M-10
 20  C-2(K1): items W1 ... W12                             §9
@@ -693,8 +728,10 @@ R-3  No push effect is recorded before the C-2 of the commit it publishes is com
 R-4  No terminal event is recorded before C-2(K1) is complete. A review-v1 Work mutation that
      holds a Work terminal append_event effect recorded before its S-c1 stage is refused
      (§9, item W12; §11.4).
-R-5  Terminal events are NEVER carried by K1. K1's delta is the Candidate's entries exactly
-     (§9, item W4), which cannot contain the event log.
+R-5  Terminal events are NEVER carried by K1. K1's physical delta is the Candidate's CHANGING
+     entries exactly (§9, item W4), which cannot contain the event log. The Candidate's INERT
+     entries are part of the reviewed artifact but are absent from that delta by construction,
+     and are proven at K1 by exact tree containment instead (§9, item W5; §17.2).
 R-6  Identifiers are reserved and content is durable before the stage that applies them
      (R4 §6, §13.2).
 R-7  Each step marked `durable` completes its save before the step below it runs. An interruption
@@ -761,7 +798,9 @@ substituted for them:
  8, 9       not applicable: there is no owned path to separate or to preflight
  9a         S-c0 exactly as in §5.1: the entry events are committed before the Candidate
 10          the empty-artifact Candidate is frozen                  F2 §7.2
-11          the material envelope is built, with payloads = []      F2 §7.2
+11          the material envelope is built: payloads = [] for the no-declared-path case
+            (F2 §7.2), and one payload per inert file / symlink entry for the all-inert
+            case under F2 §9.4's uniform coverage rule (§6.7, amendment A-3)
 12 ... 16   isolated verification, accept, launch, settle, seal     as §5.1
 17          the lineage precondition is proven, measured to K2      §8.5, §6.3
 18 ... 24   ABSENT. No K1 stage, no K1 proof, no K1 publication.
@@ -926,6 +965,52 @@ the no-K1 invariant
 ```
 
 ```text
+MATERIAL, replacing F2 §7.2's `payloads: []` for the all-inert case (amendment A-3)
+
+CandidateSnapshot.material follows F2 §9.4 in full, with no exception for inertness:
+
+    inert file entry       EXACTLY ONE payload, same path, kind "file"
+                           the exact result bytes, base64-rfc4648-v1        REQUIRED
+    inert symlink entry    EXACTLY ONE payload, same path, kind "symlink"
+                           the exact link-target bytes Git stores            REQUIRED
+    inert gitlink entry    NO payload — the entry itself is the material
+    deletion               cannot occur in an all-inert Candidate: a deletion is a CHANGING
+                           entry by construction (old present, new absent)
+
+    ordering               by the payload's path UTF-8 bytes (F2 §9.4.3)
+    cross-checks           F2 §9.5 in full and unweakened, for every payload:
+                             strict canonical Base64 decode
+                             SHA-256(decoded) == the entry's content_sha256
+                             Git blob identity(decoded) == the entry's new_oid
+    digest                 candidate_material_digest covers the whole snapshot record, payload
+                           strings included, exactly as for any other Candidate
+
+The closed correspondence of F2 §9.4.1 applies unchanged: a missing payload for an inert file or
+symlink entry, a duplicate, an extra payload with no entry, a path or kind mismatch, or a payload
+present for a gitlink is `reconcile_required`.
+```
+
+```text
+An all-inert file or symlink is NEVER reconstructed by noticing that its identity equals the
+base's and reading the bytes from base_commit instead. F2 §9.4.1 rejected that shortcut
+explicitly, and A-3 does not reintroduce it: the payload is carried, and it is cross-checked.
+```
+
+```text
+Isolated verification of an all-inert Candidate (F2 §13.4, V-2)
+
+The workspace is materialized from declared_base.base_commit plus CandidateSnapshot.material, in
+the ordinary way. For an all-inert Candidate the resulting tree EQUALS the base on those paths —
+that is what inert means — but the frozen payload material is still decoded, still cross-checked
+against content_sha256 and new_oid, and still used to install the path.
+
+It is NOT discarded as redundant, and the equality is NOT used as a reason to skip the
+materialization. A payload that fails its cross-check fails the verification even though the
+base holds identical bytes, because what is being verified is the frozen Candidate, not the base
+(V-1, V-3).
+```
+
+```text
 Why the declared entries are kept rather than emptied to match F2 §7.2 exactly:
 dropping them would discard what the executor declared, which F2 §6.3 requires the Candidate to
 preserve, and would make two materially different Works — one that declared nothing and one that
@@ -1038,6 +1123,13 @@ every pre-completion Work Git commit
 ```
 
 ```text
+AND, before S-c1 only, the UNION check of §7.4.2: the same preflight over the complete set of
+paths this operation will ever commit — the Candidate's entry paths, the event log, and the
+Consumption path — so that a transform the executor itself introduced is discovered before any
+result commit exists rather than at S-c2, when K1 might already be published.
+```
+
+```text
 A preflight passed for one stage NEVER carries to another stage. Each stage's path set is its
 own, the Project's attributes and configuration can change between stages, and a pass proven for
 paths A says nothing about paths B.
@@ -1085,16 +1177,115 @@ ENTRY REFUSAL — the knowable condition, before anything exists
   this contract version. That is a stated v1 boundary, refused before the person has spent
   anything, and it is the same kind of honest limit F2 §13.6 set for Evidence completeness.
 
-RESIDUAL — the unknowable condition, after the executor returned
+POST-EXECUTOR — a transform that did not exist at entry now applies
 
-  The executor itself wrote a .gitattributes or changed Git configuration during the run, so a
-  transform that did not exist at entry now applies.
+  This is NOT one condition. It is two, with different causes and different lawful dispositions,
+  and §7.4.1 separates them.
+```
 
-    disposition  the per-commit preflight (§7.3) fails closed before that commit is recorded.
-    character    this is a MALFORMED RUN, not an ordinary outcome: an executor that changes the
-                 Project's Git persistence configuration during a Work has changed the ground the
-                 Candidate's object identities were computed on. It is the same class as F2 §6.5's
-                 declared path that is a directory, and it reconciles.
+#### 7.4.1 Operation-owned persistence configuration is a legitimate Work result
+
+The previous draft of this contract called any post-executor transform a "malformed run". **That
+classification was unsupported and is withdrawn.** The check against landed authority:
+
+```text
+registry.md          names no path a Work result may not touch
+skills/start         Work result = declared result paths and declared deleted paths; no exclusion
+skills/review        says only that WORKLINE never writes .gitattributes or info/attributes —
+                     a statement about Workline's own writes, not about an executor's result
+F2 §6.2              the reviewed surface is exactly result_paths U deleted_paths as declared
+F2 §6.4              directly on point: "If .gitmodules is itself a declared result path, it is
+                     an ordinary file entry like any other and is represented separately."
+
+There is no landed rule making .gitattributes, .gitmodules or any configuration file an invalid
+Work result. Calling such a result malformed would be a post-executor prohibition invented here,
+which is precisely what F2 §2.3 forbids.
+```
+
+Frozen classification:
+
+```text
+OPERATION-OWNED persistence-config result
+    the changed .gitattributes (or equivalent) is a DECLARED result path of this Work, and the
+    change is this operation's own product.
+
+    -> NOT malformed. It is an ordinary Work result, represented in the Candidate as an ordinary
+       file entry like any other (F2 §6.4), reviewed like any other, and committed like any other.
+
+EXTERNAL persistence-config drift
+    the effective attributes or configuration changed, and the change is NOT a declared result
+    path of this Work.
+
+    -> external interference. It is the same class as any other foreign change to the ground the
+       operation decided on, and it reconciles. F4 owns what recovery is attempted (§25).
+```
+
+#### 7.4.2 The lawful topology for an operation-owned change
+
+The danger the classification was reaching for is real, but it is a SCOPE problem, not a validity
+problem: a new transform introduced by the executor can apply to paths this same operation has yet to
+commit — including the terminal paths — and by the time S-c2 discovered it, K1 could already exist and
+even be published.
+
+That is closed by widening *when* and *over what* the preflight runs, not by prohibiting the result:
+
+```text
+BEFORE S-c1 IS RECORDED, the preflight runs over the COMPLETE set of paths this operation will
+ever commit, evaluated against the post-executor working tree — which already holds whatever
+.gitattributes the executor produced:
+
+    the Candidate's entry paths                     (S-c1's set)
+  U .workline/events/events.jsonl                   (S-c2's event log)
+  U .workline/review/consumptions/<consumption_id>.yaml   (S-c2's Consumption)
+
+The Consumption path is knowable at this point: its identifier is reserved under the
+deterministic, replay-stable key `review-consumption:<receipt_id>` (R2 §2), and the Receipt exists
+from the seal, which precedes S-c1. F3 therefore requires that reservation to happen at or after
+the seal and BEFORE S-c1 (§13.2), which is earlier than R4 §6 demands and strictly safe.
+```
+
+```text
+Consequence, and this is the point of the widening: a transform the executor introduced that
+would affect the terminal commit is discovered BEFORE K1 exists. Nothing is committed, nothing is
+published, and the operation refuses at a point where refusing costs a Review and no history.
+
+A transform the executor introduced that affects NOTHING this operation commits does not refuse
+at all. The .gitattributes change is committed as an ordinary result, the Work completes
+normally, and later operations see the new semantics — which is exactly the lawful outcome the
+re-review asked for.
+```
+
+The per-stage preflight of §7.3 remains, unchanged, as the backstop before every later commit: it catches
+external drift arriving after the union check passed.
+
+#### 7.4.3 The one bounded case that still refuses, named precisely
+
+```text
+The executor's new transform applies to a path THIS SAME OPERATION commits.
+
+Then the Candidate cannot faithfully describe the artifact: F2 §6.3 freezes new_oid as
+gitcmd.hash_blob of the executor's bytes, which is `git hash-object --no-filters`, and Git would
+store a different object. The Candidate would assert an identity Git does not hold.
+
+Disposition: refuse BEFORE S-c1 is recorded, code review_git_transform. No commit exists, nothing
+is published, and the Review that was performed is the only cost.
+```
+
+```text
+This is an EXPRESSIBILITY boundary of the Candidate at this contract version, and it is stated
+rather than hidden. It is NOT called malformed, and it is not a claim that the outcome is wrong:
+the Work may be perfectly correct. What is true is only that F2 §6.3's object identity cannot
+describe it.
+
+Lifting it would require amending F2 §6.3 so that new_oid is the FILTERED object identity — which
+changes what the reviewer is shown, changes content_sha256's meaning, and interacts with
+declare_own_content's own-bytes digest. That is a larger architecture change than this contract's
+findings call for, and F3 deliberately does not make it. It is named here so a later contract
+version does not have to rediscover it.
+
+It is not an architecture blocker: the topology is lawful and complete for every other case, the
+refusal happens before any physical effect, and the general operation-owned case — the one the
+re-review raised — proceeds normally.
 ```
 
 #### A pending review-v1 mutation never downgrades to legacy
@@ -1120,18 +1311,35 @@ is NOT invented here. That belongs to the F4 recovery authority (§25), and F3 d
 than implying a path that does not exist.
 ```
 
-#### No-trap re-check after this repair
+#### 7.4.4 No-trap re-check, case by case
 
 ```text
-the knowable case      refused at START entry, before any mutation exists -> no pending mutation
-                       is stranded, because none was ever opened
-the unknowable case    a malformed run, which F2 §2.3 already permits to be a post-executor
-                       reconcile
-the resolvable case    the same review-v1 mutation continues from its saved result once the
-                       configuration is changed
+a transform configured at START entry
+    refused at entry, before any mutation exists. Nothing is stranded because nothing was opened,
+    and legacy START is available as a separate invocation.        F2 §20.17, knowable condition
 
-No ordinary correct outcome is left with a pending mutation and no lawful continuation, so the
-F2 §20.17 no-trap invariant holds after this repair. Architecture blocker: NONE.
+an operation-owned .gitattributes result affecting nothing this operation commits
+    PROCEEDS NORMALLY. Ordinary file entry, ordinary Candidate, ordinary K1, ordinary completion.
+    This is the case the re-review raised, and it is lawful.                            §7.4.2
+
+an operation-owned .gitattributes result affecting the TERMINAL paths
+    caught by the union preflight BEFORE S-c1. No K1, nothing published, no stranded published
+    result. The Work can be restructured and re-run.                                    §7.4.2
+
+an operation-owned transform covering this operation's OWN result paths
+    refused before S-c1, at an expressibility boundary that is named, bounded and pre-physical.
+    Not called malformed, not called invalid.                                           §7.4.3
+
+external drift after the union check passed
+    the per-stage preflight refuses before the affected commit; this is foreign interference and
+    it reconciles. What recovery is attempted is F4's.                                  §7.4.1
+```
+
+```text
+No ordinary correct outcome is left with a pending mutation and no lawful continuation that F3
+itself creates, and no post-executor prohibition is invented by naming an outcome malformed.
+
+Architecture blocker: NONE.
 ```
 
 F3 does not weaken the byte-identity requirement to accommodate any of this, because doing so would make
@@ -1321,9 +1529,11 @@ W1   OWNERSHIP
 
 W2   PERSISTENCE SEMANTICS
      The S-c1 payload names mode "review-v1-work-local-v1", and the Git persistence preflight of
-     §7.3 passed for every path S-c1 will commit, in the run made IMMEDIATELY BEFORE the stage was
-     recorded — topology step 17a, after the Review completed. Step 9's early run is an
-     optimization and never satisfies this item.
+     §7.3 passed IMMEDIATELY BEFORE the stage was recorded — topology step 17b, after the Review
+     completed — over the UNION of every path this operation will ever commit: the Candidate's
+     entry paths, the event log and the Consumption path (§7.4.2). Step 9's early run is an
+     optimization and never satisfies this item, and a preflight over S-c1's paths alone does not
+     satisfy it either.
 
 W3   LINEAGE
      parent(K1) is exactly the recorded base_head; K1 has exactly one parent; L-1 ... L-5 of §8.2
@@ -1449,19 +1659,69 @@ COMPLETE
   reader cannot answer FAILS; unanswerable is never a pass.
 
 DURABLE
-  Durability is a property of the INPUTS, not of a stored verdict. Every input is durable and
-  independently addressable: the exact committed Git objects of K and its parent, which cannot
-  change once written, and the canonical Review records, which are immutable by construction
-  (create_file never updates one; R1 §8) and are read at an exact commit. Nothing the proof reads
-  lives only in runtime state, so the proof is re-executable from any clone, after any process
-  loss, for as long as C-1 names K.
+  Durability is a property of the INPUTS, not of a stored verdict — but the inputs are of TWO
+  different layers with two different durability guarantees, and they must not be collapsed
+  (§10.2.1). The semantic proof material is clone-readable; the operation's ownership binding is
+  durable only for the owning mutation. The proof is re-executable wherever BOTH layers are
+  present, which is not the same as "from any clone".
 
 EXACT-K-BOUND
   Every item names the exact K of C-1 and evaluates against it alone. W1 refuses to proceed
   without that identity. No item reads a branch, a tip, a ref or a message.
 ```
 
-#### Durable checkpoint completion is NOT timeless current validity
+#### 10.2.1 The two layers, and what each one's durability actually means
+
+```text
+LAYER 1 — SEMANTIC PROOF MATERIAL
+
+    the exact Git objects of K and of its parent
+    the canonical Review records, read at an exact commit
+    the committed canonical Project state
+
+    durability   immutable once written; readable from any clone of the repository
+    role         every question the proof asks about WHAT was committed and WHAT was authorized
+
+LAYER 2 — OPERATION OWNERSHIP BINDING
+
+    C-1: the exact identity of K, recorded as commit_id on this mutation's own commit effect
+    the recorded mutation effect and its stage identity
+    the proof pointer note (§4.5)
+
+    durability   durable for the OWNING mutation, in this workspace's
+                 .workline/runtime/mutations/**
+    role         the single question of WHOSE commit K is
+
+    NOT reconstructed from a branch tip, from content identity, from a commit message, or from
+    any resemblance whatever (R5 §3.1).
+    NOT claimed to survive deletion or loss of .workline/runtime/**.
+```
+
+```text
+Item W1 reads layer 2. Items W2 ... W12 read layer 1 and are evaluated against the K that layer 2
+names. So the proof as a whole is re-executable exactly where both layers are present.
+```
+
+Frozen consequences, which are the two cases that actually occur:
+
+```text
+ordinary process crash, mutation record durable
+    both layers present -> resume, and RE-EXECUTE the proof in full. Nothing is read from a
+    stored verdict, and a prior pass does not carry (§10.2.2).
+
+fresh clone, or the runtime mutation record lost
+    layer 1 present, layer 2 GONE. Ownership cannot be reconstructed, no K is inferred, and the
+    operation fails closed under R5 §3.5: no owned K1 -> no exact proof -> no authorized push ->
+    reconcile, or a new Candidate against the actual committed state.
+```
+
+```text
+It is NOT claimed that a C-2 proof is independently resumable "from any clone". Layer 1 is
+clone-readable; layer 2 is not, by design, because operation ownership is precisely the thing
+that must not be inferable by anyone who can read the repository.
+```
+
+#### 10.2.2 Durable checkpoint completion is NOT timeless current validity
 
 This distinction is frozen, and the earlier draft got it wrong by claiming a proof over immutable inputs
 "yields the same result at every later evaluation". That is false, and believing it would defeat the very
@@ -1923,7 +2183,15 @@ Reserved, durably, BEFORE the terminal stage is applied:
 
   <W>:lifecycle:<n>:event:0   ->  the work_target_removed event id
   <W>:lifecycle:<n>:event:1   ->  the work_completed event id
+
+Reserved EARLIER — at or after the seal, and before S-c1 is recorded (§7.4.2):
+
   review-consumption:<receipt_id>  ->  the Consumption id
+
+  This is earlier than R4 §6 requires and is strictly safe: the key is deterministic and
+  replay-stable (R2 §2), so reserving it sooner cannot change what it yields. It is required
+  sooner because the union preflight of §7.4.2 must know the Consumption's path before any
+  result commit is made.
 
 The first two keys are the live reservation keys START already uses (ops.event_effects), and
 start._recorded_completion already proves a recorded completion by them. The third is R2 §2's
@@ -2205,7 +2473,9 @@ Gate / Receipt       the AuthorizedTransitionProjection, bound into the gate gen
                      Candidate.
 
 K1                   the ReviewedArtifactProjection, and NOTHING ELSE.
-                     Its delta is exactly the Candidate's entries (§9 W4).
+                     Its PHYSICAL DELTA is exactly the Candidate's CHANGING entries (§9 W4);
+                     its TREE holds every Candidate entry, inert ones included, at exactly the
+                     identity the Candidate records (§9 W5). See §17.2.
 
 K2                   the AuthorizedTransitionProjection, as the two appended lifecycle events,
                      PLUS the terminal OperationMetadataProjection, as the Consumption record.
@@ -2228,11 +2498,41 @@ commits              mutations before K1 (M-12). They are the gate's bookkeeping
 
 ### 17.2 The exact deltas
 
+A projection is what is reviewed. A delta is what a commit physically changes. For K1 the two are
+deliberately **not** the same set, and conflating them freezes a rule no Git commit can satisfy:
+
 ```text
-K1 delta   = { one entry per Candidate entry, with exactly that entry's status, old_mode,
-               new_mode, old_oid and new_oid }
-K2 delta   = { .workline/events/events.jsonl                       M
-               .workline/review/consumptions/<consumption_id>.yaml A }
+ReviewedArtifactProjection (K1)
+    = EVERY declared Candidate entry, CHANGING and INERT alike.
+      This is the Candidate's content, it is inside candidate_hash, and no entry is ever
+      dropped from it (F2 §6.3).
+
+K1 PHYSICAL DELTA
+    = the Candidate's CHANGING entries EXACTLY — one delta entry per changing entry, with that
+      entry's status, old_mode, new_mode, old_oid and new_oid, and nothing else.
+
+INERT Candidate entries
+    = ABSENT from commit_delta(parent(K1), K1), necessarily: an entry whose old identity equals
+      its new identity changed nothing, so Git reports nothing for it.
+      Their identity is proven at K1 by EXACT TREE CONTAINMENT instead (§9 item W5):
+      tree_entries(K1, <path>) resolves to exactly the kind, mode and object id the Candidate
+      records. Absence from the delta is never taken as absence from the artifact.
+
+K2 PHYSICAL DELTA
+    = { .workline/events/events.jsonl                       M
+        .workline/review/consumptions/<consumption_id>.yaml A }
+      and nothing else.
+```
+
+```text
+A Candidate may legally hold BOTH changing and inert entries at once (case B of §21.4). Any rule
+that said "K1's delta is one entry per Candidate entry" would be unsatisfiable for such a
+Candidate, because Git cannot report a delta entry for a path that did not change. Every
+statement of this contract now reads "CHANGING entries" where it means the physical delta, and
+"every declared entry" where it means the projection.
+
+Nothing is synthesized for an inert path to make it appear in a delta, and no inert entry is
+dropped from the Candidate to make the two sets coincide.
 ```
 
 ### 17.3 K1 carries no Review bookkeeping — and R5 §8 is satisfied
@@ -2557,6 +2857,116 @@ FC-13  START never returns completed, and never closes its mutation, with an unc
 
 ---
 
+### 21.4 Case matrix — every reachable shape, proven end to end
+
+Each case is traced through the whole topology. `n/a` means the step does not exist for that case, not that
+it was skipped. Every case has a lawful continuation; none traps.
+
+```text
+A. RESULT-BEARING, every entry changing
+   Candidate        artifact_kind "result_commit"; entries = the changing entries
+   material         one payload per file/symlink entry (F2 §9.4)
+   K1               EXISTS
+   K1 delta         the changing entries exactly (= all entries here)          §9 W4
+   C-2(K1)          W1 ... W12 in full
+   pushes           2 with a remote, 0 without                                 §11.3.1
+   terminal stage   two events + Consumption, one stage                        §13.3
+   K2 parent        K1, exactly                                                §15.1
+   C-2(K2)          T1 ... T12; T12 result-bearing branch
+   Consumption      artifact_kind "result_commit", authorized_result_commit_sha = K1
+   completion       P-1 ... P-6                                                §19
+   trap             none
+
+B. RESULT-BEARING, changing and inert MIXED                      <- the R8 case
+   Candidate        artifact_kind "result_commit"; entries = changing U inert, all kept
+   material         one payload per file/symlink entry, INERT ONES INCLUDED (F2 §9.4.1)
+   K1               EXISTS
+   K1 delta         the CHANGING entries exactly. The inert entries are ABSENT from the delta
+                    by construction and are proven at K1 by exact tree containment (W5).
+                    This is the contradiction the second review found; §17.2 now states it once.
+   C-2(K1)          W1 ... W12, with W4 splitting changing from inert
+   pushes           2 / 0 as case A
+   K2 parent        K1
+   Consumption      "result_commit", sha = K1
+   trap             none
+
+C. ALL-INERT, files
+   Candidate        artifact_kind "empty"; entries = every declared inert entry, kept   §6.7
+   material         one payload per inert file entry, REQUIRED and cross-checked       §6.7, A-3
+   K1               DOES NOT EXIST — no commit can be made from an empty delta          §6.6
+   K1 delta         n/a
+   C-2(K1)          n/a
+   pushes           1 with a remote (K2 only), 0 without                                §11.3.1
+   terminal stage   as case A
+   K2 parent        reached from declared_base.base_commit by own-Review commits only    §6.3
+   C-2(K2)          T1 ... T12; T12 empty branch, proven positively over the declared paths
+   Consumption      artifact_kind "empty", authorized_result_commit_sha = null
+   completion       P-1 ... P-6 with P-3 applying to K2 only
+   trap             none
+
+D. ALL-INERT, symlinks
+   as case C, with the payload carrying the exact link-target bytes Git stores as the blob;
+   never the dereferenced target's contents (F2 §9.4.1, §6.7)
+
+E. ALL-INERT, gitlinks
+   as case C, except: NO payload for a gitlink entry. The entry itself is the material —
+   path + new_kind gitlink + new_mode 160000 + new_oid (F2 §9.4.1). A payload present for a
+   gitlink is reconcile_required.
+
+F. NO DECLARED PATHS
+   Candidate        artifact_kind "empty"; entries = []; F2 §7.2 unchanged for this case
+   material         payloads = []                                              F2 §7.2, unchanged
+   K1               DOES NOT EXIST
+   everything else  as case C
+   trap             none
+
+G. REMOTE + RESULT-BEARING      2 pushes: S-p1(K1), S-p2(K2)                    §11.3.1
+H. REMOTE + NO-K1               1 push: S-p2(K2). A result publication is refused: there is no
+                                K1 for one to name.                             §11.2 V-6
+I. NO REMOTE + RESULT-BEARING   0 pushes. Every proof, both C-2s and the recorded-completion
+                                proof minus P-3 all still run.                  §20
+J. NO REMOTE + NO-K1            0 pushes. Same.                                 §20
+
+K. OPERATION-OWNED .gitattributes CHANGE                         <- the R9 case
+   classification   a legitimate Work result, NOT malformed                     §7.4.1
+   Candidate        .gitattributes is an ordinary file entry, exactly as F2 §6.4 says
+                    .gitmodules is
+   K.1  the new transform affects NOTHING this operation commits
+        -> proceeds normally, as case A or B. The change is committed as an ordinary result and
+           later operations see the new semantics.                     LAWFUL, no refusal
+   K.2  the new transform affects the TERMINAL paths
+        -> caught by the union preflight BEFORE S-c1 (§7.4.2). No K1 exists, nothing is
+           published, nothing is stranded.                            refuse, pre-physical
+   K.3  the new transform covers this operation's OWN result paths
+        -> refused before S-c1 at the named expressibility boundary of F2 §6.3 (§7.4.3).
+           Bounded, stated, pre-physical. Not malformed, not invalid.  refuse, pre-physical
+   trap             none: K.1 completes, K.2 and K.3 refuse before any commit exists
+
+L. EXTERNAL .gitattributes / config DRIFT
+   classification   foreign interference, not this operation's product          §7.4.1
+   disposition      the per-stage preflight refuses before the affected commit; reconcile.
+                    What recovery is attempted is F4's (§25).
+   trap             none created by F3
+
+M. RUNTIME MUTATION RECORD SURVIVES A CRASH
+   layers           both present (§10.2.1)
+   disposition      resume at the earliest unsatisfied checkpoint (§5.3) and RE-EXECUTE the
+                    proof in full. A prior pass never carries (§10.2.2).
+   trap             none
+
+N. RUNTIME MUTATION RECORD IS LOST
+   layers           layer 1 present, layer 2 (C-1 / ownership) GONE              §10.2.1
+   disposition      ownership cannot be reconstructed; no K is inferred from a branch tip,
+                    content or message; fail closed under R5 §3.5 — reconcile, or a new
+                    Candidate against the actual committed state.
+   trap             none created by F3: this is P1's frozen answer, not a new one
+```
+
+```text
+Architecture blocker: NONE. Every case above has a lawful continuation, and the two that refuse
+(K.2, K.3) refuse before any commit, any event and any publication.
+```
+
 ## 22. Consistency audit against P1 / P2 / F1 / F2
 
 Every point at which F3 touches an earlier freeze, classified.
@@ -2834,7 +3244,9 @@ F3-D11  normal K2 proof             FROZEN   parent(K2) == K1 exactly (result-be
 
 F3-D12  three-projection allocation FROZEN   K1 = ReviewedArtifact alone; K2 = AuthorizedTransition
                                              + terminal OperationMetadata; Candidate and gate
-                                             hold the other two.                          §17
+                                             hold the other two. A projection is NOT a delta:
+                                             K1's delta is the CHANGING entries, its tree holds
+                                             every declared entry.               §17, §17.2
 
 F3-D13  recursion cutoff            FROZEN   an ordinary terminal K2 carries lifecycle events
                                              and a Class-A K2-A carries none; a delta confined
@@ -2912,8 +3324,12 @@ Stop conditions. An implementation that violates any of them is not implementing
  5. The Candidate is frozen before K1 and K1 is never moved earlier to satisfy any requirement.
 
  6. K1 carries the ReviewedArtifactProjection and nothing else; K2 carries the
-    AuthorizedTransitionProjection and the terminal OperationMetadataProjection and nothing else,
-    and both are proven by complete tree-entry enumeration rather than by path allowlist.
+    AuthorizedTransitionProjection and the terminal OperationMetadataProjection and nothing else.
+    A projection is not a delta: K1's physical delta is the Candidate's CHANGING entries exactly,
+    while its tree holds every declared entry — inert ones included — at exactly the identity the
+    Candidate records. Both are proven by complete tree-entry enumeration and exact tree
+    containment, never by a path allowlist, and nothing is synthesized to make an inert entry
+    appear in a delta.
 
  7. Terminal events are never carried by K1, and the terminal transition and its Consumption are
     applied in one stage with every identifier and every byte durable before apply.
@@ -2974,7 +3390,7 @@ Stop conditions. An implementation that violates any of them is not implementing
 ## 27. Implementation readiness
 
 ```text
-Contract status              FROZEN (repaired after independent review)
+Contract status              FROZEN (repaired after independent review, twice)
 Architecture blocker         NONE
 HUMAN decision               NONE
 Forward amendment required   YES - three, to landed F2 only, declared in §1.5
