@@ -707,6 +707,22 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-30  ABSENCE IS ALREADY A REPRESENTABLE OWNERSHIP STATE. `mutation._content_digest`
+      (mutation.py:190-208) returns the `_ABSENT` sentinel for a path that does not exist, the
+      `_LINK` form for a symlink — read by `os.readlink` and NEVER followed — and `_BYTES`
+      otherwise; only an OSError/ValueError yields `None`, which `declare_own_content` records as
+      `_UNREADABLE`. So a deleted path's own-content state is `_ABSENT`, a normal recorded value,
+      and NOT an error. And `completion_precheck` requires a deleted path to be absent and to be
+      a tracked file (start.py:353-358) — it requires nothing of the path's PARENT directory.
+
+M-31  fsafe's POSIX LIMITATION IS ABOUT CREATES, NOT READS. Its module docstring lists
+      `openat(parent_fd, name, O_NOFOLLOW ...)` as "relative to the proven fd (reads only)"
+      (fsafe.py:18), and separately warns that "an fd pins nothing: the directory it holds can be
+      renamed anywhere" (fsafe.py:42), which is why an immutable CREATE is refused on POSIX
+      before anything is opened. The ownership snapshot of §7.8.4 creates nothing — it captures
+      what the executor already produced — so the handle-bound read is exactly the supported
+      case, and the placement limitation does not apply to it. §7.8.4 states this explicitly.
+
 M-28  THE CANONICAL-SPELLING PREDICATE ALREADY EXISTS AND IS ALREADY ENFORCED.
       `mutation._safe_relative` (mutation.py:333) returns false for a path that is empty, not a
       string, absolute (`startswith("/")`), drive-qualified (`":" in path.split("/")[0]`, which
@@ -970,10 +986,13 @@ below it is attempted.
  5a normalize the declared result_paths and deleted_paths ONLY as the pre-existing START API
     already normatively normalizes them: `p.replace("\\", "/")`, and nothing else
                                                            start.py:876, unchanged
- 5b DECLARED PATH IDENTITY — canonical spelling and Project containment      §7.8.4 layers 1, 3
+ 5b DECLARED PATH IDENTITY and the BOUND OWNERSHIP WITNESS     §7.8.4 layers 1, 3
     Every declared result path and deletion path must have an exact path identity before any
-    ownership decision is made about it. A declaration that does not is MALFORMED and fails
-    closed, before step 5c and before step 6.
+    ownership decision is made about it, and the proof does not merely check: it produces a
+    BOUND OWNERSHIP WITNESS, captured relative to the proven parent handle. A result whose
+    identity cannot be established is MALFORMED and fails closed; for a deletion a MISSING
+    ancestor positively proves absence and is accepted, while an existing-but-unprovable
+    ancestor fails closed.
  5c RESERVED REVIEW NAMESPACE OWNERSHIP                    §7.8.4 layer 2, A-5, PR-8
     With identity established, prove positively that the path is NOT the reserved namespace.
     If any declared path IS:
@@ -989,8 +1008,11 @@ below it is attempted.
     set_note, which calls _save() (measured), so it is a DURABLE assertion that these paths are
     START's own. A path whose identity is not established, or that the invocation contract says
     START may never own, must not first be durably recorded as START-owned and only then refused.
- 6  declare_own_content, only for paths whose identity and ownership both passed
-                                                           start.py:884, unchanged
+ 6  OWNERSHIP ASSERTION: persist the already-bound witness from 5b, for paths whose identity
+    and ownership both passed. The declared path is NOT re-read by ordinary pathname here, so
+    the digested object is the object that was proven. This is declare_own_content's existing
+    guarantee and its existing recorded forms, reached without a second root-relative
+    resolution                                             start.py:884, see IP-15
  7  completion_precheck passes                            skills/start, unchanged
  8  dirty separability over the owned set                 gitops.ensure_separable, unchanged
  9  Git persistence preflight over the owned set, under the pin  §7.3
@@ -1082,6 +1104,11 @@ R-6a PATH IDENTITY, THEN OWNERSHIP VALIDATION, THEN OWNERSHIP ASSERTION — in t
      this mutation's own. No refusal of a declaration may follow a durable assertion of the very
      ownership it refuses, and no ownership decision may be made about a path whose identity has
      not been established — a decision about an ambiguous path is not a decision.
+R-6b THE OBJECT PROVEN IS THE OBJECT ASSERTED. The identity proof of 5b produces a bound witness
+     and step 6 persists it; the declared path is never resolved a second time from the Project
+     root for the ownership snapshot. Checking a name and then using the name are two operations,
+     and a component can be swapped between them (fsafe, M-29) — so the capture is bound to the
+     proven directory object, not repeated by pathname.
 R-7  Each step marked `durable` completes its save before the step below it runs. An interruption
      between them resumes at the earliest unsatisfied checkpoint and re-derives, never re-decides.
 ```
@@ -1244,9 +1271,11 @@ substituted for them:
 
 ```text
  1 ...  5   as §5.1; the executor returns Completed with an empty owned set
- 5b, 5c     path identity and the reserved-namespace ownership check are VACUOUS for the
-            no-declared-path case: there is no declared path to inspect. For the ALL-INERT case
-            BOTH still run in full, before step 6, because declared paths exist  §5.1, §7.8.4
+ 5b, 5c     path identity, the bound witness and the reserved-namespace check are VACUOUS for
+            the no-declared-path case: there is no declared path to inspect. For the ALL-INERT
+            case ALL still run in full, before step 6, because declared paths exist — and an
+            all-inert declaration may include DELETION paths, whose absence witness is the
+            positive kind of §7.8.4 layer 3                                    §5.1, §7.8.4
  6          no declare_own_content: there is no owned path         (start.py:880, unchanged)
  7          completion_precheck passes
  8, 9       not applicable: there is no owned path to separate or to preflight
@@ -2334,36 +2363,131 @@ LAYER 2 — RESERVED NAMESPACE, component-wise.  §5.1 step 5c
       [".workline", "review", ...]                   every descendant
 
   compared COMPONENT BY COMPONENT — never by string prefix, which is what lets `.workline/reviewX`
-  be correctly accepted and `.workline/review` itself be correctly refused — and compared
-  CASE-INSENSITIVELY on every platform.
+  be correctly accepted and `.workline/review` itself be correctly refused.
 
-  The case rule is deliberately platform-independent. A case-insensitive filesystem reaches the
-  same object through `.WORKLINE/REVIEW/...`, and a rule that depended on the running filesystem
-  would make the same declaration lawful on one machine and not another. Refusing the alias
-  everywhere costs only a pathological result path and buys one answer.
+  THE COMPARISON ALGORITHM IS FROZEN EXACTLY, and it is not "case-insensitive" left to the
+  implementation:
+
+      ASCII-ONLY CASE FOLD. In the declared component, every code point in U+0041..U+005A
+      (ASCII A-Z) is mapped to the corresponding code point in U+0061..U+007A (ASCII a-z).
+      EVERY OTHER CODE POINT COMPARES LITERALLY, unchanged. The folded component is then compared
+      to the reserved literal by exact code-point equality.
+
+      NOT locale-aware comparison.
+      NOT the filesystem's own comparison.
+      NOT str.lower(), str.casefold(), Unicode simple or full case folding, or any mapping that
+        can change length or fold non-ASCII code points.
+
+  This is exact because the two reserved components are ASCII literals — `.workline` and
+  `review` — so ASCII folding is sufficient to catch every alias that could denote them, and
+  anything wider would start folding unrelated code points (the Kelvin sign folds to `k`, the
+  dotless i to `i`) for no gain.
+
+  The rule is deliberately platform-independent. A case-insensitive filesystem reaches the same
+  object through `.WORKLINE/REVIEW/...`, and a rule that depended on the running filesystem would
+  make the same declaration lawful on one machine and not another. Refusing the alias everywhere
+  costs only a pathological result path and buys one answer.
 
   failure -> ReconcileRequired(reason = "review_reserved_namespace")
 
-LAYER 3 — PROJECT CONTAINMENT, on the ANCESTORS only (filesystem).  §5.1 step 5b
+LAYER 3 — PROJECT CONTAINMENT AND THE BOUND OWNERSHIP WITNESS.  §5.1 step 5b
 
   Layers 1 and 2 are lexical, and a lexical test cannot see a symlinked or junctioned ANCESTOR
   directory that makes an innocent-looking path reach a canonical Review object.
 
-  So, before ownership is asserted, walk from the Project root to the declared path's PARENT one
-  component at a time, following nothing, proving every component that exists is a plain
-  in-Project directory — the discipline `review.fsafe.walk` already implements and the reason its
-  module gives for binding to handles rather than to names (M-29).
+  Walk from the Project root toward the declared path one component at a time, following
+  nothing, proving every component that EXISTS is a plain in-Project directory — the discipline
+  `review.fsafe` already implements, and the reason its module gives for binding to handles
+  rather than to names (M-29).
 
-      every existing ancestor component is a plain in-Project directory   -> containment proven
-      any ancestor is a symlink, junction or other reparse point          -> FAIL CLOSED
-      the identity of any ancestor cannot be established                  -> FAIL CLOSED
+  A MISSING COMPONENT MEANS DIFFERENT THINGS FOR A RESULT AND FOR A DELETION, and the previous
+  draft collapsed them. That was wrong and is withdrawn: it would have refused an ordinary
+  correct deletion after the executor returned, which F2 §2.3 forbids.
+
+      RESULT PATH — the object must EXIST when Completed is returned (F2 §6.2, live
+      completion_precheck). So every ancestor required to reach the final name must exist and be
+      proven plain:
+
+          every ancestor exists and is a plain in-Project directory   -> containment proven
+          any ancestor is a symlink, junction or other reparse point  -> FAIL CLOSED
+          any ancestor is missing                                     -> FAIL CLOSED
+          any ancestor's identity cannot be established               -> FAIL CLOSED
+
+      DELETION PATH — the object is expected to be ABSENT now, and its identity comes from the
+      base tree rather than from the filesystem (M-30: completion_precheck requires a deleted
+      path to be absent and tracked, and requires nothing of its parent):
+
+          the walk reaches the parent, and the final name is absent relative to it
+                                                         -> POSITIVE ABSENCE, accepted
+          the walk finds an ancestor component MISSING    -> POSITIVE ABSENCE, accepted:
+              a path cannot exist beneath a component that does not exist, so the first missing
+              ancestor PROVES the declared path is absent. It is not "containment unknown".
+          any EXISTING ancestor is a symlink, junction or other reparse point  -> FAIL CLOSED
+          any EXISTING ancestor's identity cannot be established               -> FAIL CLOSED
 
   THE FINAL COMPONENT IS NEVER DEREFERENCED. F2 supports a symlink as a result object, and this
   layer must not break that: what is proven is the chain that leads to the name, not what the
   name itself resolves to.
 
-  failure -> containment unknown -> MALFORMED DECLARATION, fail closed before any ownership
-             assertion. Not knowing is not a yes.
+  failure -> for a RESULT, containment unknown -> MALFORMED DECLARATION (below).
+             For a DELETION, only an existing-but-unprovable ancestor fails; a missing one does
+             not. Not knowing is not a yes, but a proven absence is not a not-knowing.
+```
+
+```text
+THE BOUND OWNERSHIP WITNESS — closing the check/use race.  §5.1 step 5b, persisted at step 6
+
+`review.fsafe`'s own module states the problem this solves: "Checking a path and then using the
+path is two operations, and anything can happen between them: a component can be replaced with a
+symlink or a junction, and the second operation - the one that actually reads or writes - follows
+it. Adding a second check narrows that window without closing it."
+
+The previous draft proved containment at 5b and then let step 6 call the live
+`declare_own_content`, which resolves `ProjectStore.abs(path)` — `root / relative` — and digests
+whatever that pathname reaches. That is a SECOND root-relative resolution, so the object digested
+need not be the object proven. Withdrawn.
+
+FROZEN: layer 3 does not merely check. It produces a BOUND OWNERSHIP WITNESS per declaration, and
+step 6 persists that witness WITHOUT re-reading the declared path by ordinary pathname.
+
+    CHECKED OBJECT  ==  DIGESTED OBJECT  ==  OWNERSHIP-ASSERTED OBJECT
+
+    no second root-relative pathname resolution may substitute another filesystem object between
+    those steps.
+
+A RESULT witness carries:
+    the declared canonical path;
+    the object state captured RELATIVE TO THE PROVEN PARENT — the handle chain is held across the
+      capture, and the final entry is stat'd / read / readlink'd relative to that parent, never
+      reopened as `root / declared_path`;
+    the ownership digest START's existing own-content guarantee requires, in the SAME form
+      `_content_digest` produces (M-30), so nothing downstream changes:
+          regular file   the exact file bytes' digest        (`_BYTES` form)
+          symlink        the exact link-target bytes' digest, read with no-follow semantics and
+                         NEVER followed                       (`_LINK` form)
+    and it preserves every F2-supported result kind — an executable file keeps its mode from the
+    Git tree entry and a gitlink keeps its referenced commit OID, exactly as F2 §6.3/§6.4 say;
+    nothing is silently dropped.
+
+A DELETION witness carries:
+    the declared canonical path;
+    its exact TRACKED IDENTITY in declared_base / the base tree;
+    a POSITIVE CURRENT-ABSENCE witness, from the walk above — either the final name absent
+      relative to the proven parent, or a proven-missing ancestor.
+    Step 6 persists the ABSENT ownership state from that witness (`_ABSENT`, M-30). It does NOT
+    call a generic path-string `_content_digest()` again after absence has been proven.
+
+WHY THE HANDLE-BOUND READ IS SOUND HERE, including on POSIX. fsafe warns that on POSIX "an fd
+pins nothing: the directory it holds can be renamed anywhere", and for that reason refuses an
+immutable CREATE on POSIX. That limitation is about WHERE A CREATE LANDS. This operation creates
+nothing: it captures what the executor already produced, and fsafe's own docstring lists
+`openat(parent_fd, name, O_NOFOLLOW ...)` as "relative to the proven fd (reads only)" — exactly
+this case (M-31). A renamed ancestor carries the proven directory OBJECT with it, and the read
+still reads that object, which is the object whose containment was proven. On Windows the
+no-follow / reparse handling is preserved unchanged: every directory is opened without following,
+and the final entry is opened with reparse-point semantics rather than being resolved.
+
+Unknown identity at any point -> FAIL CLOSED, before any ownership assertion.
 ```
 
 ```text
@@ -4248,6 +4372,17 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
       tree, at every depth, plus .git/info/attributes — not a path probe. Its supported shape is
       narrow by design and refuses any [attr] macro.
 
+IP-15 THE BOUND OWNERSHIP WITNESS of §7.8.4 cannot be built from the live helpers as they
+      stand, and this is named rather than papered over. `declare_own_content` takes path
+      STRINGS and calls `_content_digest(mutation.store.abs(path))`, which re-resolves
+      `root / relative` (M-28, M-30) — a second root-relative resolution, which is exactly what
+      the witness exists to avoid. The implementation needs a capture that walks the ancestors
+      no-follow, HOLDS the handle chain, reads or stats or readlinks the final entry RELATIVE to
+      the proven parent, and hands `declare_own_content` the already-captured state in its
+      existing recorded forms (`_BYTES`, `_LINK`, `_ABSENT`, `_UNREADABLE`) instead of a path to
+      resolve again. No recorded form changes and no downstream reader changes; only where the
+      value comes from does.
+
 IP-14 The reserved-namespace ownership boundary of A-5 needs three things: the pre-execution
       binding in the review-v1 invocation contract (PR-8), a post-Completed validation of every
       declared result and deletion path against the canonical Review namespace WHICH MUST RUN
@@ -4939,9 +5074,15 @@ DECLARATION                                     LAYER   OUTCOME
 
 "build/out.so" where "build" IS A SYMLINK       3       CONTAINMENT FAIL -> fail closed,
    (ancestor indirection, whatever it targets)          review_candidate_unavailable
-   an ancestor that is a symlink, junction or other reparse point is refused. This is the case a
-   lexical test cannot see, and the reason layer 3 exists: an innocent-looking path must not be
-   able to make declare_own_content read a canonical Review object through a redirected ancestor.
+   an EXISTING ancestor that is a symlink, junction or other reparse point is refused, for a
+   result and for a deletion alike. This is the case a lexical test cannot see, and the reason
+   layer 3 exists: an innocent-looking path must not be able to make the ownership snapshot read
+   a canonical Review object through a redirected ancestor.
+
+"tmp/old.txt" DELETED, and "tmp/" is now gone   3       ACCEPTED (positive absence)
+   an ordinary correct F2 deletion. The missing ancestor PROVES the path is absent, and
+   completion_precheck requires only that a deleted path be absent and tracked (M-30). Refusing
+   it would be a post-executor refusal of an ordinary correct outcome, which F2 §2.3 forbids.
 
 "assets/link" where "link" ITSELF is a symlink  3       ACCEPTED
    the FINAL component is NEVER dereferenced. F2 supports a symlink as a result object and this
@@ -4957,6 +5098,73 @@ established at all                              3       CONTAINMENT UNKNOWN -> f
 In every refusing row, the refusal happens BEFORE declare_own_content, so no _OWN_CONTENT note is
 written for the declaration, and §5.4's refusal state applies: the mutation stays pending with its
 markers unchanged, and the executor's working-tree state is left untouched for reconciliation.
+```
+
+### 21.11 Bound ownership witness matrix
+
+Every row runs at §5.1 step 5b, before ownership is asserted at step 6. "Witness" is the bound ownership
+witness of §7.8.4: captured relative to the proven parent handle, never by re-resolving
+`root / declared_path`.
+
+```text
+A. RESULT FILE, ALL PARENTS PLAIN
+   walk      every ancestor exists and is proven a plain in-Project directory
+   witness   the final entry stat'd and read RELATIVE to the proven parent; digest in the
+             existing `_BYTES` form
+   outcome   ACCEPTED -> step 6 persists the witness, no pathname re-resolution
+
+B. RESULT FINAL COMPONENT IS A SYMLINK, PARENTS PLAIN
+   witness   the link target's bytes, read with no-follow semantics relative to the proven
+             parent; digest in the existing `_LINK` form. THE LINK IS NEVER FOLLOWED.
+   outcome   ACCEPTED. F2 §6.4's symlink result object keeps its semantics exactly; the
+             executable bit and a gitlink's referenced commit OID likewise come from the Git
+             tree entry and are not dropped.
+
+C. RESULT PATH WITH A SYMLINK ANCESTOR
+   walk      an existing ancestor is a symlink / junction / reparse point
+   outcome   FAIL CLOSED before ownership assertion -> review_candidate_unavailable.
+             No witness, no _OWN_CONTENT note, no Candidate.
+
+D. DELETION, PARENT EXISTS, FINAL PATH ABSENT
+   walk      ancestors proven plain; the final name is absent relative to the proven parent
+   witness   declared canonical path + tracked identity in the base tree + positive absence
+   outcome   ACCEPTED -> step 6 persists the `_ABSENT` state from the witness
+
+E. DELETION, IMMEDIATE PARENT ABSENT
+   walk      the parent component does not exist
+   witness   the missing parent POSITIVELY proves the declared path is absent — a path cannot
+             exist beneath a component that does not exist
+   outcome   ACCEPTED, exactly as D. NOT "containment unknown", NOT malformed.
+   no-trap   this is the ordinary shape of a deletion that removed the last file in a directory
+             and let the directory go. F2 supports `new_kind = "absent"` for every object kind
+             and requires nothing of the parent; live completion_precheck requires only absence
+             and tracked-ness (M-30). Refusing it would be a post-executor refusal of an
+             ordinary correct outcome, which F2 §2.3 forbids — so the previous draft's blanket
+             "missing ancestor -> fail closed" is withdrawn.
+
+F. DELETION, A HIGHER ANCESTOR ABSENT
+   identical to E at whatever depth the walk first finds a missing component. The proof does not
+   care which level it is: the first missing component ends the walk and proves the absence.
+
+G. DELETION, AN EXISTING ANCESTOR IS A SYMLINK / JUNCTION
+   outcome   FAIL CLOSED. Absence "below" an indirection proves nothing about the declared path,
+             because the name could denote an object elsewhere. Missing is a proof; redirected
+             is not.
+
+H. AN ANCESTOR IS SWAPPED AFTER VALIDATION BUT BEFORE THE OWNERSHIP SNAPSHOT
+   outcome   THE SNAPSHOT CANNOT BE REDIRECTED, because there is no pathname reopen to redirect.
+             The capture is performed relative to the handle chain already proven, so a component
+             replaced by name afterwards is not consulted again (fsafe, M-29). This is the race
+             the previous draft left open by handing step 6 a path string.
+   POSIX     sound for this operation: fsafe's pinning caveat is about where a CREATE lands, and
+             this creates nothing; `openat(parent_fd, ..., O_NOFOLLOW)` relative to the proven fd
+             is listed as the supported read form (M-31).
+
+I. EXTERNAL CHANGE AFTER THE OWNERSHIP SNAPSHOT
+   outcome   the snapshot is NOT redefined retroactively. START's existing own-bytes guarantee
+             and the currency checks detect the drift before the commit — the Git stage commits
+             the owned paths only while they still hold exactly what was recorded — and the
+             operation refuses there rather than committing someone else's bytes.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -5216,7 +5424,12 @@ PR-8  THE RESERVED REVIEW NAMESPACE, BOUND BEFORE EXECUTION. Selecting review-v1
 
       The checks run at §5.1 steps 5b and 5c, BEFORE declare_own_content, so this operation
       never durably asserts ownership of a path it may not own — and "inside the namespace" is
-      decided by the three-layer path-identity rule of §7.8.4, never by a string prefix test.
+      decided by the three-layer path-identity rule of §7.8.4, never by a string prefix test,
+      with the reserved components compared by the exact ASCII-only case fold that rule freezes.
+      Step 5b produces a BOUND OWNERSHIP WITNESS and step 6 persists it without re-resolving the
+      declared path, so the object proven is the object asserted. A declared DELETION whose
+      ancestor directory no longer exists is an ordinary correct outcome, not a refusal: the
+      missing ancestor positively proves the absence.
 
       A `Completed` outcome declaring a path there has violated a pre-existing ownership
       contract. It is UNOWNED STATE, refused as
@@ -5528,6 +5741,16 @@ Stop conditions. An implementation that violates any of them is not implementing
     the built-in macro binary, and the configuration variables core.autocrlf and core.eol. A name
     is never judged as an opaque word.
 
+27b. The object whose containment was proven is the object whose ownership is asserted. The
+    identity proof produces a bound witness captured relative to the proven parent, and the
+    ownership snapshot persists that witness rather than resolving the declared path from the
+    Project root a second time.
+
+27c. A declared deletion whose ancestor directory no longer exists is an ordinary correct
+    outcome. A missing ancestor positively proves the declared path's absence and is accepted;
+    only an EXISTING ancestor that is an indirection, or whose identity cannot be established,
+    fails closed. An ordinary correct deletion is never refused after the executor returns.
+
 27a. Path identity is established, then ownership is validated, then ownership is asserted — in
     that order. A declared path's canonical spelling and Project containment are proven, and the
     reserved Review namespace is proven absent by a component-wise case-insensitive test and an
@@ -5602,6 +5825,9 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-12 the universal attribute-source parser: every .gitattributes in the tree at every depth
         plus info/attributes, alias-expanded, narrow supported shape, no user-defined macros
   IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
+  IP-15 the bound ownership witness of §7.8.4: a handle-bound capture that replaces
+        declare_own_content's second `root / relative` resolution, producing the SAME recorded
+        forms (_BYTES, _LINK, _ABSENT, _UNREADABLE) from the proven object
   IP-14 the reserved-namespace ownership boundary of A-5: the pre-execution binding in the
         review-v1 invocation contract, the post-Completed validation of every declared result
         and deletion path — running BEFORE declare_own_content, by §7.8.4's three-layer path
