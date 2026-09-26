@@ -415,11 +415,19 @@ F3 supersedes it by ONE exclusion, and nothing else:
     code             reconcile_required
     reason           review_reserved_namespace
 
-    The refusal happens BEFORE declare_own_content (§5.1 step 5b), so no ownership of the
-    reserved path is ever asserted. No Candidate is built from that declaration.
+    "Inside" is decided by the exact three-layer path-identity rule of §7.8.4 — canonical
+    spelling, component-wise and case-insensitive namespace test including the Review root
+    itself, and ancestor-only Project containment — and NEVER by a string prefix test.
+
+    The refusal happens BEFORE declare_own_content (§5.1 steps 5b and 5c), so no ownership of
+    the reserved path is ever asserted. No Candidate is built from that declaration.
 
     It is NOT `review_candidate_unavailable`, NOT a new StopError code, NOT a new exception
     class, and NOT a refusal of an unsupported Git result shape.
+
+    A declaration whose path identity cannot be established at all is a DIFFERENT refusal:
+    `review_candidate_unavailable`, F2 §6.5's own predicate, reused as a third instance of it
+    rather than extended (§7.8.4). The two are never collapsed.
 ```
 
 **Why both cannot stand.** Measured (M-26): with the canonical Review checkout rule in the base tree, a
@@ -699,6 +707,29 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-28  THE CANONICAL-SPELLING PREDICATE ALREADY EXISTS AND IS ALREADY ENFORCED.
+      `mutation._safe_relative` (mutation.py:333) returns false for a path that is empty, not a
+      string, absolute (`startswith("/")`), drive-qualified (`":" in path.split("/")[0]`, which
+      also catches a UNC path once backslashes are separators), or that holds any empty, `.` or
+      `..` component. `validate_effect` applies it to every `git_commit` path, so a declaration
+      failing it could never reach a commit anyway — the Git stage would raise. What F3 needs is
+      the same predicate applied EARLIER, before ownership is asserted.
+
+      Also measured: `review.paths.is_review_path` is only
+      `relative.startswith(".workline/review/")`, and `ProjectStore.abs` is `root / relative`.
+      So a naive `is_review_path` over the slash-replaced declaration does NOT close
+      `./.workline/review/gates/x.yaml` or `.workline/runtime/../review/gates/x.yaml`: the
+      prefix test says "not Review", while `root / relative` reaches the Review namespace.
+      That is exactly why §7.8.4 freezes a three-layer rule instead of a prefix test.
+
+M-29  THE ANCESTOR-CONTAINMENT MECHANISM ALSO EXISTS. `review.fsafe.walk(root, parts)`
+      (fsafe.py:601) walks from the Project root one component at a time, following nothing,
+      refusing anything present that is not a plain in-Project directory, and holding a handle to
+      each. Its module docstring states the reason F3 relies on: checking a path and then using
+      it are two operations, and a component can be replaced in between — which is why the proof
+      binds to the directory object rather than to the name. F3 reuses that discipline for the
+      ANCESTORS of a declared path and never for its final component.
+
 M-27  `GATE_STATUSES` is exactly `("open", "sealed_authorized")` (review/records.py:48-50), and
       `GateGeneration` has no reason, detail or failure field: an open generation carrying a
       receipt_id is refused, and only a seal names an authorized_operation_stage. So a
@@ -936,21 +967,30 @@ below it is attempted.
  3  Project execution lock; activation verified           F1-D4, F1 §6.4
  4  durable  mutation opened with both markers            F1-D2
  5  the Work cycle runs; the executor returns Completed
- 5a normalize the declared result_paths and deleted_paths  start.py:876, unchanged
- 5b THE RESERVED REVIEW NAMESPACE OWNERSHIP CHECK          §7.8.4, A-5, PR-8
-    inspect every declared result path and every declared deletion path.
-    If ANY lies inside `.workline/review/**`:
+ 5a normalize the declared result_paths and deleted_paths ONLY as the pre-existing START API
+    already normatively normalizes them: `p.replace("\\", "/")`, and nothing else
+                                                           start.py:876, unchanged
+ 5b DECLARED PATH IDENTITY — canonical spelling and Project containment      §7.8.4 layers 1, 3
+    Every declared result path and deletion path must have an exact path identity before any
+    ownership decision is made about it. A declaration that does not is MALFORMED and fails
+    closed, before step 5c and before step 6.
+ 5c RESERVED REVIEW NAMESPACE OWNERSHIP                    §7.8.4 layer 2, A-5, PR-8
+    With identity established, prove positively that the path is NOT the reserved namespace.
+    If any declared path IS:
 
-        ReconcileRequired(reason = "review_reserved_namespace")  and STOP, with
+        ReconcileRequired(reason = "review_reserved_namespace")  and STOP
+
+    On ANY failure at 5b or 5c:
             no declare_own_content        no _OWN_CONTENT note
             no completion_precheck        no dirty-separability check
             no Candidate projection       no Review of any kind
 
-    This MUST precede step 6, and the precedence is the point: declare_own_content writes the
-    _OWN_CONTENT note through set_note, which calls _save() (measured), so it is a DURABLE
-    assertion that these paths are START's own. A path the invocation contract says START may
-    never own must not first be durably recorded as START-owned and only then refused.
- 6  declare_own_content over the valid declared paths      start.py:884, unchanged
+    The precedence is the point: declare_own_content writes the _OWN_CONTENT note through
+    set_note, which calls _save() (measured), so it is a DURABLE assertion that these paths are
+    START's own. A path whose identity is not established, or that the invocation contract says
+    START may never own, must not first be durably recorded as START-owned and only then refused.
+ 6  declare_own_content, only for paths whose identity and ownership both passed
+                                                           start.py:884, unchanged
  7  completion_precheck passes                            skills/start, unchanged
  8  dirty separability over the owned set                 gitops.ensure_separable, unchanged
  9  Git persistence preflight over the owned set, under the pin  §7.3
@@ -1030,10 +1070,18 @@ R-5  Terminal events are NEVER carried by K1. K1's physical delta is the Candida
      and are proven at K1 by exact tree containment instead (§9, item W5; §17.2).
 R-6  Identifiers are reserved and content is durable before the stage that applies them
      (R4 §6, §13.2).
-R-6a OWNERSHIP VALIDATION PRECEDES OWNERSHIP ASSERTION. The reserved-namespace check of step 5b
-     runs before declare_own_content, before completion_precheck and before any dirty-separability
-     check, because declare_own_content durably records the declared paths as this mutation's own.
-     No refusal of a declaration may follow a durable assertion of the very ownership it refuses.
+R-6a PATH IDENTITY, THEN OWNERSHIP VALIDATION, THEN OWNERSHIP ASSERTION — in that order, and
+     the order matters more than the step numbers:
+
+         5b  PATH IDENTITY        canonical spelling and Project containment proven
+         5c  OWNERSHIP VALIDATION the reserved namespace proven absent
+         6   OWNERSHIP ASSERTION  declare_own_content
+
+     Both checks run before declare_own_content, before completion_precheck and before any
+     dirty-separability check, because declare_own_content durably records the declared paths as
+     this mutation's own. No refusal of a declaration may follow a durable assertion of the very
+     ownership it refuses, and no ownership decision may be made about a path whose identity has
+     not been established — a decision about an ambiguous path is not a decision.
 R-7  Each step marked `durable` completes its save before the step below it runs. An interruption
      between them resumes at the earliest unsatisfied checkpoint and re-derives, never re-decides.
 ```
@@ -1111,11 +1159,24 @@ launched under exactly it. What it is not, before generation 1, is DURABLE.
 F3 freezes the resume **point**; F4 owns what to do when the state found there does not match.
 
 ```text
-before 5b                     the executor has returned and nothing is recorded; a retry asks the
-                              executor again or reuses a saved result, exactly as today
-5b refused                    NOTHING was written: no note, no effect, no record changed. A retry
-                              re-runs the same check and reaches the same answer while the
-                              declaration is the same; a person reconciles (reconcile_required)
+before 5b                     the executor has returned; the mutation opened at step 4 is pending
+                              with its markers, and no ownership or completion effect of this
+                              completion is recorded yet. A retry asks the executor again or
+                              reuses a saved result, exactly as today
+5b or 5c refused              what is TRUE is that START has asserted no ownership and recorded
+                              nothing of this completion — not that nothing exists:
+
+                                the mutation opened at step 4 REMAINS PENDING, and its durable
+                                  review markers are unchanged;
+                                the executor may already have modified the working tree, and
+                                  that state is LEFT UNTOUCHED for human reconciliation;
+                                NO _OWN_CONTENT note for the refused declaration;
+                                NO completion effect, NO Candidate, NO Review record, and NO
+                                  Git stage caused by this completion.
+
+                              A retry re-runs the same checks and reaches the same answer while
+                              the declaration is the same; a person reconciles
+                              (reconcile_required). There is no automatic legacy downgrade.
 before 9a                     nothing of the completion is committed; the flow continues
 9a recorded, not applied      S-c0 replays; when the event log already matches HEAD it is a
                               no-op and the Candidate is frozen against the same base
@@ -1183,9 +1244,9 @@ substituted for them:
 
 ```text
  1 ...  5   as §5.1; the executor returns Completed with an empty owned set
- 5b         the reserved-namespace ownership check is VACUOUS for the no-declared-path case:
-            there is no declared path to inspect. For the ALL-INERT case it still runs in full,
-            before step 6, because declared paths exist                           §5.1, §7.8.4
+ 5b, 5c     path identity and the reserved-namespace ownership check are VACUOUS for the
+            no-declared-path case: there is no declared path to inspect. For the ALL-INERT case
+            BOTH still run in full, before step 6, because declared paths exist  §5.1, §7.8.4
  6          no declare_own_content: there is no owned path         (start.py:880, unchanged)
  7          completion_precheck passes
  8, 9       not applicable: there is no owned path to separate or to preflight
@@ -2221,8 +2282,8 @@ FROZEN, AS AN OWNERSHIP BOUNDARY DECLARED BEFORE EXECUTION:
   bound it. START cannot show ownership of that path for this operation, because the namespace is
   owned by Review.
 
-  THE CHECK RUNS BEFORE declare_own_content (§5.1 step 5b). declare_own_content writes the
-  _OWN_CONTENT note through set_note, which calls _save(), so it durably asserts that the
+  THE CHECK RUNS BEFORE declare_own_content (§5.1 steps 5b and 5c). declare_own_content writes
+  the _OWN_CONTENT note through set_note, which calls _save(), so it durably asserts that the
   declared paths are this mutation's own. Refusing after that would mean durably claiming
   ownership of a path the contract says may never be owned, and only then rejecting it.
 
@@ -2235,6 +2296,104 @@ FROZEN, AS AN OWNERSHIP BOUNDARY DECLARED BEFORE EXECUTION:
                      reason. The previous draft froze a plain StopError and simultaneously
                      claimed §2.3 was retained unchanged; those could not both hold, and the
                      StopError form is withdrawn.
+```
+
+#### The exact path identity the check requires
+
+A prefix test over the declared string is **not** sufficient and must not be implemented. Measured
+(M-28): `is_review_path` is only `relative.startswith(".workline/review/")`, while `ProjectStore.abs` is
+`root / relative` — so `./.workline/review/gates/x.yaml` and `.workline/runtime/../review/gates/x.yaml`
+both pass the prefix test as "not Review" while reaching the Review namespace on the filesystem.
+
+The frozen rule has three layers, all required, evaluated on the declaration as START's existing
+normalization leaves it (`p.replace("\\", "/")` and nothing more):
+
+```text
+LAYER 1 — CANONICAL SPELLING (lexical).  §5.1 step 5b
+
+  The declared path MUST satisfy the landed predicate `mutation._safe_relative` (M-28):
+
+      non-empty, and a string
+      not absolute                  (no leading "/")
+      not drive-qualified           (no ":" in the first component — also catches UNC once
+                                     backslashes have become separators)
+      no empty component, no "." component, no ".." component
+      no backslash survives, because step 5a has already turned every one into a separator
+
+  F3 REFUSES every non-canonical spelling; it does NOT rewrite one into a canonical form.
+  Silently turning `./x` into `x` would replace one declared result identity with another after
+  the executor returned, which is exactly what this contract refuses to do anywhere else.
+
+  failure -> MALFORMED DECLARATION (see "How a malformed declaration is classified", below)
+
+LAYER 2 — RESERVED NAMESPACE, component-wise.  §5.1 step 5c
+
+  Split the canonical path into components. It is RESERVED when its component sequence is
+
+      [".workline", "review"]                        the Review root ITSELF, and
+      [".workline", "review", ...]                   every descendant
+
+  compared COMPONENT BY COMPONENT — never by string prefix, which is what lets `.workline/reviewX`
+  be correctly accepted and `.workline/review` itself be correctly refused — and compared
+  CASE-INSENSITIVELY on every platform.
+
+  The case rule is deliberately platform-independent. A case-insensitive filesystem reaches the
+  same object through `.WORKLINE/REVIEW/...`, and a rule that depended on the running filesystem
+  would make the same declaration lawful on one machine and not another. Refusing the alias
+  everywhere costs only a pathological result path and buys one answer.
+
+  failure -> ReconcileRequired(reason = "review_reserved_namespace")
+
+LAYER 3 — PROJECT CONTAINMENT, on the ANCESTORS only (filesystem).  §5.1 step 5b
+
+  Layers 1 and 2 are lexical, and a lexical test cannot see a symlinked or junctioned ANCESTOR
+  directory that makes an innocent-looking path reach a canonical Review object.
+
+  So, before ownership is asserted, walk from the Project root to the declared path's PARENT one
+  component at a time, following nothing, proving every component that exists is a plain
+  in-Project directory — the discipline `review.fsafe.walk` already implements and the reason its
+  module gives for binding to handles rather than to names (M-29).
+
+      every existing ancestor component is a plain in-Project directory   -> containment proven
+      any ancestor is a symlink, junction or other reparse point          -> FAIL CLOSED
+      the identity of any ancestor cannot be established                  -> FAIL CLOSED
+
+  THE FINAL COMPONENT IS NEVER DEREFERENCED. F2 supports a symlink as a result object, and this
+  layer must not break that: what is proven is the chain that leads to the name, not what the
+  name itself resolves to.
+
+  failure -> containment unknown -> MALFORMED DECLARATION, fail closed before any ownership
+             assertion. Not knowing is not a yes.
+```
+
+```text
+THE INVARIANT, stated once: START must POSITIVELY prove that a declared path is not the reserved
+Review namespace before it durably asserts ownership of that path. Unknown containment fails
+closed, before declare_own_content.
+```
+
+#### How a malformed declaration is classified
+
+```text
+A declaration that fails LAYER 1 or LAYER 3 has no establishable path identity, so the declared
+owned set cannot be projected exactly. That is F2 §6.5's OWN PREDICATE, and the existing
+refusal is reused verbatim:
+
+    review_candidate_unavailable
+
+F2 §6.5 names two instances of that predicate — a declared path that is a directory, and one
+that cannot be read. A path whose spelling or containment cannot be established is a THIRD
+INSTANCE OF THE SAME PREDICATE, not a new one, so this is a SPECIALIZATION and needs no
+amendment.
+
+Contrast A-5, which DID extend §6.5: it added an OWNERSHIP-based invalidity, a different
+predicate, with its own reason. The two are deliberately kept apart:
+
+    malformed path identity   -> review_candidate_unavailable   (projectability)
+    reserved namespace        -> review_reserved_namespace      (ownership)
+
+They are never collapsed into one condition, because they answer different questions and a
+reader needs to know which one refused.
 ```
 
 ```text
@@ -4092,8 +4251,12 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
 IP-14 The reserved-namespace ownership boundary of A-5 needs three things: the pre-execution
       binding in the review-v1 invocation contract (PR-8), a post-Completed validation of every
       declared result and deletion path against the canonical Review namespace WHICH MUST RUN
-      BEFORE declare_own_content (§5.1 step 5b, because that call durably records ownership),
-      and the new
+      BEFORE declare_own_content (§5.1 steps 5b and 5c, because that call durably records
+      ownership), implemented as §7.8.4's three layers — `_safe_relative` for spelling, a
+      component-wise case-insensitive namespace test that includes the Review root itself, and a
+      `fsafe`-style no-follow walk of the ANCESTORS only, never dereferencing the final
+      component — with a malformed identity routed to `review_candidate_unavailable` and the
+      reserved namespace to the new
       reason value `review_reserved_namespace` registered in the reason catalogue alongside the
       review-v1 planning reasons, carried through ReconcileRequired. It is the only new reason F3
       introduces, and it needs no new exception class.
@@ -4600,7 +4763,7 @@ B. .gitattributes RESULT
 
 C. RESULT PATH EXACTLY INSIDE .workline/review/gates/**
    violation of the PRE-EXISTING review-v1 executor ownership contract (§7.8.4, A-5).
-   when         §5.1 step 5b, before declare_own_content
+   when         §5.1 step 5c, after path identity at 5b and before declare_own_content
    refusal      ReconcileRequired(reason = "review_reserved_namespace")
    framing      this is NOT an unsupported Git result shape. The blob there may be perfectly
                 ordinary. What is refused is a DECLARATION OF OWNERSHIP over a namespace the
@@ -4668,8 +4831,9 @@ E. EVERY LATER COMMIT
 
 F. RESULT PATH INSIDE .workline/review/**
    bound   before the executor ran, by the review-v1 invocation contract (PR-8)
-   at 5b   the ownership check refuses BEFORE declare_own_content: no _OWN_CONTENT note, no
-           completion_precheck, no dirty-separability check, no Candidate projection, no Review
+   at 5c   the ownership check refuses BEFORE declare_own_content: no _OWN_CONTENT note, no
+           completion_precheck, no dirty-separability check, no Candidate projection, no Review.
+           "Inside" is decided by §7.8.4's three-layer rule, not by a string prefix
    refusal ReconcileRequired(reason="review_reserved_namespace") — unowned state, which F2 §2.3
            permits refusing, and refusing as a reconcile is what §2.3 says it is
    not     an unsupported Git result shape; not review_candidate_unavailable; never legacy
@@ -4688,12 +4852,13 @@ G. ORDINARY .gitattributes RESULT
 
 ```text
 A. ORDINARY RESULT OUTSIDE THE REVIEW NAMESPACE
-   5 Completed -> 5a normalize -> 5b ownership check PASSES (no declared path is inside
-   .workline/review/**) -> 6 declare_own_content -> 7 completion_precheck -> ... -> 10 Candidate
+   5 Completed -> 5a normalize -> 5b path identity PASSES -> 5c ownership PASSES (no declared
+   path is inside .workline/review/**) -> 6 declare_own_content -> 7 completion_precheck
+   -> ... -> 10 Candidate
    result  ordinary supported result; the Candidate is built
 
 B. RESULT PATH INSIDE .workline/review/**
-   5 Completed -> 5a normalize -> 5b ownership check FAILS
+   5 Completed -> 5a normalize -> 5b path identity PASSES -> 5c ownership check FAILS
    refusal ReconcileRequired(reason = "review_reserved_namespace")
    NOT run  declare_own_content, the _OWN_CONTENT note, completion_precheck,
             dirty-separability, Candidate projection, any Review
@@ -4706,11 +4871,11 @@ C. DELETION PATH INSIDE THE REVIEW NAMESPACE
    identical to B. The ownership rule names result paths and deletion paths alike.
 
 D. ALL-INERT ORDINARY RESULT
-   5b runs IN FULL — declared paths exist, they are simply inert — and passes.
+   5b and 5c run IN FULL — declared paths exist, they are simply inert — and both pass.
    -> 6 declare_own_content -> ... -> all-inert Candidate, artifact_kind "empty", NO K1 (§6.7)
 
 E. NO DECLARED PATH
-   5b is VACUOUS: there is no declared path to inspect. No declare_own_content either
+   5b and 5c are VACUOUS: there is no declared path to inspect. No declare_own_content either
    (start.py:880). -> empty Candidate, NO K1.
 
 F. CRASH AFTER CONTEXT BUILD, BEFORE GENERATION 1, AUTHORITY FILES UNCHANGED
@@ -4732,6 +4897,66 @@ H. CRASH AFTER GENERATION 1
    recomputes it and never reconstructs it from the hash, and it NEVER retargets to a newly
    recomputed Context. Authority that differs now is ordinary current-validity drift under
    F2 §16.1 — an invalidation question, not a licence to rebuild.
+```
+
+### 21.10 Declared-path identity matrix
+
+Every row is a declared result or deletion path, judged by §7.8.4's three layers at §5.1 steps 5b and 5c —
+before `declare_own_content`. Outcomes are exactly four: **accepted**, `review_reserved_namespace`,
+**malformed** (`review_candidate_unavailable`), or **containment unknown** (fail closed, which is reported
+as malformed because no identity was established).
+
+```text
+DECLARATION                                     LAYER   OUTCOME
+
+"./.workline/review/gates/x.yaml"               1       MALFORMED -> review_candidate_unavailable
+   the "." component fails _safe_relative. Note that the naive prefix test would have said
+   "not Review" while `root / relative` reaches the Review namespace (M-28) — which is exactly
+   why layer 1 runs first and why the path is refused rather than rewritten to a canonical form.
+
+".workline/runtime/../review/gates/x.yaml"      1       MALFORMED -> review_candidate_unavailable
+   the ".." component fails _safe_relative, for the same reason and with the same consequence.
+   F3 does not normalize it into ".workline/review/gates/x.yaml" and then refuse that; silently
+   replacing one declared result identity with another after the executor returned is prohibited.
+
+".workline/review"  (the Review ROOT itself)    2       review_reserved_namespace
+   reserved. The component sequence is exactly [".workline", "review"], which the component-wise
+   test covers — a "starts with .workline/review/" prefix test would have MISSED it.
+
+".workline/reviewX/notes.md"                    2       ACCEPTED
+   not reserved: the second component is "reviewX", not "review". Component-wise comparison is
+   what makes this correct, where a string-prefix test on ".workline/review" would wrongly
+   refuse it.
+
+".WORKLINE/Review/gates/x.yaml"                 2       review_reserved_namespace
+   a case alias. The namespace test is case-insensitive ON EVERY PLATFORM, deliberately: on a
+   case-insensitive filesystem this reaches the same object, and a rule that depended on the
+   running filesystem would make one declaration lawful on one machine and not another.
+
+"src/app/main.py"   (ordinary canonical path)   1,2,3   ACCEPTED
+   canonical spelling, not reserved, ancestors proven plain in-Project directories. Ordinary
+   supported result; proceeds to declare_own_content.
+
+"build/out.so" where "build" IS A SYMLINK       3       CONTAINMENT FAIL -> fail closed,
+   (ancestor indirection, whatever it targets)          review_candidate_unavailable
+   an ancestor that is a symlink, junction or other reparse point is refused. This is the case a
+   lexical test cannot see, and the reason layer 3 exists: an innocent-looking path must not be
+   able to make declare_own_content read a canonical Review object through a redirected ancestor.
+
+"assets/link" where "link" ITSELF is a symlink  3       ACCEPTED
+   the FINAL component is NEVER dereferenced. F2 supports a symlink as a result object and this
+   layer must not break that: what layer 3 proves is the chain that leads to the name, not what
+   the name resolves to.
+
+any path whose ancestor identity cannot be
+established at all                              3       CONTAINMENT UNKNOWN -> fail closed
+   not knowing is not a yes. It is refused before any ownership is asserted.
+```
+
+```text
+In every refusing row, the refusal happens BEFORE declare_own_content, so no _OWN_CONTENT note is
+written for the declaration, and §5.4's refusal state applies: the mutation stays pending with its
+markers unchanged, and the executor's working-tree state is left untouched for reconciliation.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -4989,8 +5214,9 @@ PR-8  THE RESERVED REVIEW NAMESPACE, BOUND BEFORE EXECUTION. Selecting review-v1
       path and not as a deletion path. The rule is static and in force from selection; the
       concrete future path list need not be known for it to bind.
 
-      The check runs at §5.1 step 5b, BEFORE declare_own_content, so this operation never
-      durably asserts ownership of a path it may not own.
+      The checks run at §5.1 steps 5b and 5c, BEFORE declare_own_content, so this operation
+      never durably asserts ownership of a path it may not own — and "inside the namespace" is
+      decided by the three-layer path-identity rule of §7.8.4, never by a string prefix test.
 
       A `Completed` outcome declaring a path there has violated a pre-existing ownership
       contract. It is UNOWNED STATE, refused as
@@ -5302,9 +5528,12 @@ Stop conditions. An implementation that violates any of them is not implementing
     the built-in macro binary, and the configuration variables core.autocrlf and core.eol. A name
     is never judged as an opaque word.
 
-27a. The reserved-namespace ownership check runs before declare_own_content, so a path the
-    invocation contract says START may never own is never durably recorded as START-owned and
-    only then refused. Ownership validation always precedes ownership assertion.
+27a. Path identity is established, then ownership is validated, then ownership is asserted — in
+    that order. A declared path's canonical spelling and Project containment are proven, and the
+    reserved Review namespace is proven absent by a component-wise case-insensitive test and an
+    ancestor-only no-follow walk, BEFORE declare_own_content durably records it as START's own.
+    A prefix test over the declared string is never sufficient, unknown containment fails closed,
+    and the final component is never dereferenced.
 
 28. The canonical Review namespace is reserved: no Candidate entry lies inside it, and the
     canonical form-L checkout rule is required there rather than refused. Those two together are
@@ -5375,7 +5604,8 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
   IP-14 the reserved-namespace ownership boundary of A-5: the pre-execution binding in the
         review-v1 invocation contract, the post-Completed validation of every declared result
-        and deletion path — running BEFORE declare_own_content — and the new ReconcileRequired
+        and deletion path — running BEFORE declare_own_content, by §7.8.4's three-layer path
+        identity rule rather than a prefix test — and the new ReconcileRequired
         reason value `review_reserved_namespace` registered in the reason catalogue (no new code
         and no new exception class is needed)
 
