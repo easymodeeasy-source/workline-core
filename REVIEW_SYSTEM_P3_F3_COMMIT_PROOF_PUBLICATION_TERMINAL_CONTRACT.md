@@ -336,19 +336,44 @@ Context is not a Context of this contract version.
 The narrow replacement, frozen in §7.9:
 
 ```text
-1. The Work Review Context gains a bound checkout-capability claim over the CANONICAL REVIEW
-   NAMESPACE — not over the Work result. F2's reason for excluding it stands untouched for the
-   result: a result's bytes are the executor's and are bound by Git object identity.
+1. THE CONTEXT IS VERSION 2 and gains a bound checkout-capability claim over the CANONICAL
+   REVIEW NAMESPACE — not over the Work result. F2's reason for excluding it stands untouched
+   for the result: a result's bytes are the executor's and are bound by Git object identity.
 
-2. The claim is a Context field, so `review_context_hash` covers it and the Context's version is
-   raised. A Run whose Context does not carry it is not a Run of this contract version.
+2. THE CLAIM BINDS THE PROOF TARGET ONLY, exactly five keys (§7.9.6):
 
-3. It is proven at SEAL, over the RESULTING TREE, by the committed attribute evaluation of M-21:
-   no material attribute applies to this Run's canonical Review record paths or to the
-   Consumption path.
+       capability_contract    "review-v1-work-checkout-capability-v1"
+       form                   "form-L"
+       namespace              ".workline/review/**"
+       base_tree              <full object id>
+       resulting_tree         <full object id>
 
-4. It is a SEAL precondition, never a Candidate refusal. The Candidate stays expressible and
-   reviewable; what it cannot do is receive authorization (§7.9.2).
+   NO VERDICT FIELD of any kind. `review_context_hash` covers the claim, and a Run whose Context
+   does not carry it is not a Run of this contract version.
+
+3. AN UNSAFE OR UNKNOWN RESULTING TREE STILL PRODUCES A VALID CONTEXT. Such a Run is built,
+   reaches generation 1 and is reviewed normally. This is the whole reason the field carries a
+   target and not a verdict.
+
+4. AT SEAL, THE CAPABILITY IS DERIVED for exactly `Context.resulting_tree`. Success means the
+   CANONICAL FORM-L PROOF of §7.9.3 holds — the exact rule
+
+       .workline/review/** !text eol=lf -filter -ident -working-tree-encoding
+
+   printing form L, under all four proof layers `skills/review` freezes. It is NOT the weaker
+   "no material attribute applies" test, which the previous draft of this amendment still
+   carried and which is withdrawn: that test says nothing about a fresh clone's own
+   line-ending configuration, which is exactly what `eol=lf` is there to override.
+
+5. THE PROOF PROTECTS THE COMPLETE REQUIRED DURABLE SURFACE — the whole canonical Review
+   namespace as it stands in the resulting tree, every Run's records and not only this Run's,
+   plus the records this seal is about to create and the Consumption path this authorization
+   may later create (§7.9.4).
+
+6. ONLY `capable` MAY ISSUE A RECEIPT. `unsafe` and `unknown` withhold authorization.
+
+7. THIS IS NEVER A CANDIDATE REFUSAL. It is a SEAL precondition: the Candidate stays expressible
+   and reviewable, and what it cannot do is receive authorization (§7.9.2).
 ```
 
 **Why both cannot stand.** F2 §10.3's reason for excluding checkout capability is that a Work result's
@@ -798,11 +823,15 @@ frozen. It is therefore the first commit at which the completion's artifact is f
 commit of this operation lies between it and the Review.
 ```
 
-This is a specialization of an under-determined timing description, not a change to a normative
-rule: every normative clause of F2 §5.3 still holds exactly — `base_commit` is a full commit id of
-HEAD, every `declared_base` field is read from its committed state through the canonical loader,
-and it is the lineage the result is measured against. The entries' `old_*` are unaffected, because
-the event log is never a result path. §22 row 19.
+This timing and lineage rule is the physical consequence of **forward amendment A-1** (§1.5), which
+supersedes both relevant clauses of F2 §5.3 — the timing of `base_commit` and the statement that it is
+what F3 will require as K1's parent. It is not a specialization, and the earlier draft's claim that "every
+normative clause of F2 §5.3 still holds exactly" is withdrawn as inconsistent with A-1 and with §22 row 19.
+
+F2 §5.3's remaining, unaffected requirements continue unchanged: `base_commit` is a full commit id of
+HEAD, every `declared_base` field is read from that commit's committed state through the canonical loader,
+and it is the lineage the result is measured against. The entries' `old_*` are unaffected, because the
+event log is never a result path. §22 row 19.
 
 #### Every other Git stage of a review-v1 Work mutation is commit-only
 
@@ -901,7 +930,8 @@ below it is attempted.
 11  the CandidateSnapshot material envelope is built      F2 §9.3
 11a the RESULTING TREE identity becomes computable: base tree + the Candidate's entries,
     fully determined by what step 10 froze                §7.9.2
-11b durable  the Work Review Context v2 is built and becomes IMMUTABLE       §7.9.6
+11b          the Work Review Context v2 is built. It is NOT a durable checkpoint yet: its
+             first canonical durable binding is generation 1 (§5.4)            §7.9.6
              it binds capability_contract, form, namespace, base_tree, resulting_tree —
              the proof TARGET, never a verdict, so a Context is built and valid whatever
              the resulting tree's capability turns out to be
@@ -975,7 +1005,48 @@ R-7  Each step marked `durable` completes its save before the step below it runs
      between them resumes at the earliest unsatisfied checkpoint and re-derives, never re-decides.
 ```
 
-### 5.3 Where an interruption resumes
+### 5.3 The Context's durability before generation 1
+
+The Context must exist before isolated verification, because F2 §13.4 V-4 binds
+`review_context_hash` into the Evidence identity. That is an ORDERING requirement and not a durability
+claim, and the previous draft conflated the two by marking step 11b `durable` and its resume table
+"11b recorded"
+while defining no carrier for it. Withdrawn. The frozen model:
+
+```text
+BEFORE GENERATION 1
+    the Context is computed and used, and NOTHING durably carries it. There is no mutation note,
+    no runtime record and no canonical record that holds it, and this contract does not invent
+    one.
+
+    A crash before generation 1 has durably committed the TaskInput and gate 1 therefore loses
+    the Context, and the resume:
+        recomputes the Candidate and the Context from the same frozen inputs,
+        reruns the isolated verification under the recomputed Context,
+        and claims NO prior Context survived.
+    Because every input is fixed — the base, the Candidate, the resulting tree, the authority
+    digests — recomputation is deterministic and yields the same review_context_hash, so this is
+    a repetition of work rather than a change of identity.
+
+GENERATION 1 IS THE FIRST CANONICAL DURABLE BINDING
+    the TaskInput carries `review_context_hash` (M-2) and the gate generation carries it too
+    (M-3), and the generation mutation commits both and proves them persisted (M-12).
+
+AFTER GENERATION 1
+    the Context is IMMUTABLE. It is never rebuilt, never recomputed and never retargeted, and a
+    resume reads it rather than deriving it again. A Context that disagreed with the bound
+    `review_context_hash` would be a material change under F2 §16.1.
+```
+
+```text
+Nothing here weakens §7.9.6's statement that the Context is immutable before generation 1 accepts
+the task: it is immutable in the sense that it is not edited once built, and the Review is
+launched under exactly it. What it is not, before generation 1, is DURABLE.
+```
+
+---
+
+### 5.4 Where an interruption resumes
 
 F3 freezes the resume **point**; F4 owns what to do when the state found there does not match.
 
@@ -985,8 +1056,14 @@ before 9a                     nothing of the completion is committed; the flow c
                               no-op and the Candidate is frozen against the same base
 after 9a, before 11b          nothing physical happened since; the Candidate is re-frozen or
                               reused and the Context is built
-11b recorded, before 16       the Context is immutable and is NOT rebuilt; the flow resumes at
-                              the earliest unfinished gate generation
+after 11b, before 13          the Context exists in memory only and NO durable carrier holds
+                              it. A crash here loses it, and §5.4 says exactly what a resume
+                              does: recompute it from the same frozen inputs, rerun the
+                              isolated verification, and claim no prior Context survived
+13 recorded, before 16        generation 1 has durably bound the Context through the TaskInput
+                              and the gate record. From here the Context is IMMUTABLE and is
+                              never rebuilt or retargeted; the flow resumes at the earliest
+                              unfinished gate generation
 after 15, before 16           the pre-seal boundary: the capability of Context.resulting_tree is
                               derived again, from committed objects, and decides whether the
                               seal proceeds. A previous pass does not carry, and a previous
@@ -2074,12 +2151,30 @@ FROZEN, AS AN OWNERSHIP BOUNDARY DECLARED BEFORE EXECUTION:
   bound it. START cannot show ownership of that path for this operation, because the namespace is
   owned by Review.
 
-  refusal identity:  ReconcileRequired is NOT used. The refusal is a StopError with the frozen
-                     code `review_reserved_namespace`.
+  refusal identity:  ReconcileRequired, carrying the frozen reason
+
+                         ReconcileRequired(reason = "review_reserved_namespace")
+
+                     The recovery CLASS is `reconcile_required`, which is what F2 §2.3 says an
+                     unowned-state refusal is, and the dedicated semantic identity is the
+                     reason. The previous draft froze a plain StopError and simultaneously
+                     claimed §2.3 was retained unchanged; those could not both hold, and the
+                     StopError form is withdrawn.
 ```
 
 ```text
-Why a NEW code rather than `review_candidate_unavailable`. That code means exactly one thing in
+No extension is needed to carry it. `ReconcileRequired(message, *, reason=...)` exists in live
+code as a subclass of StopError whose code is always `reconcile_required` and whose `reason`
+names which review-v1 reason stopped the operation — exactly the shape this needs. F1 already
+used it for `review_marker_mismatch`, so `review_reserved_namespace` joins the same catalogue as
+a new REASON value, not a new code.
+
+What is preserved by using it: the `reconcile_required` recovery class, a dedicated semantic
+identity, human reconciliation semantics, and no automatic legacy downgrade.
+```
+
+```text
+Why a DEDICATED IDENTITY rather than `review_candidate_unavailable`. That code means exactly one thing in
 F2 §6.5 — "the declared owned set cannot be projected exactly" — which is about PROJECTABILITY, a
 property of the bytes at a path. This condition is about OWNERSHIP, which is a property of the
 namespace and is decided without looking at the bytes at all. Overloading one code with two
@@ -2244,12 +2339,30 @@ THE COVERED SURFACE, frozen:
 
   2. the paths this seal is about to create: the sealing generation record and the Receipt;
 
-  3. the Consumption path this authorization may later create, whose identifier is already
-     reserved (§13.2).
+  3. the Consumption path this authorization may later create — covered WITHOUT knowing its
+     identifier, because the required rule is a single pattern over the whole namespace and
+     therefore guarantees the checkout capability of a future, not-yet-named path inside it.
 
 Because the required rule is a single pattern over `.workline/review/**`, proving it covers the
 whole namespace at once — including record paths that do not exist yet, which is the same reason
 the entry predicate is over the source rather than over paths (§7.8.1).
+```
+
+```text
+TWO DIFFERENT SCOPES, and they must not be conflated:
+
+  FORM-L COVERAGE        applies to the namespace as a pattern, so it covers paths that EXIST in
+                         the resulting tree AND paths that will be created later — the sealing
+                         generation, the Receipt, and the Consumption. No identifier is needed
+                         for any of them.
+
+  STRICT-READER CHECK    applies only to records that ALREADY EXIST in the resulting tree. A
+                         record that has not been written cannot be read, and its future
+                         readability is exactly what the form-L guarantee provides.
+
+So the capability decision at §5.1 step 15a requires NO reserved Consumption identifier. The
+identifier is reserved after the seal (§13.2), which is where it belongs, and nothing in the
+pre-seal proof depends on it.
 ```
 
 ```text
@@ -3793,7 +3906,7 @@ lifecycle.
 A review-v1 Work whose terminal events are applied but whose K2 is not committed, or whose K2 is
 committed but not proven, or not published where a remote exists, is NEVER reported completed and
 the mutation is NEVER closed. The pending mutation resumes from the earliest unsatisfied
-checkpoint (§5.3), exactly as the live Terminal finalization rule already requires.
+checkpoint (§5.4), exactly as the live Terminal finalization rule already requires.
 ```
 
 ---
@@ -3903,8 +4016,9 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
 IP-14 The reserved-namespace ownership boundary of A-5 needs three things: the pre-execution
       binding in the review-v1 invocation contract (PR-8), a post-Completed validation of every
       declared result and deletion path against the canonical Review namespace, and the new
-      StopError code `review_reserved_namespace` registered in the error and reason catalogue
-      alongside the review-v1 codes. It is the only new code F3 introduces.
+      reason value `review_reserved_namespace` registered in the reason catalogue alongside the
+      review-v1 planning reasons, carried through ReconcileRequired. It is the only new reason F3
+      introduces, and it needs no new exception class.
 
 IP-13 The seal precondition of §7.9 requires composing the resulting tree from the base tree and
       the Candidate's entries, and evaluating attributes with --source against it inside the
@@ -4106,7 +4220,7 @@ L. EXTERNAL DRIFT IN A NON-TREE ATTRIBUTE SOURCE
 
 M. RUNTIME MUTATION RECORD SURVIVES A CRASH
    layers           both present (§10.2.1)
-   disposition      resume at the earliest unsatisfied checkpoint (§5.3) and RE-EXECUTE the
+   disposition      resume at the earliest unsatisfied checkpoint (§5.4) and RE-EXECUTE the
                     proof in full. A prior pass never carries (§10.2.2).
    trap             none
 
@@ -4295,9 +4409,16 @@ I. WINDOWS-LIKE FRESH CLONE WITH core.autocrlf=true
    storage    unaffected: the operation's own commits set core.autocrlf=false (M-23)
 
 J. CONTEXT v2 BYTES BEFORE GENERATION 1
-   timing     the Candidate is frozen first, so the resulting tree and its object id are known
-              before the Context is built; both verdicts are proven then; the Context is immutable
-              before generation 1 accepts the task and is what the TaskInput binds
+   order      the Candidate is frozen first, so the resulting tree and its object id are known;
+              then the Context's TARGET-ONLY record is built from them
+   verdicts   NONE. No resulting-tree verdict is required, computed or stored at Context build
+              time — the Context carries a target, never a verdict (§7.9.6). The earlier
+              "both verdicts are proven then" is obsolete and withdrawn.
+   base       the base capability is ALREADY an entry precondition (§7.4, §7.8), decided before
+              any mutation exists, so nothing about it is decided here either
+   resulting  the resulting-tree verdict is derived at SEAL ONLY, at §5.1 step 15a
+   durability the Context is NOT durable before generation 1; generation 1 is its first canonical
+              durable binding, and a crash before it recomputes rather than resumes (§5.3)
    identity   review_context_hash covers review_checkout_capability, so the claim reaches the gate
               generations, the Receipt and the closure
    v1         a version 1 Context is not a Context of this contract version; the strict reader
@@ -4401,7 +4522,7 @@ B. .gitattributes RESULT
 
 C. RESULT PATH EXACTLY INSIDE .workline/review/gates/**
    violation of the PRE-EXISTING review-v1 executor ownership contract (§7.8.4, A-5).
-   refusal      StopError, code `review_reserved_namespace`
+   refusal      ReconcileRequired(reason = "review_reserved_namespace")
    framing      this is NOT an unsupported Git result shape. The blob there may be perfectly
                 ordinary. What is refused is a DECLARATION OF OWNERSHIP over a namespace the
                 invocation contract reserved before the executor ran — unowned state, which
@@ -4432,7 +4553,7 @@ authority plan and the matrices cannot drift apart again.
 
 ```text
 A. SAFE CANDIDATE, CAPABILITY CAPABLE
-   §5.1  10 Candidate frozen -> 11 material -> 11a resulting tree id -> 11b Context v2 immutable
+   §5.1  10 Candidate frozen -> 11 material -> 11a resulting tree id -> 11b Context v2 built
          -> 12 isolated verification under that Context -> 13 gen 1 accept + TaskInput
          -> 14 reviewer -> 15 gen 2 settle
          -> 15a capability derived for Context.resulting_tree = CAPABLE
@@ -4445,6 +4566,7 @@ B. UNSAFE RESULTING TREE
    §5.1  identical through step 15. The Context at 11b IS BUILT AND VALID — it binds the proof
          target and carries no verdict (§7.9.6, TM-11) — so generation 1 exists, the TaskInput
          binds review_context_hash, and the external Review occurs normally.
+   note  no verdict is computed at 11b in this case either; `unsafe` is first known at 15a.
    15a   capability derived for Context.resulting_tree = UNSAFE
    then  NO step 16: no generation-3 record, no Receipt, no authorization, no Consumption,
          no K1, nothing published. Generation 2 remains latest and `open`. Operation STOP
@@ -4469,7 +4591,8 @@ F. RESULT PATH INSIDE .workline/review/**
    bound   before the executor ran, by the review-v1 invocation contract (PR-8)
    at 10   the Candidate cannot be projected: the declaration violates that pre-bound ownership
            rule
-   refusal StopError `review_reserved_namespace` — unowned state, which F2 §2.3 permits refusing
+   refusal ReconcileRequired(reason="review_reserved_namespace") — unowned state, which F2 §2.3
+           permits refusing, and refusing as a reconcile is what §2.3 says it is
    not     an unsupported Git result shape; not review_candidate_unavailable; never legacy
    same    for a DELETION path inside the namespace
 
@@ -4724,7 +4847,8 @@ PR-3  the terminal stage of §13.3 and its reservation keys
 PR-4  the recorded-completion proof of §19, and that Receipt existence, K2 existence and remote
       publication are each insufficient
 PR-5  the no-remote topology of §20, and that it never collapses into the combined legacy shape
-PR-6  the resume points of §5.3, and that a resume re-derives and never re-decides
+PR-6  the resume points of §5.4, the Context durability model of §5.3, and that a resume
+      re-derives and never re-decides
 PR-7  that a pending review-v1 mutation never downgrades to legacy, and that legacy
       availability is a property of a separate later invocation (§7.4)
 PR-8  THE RESERVED REVIEW NAMESPACE, BOUND BEFORE EXECUTION. Selecting review-v1 binds, as part
@@ -4737,7 +4861,9 @@ PR-8  THE RESERVED REVIEW NAMESPACE, BOUND BEFORE EXECUTION. Selecting review-v1
       concrete future path list need not be known for it to bind.
 
       A `Completed` outcome declaring a path there has violated a pre-existing ownership
-      contract. It is UNOWNED STATE, refused with StopError code `review_reserved_namespace`.
+      contract. It is UNOWNED STATE, refused as
+      ReconcileRequired(reason = "review_reserved_namespace") — the reconcile recovery class F2
+      §2.3 assigns to unowned state, carrying a dedicated reason.
       It is NOT an unsupported Git result shape, NOT `review_candidate_unavailable` (which means
       projectability), and NEVER a fallback to legacy.
 
@@ -5114,7 +5240,8 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-14 the reserved-namespace ownership boundary of A-5: the pre-execution binding in the
         review-v1 invocation contract, the post-Completed validation of every declared result
         and deletion path against the canonical Review namespace, and the new StopError code
-        `review_reserved_namespace` registered in the error and reason catalogue
+        reason `review_reserved_namespace` registered in the reason catalogue, carried through
+        ReconcileRequired (no new exception class is needed)
 
 Not implemented by this contract:
   any commit primitive, proof, validator, terminal stage, publication or postcheck code
