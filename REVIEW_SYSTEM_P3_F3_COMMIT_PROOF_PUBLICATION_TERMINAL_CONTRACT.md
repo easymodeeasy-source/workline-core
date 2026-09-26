@@ -60,7 +60,7 @@ implementation lands are listed in §23 and are not written by this document.
 P1 R1-R12          inherited; specialized, never weakened
 P2 integration     inherited; the publication barrier is preserved exactly (§12)
 P3 F1              inherited without change (F1-D1 ... F1-D11)
-P3 F2              inherited EXCEPT the five explicit forward amendments of §1.5
+P3 F2              inherited EXCEPT the six explicit forward amendments of §1.5
                    (F2-D1 ... F2-D17 otherwise unchanged)
 F3                 this document: physical topology, proof, publication, terminal stage
 F4                 deferred (§25)
@@ -70,7 +70,7 @@ Where F3 appears to say something an earlier freeze also says, F3 is a **special
 never widens. Every apparent collision was audited item by item in §22.
 
 ```text
-F3 semantic forward amendments: YES - five, all to landed F2, all stated in §1.5.
+F3 semantic forward amendments: YES - six, all to landed F2, all stated in §1.5.
 ```
 
 They are declared there in full, with the exact superseded sentences and the narrow replacement.
@@ -79,7 +79,7 @@ same discipline F1 used for its amendments to P1 R4 and R5.
 
 ### 1.4 F1 and F2 decisions F3 preserves without change
 
-Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the five
+Everything in this list is inherited exactly. What F3 does **not** inherit unchanged is the six
 statements named in §1.5, and nothing else.
 
 ```text
@@ -110,7 +110,7 @@ the invalidation boundary                                                       
 
 ### 1.5 Forward amendments to landed F2
 
-F3 supersedes five statements of the landed F2 contract. Each is named exactly, with the sentence
+F3 supersedes six statements of the landed F2 contract. Each is named exactly, with the sentence
 superseded, the replacement, and why the two cannot both stand. **The F2 file is not edited.** This is the
 mechanism F1 §11.3 already used for P1 R4 §2 and R5 §8: the amendment is declared in the new contract, and
 the historical freeze keeps its bytes.
@@ -471,6 +471,43 @@ storage-identity invariant would break.
 
 ---
 
+#### A-6 — F2 §6.2 superseded, §6.5 extended, §2.3 retained: the lifecycle event log
+
+```text
+F2 §6.2's reviewed surface has no exclusion for START's own lifecycle state either. F3 adds a
+SECOND exclusion, on exactly the same footing as A-5 and for a reason A-5 did not have:
+
+    A review-v1 Work may not declare a result path or a deletion path at
+
+        .workline/events/events.jsonl
+
+    A Completed outcome that does so is UNOWNED STATE, refused as
+
+        ReconcileRequired(reason = "review_reserved_namespace")
+
+F2 §6.5   EXTENDED, by the same ownership-based declaration-invalidity case A-5 added; this is a
+          second instance of THAT predicate, not a third predicate.
+F2 §2.3   RETAINED. An ownership violation of a rule bound before execution is unowned state,
+          which §2.3 expressly permits refusing — not a refusal of a result SHAPE.
+```
+
+**Why this is needed, and why it could not be assumed.** §7.8.5 has the full argument; in short: the
+deletion witness must bind a base identity at step 5b, which runs BEFORE S-c0, so the only base that
+exists then is PRE_S_C0_BASE — while the Candidate measures `old_*` against `declared_base.base_commit`.
+Those two commits differ at exactly one path, the event log. If an executor could declare that path, the
+two bases would differ AT A DECLARED PATH and the witness's base identity would be the wrong one. Checked
+against primary sources: nothing excludes it today, exactly as nothing excluded the Review namespace.
+
+The earlier draft simply asserted "the event log is never a result path". That was an unsupported premise
+rather than a rule, and it is replaced by this amendment rather than retained.
+
+**Why the same reason value as A-5.** Both are the same condition — a declaration over state the
+invocation contract reserved before the executor ran — and both reconcile identically. Splitting them
+would distinguish two things that behave the same way, which is the ambiguity this contract removes
+elsewhere.
+
+---
+
 #### What these amendments do NOT change
 
 ```text
@@ -707,6 +744,53 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-32  A GITLINK CANNOT SATISFY THE CURRENT OWN-CONTENT GUARD. MEASURED, on a real submodule.
+      A gitlink path is a DIRECTORY, so in `_content_digest`: `is_symlink()` is False, `exists()`
+      is True, and `read_bytes()` raises IsADirectoryError, which the except clause turns into
+      `None`. `declare_own_content` therefore stores the `_UNREADABLE` string. The later guard
+      `_require_own_bytes_committed` compares `_content_digest(abs(path)) != expected`, i.e.
+
+          None  !=  "unreadable"      ->  True  ->  the path is classified FOREIGN
+
+      so a CHANGED gitlink result is refused by the own-content guard and its commit never
+      happens. Measured exactly that way: tree entry `160000 commit 40755bbb...`, digest `None`,
+      stored `'unreadable'`, comparison unequal.
+
+      Consequence for this contract: the previous claim that the witness needs "no recorded form
+      changes and no downstream reader changes" was FALSE, and is withdrawn. §7.8.4 freezes a
+      per-kind witness and IP-16 names the runtime extension it needs.
+
+M-33  MODE IS NOT IN THE OWN-CONTENT FORM AT ALL. `_content_digest` produces `_BYTES`, `_LINK`,
+      `_ABSENT` or `None`; none of them carries the Git mode. So `100644` vs `100755` is invisible
+      to the own-content guard, while F2 §6.3 makes `new_mode` part of Candidate identity. A
+      chmod between the witness and staging is therefore not detected by that guard today.
+
+M-34  WINDOWS: GIT DOES NOT REFUSE AN ANCESTOR JUNCTION AT STAGING. MEASURED.
+      With a tracked `dir/file.txt`, `dir` removed and replaced by a junction to `elsewhere`
+      (`fsutil reparsepoint query` reports tag 0xa0000003, IO_REPARSE_TAG_MOUNT_POINT):
+
+          git add -- dir/file.txt        ->  EXIT 0, and it staged b2f3ae2a, the blob from
+                                             `elsewhere/file.txt`, NOT HEAD's 4b48deed
+
+      So Git does NOT mechanically fail closed on Windows ancestor indirection. The independent
+      re-review's POSIX measurement — `fatal: pathspec 'dir/file' is beyond a symbolic link` —
+      is reported here as THEIR measurement; this environment is Windows only and could not
+      reproduce it.
+
+M-35  BUT THE OWN-BYTES GUARD DOES CATCH THE HARMFUL CASE. MEASURED, same fixture.
+      `_content_digest` resolves by pathname too, so it follows the junction and reads the
+      foreign bytes:
+
+          digest through the junction   bytes:c11b5b87...
+          digest recorded at witness    bytes:25718360...
+          equal?                        NO  ->  FOREIGN  ->  STOP, nothing staged
+
+      And when the redirected file holds the SAME bytes, the staged blob is byte-identical to
+      the witnessed one (`4b48deed` both sides), so there is no identity breach to detect.
+      An ancestor redirection therefore either changes the artifact's bytes — and is caught — or
+      does not change them, and is harmless. §7.8.4 turns this into the frozen argument, and
+      extends it to mode and gitlink identity, which M-33 and M-32 show the current form misses.
+
 M-30  ABSENCE IS ALREADY A REPRESENTABLE OWNERSHIP STATE. `mutation._content_digest`
       (mutation.py:190-208) returns the `_ABSENT` sentinel for a path that does not exist, the
       `_LINK` form for a symlink — read by `os.readlink` and NEVER followed — and `_BYTES`
@@ -860,8 +944,10 @@ and K2 would then hold lifecycle events that are **not** the AuthorizedTransitio
 the projection ambiguity F3 exists to remove (§17). F3 therefore commits them first:
 
 ```text
-S-c0 is recorded immediately after the executor returns Completed and BEFORE the Candidate is
-frozen, and it commits the event log alone.
+S-c0 is recorded BEFORE the Candidate is frozen, at §5.1 step 9a — after the declaration checks
+of 5b/5c, the ownership assertion of 6, the completion precheck and the separability and
+persistence preflights — and it commits the event log alone. The earlier wording "immediately
+after the executor returns" is withdrawn: steps 5a through 9 precede it.
 
 It is recorded only when there is something to commit. When the event log already matches HEAD —
 a resumed START, a Work already in_progress with its target, or a cycle whose earlier derivation
@@ -893,7 +979,8 @@ normative clause of F2 §5.3 still holds exactly" is withdrawn as inconsistent w
 F2 §5.3's remaining, unaffected requirements continue unchanged: `base_commit` is a full commit id of
 HEAD, every `declared_base` field is read from that commit's committed state through the canonical loader,
 and it is the lineage the result is measured against. The entries' `old_*` are unaffected, because the
-event log is never a result path. §22 row 19.
+event log is never a result path — which is not an assumption but the ownership rule of
+§7.8.5, declared as forward amendment A-6 (§1.5). §22 row 19, row 24.
 
 #### Every other Git stage of a review-v1 Work mutation is commit-only
 
@@ -1273,9 +1360,9 @@ substituted for them:
  1 ...  5   as §5.1; the executor returns Completed with an empty owned set
  5b, 5c     path identity, the bound witness and the reserved-namespace check are VACUOUS for
             the no-declared-path case: there is no declared path to inspect. For the ALL-INERT
-            case ALL still run in full, before step 6, because declared paths exist — and an
-            all-inert declaration may include DELETION paths, whose absence witness is the
-            positive kind of §7.8.4 layer 3                                    §5.1, §7.8.4
+            case ALL still run in full, before step 6, because declared paths exist. An
+            all-inert declaration holds NO deletion path: a deletion has old_kind present and
+            new_kind absent, so it is necessarily CHANGING (F2 §6.3)           §5.1, §7.8.4
  6          no declare_own_content: there is no owned path         (start.py:880, unchanged)
  7          completion_precheck passes
  8, 9       not applicable: there is no owned path to separate or to preflight
@@ -1540,8 +1627,12 @@ hooks dir   proven to be an empty plain directory immediately before use, or STO
             (review_hooks_path_invalid)
 capability  the running Git is proven to honour the pin, by the probe of §7.7, before the first
             pinned commit
-source      the pinned attribute source is proven to carry no material attribute at all, by the
-predicate   finite proof over the source itself of §7.8 — not by probing paths
+source      the pinned attribute source is proven, by the finite proof over the source itself of
+predicate   §7.8 — not by probing paths — to satisfy the TWO-SURFACE rule:
+                ORDINARY / RESULT SURFACE   no material attribute assignment at all
+                RESERVED REVIEW SURFACE     the exact canonical form-L rule is REQUIRED,
+                                            `.workline/review/** !text eol=lf -filter -ident
+                                            -working-tree-encoding` (§7.8.4, §7.9.3, PB-3)
 ```
 
 ```text
@@ -2040,15 +2131,21 @@ the two disagreeing, which is the defect M-22 names.
 ```text
 The base-tree condition, proven once at entry and re-proven before each commit under the pin:
 
-    no material attribute — filter, ident, working-tree-encoding, text, eol (and the alias crlf) —
-    applies, under the pinned source, to any path this operation will write — result paths, Review record paths, the event log and the
-    Consumption path alike.
+    THE TWO-SURFACE RULE holds under the pinned source (§7.1, §7.8.2):
 
-A base tree that assigns no material attribute at all — the complete alias-expanded surface of
-§7.8.2 — to anything satisfies this for every path
-at once, including paths whose identifiers are not yet allocated, which is why it is the
-condition the entry refusal (§7.4) actually tests. It is the same shape as the single supported
-configuration P2 already freezes for its own checkout capability (`skills/review`).
+        ORDINARY SURFACE   no material attribute — filter, ident, working-tree-encoding, text,
+                           eol, or the alias crlf — applies to any ORDINARY path this operation
+                           will write, which is every result path and the event log.
+        RESERVED SURFACE   the canonical form-L rule is REQUIRED over `.workline/review/**`, so
+                           the Review record paths and the Consumption path are governed by it
+                           rather than by the ordinary rule (§7.9.3).
+
+A base tree that assigns no material attribute to any ORDINARY path satisfies the first half for
+every path at once, including paths whose identifiers are not yet allocated, which is why it is
+the condition the entry refusal (§7.4) actually tests. The second half is the single supported
+configuration P2 already freezes for its own checkout capability (`skills/review`), and refusing
+it would make every P2-capable Project unusable for P3 Work Review — which is precisely the
+mistake an earlier draft made by demanding "no material attribute at all" everywhere.
 ```
 
 ```text
@@ -2378,15 +2475,40 @@ LAYER 2 — RESERVED NAMESPACE, component-wise.  §5.1 step 5c
       NOT str.lower(), str.casefold(), Unicode simple or full case folding, or any mapping that
         can change length or fold non-ASCII code points.
 
-  This is exact because the two reserved components are ASCII literals — `.workline` and
-  `review` — so ASCII folding is sufficient to catch every alias that could denote them, and
-  anything wider would start folding unrelated code points (the Kelvin sign folds to `k`, the
-  dotless i to `i`) for no gain.
+  THE LEXICAL FOLD IS A PRE-FILTER, NOT THE PROOF. It is deterministic and
+  platform-independent, which is what a lexical rule must be, and it refuses the common aliases
+  early. But it is an EMULATION of a filesystem comparator, and emulating one is not a positive
+  proof that some other spelling cannot reach the same object. Windows compares filenames through
+  Unicode upcase tables — NTFS stores a per-volume `$UpCase` — so the mapping is a property of the
+  volume, not of this contract.
 
-  The rule is deliberately platform-independent. A case-insensitive filesystem reaches the same
-  object through `.WORKLINE/REVIEW/...`, and a rule that depended on the running filesystem would
-  make the same declaration lawful on one machine and not another. Refusing the alias everywhere
-  costs only a pathological result path and buys one answer.
+  MEASURED on the NTFS volume available here:
+
+      ".workline"         reaches the canonical object
+      ".WORKLINE"         SAME OBJECT   (mkdir -> FileExistsError, read succeeds)
+      ".Workline"         SAME OBJECT
+      ".workl\u0131ne"    (U+0131)  DISTINCT object (mkdir succeeded, read FileNotFound)
+      ".WORKL\u0130NE"    (U+0130)  DISTINCT object
+
+  So the ASCII aliases are real and must be caught, while the dotless-i hypothesis does NOT hold
+  on this volume. That is exactly why the fold cannot be the proof: it happened to match here, on
+  one volume, and a differently formatted volume is not this contract's to predict.
+
+  THE PROOF IS OBJECT IDENTITY, and it dominates any filesystem's comparator because it asks the
+  filesystem which object was reached instead of guessing which names are equal:
+
+      during the no-follow ancestor walk (layer 3), each opened directory's OBJECT IDENTITY is
+        taken — POSIX (st_dev, st_ino); Windows the volume serial plus the file index, from the
+        open handle;
+      the canonical `.workline` and `.workline/review` directories are opened the same way, when
+        they exist, and their identities taken;
+      if any opened ancestor of the declared path IS the `.workline/review` object, the
+        declaration is RESERVED, whatever it was spelled;
+      an identity that cannot be established is a FAIL CLOSED, not a pass.
+
+  When the canonical Review directory does not exist yet — it is created lazily — there is no
+  object to compare against, and the lexical fold is then the whole test. That is sound in that
+  state precisely because there is no Review object for an alias to reach.
 
   failure -> ReconcileRequired(reason = "review_reserved_namespace")
 
@@ -2415,7 +2537,13 @@ LAYER 3 — PROJECT CONTAINMENT AND THE BOUND OWNERSHIP WITNESS.  §5.1 step 5b
 
       DELETION PATH — the object is expected to be ABSENT now, and its identity comes from the
       base tree rather than from the filesystem (M-30: completion_precheck requires a deleted
-      path to be absent and tracked, and requires nothing of its parent):
+      path to be absent and tracked, and requires nothing of its parent).
+
+      WHICH base tree, exactly: step 5b runs BEFORE S-c0, so `declared_base.base_commit` — the
+      post-S-c0 HEAD — DOES NOT EXIST YET. The witness therefore binds the tracked identity in
+      PRE_S_C0_BASE, and §7.8.5 proves that this is the same entry `declared_base` will hold for
+      every path a review-v1 Work is allowed to declare. The previous draft said "declared_base /
+      the base tree" here, which was impossible at that point in the sequence, and is withdrawn:
 
           the walk reaches the parent, and the final name is absent relative to it
                                                          -> POSITIVE ABSENCE, accepted
@@ -2455,27 +2583,81 @@ step 6 persists that witness WITHOUT re-reading the declared path by ordinary pa
     no second root-relative pathname resolution may substitute another filesystem object between
     those steps.
 
-A RESULT witness carries:
-    the declared canonical path;
-    the object state captured RELATIVE TO THE PROVEN PARENT — the handle chain is held across the
-      capture, and the final entry is stat'd / read / readlink'd relative to that parent, never
-      reopened as `root / declared_path`;
-    the ownership digest START's existing own-content guarantee requires, in the SAME form
-      `_content_digest` produces (M-30), so nothing downstream changes:
-          regular file   the exact file bytes' digest        (`_BYTES` form)
-          symlink        the exact link-target bytes' digest, read with no-follow semantics and
-                         NEVER followed                       (`_LINK` form)
-    and it preserves every F2-supported result kind — an executable file keeps its mode from the
-    Git tree entry and a gitlink keeps its referenced commit OID, exactly as F2 §6.3/§6.4 say;
-    nothing is silently dropped.
+THE WITNESS IS PER-KIND, AND IT IS NOT THE CURRENT `_content_digest` FORM. The previous draft
+claimed the witness needed "no recorded form changes and no downstream reader changes". That was
+FALSE and is withdrawn, on measurement: a gitlink digests to `None`, is stored as `"unreadable"`,
+and the later guard compares `None != "unreadable"` and refuses the commit (M-32); and the mode
+is not in the form at all, so `100644` vs `100755` is invisible to it (M-33).
 
-A DELETION witness carries:
-    the declared canonical path;
-    its exact TRACKED IDENTITY in declared_base / the base tree;
-    a POSITIVE CURRENT-ABSENCE witness, from the walk above — either the final name absent
-      relative to the proven parent, or a proven-missing ancestor.
-    Step 6 persists the ABSENT ownership state from that witness (`_ABSENT`, M-30). It does NOT
-    call a generic path-string `_content_digest()` again after absence has been proven.
+```text
+EVERY witness binds, for every F2-supported kind:
+
+    path        the declared canonical path
+    kind        "file" | "symlink" | "gitlink" | "absent"
+    git_mode    "100644" | "100755" | "120000" | "160000" | "000000"
+    identity    the exact Git object identity for that kind, and the exact material where the
+                kind has material
+    captured    RELATIVE TO THE PROVEN PARENT — the handle chain is held across the capture and
+                the final entry is stat'd / read / readlink'd relative to that parent, never
+                reopened as `root / declared_path`
+
+PER KIND, exactly:
+
+    100644 / 100755 file
+        git_mode  from the entry's executable bit as Git records it, NOT from the filesystem
+                  permission alone where the platform does not carry one
+        identity  the exact bytes, and their Git blob id under the pinned attribute source
+                  (§7.1), which is `hash_blob` of those bytes and therefore F2 §6.3's new_oid
+        material  the exact bytes, which become the CandidateSnapshot payload (F2 §9.4)
+
+    120000 symlink
+        identity  the exact link-target bytes, read with no-follow semantics and NEVER followed,
+                  and their Git blob id
+        material  those same target bytes, as F2 §9.4.1 requires
+
+    160000 gitlink
+        identity  THE EXACT REFERENCED COMMIT OID — the thing the tree entry names. It is read
+                  from Git's own view of the entry, never by reading the submodule's working
+                  tree, and it is what F2 §6.3 calls new_oid for this kind
+        material  NONE. F2 §9.4.1 gives a gitlink no payload; the entry IS the material
+
+    absent (deletion)
+        identity  the exact TRACKED identity in the base tree (§7.8.4's deletion rule), plus the
+                  positive current-absence witness from the walk
+        material  NONE
+```
+
+```text
+THIS NEEDS A RUNTIME EXTENSION, AND IT IS NAMED RATHER THAN ASSUMED: `_OWN_CONTENT` must be able
+to hold a per-kind witness rather than only the four `_content_digest` strings, and the
+currentness comparison must compare the whole witness — kind, mode and identity — rather than a
+single digest string. See IP-16. This is RUNTIME / RECOVERY material only: no canonical Review
+record and no Candidate schema changes.
+```
+
+```text
+THE CANDIDATE DERIVES FROM THE WITNESS, NOT FROM A REREAD.  (F2 ST-1)
+
+F2 ST-1 freezes that START freezes the Work Candidate from the declared owned set AT THE MOMENT
+THE EXECUTOR RETURNS. The witness IS that moment's exact capture, so §5.1 step 10 CONSUMES it:
+
+    for every Candidate entry, new_kind, new_mode, new_oid and content_sha256 are taken from the
+      bound witness for that path — never by an ordinary path-string reread of the working tree;
+    the CandidateSnapshot payload bytes for a file or a symlink are the exact bytes the witness
+      binds;
+    for a gitlink, new_oid is the exact referenced commit OID the witness binds;
+    for a deletion, new_kind is "absent" and the absence material derives from the positive
+      absence witness.
+
+    old_kind / old_mode / old_oid continue to come from the base tree, as F2 §6.3 says.
+
+FROZEN INVARIANT:
+
+    EXECUTOR-RETURN ARTIFACT == OWNERSHIP WITNESS == CANDIDATE IDENTITY == SNAPSHOT MATERIAL
+
+A foreign change between step 6 and step 10 therefore CANNOT become the thing Review judges: the
+Candidate is built from what was captured, not from what the path holds when step 10 runs.
+```
 
 WHY THE HANDLE-BOUND READ IS SOUND HERE, including on POSIX. fsafe warns that on POSIX "an fd
 pins nothing: the directory it holds can be renamed anywhere", and for that reason refuses an
@@ -2488,6 +2670,66 @@ no-follow / reparse handling is preserved unchanged: every directory is opened w
 and the final entry is opened with reparse-point semantics rather than being resolved.
 
 Unknown identity at any point -> FAIL CLOSED, before any ownership assertion.
+```
+
+```text
+THE WITNESS ALONE DOES NOT CLOSE THE STAGING RACE, AND THIS IS MEASURED, NOT ASSUMED.
+
+The witness is taken at executor return. Review can take arbitrarily long. Immediately before
+K1, the live currentness guard still resolves by pathname, and the staging primitive is
+`git add -- <paths>`, which also resolves by pathname.
+
+MEASURED (M-34), Windows/NTFS: with `dir` replaced by a JUNCTION (reparse tag 0xa0000003),
+`git add -- dir/file.txt` SUCCEEDED and staged the blob from the junction's target, not HEAD's.
+So Git does NOT mechanically refuse ancestor indirection at staging on Windows. The re-review's
+POSIX result — `fatal: pathspec ... is beyond a symbolic link` — is recorded as THEIR
+measurement; this environment is Windows only and did not reproduce it.
+
+Therefore F3 does NOT claim the initial witness closes this race, and does NOT claim Git closes
+it. What closes the end-to-end identity invariant is three things together:
+
+  1. PRE-STAGE CONTAINMENT RE-PROOF. Immediately before the staging of S-c1 — after the Review,
+     in the same call that stages — the ancestor chain of every path to be staged is re-proven
+     by the layer-3 walk, including the object-identity check. This narrows the window to that
+     call, exactly as the destination locator is re-resolved immediately before a push and for
+     the same reason: the window cannot be closed entirely by a check, only narrowed to the
+     operation.
+
+  2. FULL-WITNESS CURRENTNESS, not a single digest. The pre-stage comparison compares the WHOLE
+     witness — kind, git_mode and identity — against what the path holds now. This is what makes
+     a chmod (M-33) and a changed gitlink (M-32) detectable, which the current `_content_digest`
+     string cannot express. See IP-16.
+
+  3. C-2(K1) AS THE MECHANICAL BACKSTOP. W4 and W5 compare the COMMITTED tree entries against the
+     Candidate's entries by kind, mode and object id. A commit that staged anything other than
+     the witnessed artifact fails them and is refused; nothing is proven and nothing is pushed.
+
+WHY THAT IS SUFFICIENT, stated as an argument rather than a hope. An ancestor redirection at
+staging time either changes the artifact's identity or it does not:
+
+    it changes it     -> the full-witness currentness check refuses before staging, and if it
+                         somehow reached the commit, C-2(K1) refuses before any publication.
+                         MEASURED for the byte case (M-35): the digest through the junction
+                         differed from the recorded one, so the path was classified FOREIGN and
+                         nothing was staged.
+    it does not       -> the staged object is byte-for-byte and mode-for-mode the witnessed
+                         object. MEASURED (M-35): with identical content behind the junction the
+                         staged blob was identical. There is no identity breach to detect.
+
+So the frozen end-to-end invariant holds for everything that is ever PUBLISHED:
+
+    ARTIFACT AT EXECUTOR RETURN == WITNESS == CANDIDATE == PRE-STAGE CURRENT == STAGED == K1
+
+The residual, stated rather than hidden: on Windows a local commit CAN be made from a redirected
+ancestor when the redirected content is identical — and in that case it is the same artifact, so
+the invariant is not violated. A differing one is refused. No wrong artifact is ever published,
+which is what "no push before proof" protects.
+
+THE STAGING-CONTAINMENT PROPERTY IS PLATFORM-DEPENDENT AND IS PINNED BY TEST. `review-v1-work-local-v1`
+carries a required regression test over the measured matrix of §21.12: POSIX refuses ancestor
+indirection at `git add`; Windows does not; and in both cases the full-witness currentness check
+and C-2(K1) produce the same outcome. A future Git that changes this behaviour must not silently
+change what the contract relies on.
 ```
 
 ```text
@@ -2580,7 +2822,120 @@ the statement that a Work RESULT may not land there: completion_precheck applies
 restriction and declare_own_content takes any path.
 ```
 
-#### 7.8.5 Defence in depth, not a substitute
+#### 7.8.5 The reserved lifecycle event log, and why the two bases are interchangeable (A-6)
+
+The deletion witness binds its tracked identity in PRE_S_C0_BASE, while the Candidate's entries are
+measured against `declared_base.base_commit`. Those are two different commits, so F3 owes a proof that
+they hold the SAME entry at every path a review-v1 Work may declare. S-c0 changes exactly one path, so
+the proof reduces to one question: may an executor declare THAT path?
+
+```text
+S-c0 commits `.workline/events/events.jsonl` and nothing else (§4.3).
+
+If an executor could declare that path as a result or a deletion, then PRE_S_C0_BASE and
+declared_base.base_commit would differ AT A DECLARED PATH, and the two bases would not be
+interchangeable. Checked: no landed rule excludes it. `completion_precheck` applies no namespace
+restriction and `declare_own_content` takes any path — the same gap A-5 found for the Review
+namespace.
+
+So the earlier sentence "the event log is never a result path" was an UNSUPPORTED PREMISE, not a
+rule. It is replaced by one.
+```
+
+**FROZEN, as an ownership boundary declared before execution — forward amendment A-6:**
+
+```text
+The review-v1 Work INVOCATION CONTRACT declares
+
+    .workline/events/events.jsonl
+
+to be START LIFECYCLE-OWNED state that the executor may not own — not as a result path and not as
+a deletion path. The rule is static, part of what selecting review-v1 means (F1-D1), and in force
+BEFORE the executor runs; the concrete future path list need not be known for it to bind.
+
+A Completed outcome declaring it has violated a pre-existing ownership contract. It is UNOWNED
+STATE, refused exactly as A-5's case is:
+
+    ReconcileRequired(reason = "review_reserved_namespace")
+
+carrying the same reason: the condition is the same one — a declaration over state this operation
+was never permitted to own — and splitting it into a second reason would distinguish two things
+that reconcile identically.
+
+It is NOT an unsupported Git result shape, NOT `review_candidate_unavailable`, and never a legacy
+downgrade. The check runs at §5.1 step 5c with the reserved-namespace check, on the same canonical
+path identity established at 5b.
+```
+
+**The interchangeability proof, which is what this boundary buys:**
+
+```text
+Given A-6 and A-5, every path a review-v1 Work may declare lies outside
+    .workline/review/**        (A-5)
+    .workline/events/events.jsonl   (A-6)
+
+S-c0's complete delta is exactly { .workline/events/events.jsonl }, and that path is not
+declarable. Therefore, for EVERY allowed result path and deletion path:
+
+    the tree entry at that path in PRE_S_C0_BASE
+      ==
+    the tree entry at that path in declared_base.base_commit
+
+so the deletion witness's tracked identity, taken at PRE_S_C0_BASE, IS the `old_*` identity the
+Candidate records against declared_base. The two bases are interchangeable exactly where it
+matters, and nowhere else is claimed.
+```
+
+```text
+This is the same argument §7.1.1 makes for the attribute source, and it is now the same argument:
+S-c0 touches one path, that path is reserved, so nothing a Work can declare or read differs
+between the two bases.
+```
+
+#### 7.8.6 Classification precedence — exactly one answer per declaration
+
+A reserved path may be a DIRECTORY — `.workline/review` itself is one — and a directory is not a valid
+result object. If the filesystem layer ran first it would classify that declaration as malformed, and A-5
+would never be reached. That is two answers for one declaration, and it is fixed by precedence:
+
+```text
+1. CANONICAL SPELLING                         §7.8.4 layer 1        step 5b
+     fails -> review_candidate_unavailable, and nothing further is evaluated
+
+2. RESERVED OWNERSHIP CLASSIFICATION          §7.8.4 layer 2,       step 5c
+                                              §7.8.5
+     lexical component-wise test, plus the object-identity test where the canonical directories
+     exist. A path classified reserved here is refused as
+     ReconcileRequired(reason = "review_reserved_namespace") and NOTHING FURTHER IS EVALUATED —
+     in particular the filesystem/witness layer never runs on it, so it can never be downgraded
+     into the generic malformed refusal merely because its final object is a directory.
+
+3. FILESYSTEM CONTAINMENT AND THE BOUND WITNESS, FOR NON-RESERVED PATHS ONLY
+                                              §7.8.4 layer 3        step 5b/5c
+     fails -> review_candidate_unavailable (result) or, for a deletion, only where an EXISTING
+     ancestor is indirect or unprovable
+
+4. OWNERSHIP ASSERTION                        step 6
+```
+
+```text
+The object-identity half of step 2 needs an opened directory, so it is physical evidence inside a
+classification step. That is deliberate and it does not reorder anything: it opens ANCESTORS to
+ask which object they are, and it never judges the declared path's final object. Whether the
+final object is a directory, a file, a symlink or absent is a question only step 3 asks, and only
+for paths step 2 has already cleared.
+```
+
+```text
+A-5's reserved set is, explicitly and in both halves:
+
+    .workline/review            the Review root ITSELF
+    .workline/review/**         every descendant
+
+and A-6 adds .workline/events/events.jsonl. All three are classified at step 2.
+```
+
+#### 7.8.7 Defence in depth, not a substitute
 
 ```text
 After the source parse passes, the entry check ALSO evaluates `check-attr` under the pinned
@@ -4372,6 +4727,24 @@ IP-12 The universal source predicate of §7.8 requires a parser over every .gita
       tree, at every depth, plus .git/info/attributes — not a path probe. Its supported shape is
       narrow by design and refuses any [attr] macro.
 
+IP-17 THE PRE-STAGE CONTAINMENT RE-PROOF of §7.8.4: immediately before S-c1 stages, the
+      ancestor chain of every path to be staged is re-proven by the layer-3 walk including the
+      object-identity check, and the staging-containment behaviour is pinned by a required
+      regression test over §21.12's matrix. MEASURED and platform-dependent: Git refuses ancestor
+      indirection at `git add` on POSIX (the re-review's measurement) and does NOT on Windows
+      (M-34, measured here), so the contract relies on the currentness check and C-2(K1) rather
+      than on Git's behaviour, and the test exists so a future Git cannot silently change what is
+      relied on.
+
+IP-16 THE PER-KIND WITNESS NEEDS A RUNTIME FORM `_content_digest` CANNOT EXPRESS, and this is
+      measured rather than assumed. A gitlink digests to `None` and is stored as `"unreadable"`,
+      so the currentness guard compares `None != "unreadable"` and refuses a changed gitlink
+      outright (M-32); and the mode is absent from every form, so a chmod is invisible (M-33).
+      `_OWN_CONTENT` must therefore hold a per-kind witness — path, kind, git_mode, identity and
+      material where the kind has material — and the currentness comparison must compare the
+      whole witness rather than one digest string. RUNTIME / RECOVERY material only: no canonical
+      Review record and no Candidate schema changes.
+
 IP-15 THE BOUND OWNERSHIP WITNESS of §7.8.4 cannot be built from the live helpers as they
       stand, and this is named rather than papered over. `declare_own_content` takes path
       STRINGS and calls `_content_digest(mutation.store.abs(path))`, which re-resolves
@@ -5127,7 +5500,8 @@ C. RESULT PATH WITH A SYMLINK ANCESTOR
 
 D. DELETION, PARENT EXISTS, FINAL PATH ABSENT
    walk      ancestors proven plain; the final name is absent relative to the proven parent
-   witness   declared canonical path + tracked identity in the base tree + positive absence
+   witness   declared canonical path + tracked identity in PRE_S_C0_BASE (§7.8.5) + positive
+             absence
    outcome   ACCEPTED -> step 6 persists the `_ABSENT` state from the witness
 
 E. DELETION, IMMEDIATE PARENT ABSENT
@@ -5165,6 +5539,102 @@ I. EXTERNAL CHANGE AFTER THE OWNERSHIP SNAPSHOT
              and the currency checks detect the drift before the commit — the Git stage commits
              the owned paths only while they still hold exactly what was recorded — and the
              operation refuses there rather than committing someone else's bytes.
+```
+
+### 21.12 End-to-end artifact identity matrix
+
+For every SUPPORTED ordinary result the chain proven is
+
+    witness == Candidate == CandidateSnapshot material == pre-stage current identity
+            == staged identity == K1 identity
+
+and for every RESERVED case the refusal precedes any ownership assertion.
+
+```text
+A. REGULAR 100644 RESULT
+   witness   kind file, git_mode 100644, exact bytes + blob id, captured on the proven parent
+   Candidate new_kind/new_mode/new_oid/content_sha256 taken FROM THE WITNESS (§7.8.4), not a
+             reread; snapshot payload is the witnessed bytes
+   pre-stage full-witness currentness: kind, mode and identity all compared
+   staged    the same blob; C-2(K1) W4/W5 confirm it against the Candidate
+   chain     HOLDS
+
+B. EXECUTABLE 100755 RESULT
+   as A, and git_mode 100755 is IN the witness. Measured gap it closes: the current
+   `_content_digest` form carries no mode at all (M-33), so without IP-16 a chmod between
+   witness and staging is invisible. With it, the pre-stage comparison catches it.
+   chain     HOLDS
+
+C. FINAL SYMLINK 120000 RESULT
+   witness   link-target bytes read with no-follow semantics, NEVER followed; blob id of those
+             bytes; git_mode 120000
+   snapshot  the same target bytes (F2 §9.4.1)
+   chain     HOLDS. The final component is never dereferenced at any step.
+
+D. GITLINK 160000 CHANGED TO ANOTHER COMMIT
+   measured  today this is REFUSED by the own-content guard: digest None vs stored "unreadable"
+             (M-32). That is the defect IP-16 fixes.
+   witness   kind gitlink, git_mode 160000, identity = the exact referenced commit OID from the
+             tree entry — never by reading the submodule's working tree; no material
+   Candidate new_oid IS that commit OID (F2 §6.3/§6.4); no snapshot payload (F2 §9.4.1)
+   pre-stage compares the referenced OID, which the digest string could not express
+   chain     HOLDS once IP-16 lands; NOT before, and that is stated rather than assumed.
+
+E. DELETION, PARENT PRESENT        witness: base identity in PRE_S_C0_BASE + positive absence
+F. DELETION, PARENT ABSENT         the missing ancestor PROVES absence; accepted (§7.8.4)
+   both      Candidate new_kind "absent", no payload; chain HOLDS
+
+G. REVIEW ROOT `.workline/review` DECLARED AS A RESULT
+   step 2    classified RESERVED and refused there:
+             ReconcileRequired(reason = "review_reserved_namespace")
+   NOT       downgraded to review_candidate_unavailable because its final object is a directory —
+             the filesystem layer never runs on it (§7.8.6 precedence)
+
+H. REVIEW DESCENDANT DECLARED AS A RESULT          as G
+I. `.workline/events/events.jsonl` AS A RESULT     as G, by A-6 (§7.8.5)
+J. `.workline/events/events.jsonl` AS A DELETION   as G, by A-6; result and deletion alike
+
+K. `.WORKLINE/Review/...`
+   lexical   caught by the ASCII fold
+   physical  and independently by object identity, where the canonical directory exists
+   MEASURED  `.WORKLINE` and `.Workline` DO resolve to the canonical object on this NTFS volume
+   outcome   review_reserved_namespace
+
+L. `.workl\u0131ne/review/...`   (U+0131 DOTLESS I)
+   MEASURED  a DISTINCT object on this volume — mkdir succeeded, read raised FileNotFound
+   outcome   NOT reserved here, and accepted if it is otherwise valid. The point of the
+             object-identity test is that this answer comes from the FILESYSTEM rather than from
+             a guessed case table: on a volume whose upcase table maps it, the same test would
+             classify it reserved without any contract change.
+
+M. ANCESTOR SWAPPED AFTER THE WITNESS BUT BEFORE THE CANDIDATE
+   the Candidate is built FROM THE WITNESS (§7.8.4), so the swap cannot become what Review
+   judges. F2 ST-1's "at the moment the executor returns" is what the witness captures.
+
+N. ANCESTOR SWAPPED AFTER REVIEW BUT BEFORE THE STAGE IS RECORDED
+   the pre-stage containment re-proof and the full-witness currentness check run there and
+   refuse; and C-2(K1) would refuse afterwards regardless.
+
+O. ANCESTOR SWAPPED BETWEEN THE CURRENTNESS CHECK AND `git add`
+   MEASURED  Git does NOT refuse this on Windows: `git add` through a junction staged the
+             redirected blob (M-34). POSIX does refuse it (the re-review's measurement).
+   outcome   the redirection either changes the artifact identity — MEASURED caught, the digest
+             differed and the path was classified FOREIGN, nothing staged (M-35) — or it does
+             not, in which case the staged object is byte-identical to the witnessed one
+             (MEASURED, M-35) and there is no breach. C-2(K1) is the backstop for anything that
+             reaches a commit. NOTHING WRONG IS EVER PUBLISHED.
+
+P. EXTERNAL chmod AFTER CANDIDATE FREEZE
+   caught by the full-witness currentness comparison (mode is in the witness, IP-16), and by
+   C-2(K1) W4/W5 which compare new_mode against the committed tree entry.
+
+Q. GITLINK CHANGES AFTER CANDIDATE FREEZE
+   caught the same way, by comparing the referenced commit OID rather than a byte digest.
+
+R. CANONICAL FORM-L BASE SOURCE
+   permitted and REQUIRED in the reserved surface (§7.1 two-surface rule, §7.9.3), while the
+   ordinary surface admits no material assignment. A base carrying form-L is not refused at
+   entry; one carrying a material rule over ordinary paths is.
 ```
 
 ## 22. Consistency audit against P1 / P2 / F1 / F2
@@ -5240,6 +5710,15 @@ C  true conflict requiring a new forward amendment
     F3 uses it at commit time, and extends what that identity denotes: the attribute-source
     pin and the line-ending configuration are part of the frozen primitive. That is the part
     §10.3 left to F3. §7.1.                                 A
+
+24  F2 §6.2, §6.5 and §2.3 — the reserved lifecycle event log.
+    The deletion witness binds a base identity at step 5b, before S-c0 exists, so it must use
+    PRE_S_C0_BASE; the Candidate measures old_* against declared_base. The two differ at exactly
+    one path, `.workline/events/events.jsonl`, and nothing landed excludes that path from a
+    declaration — so the two bases were not interchangeable and the earlier sentence "the event
+    log is never a result path" was an unsupported premise. §6.2 is superseded by a second
+    exclusion, §6.5 extended by a second instance of A-5's ownership predicate, §2.3 retained.
+    FORWARD AMENDMENT A-6 (§1.5). §7.8.5.                                                      C
 
 23  F2 §6.2, §6.5 and §2.3 — the reserved Review namespace. A-5 touches three sections and
     each one differently, so each is stated:
@@ -5323,13 +5802,18 @@ C  true conflict requiring a new forward amendment
 ```text
 Forward amendment required: YES
 
-Five, all to landed F2, all declared in full in §1.5:
+Six, all to landed F2, all declared in full in §1.5:
     A-1  F2 §5.3           base_commit's timing, and that it is K1's parent       row 19
     A-2  F2 §14.4, §16.1   the unqualified "every HEAD advance" consequence       row 3
     A-3  F2 §7.1/7.2/7.3   the result-bearing / no-K1 discriminator               row 21
     A-4  F2 §10.3, §10.1   checkout capability unbound, and the exact Context     row 22
                            record it has to be added to
     A-5  F2 §6.2 SUPERSEDED, §6.5 EXTENDED, §2.3 RETAINED                         row 23
+                           the reserved Review namespace
+    A-6  F2 §6.2 SUPERSEDED, §6.5 EXTENDED, §2.3 RETAINED                         row 24
+                           the reserved lifecycle event log, which is what makes
+                           PRE_S_C0_BASE and declared_base interchangeable at every
+                           declarable path
                            the reserved Review namespace: the reviewed surface excludes it,
                            and a declaration there is unowned state refused as
                            `review_reserved_namespace` — a third declaration-invalidity case
@@ -5741,6 +6225,19 @@ Stop conditions. An implementation that violates any of them is not implementing
     the built-in macro binary, and the configuration variables core.autocrlf and core.eol. A name
     is never judged as an opaque word.
 
+27d. The artifact identity is carried unbroken from executor return to K1: witness, Candidate,
+    snapshot material, pre-stage currentness, staged object and K1 tree entry are the same
+    artifact, for every supported kind — file, executable file, symlink, gitlink and deletion.
+    The Candidate is derived from the witness, never from a reread of the working tree.
+
+27e. The witness is per-kind and carries kind, mode and object identity. A single content digest
+    cannot express a gitlink's referenced commit or an executable bit, and a contract that relied
+    on one would not detect either.
+
+27f. Two ownership boundaries bind before execution and are refused identically: the canonical
+    Review namespace (A-5) and the lifecycle event log (A-6). The second is what makes
+    PRE_S_C0_BASE and declared_base interchangeable at every declarable path.
+
 27b. The object whose containment was proven is the object whose ownership is asserted. The
     identity proof produces a bound witness captured relative to the proven parent, and the
     ownership snapshot persists that witness rather than resolving the declared path from the
@@ -5825,6 +6322,11 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-12 the universal attribute-source parser: every .gitattributes in the tree at every depth
         plus info/attributes, alias-expanded, narrow supported shape, no user-defined macros
   IP-13 the resulting-tree checkout-capability machinery and the Work Review Context v2 record
+  IP-17 the pre-stage containment re-proof of §7.8.4 and its required regression test over the
+        measured staging-containment matrix (§21.12)
+  IP-16 the per-kind witness runtime form: `_OWN_CONTENT` extended to carry path, kind, git_mode
+        and identity, and a currentness comparison over the whole witness — without it a changed
+        gitlink (M-32) and a chmod (M-33) are undetectable
   IP-15 the bound ownership witness of §7.8.4: a handle-bound capture that replaces
         declare_own_content's second `root / relative` resolution, producing the SAME recorded
         forms (_BYTES, _LINK, _ABSENT, _UNREADABLE) from the proven object
