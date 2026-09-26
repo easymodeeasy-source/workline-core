@@ -878,6 +878,40 @@ M-26  THE CANONICAL REVIEW CHECKOUT RULE NORMALIZES CHECK-IN BYTES. MEASURED, gi
       That is why §7.8.4 excludes the namespace from the reviewed surface (amendment A-5) rather
       than merely exempting the rule from the parser.
 
+M-63  `git var ...IDENT` CONSUMES THE INHERITED ENVIRONMENT; `config --get` UNDER THE STRIP DOES
+      NOT. MEASURED, in a Project configured `user.name = Real Person`,
+      `user.email = real@proj`, whose global config says `Global Person`, with hostile inherited
+      GIT_AUTHOR_NAME=Attacker, GIT_AUTHOR_EMAIL=evil@x, GIT_COMMITTER_NAME=AttackerC,
+      GIT_COMMITTER_EMAIL=evilc@x:
+
+          git var GIT_AUTHOR_IDENT                       -> Attacker <evil@x>
+          git var GIT_COMMITTER_IDENT                    -> AttackerC <evilc@x>
+          <GIT_* stripped> git -C <root> config --get user.name   -> Real Person
+          <GIT_* stripped> git -C <root> config --get user.email  -> real@proj
+
+      Repository-local values won over the global ones, so ordinary configuration precedence is
+      preserved by the capture.
+
+      END TO END, with GIT_AUTHOR_*, GIT_COMMITTER_*, GIT_OBJECT_DIRECTORY and GIT_INDEX_FILE all
+      hostile, running phase A then phase B of §7.1.9, the raw commit object read back under a
+      stripped environment held:
+
+          author    Real Person <real@proj>
+          committer Real Person <real@proj>
+
+      and no hostile value appeared anywhere in it.
+
+      AND WITH NO IDENTITY CONFIGURED AT ALL:
+          <stripped> config --get user.name  -> EXIT 1, empty output, nothing invented
+          <stripped> var GIT_AUTHOR_IDENT    -> EXIT 128, "Author identity unknown"
+      Both refuse, so withdrawing `git var` costs nothing; `config --get` refuses more quietly and
+      never guesses an identity from a fallback.
+
+      NOTE ON WHAT ACTUALLY CLOSES IT: `git var` run UNDER the same strip also returned
+      `Real Person <real@proj>`. The ORDERING — strip before capture — is what removes the
+      poisoning; withdrawing `git var` removes the remaining ambiguity and its
+      invent-an-identity fallback. §7.1.9 freezes both.
+
 M-57  GIT'S REVISION VIEW IS NOT THE COMMIT OBJECT, AND GRAFTS PROVE IT. MEASURED on a linear
       chain C1 <- C2 <- C3 <- C4, with `.git/info/grafts` holding "C4 C1":
 
@@ -994,8 +1028,9 @@ M-51  NEUTRALIZING CONFIG REMOVES THE COMMIT IDENTITY, AND commit-tree THEN REFU
                                      author/committer "Global Person <global@example.com>"
 
       So an ordinary Project would have become uncommittable purely because F3 neutralizes config
-      for persistence safety. §7.1.9 freezes capturing the effective identity BEFORE
-      neutralization and supplying it explicitly.
+      for persistence safety. §7.1.9 freezes capturing the configured identity AFTER the GIT_*
+      strip and BEFORE neutralization — by `config --get`, never by `git var ...IDENT` (M-63) —
+      and supplying it explicitly.
 
 M-52  GIT'S INDEX TRANSACTION IS AN O_EXCL LOCKFILE, AND HOLDING IT EXCLUDES EVERY ORDINARY GIT
       INDEX WRITE. MEASURED. After creating `.git/index.lock` with O_CREAT|O_EXCL:
@@ -2865,11 +2900,49 @@ allowlist   GIT_ATTR_NOSYSTEM=1              always
             Any further variable a final design needs must be added to this list explicitly. A
             variable that is not on it is not set, and a variable that is inherited is not kept.
 
-identity    ONE ANSWER, and it is the capture — inherited GIT_AUTHOR_* / GIT_COMMITTER_* do NOT
-precedence  survive, because step 1 removes them. Before the configuration above is neutralized,
-            the EFFECTIVE identity is read by Git's ordinary rules (`git var GIT_AUTHOR_IDENT` /
-            `GIT_COMMITTER_IDENT`, or equivalently the resolved `user.name` / `user.email`), and
-            that captured result is what step 2 injects. Nothing else contributes.
+identity    ONE MECHANISM, in TWO ORDERED PHASES. An earlier draft offered
+precedence  `git var GIT_AUTHOR_IDENT` / `GIT_COMMITTER_IDENT` and the resolved
+            `user.name` / `user.email` as EQUIVALENT ways to capture the identity. THEY ARE NOT
+            EQUIVALENT, and the difference is the whole of this rule: MEASURED (M-63), with
+            hostile inherited GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / GIT_COMMITTER_NAME /
+            GIT_COMMITTER_EMAIL, `git var GIT_AUTHOR_IDENT` returned `Attacker <evil@x>` and
+            `git var GIT_COMMITTER_IDENT` returned `AttackerC <evilc@x>`. Because the capture
+            necessarily runs BEFORE the configuration is neutralized, a poisoned capture would
+            then be re-injected by step 2 as an ALLOWLISTED value — so the hostile identity would
+            survive through the very rule that claims to remove it. `git var ...IDENT` is
+            WITHDRAWN as an authorized capture mechanism.
+
+            PHASE A — CONFIGURATION CAPTURE. Run, with step 1's strip ALREADY APPLIED to this
+            invocation and the Project root given on the command line rather than through the
+            environment:
+
+                git -C <project root> config --get user.name
+                git -C <project root> config --get user.email
+
+            `--get` reads the MERGED configuration with ordinary precedence, so system, global
+            and repository-local settings decide exactly as they always did; `-C` survives the
+            strip because it is an argument, not a variable. MEASURED (M-63): under the hostile
+            environment above this returns `Real Person` / `real@proj`, the repository-local
+            values, while the global `Global Person` is correctly overridden — the person's
+            intended configured identity, unpoisoned.
+            Either lookup failing is STOP AT ENTRY (the same condition ordinary Git reports),
+            raised before anything is written. MEASURED (M-63): with no identity configured
+            anywhere, `config --get` exits 1 with EMPTY output and invents nothing, where
+            `git var` exits 128 — so removing `git var` loses no capability here.
+
+            PHASE B — HERMETIC EXECUTION. Step 1's strip stays in force, the configuration above
+            is neutralized, and step 2 injects the PHASE A values — and only those — as
+            GIT_AUTHOR_NAME / GIT_AUTHOR_EMAIL / GIT_COMMITTER_NAME / GIT_COMMITTER_EMAIL, with
+            the dates. Nothing else contributes to author or committer.
+
+            THE ORDER IS THE MECHANISM, and it is stated once so it cannot be read either way:
+            the strip precedes the capture, the capture precedes the neutralization, and the
+            neutralization precedes every commit. There is no point at which an inherited
+            identity variable is visible to a Git invocation of this operation.
+            MEASURED END TO END (M-63): with GIT_AUTHOR_*, GIT_COMMITTER_*, GIT_OBJECT_DIRECTORY
+            and GIT_INDEX_FILE all hostile, the raw commit carried
+            `author Real Person <real@proj>` and `committer Real Person <real@proj>`, with no
+            hostile value anywhere in the object.
 attribute   attr.tree = <the PERSISTENCE BASIS of this commit, per §7.1.11>, on every invocation
 pin         of the sequence
 line        core.autocrlf=false and core.eol=lf, on every invocation. These are CONFIGURATION,
@@ -6467,8 +6540,11 @@ IP-26 THE RAW COMMIT ANCESTRY READER of §7.1.8, which must NOT be built from, o
 IP-25 THE HERMETIC GIT ENVIRONMENT of §7.1.9, applied to EVERY invocation rather than to the
       commit path alone: GIT_NO_LAZY_FETCH=1, GIT_NO_REPLACE_OBJECTS=1, GIT_LITERAL_PATHSPECS=1,
       the promisor-configuration read and the grafts refusal at entry, and the author/committer
-      identity captured BEFORE config neutralization and supplied explicitly with its dates.
-      Without the last of these an ordinary Project becomes uncommittable (M-51).
+      identity captured BEFORE config neutralization but AFTER the GIT_* strip, by
+      `git -C <root> config --get user.name` / `user.email` and by no other mechanism (§7.1.9
+      phase A), then supplied explicitly with its dates. Without the capture an ordinary Project
+      becomes uncommittable (M-51); with the capture in the wrong order a hostile inherited
+      GIT_AUTHOR_* would be captured and re-injected (M-63).
 
 IP-24 THE ATOMIC INDEX TRANSACTION of §7.1.4: an O_CREAT|O_EXCL `<git-dir>/index.lock`, a snapshot
       of the real index, entry-wise comparison against the plan's expected old entries, writes
@@ -7745,6 +7821,14 @@ D. user.name / user.email ONLY IN GLOBAL CONFIG
              GIT_COMMITTER_*, the commit was made with the correct author and committer (M-51)
    required  an ordinary Project does not become uncommittable because F3 neutralized config
 
+D2. HOSTILE INHERITED GIT_AUTHOR_* / GIT_COMMITTER_* AT CAPTURE TIME
+   MEASURED  `git var GIT_AUTHOR_IDENT` -> `Attacker <evil@x>` and `git var GIT_COMMITTER_IDENT`
+             -> `AttackerC <evilc@x>`, while `git -C <root> config --get user.name` / `user.email`
+             UNDER THE GIT_* STRIP returned `Real Person` / `real@proj` (M-63)
+   required  the capture runs AFTER the strip and uses `config --get` only; `git var ...IDENT` is
+             withdrawn. End to end the raw commit carried the configured identity and no hostile
+             value (M-63). Configuration precedence is preserved: repository-local beat global.
+
 E. MALICIOUS reference-transaction HOOK
    MEASURED  with the default hooks directory it ran THREE TIMES for one `update-ref`; under the
              empty `core.hooksPath` it did not run at all (M-48)
@@ -8073,6 +8157,7 @@ Seven F2 amendments (A-1 ... A-7) and one F3-only correction (C3-1), declared in
                            "review-v1-work-local-v2". The field's MEANING is unchanged
                            and A-4 stands; the behaviour it names is no longer the
                            contained commit primitive, so the identity cannot be
+                           reused without making a landed F2 sentence false
 
 AND, IN ITS OWN CLASS, superseding no F2 sentence:
 
