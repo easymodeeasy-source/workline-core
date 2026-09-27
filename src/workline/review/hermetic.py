@@ -40,7 +40,7 @@ owns that dispatch lands.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
@@ -349,15 +349,19 @@ class HermeticGit:
         return gitcmd.run_git(self.root, *self.configuration_arguments(), *args, check=check, env=environment)
 
 
-def _promisor_remotes(root: Path, environment: dict[str, str]) -> tuple[str, ...]:
+def _promisor_remotes(hermetic: "HermeticGit") -> tuple[str, ...]:
     """The Project's promisor-configured remotes, read at entry so the condition is visible (M-54).
 
     A partial clone would otherwise demand-fetch from a promisor remote in the
     middle of a proof. ``GIT_NO_LAZY_FETCH`` makes that a local-unavailable
     failure rather than a fetch; this read is what makes the arrangement
     reportable instead of silent. Exit 1 is the ordinary "no match" answer.
+
+    It is an ordinary class B invocation and is made through :meth:`HermeticGit.run`
+    like every other one, so it carries the whole envelope and not only the
+    environment half of it.
     """
-    found = gitcmd.run_git(root, "config", "--get-regexp", _PROMISOR_PATTERN, check=False, env=environment)
+    found = hermetic.run("config", "--get-regexp", _PROMISOR_PATTERN, check=False)
     if not found.ok:
         return ()
     names: list[str] = []
@@ -370,31 +374,61 @@ def _promisor_remotes(root: Path, environment: dict[str, str]) -> tuple[str, ...
 
 
 def _require_no_grafts(store: ProjectStore) -> None:
-    """A legacy ``.git/info/grafts`` file is STOP — defence in depth only (§7.1.9).
+    """A legacy ``.git/info/grafts`` file that is PRESENT AND NON-EMPTY is STOP (§7.1.9, §21.14 B).
 
-    Correctness does not depend on this check: the raw ancestry reader reads the
-    stored commit object, which a graft file does not alter (M-57). It is here
-    because a graft file is something a person should be told about, and because
-    one can appear at any later moment — which is precisely why it cannot be the
-    mechanism.
+    The predicate is the contract's, exactly: "Legacy ``.git/info/grafts``, if
+    present and non-empty, STOPS at entry." An empty file grafts nothing and is
+    not the refused condition — Git creates and leaves one in ordinary use, and
+    refusing it would turn a lawful repository away.
+
+    Correctness does not depend on this check at all: the raw ancestry reader
+    reads the stored commit object, which a graft file does not alter (M-57),
+    and one can appear at any later moment — which is precisely why it cannot be
+    the mechanism. It is retained because it is cheap and a Project using grafts
+    is one a person should know about.
+
+    Emptiness is a property of an ordinary file. Anything else at that path —
+    a directory, a symlink, a reparse point — is refused rather than measured:
+    following it to decide would be the one thing a no-follow check must not do,
+    so what cannot be proven empty is not treated as empty.
     """
     grafts = store.root / ".git" / "info" / "grafts"
-    if os.path.lexists(grafts):
+    try:
+        if not os.path.lexists(grafts):
+            return
+        info = os.lstat(grafts)
+        reparse = getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        if not stat.S_ISREG(info.st_mode) or reparse:
+            raise StopError(
+                "this Project's .git/info/grafts is not an ordinary file, so whether it grafts anything "
+                "cannot be read without following it; nothing is committed: STOP",
+                code="review_repository_grafted",
+            )
+        if info.st_size > 0:
+            raise StopError(
+                "this Project has a non-empty legacy .git/info/grafts file, which rewrites what every "
+                "revision walker reports about ancestry; nothing is committed: STOP",
+                code="review_repository_grafted",
+            )
+    except OSError as exc:
         raise StopError(
-            "this Project has a legacy .git/info/grafts file, which rewrites what every revision walker "
-            "reports about ancestry; nothing is committed: STOP",
+            f"this Project's .git/info/grafts cannot be read ({exc}): STOP",
             code="review_repository_grafted",
-        )
+        ) from exc
 
 
-def _require_not_shallow(root: Path, environment: dict[str, str]) -> None:
+def _require_not_shallow(hermetic: "HermeticGit") -> None:
     """A shallow repository is STOP — defence in depth only (§7.1.9).
 
     Measured (M-59), in a shallow clone the walker reported HEAD as a root with
     no parents while the object held two ``parent`` headers. As with grafts, the
     raw reader is unaffected; the check exists so the condition is reported.
+
+    It is an ordinary class B invocation and is made through :meth:`HermeticGit.run`
+    like every other one, so it carries the whole envelope and not only the
+    environment half of it.
     """
-    found = gitcmd.run_git(root, "rev-parse", "--is-shallow-repository", check=False, env=environment)
+    found = hermetic.run("rev-parse", "--is-shallow-repository", check=False)
     if found.ok and found.stdout.strip() == "true":
         raise StopError(
             "this Project is a shallow repository, where a commit's stored parents are not all present; "
@@ -418,19 +452,19 @@ def enter(store: ProjectStore) -> HermeticGit:
 
     Steps 1-3 are :func:`capture_identity`; steps 4-6 are the returned object.
     The entry reads of §7.1.9 - the promisor configuration, the grafts file and
-    the shallow flag - are the first class B invocations, so they are made here
-    rather than left to each caller to remember.
+    the shallow flag - are made here rather than left to each caller to
+    remember. The two that invoke Git are made THROUGH the constructed object,
+    so they are class B invocations in full: one authority builds the envelope,
+    and an entry read cannot carry a different one from a later proof command.
     """
-    root = store.root
-    identity = capture_identity(root)
+    identity = capture_identity(store.root)
     _require_no_grafts(store)
-    no_config = no_config_file(store)
-    environment = _class_b_base(no_config)
-    _require_not_shallow(root, environment)
-    return HermeticGit(
-        root=root,
+    built = HermeticGit(
+        root=store.root,
         identity=identity,
-        promisor_remotes=_promisor_remotes(root, environment),
-        _no_config=no_config,
+        promisor_remotes=(),
+        _no_config=no_config_file(store),
         _store=store,
     )
+    _require_not_shallow(built)
+    return replace(built, promisor_remotes=_promisor_remotes(built))

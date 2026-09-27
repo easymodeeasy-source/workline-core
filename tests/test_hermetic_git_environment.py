@@ -31,6 +31,7 @@ from helpers import WorklineTestCase, git
 from workline import gitcmd
 from workline.errors import StopError
 from workline.review import hermetic, paths as review_paths
+from workline.store import ProjectStore
 
 #: A hostile ambient environment of the shape M-61 and M-63 measured.
 HOSTILE = {
@@ -474,6 +475,276 @@ class GateBoundaryTests(unittest.TestCase):
         self.assertTrue(hasattr(mutation, "_no_hooks_directory"))
         self.assertTrue(hasattr(gitcmd, "contained_add"))
         self.assertTrue(hasattr(gitcmd, "contained_commit"))
+
+
+class RecordingCase(EnvironmentCase):
+    """Watch the argv and environment of every Git command ``enter`` actually runs."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.calls: list[tuple[tuple[str, ...], dict]] = []
+        real = gitcmd.run_git
+
+        def recording(repo, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return real(repo, *args, **kwargs)
+
+        patcher = mock.patch.object(gitcmd, "run_git", recording)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def call_with(self, needle: str) -> tuple[tuple[str, ...], dict]:
+        found = [call for call in self.calls if needle in call[0]]
+        self.assertEqual(len(found), 1, f"expected exactly one {needle} invocation, saw {len(found)}")
+        return found[0]
+
+    def settings_of(self, args: tuple[str, ...]) -> dict[str, str]:
+        return dict(
+            argument.split("=", 1)
+            for position, argument in enumerate(args)
+            if position > 0 and args[position - 1] == "-c"
+        )
+
+
+class EntryInvocationEnvelopeTests(RecordingCase):
+    """Every entry Git read is a class B invocation IN FULL, not only in its environment.
+
+    §7.1.9 names the class B invocations and does not exempt the entry reads from any part
+    of the class: the allowlist AND the frozen configuration controls, IP-10 among them.
+    """
+
+    def entry_calls(self):
+        hermetic.enter(self.store)
+        return (
+            ("promisor read", self.call_with("--get-regexp")),
+            ("shallow read", self.call_with("--is-shallow-repository")),
+        )
+
+    def test_each_entry_read_carries_the_exact_class_b_environment(self) -> None:
+        for label, (args, kwargs) in self.entry_calls():
+            with self.subTest(invocation=label):
+                environment = kwargs["env"]
+                names = {name for name in environment if name.upper().startswith("GIT_")}
+                self.assertEqual(names, set(hermetic.CLASS_B_ALLOWLIST))
+
+    def test_each_entry_read_carries_the_frozen_configuration_controls(self) -> None:
+        for label, (args, _) in self.entry_calls():
+            settings = self.settings_of(args)
+            for key, value in hermetic.CLASS_B_CONFIGURATION:
+                with self.subTest(invocation=label, setting=key):
+                    self.assertEqual(settings.get(key), value)
+
+    def test_each_entry_read_carries_ip_10(self) -> None:
+        """IP-10 applies to every class B invocation, not only to those that write files."""
+        for label, (args, _) in self.entry_calls():
+            settings = self.settings_of(args)
+            with self.subTest(invocation=label):
+                self.assertEqual(settings.get("core.autocrlf"), "false")
+                self.assertEqual(settings.get("core.eol"), "lf")
+
+    def test_each_entry_read_carries_the_proven_hooks_directory(self) -> None:
+        for label, (args, _) in self.entry_calls():
+            named = self.settings_of(args).get("core.hooksPath")
+            with self.subTest(invocation=label):
+                self.assertTrue(named and os.path.isdir(named))
+                self.assertEqual(os.listdir(named), [])
+
+    def test_a_hook_dropped_before_entry_stops_the_entry_reads(self) -> None:
+        """The hooks proof is not skipped for entry calls: it is the same proof, at the same time."""
+        hooks = self.store.root / review_paths.RUNTIME_NO_HOOKS_DIR
+        hooks.mkdir(parents=True, exist_ok=True)
+        (hooks / "reference-transaction").write_text("#!/bin/sh\n", encoding="utf-8", newline="\n")
+        with self.assertRaises(StopError) as caught:
+            hermetic.enter(self.store)
+        self.assertEqual(caught.exception.code, "review_hooks_path_invalid")
+
+    def test_no_commit_identity_or_date_reaches_a_non_commit_entry_read(self) -> None:
+        for label, (_, kwargs) in self.entry_calls():
+            for name in hermetic.CLASS_B_IDENTITY_VARIABLES:
+                with self.subTest(invocation=label, variable=name):
+                    self.assertNotIn(name, kwargs["env"])
+
+    def test_no_index_file_reaches_a_non_index_entry_read(self) -> None:
+        for label, (_, kwargs) in self.entry_calls():
+            with self.subTest(invocation=label):
+                self.assertNotIn("GIT_INDEX_FILE", kwargs["env"])
+
+    def test_class_a_did_not_inherit_the_class_b_controls(self) -> None:
+        """The repair must not have leaked the configuration envelope backwards into the capture."""
+        hermetic.enter(self.store)
+        captures = [call for call in self.calls if "--get" in call[0] and "user.name" in call[0]]
+        self.assertTrue(captures)
+        for args, kwargs in captures:
+            self.assertNotIn("-c", args)
+            self.assertEqual(
+                {name for name in kwargs["env"] if name.upper().startswith("GIT_")}, set()
+            )
+
+    def test_the_identity_is_still_captured_before_any_class_b_invocation(self) -> None:
+        """STRIP -> CAPTURE -> NEUTRALIZE -> HERMETIC EXECUTION, proven by call order."""
+        hermetic.enter(self.store)
+        first_class_b = min(
+            position for position, (args, _) in enumerate(self.calls) if "-c" in args
+        )
+        last_capture = max(
+            position for position, (args, _) in enumerate(self.calls) if "--get" in args and "user.email" in args
+        )
+        self.assertLess(last_capture, first_class_b)
+
+
+class GraftsPredicateTests(EnvironmentCase):
+    """The contract refuses a graft file that is PRESENT AND NON-EMPTY, and only that."""
+
+    def grafts_path(self):
+        info = self.store.root / ".git" / "info"
+        info.mkdir(parents=True, exist_ok=True)
+        return info / "grafts"
+
+    def refusal(self) -> StopError:
+        with self.assertRaises(StopError) as caught:
+            hermetic.enter(self.store)
+        self.assertEqual(caught.exception.code, "review_repository_grafted")
+        return caught.exception
+
+    def test_an_absent_graft_file_is_allowed(self) -> None:
+        self.assertFalse(os.path.lexists(self.grafts_path()))
+        self.assertIsNotNone(hermetic.enter(self.store))
+
+    def test_an_empty_graft_file_is_allowed(self) -> None:
+        """§21.14 B: "if present and non-empty". An empty file grafts nothing."""
+        self.grafts_path().write_bytes(b"")
+        self.assertIsNotNone(hermetic.enter(self.store))
+
+    def test_a_non_empty_graft_file_stops(self) -> None:
+        self.grafts_path().write_text("dead beef\n", encoding="utf-8", newline="\n")
+        self.assertIn("non-empty", str(self.refusal()))
+
+    def test_a_single_byte_graft_file_stops(self) -> None:
+        self.grafts_path().write_bytes(b"\n")
+        self.refusal()
+
+    def test_a_directory_at_the_graft_path_fails_closed(self) -> None:
+        """Not "empty file allowed" but "arbitrary object allowed": what cannot be proven empty is refused."""
+        self.grafts_path().mkdir()
+        self.assertIn("not an ordinary file", str(self.refusal()))
+
+    def test_a_symlink_at_the_graft_path_fails_closed(self) -> None:
+        target = self.store.root / "graft-target"
+        target.write_bytes(b"")
+        try:
+            os.symlink(target, self.grafts_path())
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"file symlinks are refused here: {exc}")
+        self.assertIn("not an ordinary file", str(self.refusal()))
+
+
+class ShallowRepositoryTests(WorklineTestCase):
+    """A genuine shallow repository, cloned for the test, is refused at entry."""
+
+    def source(self):
+        """A disposable source with two commits, so a depth-1 clone is genuinely shallow."""
+        source = self.new_dir("shallow-source")
+        git(source, "init", "-b", "main")
+        git(source, "config", "user.name", "Real Person")
+        git(source, "config", "user.email", "real@proj")
+        for number in (1, 2):
+            (source / f"f{number}.txt").write_text(f"{number}\n", encoding="utf-8", newline="\n")
+            git(source, "add", f"f{number}.txt")
+            git(source, "commit", "-m", f"c{number}")
+        return source
+
+    def cloned(self, *, depth: int | None):
+        source = self.source()
+        target = self.new_dir(f"clone-depth-{depth}")
+        arguments = ["clone", "-q"]
+        if depth is not None:
+            arguments += [f"--depth={depth}"]
+        git(self.tmp, *arguments, source.resolve().as_uri(), str(target))
+        git(target, "config", "user.name", "Real Person")
+        git(target, "config", "user.email", "real@proj")
+        (target / ".workline").mkdir(exist_ok=True)
+        return ProjectStore(target)
+
+    def test_a_full_clone_passes_the_shallow_check(self) -> None:
+        store = self.cloned(depth=None)
+        self.assertFalse((store.root / ".git" / "shallow").exists())
+        self.assertIsNotNone(hermetic.enter(store))
+
+    def test_a_shallow_clone_stops_at_entry(self) -> None:
+        store = self.cloned(depth=1)
+        self.assertTrue((store.root / ".git" / "shallow").exists(), "the clone is genuinely shallow")
+        with self.assertRaises(StopError) as caught:
+            hermetic.enter(store)
+        self.assertEqual(caught.exception.code, "review_repository_shallow")
+
+    def test_the_shallow_query_travels_through_the_complete_class_b_envelope(self) -> None:
+        store = self.cloned(depth=1)
+        seen: list[tuple[tuple[str, ...], dict]] = []
+        real = gitcmd.run_git
+
+        def recording(repo, *args, **kwargs):
+            seen.append((args, kwargs))
+            return real(repo, *args, **kwargs)
+
+        with mock.patch.object(gitcmd, "run_git", recording):
+            with self.assertRaises(StopError):
+                hermetic.enter(store)
+        query = [call for call in seen if "--is-shallow-repository" in call[0]]
+        self.assertEqual(len(query), 1)
+        args, kwargs = query[0]
+        settings = dict(
+            argument.split("=", 1)
+            for position, argument in enumerate(args)
+            if position > 0 and args[position - 1] == "-c"
+        )
+        for key, value in hermetic.CLASS_B_CONFIGURATION:
+            with self.subTest(setting=key):
+                self.assertEqual(settings.get(key), value)
+        self.assertIn("core.hooksPath", settings)
+        self.assertEqual(
+            {name for name in kwargs["env"] if name.upper().startswith("GIT_")},
+            set(hermetic.CLASS_B_ALLOWLIST),
+        )
+
+
+class PromisorEntryTests(RecordingCase):
+    """The promisor read is the real command, under the real neutralization."""
+
+    def test_the_exact_command_is_run(self) -> None:
+        hermetic.enter(self.store)
+        args, _ = self.call_with("--get-regexp")
+        self.assertIn("config", args)
+        self.assertIn(r"^remote\..*\.promisor$", args)
+
+    def test_a_repository_local_promisor_remote_is_observed(self) -> None:
+        """Repository-local configuration is not neutralized, so the Project's own answer is read."""
+        git(self.store.root, "config", "remote.origin.promisor", "true")
+        self.assertEqual(hermetic.enter(self.store).promisor_remotes, ("origin",))
+
+    def test_several_promisor_remotes_are_reported_in_order(self) -> None:
+        git(self.store.root, "config", "remote.zulu.promisor", "true")
+        git(self.store.root, "config", "remote.alpha.promisor", "true")
+        self.assertEqual(hermetic.enter(self.store).promisor_remotes, ("alpha", "zulu"))
+
+    def test_a_global_promisor_remote_is_not_visible_under_neutralization(self) -> None:
+        """Global configuration takes no part in a class B invocation, by construction."""
+        home = self.new_dir("home-promisor")
+        (home / ".gitconfig").write_text(
+            '[remote "global"]\n\tpromisor = true\n', encoding="utf-8", newline="\n"
+        )
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            self.assertEqual(hermetic.enter(self.store).promisor_remotes, ())
+
+    def test_a_hostile_config_environment_cannot_invent_a_promisor_remote(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "remote.injected.promisor",
+                "GIT_CONFIG_VALUE_0": "true",
+            },
+        ):
+            self.assertEqual(hermetic.enter(self.store).promisor_remotes, ())
 
 
 if __name__ == "__main__":
