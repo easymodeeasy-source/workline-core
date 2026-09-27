@@ -533,21 +533,37 @@ CONSUMPTION_FIELDS = (
     "terminal_event_type",
     "target_identity",
     "authorized_result_commit_sha",
+    "artifact_kind",
 )
+
+#: What a Work-kind Consumption says it consumed: a result commit, or an
+#: empty-artifact Candidate that has none (F1 §11.3). Any other kind says null.
+CONSUMPTION_ARTIFACT_KINDS = ("result_commit", "empty")
 
 
 @dataclass(frozen=True)
 class Consumption:
     """The one use of one authorization.
 
-    ``terminal_event_id`` and ``authorized_result_commit_sha`` are the Work-kind
-    bindings; a planning or policy Consumption leaves them null and is unique by
-    Receipt alone, because those kinds never invent a Work terminal event
-    (``R4`` §7).
+    ``terminal_event_id`` is the Work-kind discriminator; a planning or policy
+    Consumption leaves it null and is unique by Receipt alone, because those
+    kinds never invent a Work terminal event (``R4`` §7).
+
+    ``artifact_kind`` says which of the two authorized Work shapes this is
+    (F1 §11.3, Gate 2). A Work can complete correctly with no result-path change
+    and no deleted path, and START then makes no result commit at all - ordinary
+    and correct, not a degenerate case (F1 §11.1, §11.2). Such a Consumption
+    binds ``artifact_kind = "empty"`` with no ``authorized_result_commit_sha``,
+    and no empty commit is ever synthesized to stand in for one. A result-bearing
+    Consumption binds ``artifact_kind = "result_commit"`` with K1. The field is
+    what states the absence explicitly instead of leaving a null to be guessed
+    at, so the two cases are never told apart by the commit field alone.
 
     P1 builds the identity and cardinality foundation only. The P3 totality rule
     - that a review-v1 ``work_completed`` has exactly one Consumption - is not
-    applied to the current START path by anything here.
+    applied to the current START path by anything here, and neither is the
+    Candidate/Consumption ``artifact_kind`` agreement of F3 §14, which is read
+    and compared by the F3 terminal-stage and C-2(K2) proofs, not here.
     """
 
     consumption_id: str
@@ -562,6 +578,10 @@ class Consumption:
     terminal_event_type: str | None
     target_identity: str
     authorized_result_commit_sha: str | None
+    # Declared last, and null for every kind that is not Work-kind, so the
+    # existing positional constructions of a non-Work Consumption still build
+    # the record they always did (F1 §11.3, implementation note).
+    artifact_kind: str | None = None
 
     @property
     def work_kind(self) -> bool:
@@ -589,6 +609,10 @@ class Consumption:
                 "terminal_event_type": self.terminal_event_type,
                 "target_identity": self.target_identity,
                 "authorized_result_commit_sha": self.authorized_result_commit_sha,
+                # Always emitted, present-as-null for a non-Work kind, never
+                # omitted: a reader must never have to tell "no artifact_kind"
+                # apart from "artifact_kind is null" (F1 §11.3).
+                "artifact_kind": self.artifact_kind,
             }
         )
         return record
@@ -600,17 +624,12 @@ class Consumption:
         event_id = record.get("terminal_event_id")
         event_type = record.get("terminal_event_type")
         commit = record.get("authorized_result_commit_sha")
-        # A Work-kind Consumption binds one terminal event of one Work to one
-        # authorized result commit (R4 section 2). The three are a single binding:
-        # either all are there, or - for a planning or policy Consumption, which
-        # never invents a Work terminal event (R4 section 7) - none is.
-        present = [value is not None for value in (event_id, event_type, commit)]
-        if any(present) and not all(present):
-            raise ValidationError(
-                f"{described} carries part of a Work terminal binding (terminal_event_id, terminal_event_type, "
-                "authorized_result_commit_sha); a Work-kind Consumption carries all three and any other kind none",
-                code="review_record_invalid",
-            )
+        kind = record.get("artifact_kind")
+        # The binding rule of F1 §11.3, which replaces the all-or-none rule this
+        # record used to apply over the Work-terminal triple. That rule made an
+        # empty-artifact Work Consumption unrepresentable - it demanded a result
+        # commit from a Work that correctly has none - so the discriminator is
+        # now the terminal event, and artifact_kind says which Work shape it is.
         if event_id is not None:
             if not is_valid_id(str(event_id), "event"):
                 raise ValidationError(
@@ -622,15 +641,48 @@ class Consumption:
                     f"{WORK_TERMINAL_EVENT}",
                     code="review_record_invalid",
                 )
-            if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit) is None:
-                raise ValidationError(
-                    f"{described} authorized_result_commit_sha is not a full commit id: {commit!r}",
-                    code="review_record_invalid",
-                )
             target = record.get("target_identity")
             if not isinstance(target, str) or not is_valid_id(target, "work"):
                 raise ValidationError(
                     f"{described} binds a Work terminal event but its target_identity is not a work id: {target!r}",
+                    code="review_record_invalid",
+                )
+            if kind not in CONSUMPTION_ARTIFACT_KINDS:
+                raise ValidationError(
+                    f"{described} artifact_kind is {kind!r}; a Work-kind Consumption is one of "
+                    f"{' or '.join(CONSUMPTION_ARTIFACT_KINDS)}",
+                    code="review_record_invalid",
+                )
+            # The commit and the kind say the same thing or the record is not
+            # one: a result commit exactly when the artifact is one, and none at
+            # all when it is empty. Neither is ever derived from the other.
+            if kind == "result_commit":
+                if not isinstance(commit, str) or re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit) is None:
+                    raise ValidationError(
+                        f"{described} authorized_result_commit_sha is not a full commit id: {commit!r}",
+                        code="review_record_invalid",
+                    )
+            elif commit is not None:
+                raise ValidationError(
+                    f"{described} artifact_kind is empty and authorized_result_commit_sha is {commit!r}; "
+                    "an empty-artifact Consumption binds no result commit",
+                    code="review_record_invalid",
+                )
+        else:
+            carried = sorted(
+                name
+                for name, value in (
+                    ("terminal_event_type", event_type),
+                    ("authorized_result_commit_sha", commit),
+                    ("artifact_kind", kind),
+                )
+                if value is not None
+            )
+            if carried:
+                raise ValidationError(
+                    f"{described} carries {', '.join(carried)} without a terminal_event_id; a Consumption that "
+                    "is not Work-kind carries none of terminal_event_id, terminal_event_type, "
+                    "authorized_result_commit_sha, artifact_kind",
                     code="review_record_invalid",
                 )
         return Consumption(
@@ -646,6 +698,7 @@ class Consumption:
             terminal_event_type=None if event_type is None else str(event_type),
             target_identity=_require_text(record, "target_identity", described),
             authorized_result_commit_sha=None if commit is None else str(commit),
+            artifact_kind=None if kind is None else str(kind),
         )
 
 

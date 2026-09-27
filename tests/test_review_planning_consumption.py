@@ -307,7 +307,7 @@ class VersionTests(unittest.TestCase):
                 "review_generation": 3, "review_kind": kind, "authorized_candidate_hash": "a" * 64,
                 "operation_identity": operation, "operation_mutation_id": "mut_01ARZ3NDEKTSV4RRFFQ69G5FAV",
                 "terminal_event_id": None, "terminal_event_type": None, "target_identity": target,
-                "authorized_result_commit_sha": None,
+                "authorized_result_commit_sha": None, "artifact_kind": None,
             }
             with self.subTest(kind):
                 with self.assertRaises(ValidationError) as raised:
@@ -324,6 +324,7 @@ class VersionTests(unittest.TestCase):
             "operation_identity": "start:x", "operation_mutation_id": "mut_01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "terminal_event_id": "evt_01ARZ3NDEKTSV4RRFFQ69G5FAV", "terminal_event_type": "work_completed",
             "target_identity": "w_01ARZ3NDEKTSV4RRFFQ69G5FAV", "authorized_result_commit_sha": "c" * 40,
+            "artifact_kind": "result_commit",
         }
         found = records.consumption_from_record(v1, "v1")
         self.assertIsInstance(found, records.Consumption)

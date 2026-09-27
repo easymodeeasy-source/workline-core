@@ -25,9 +25,9 @@ meaning or requires one to be present, and state derivation still reads the four
 lifecycle fields and only those. An event that carries no metadata is the event it
 was before, down to its bytes.
 
-This is Gate 1 alone. Gate 2 (the Consumption ``artifact_kind`` repair) and Gate 3
-(the activation producer) are not implemented, and the tests below pin that they
-are still absent.
+This is Gate 1 alone. Gate 2 (the Consumption ``artifact_kind`` repair) has since landed in its
+own ordered unit, and the tests below pin that it did not arrive through this one; Gate 3 (the
+activation producer) is not implemented, and they pin that it is still absent.
 """
 
 from __future__ import annotations
@@ -257,17 +257,24 @@ class PhysicalWriteTests(WorklineTestCase):
 
 
 class GateBoundaryTests(unittest.TestCase):
-    """Gate 1 is a carrier prerequisite. It does not start Gate 2 and does not activate Gate 3."""
+    """Gate 1 is a carrier prerequisite. It carries no Gate 2 work, and it does not activate Gate 3."""
 
-    def test_gate_2_consumption_artifact_kind_repair_is_not_implemented(self) -> None:
-        """P3 F1 §12.2 / IP-5: the Consumption record still has no artifact_kind field."""
+    def test_gate_2_did_not_arrive_through_the_carrier(self) -> None:
+        """P3 F1 §12.2 / IP-5: Gate 2 is the Consumption record's own repair, not the Event's.
+
+        This pinned Gate 2's absence while Gate 1 was the unit being built. Gate 2 has since landed
+        in the ordered unit that owns it, so what still has to hold is the separation: the
+        ``artifact_kind`` repair lives on the Consumption record, and nothing about it reached the
+        Event carrier, whose metadata stays uninterpreted (F1 §12.1).
+        """
         from workline.review import records
+        from workline.store import EVENT_LIFECYCLE_FIELDS, Event
 
-        self.assertNotIn(
-            "artifact_kind",
-            records.Consumption.__dataclass_fields__,
-            "Gate 2 appears to have landed; this unit implements Gate 1 only",
-        )
+        self.assertIn("artifact_kind", records.Consumption.__dataclass_fields__)
+        self.assertNotIn("artifact_kind", Event.__dataclass_fields__)
+        self.assertEqual(EVENT_LIFECYCLE_FIELDS, ("id", "type", "entity", "at"))
+        carried = Event.from_record({**LIFECYCLE, "artifact_kind": "empty"})
+        self.assertEqual(dict(carried.metadata), {"artifact_kind": "empty"})
 
     def test_gate_3_activation_is_not_produced(self) -> None:
         """P3 F1 §12.3 / IP-7: the activation record exists as a type, and nothing writes one."""

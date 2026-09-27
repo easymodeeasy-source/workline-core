@@ -97,6 +97,10 @@ def consumption_record(**overrides: object) -> dict:
         "terminal_event_type": "work_completed",
         "target_identity": "w_01ARZ3NDEKTSV4RRFFQ69G5FAV",
         "authorized_result_commit_sha": "a" * 40,
+        # A Work-kind Consumption says which artifact it consumed (F1 §11.3); this
+        # one binds a result commit. A non-Work-kind override nulls it with the
+        # rest of the Work-terminal binding.
+        "artifact_kind": "result_commit",
     }
     record.update(overrides)
     return record
@@ -326,7 +330,8 @@ class SealAndConsumptionTests(WorklineTestCase):
 
     def test_a_planning_consumption_names_no_terminal_event(self) -> None:
         record = consumption_record(
-            terminal_event_id=None, terminal_event_type=None, authorized_result_commit_sha=None, review_kind="roadmap_planning"
+            terminal_event_id=None, terminal_event_type=None, authorized_result_commit_sha=None,
+            artifact_kind=None, review_kind="roadmap_planning",
         )
         parsed = records.Consumption.from_record(record, "consumption")
         self.assertIsNone(parsed.terminal_event_id)

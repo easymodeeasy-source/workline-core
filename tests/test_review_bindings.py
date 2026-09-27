@@ -188,7 +188,10 @@ class ReceiptConsumptionBindingTests(BindingCase):
         self.assertTrue(found.work_kind)
         self.assertEqual(found.target_identity, found.work_id)
         planning = records.Consumption.from_record(
-            consumption_record(terminal_event_id=None, terminal_event_type=None, authorized_result_commit_sha=None),
+            consumption_record(
+                terminal_event_id=None, terminal_event_type=None, authorized_result_commit_sha=None,
+                artifact_kind=None,
+            ),
             "consumption",
         )
         self.assertIsNone(planning.work_id)
