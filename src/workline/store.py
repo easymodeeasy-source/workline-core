@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Mapping
 
 from . import pushurl, yamlish
 from .errors import ValidationError
@@ -220,19 +221,80 @@ def parse_push_pin(data: dict[str, Any]) -> PushPin | None:
     return PushPin(remote.strip(), tuple(accepted))
 
 
+#: The lifecycle fields of an event, and only these: what state derivation reads, and what an event
+#: is identified and ordered by (P3 F1 §12.1, P1 R4 §5).
+EVENT_LIFECYCLE_FIELDS = ("id", "type", "entity", "at")
+
+
 @dataclass(frozen=True)
 class Event:
+    """One lifecycle event, and the non-lifecycle metadata it carries unchanged.
+
+    The four lifecycle fields are what a Project's state is derived from, and
+    they are the only ones any derivation reads (:mod:`workline.state`).
+
+    ``metadata`` is everything else the record holds. It is carried, not
+    interpreted: P3's Review consistency metadata for a review-v1
+    ``work_completed`` - ``operation_contract``, ``review_receipt_id``,
+    ``review_run_id``, ``review_generation`` - reaches the physical log through
+    an ``append_event`` effect, and has to come back out of the log the same way
+    or the effect classifies as applied with an unexpected result and poisons
+    its own mutation (P3 F1 §12.1, Gate 1; P3 F3 IP-4).
+
+    Carrying it is all this does. Nothing here reads a metadata key, gives one a
+    meaning, or requires one to be present; unknown or contradictory metadata is
+    neither rejected here nor stripped into lifecycle semantics, and whatever
+    reads it for Review consistency is what fails closed on it.
+
+    An event with no metadata is the event this was before: same fields, same
+    record, same rendering, same comparison, same hash.
+    """
+
     id: str
     type: str
     entity: str
     at: str
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        held = dict(self.metadata)
+        overlap = [key for key in EVENT_LIFECYCLE_FIELDS if key in held]
+        if overlap:
+            raise ValidationError(
+                f"event metadata cannot hold the lifecycle field(s) {', '.join(overlap)}",
+                code="events_invalid",
+            )
+        object.__setattr__(self, "metadata", MappingProxyType(held))
+
+    def __hash__(self) -> int:
+        """Hash the lifecycle fields, and only those - what this hashed before metadata existed."""
+        return hash((self.id, self.type, self.entity, self.at))
 
     def to_record(self) -> dict[str, Any]:
-        return {"id": self.id, "type": self.type, "entity": self.entity, "at": self.at}
+        """The record form: the lifecycle fields, then the metadata this carries.
+
+        With no metadata this is exactly the four-key record it has always been,
+        so an event that carries none renders and compares byte for byte as it
+        did before.
+        """
+        record: dict[str, Any] = {"id": self.id, "type": self.type, "entity": self.entity, "at": self.at}
+        record.update(self.metadata)
+        return record
 
     @staticmethod
     def from_record(record: dict[str, Any]) -> "Event":
-        return Event(str(record["id"]), str(record["type"]), str(record["entity"]), str(record["at"]))
+        """Read a record, keeping every key that is not a lifecycle field.
+
+        Dropping them is what made a metadata-carrying event unable to survive
+        its own round trip (P3 F1 §12.1).
+        """
+        return Event(
+            str(record["id"]),
+            str(record["type"]),
+            str(record["entity"]),
+            str(record["at"]),
+            {key: value for key, value in record.items() if key not in EVENT_LIFECYCLE_FIELDS},
+        )
 
 
 # --------------------------------------------------------------------------- rendering
