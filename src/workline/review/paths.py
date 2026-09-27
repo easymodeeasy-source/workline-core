@@ -47,6 +47,9 @@ RUNTIME_PROOFS_DIR = f"{RUNTIME_REVIEW_DIR}/proofs"
 RUNTIME_REPORTS_DIR = f"{RUNTIME_REVIEW_DIR}/reports"
 #: The Workline-owned empty directory the planning commit primitive names as ``core.hooksPath``.
 RUNTIME_NO_HOOKS_DIR = f"{RUNTIME_REVIEW_DIR}/no-hooks"
+#: The Workline-owned empty file a hermetic (class B) Git invocation names as ``GIT_CONFIG_GLOBAL``,
+#: so no global configuration takes part in it (``F3`` §7.1.9).
+RUNTIME_NO_CONFIG_FILE = f"{RUNTIME_REVIEW_DIR}/no-config"
 #: Throw-away bare directories the committed attribute evaluation runs in.
 RUNTIME_ATTR_EVAL_DIR = f"{RUNTIME_REVIEW_DIR}/attr-eval"
 

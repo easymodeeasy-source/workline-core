@@ -31,7 +31,13 @@ class GitResult:
         return self.returncode == 0
 
 
-def run_git(repo: Path | None, *args: str, check: bool = True) -> GitResult:
+def run_git(repo: Path | None, *args: str, check: bool = True, env: dict[str, str] | None = None) -> GitResult:
+    """Run git and decode its output as text.
+
+    ``env`` replaces the environment the command runs in; ``None`` inherits this
+    process's, which is what every caller that does not name one gets and what
+    every caller has always got.
+    """
     command = ["git"]
     if repo is not None:
         command += ["-C", str(repo)]
@@ -43,6 +49,7 @@ def run_git(repo: Path | None, *args: str, check: bool = True) -> GitResult:
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=env,
         )
     except FileNotFoundError as exc:
         raise GitError("git executable not found") from exc
