@@ -52,6 +52,10 @@ RUNTIME_NO_HOOKS_DIR = f"{RUNTIME_REVIEW_DIR}/no-hooks"
 RUNTIME_NO_CONFIG_FILE = f"{RUNTIME_REVIEW_DIR}/no-config"
 #: Throw-away bare directories the committed attribute evaluation runs in.
 RUNTIME_ATTR_EVAL_DIR = f"{RUNTIME_REVIEW_DIR}/attr-eval"
+#: Throw-away repositories the Work attribute-pin capability probe measures in (``F3`` §7.7).
+#: A probe repository is created under a fresh name here and removed again; nothing in it is
+#: this Project's repository, index, worktree or refs.
+RUNTIME_ATTR_PROBE_DIR = f"{RUNTIME_REVIEW_DIR}/attr-probe"
 
 
 def runtime_report_rel(review_task_id: str) -> str:

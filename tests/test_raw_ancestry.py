@@ -801,7 +801,9 @@ class UnitBoundaryTests(unittest.TestCase):
         from workline.review import records
         from workline.review.store import ReviewStore
 
-        self.assertFalse(hasattr(gitcmd, "P3_WORK_ATTR_PIN_GIT_MIN"))
+        # The attribute foundation landed as its own unit; what must stay absent here is any
+        # ancestry involvement in it, and every later unit's machinery.
+        self.assertFalse(hasattr(ancestry, "attribute_configuration_arguments"))
         self.assertFalse(hasattr(mutation, "WORK_COMMIT_MODE"))
         self.assertEqual(mutation.PLANNING_COMMIT_MODE, "review-v1-planning-local-v1")
         self.assertFalse(hasattr(ancestry, "CommitTreePlan"))

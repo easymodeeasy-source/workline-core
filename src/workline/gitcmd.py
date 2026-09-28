@@ -449,16 +449,27 @@ def commits_touching(repo: Path, since: str, until: str, paths: list[str]) -> li
 
 # --------------------------------------------------------------------------- review-v1 planning: versions
 #
-# ``rules/git`` owns both thresholds. They are independent and never merged:
+# ``rules/git`` owns these thresholds. They are independent and never merged:
 # the first is what beginning or resuming an explicit review-v1 planning
 # invocation needs (``git check-attr --source`` of the checkout capability),
 # the second what the publication barrier's registered-Run discovery and the
-# committed planning proof need (``git log --diff-merges=combined``).
+# committed planning proof need (``git log --diff-merges=combined``), and the
+# third what a review-v1 WORK operation's attribute-source pin needs.
 
 #: The oldest Git that may begin or resume an explicit review-v1 planning invocation.
 P2_REVIEW_GIT_MIN = (2, 40, 0)
 #: The oldest Git that may classify a history holding planning Review material for publication.
 P2_PUBLICATION_GIT_MIN = (2, 31, 0)
+#: The oldest Git a review-v1 WORK operation's attribute-source pin is declared for (``F3`` §7.7.2 A).
+#:
+#: ``--source`` on ``check-attr`` exists at ``P2_REVIEW_GIT_MIN`` and proves NOTHING about
+#: ``attr.tree`` governing the attribute subsystem, which landed later; that inference is
+#: withdrawn (``F3`` §7.7.1). This value is adopted from upstream release notes rather than
+#: measured, and it is deliberately NOT the authority: the capability probe of ``F3`` §7.7.2 B
+#: proves the running Git honours the pin, on this machine, on this run. A floor that is too high
+#: costs availability; a floor that is too low is caught by the probe. Neither can authorize an
+#: unpinned commit.
+P3_WORK_ATTR_PIN_GIT_MIN = (2, 43, 0)
 
 _VERSION_TEXT = re.compile(r"git version (\d+)\.(\d+)\.(\d+)(?!\d)")
 _VERSION_READ: list[tuple[int, int, int] | None] = []

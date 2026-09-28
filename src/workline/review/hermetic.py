@@ -329,6 +329,42 @@ class HermeticGit:
             arguments += ["-c", f"{key}={value}"]
         return tuple(arguments)
 
+    def attribute_configuration_arguments(self, source: str) -> tuple[str, ...]:
+        """:meth:`configuration_arguments` plus the attribute-source pin (``F3`` §7.1.9 class (b)).
+
+        Every invocation that RESOLVES ATTRIBUTES carries two settings beyond the
+        class B ones, and carries them in addition to - never instead of - the
+        complete envelope this composes from:
+
+        ```text
+        attr.tree            = <this commit's persistence basis>
+        core.attributesFile  = <the Workline-owned empty file>
+        ```
+
+        ``source`` is the persistence basis as an EXACT full object id, and is
+        validated before Git is asked. ``HEAD``, a branch name, an abbreviation
+        and every other revision expression are refused: a pin whose identity
+        Git resolves at use time is not a pin, because what it names can change
+        between the evaluation and the commit the evaluation is supposed to
+        govern. Both object formats are accepted - 40 hex for SHA-1 and 64 for
+        SHA-256 - because a basis is whatever identity its repository stores.
+
+        The attributes file is the same Workline-owned empty file as
+        ``GIT_CONFIG_GLOBAL``, and it is RE-PROVEN here rather than remembered,
+        exactly as the hooks directory is: what matters is that it is an empty
+        plain file immediately before use, and content appearing there would
+        become an attribute source of this very invocation.
+        """
+        if not gitcmd.full_commit_id(source):
+            raise StopError(
+                f"the attribute source must be pinned to an exact full object id, and {source!r} is not one; "
+                "an attribute question asked under an unpinned or resolvable source cannot be answered for the "
+                "commit it is meant to govern: STOP",
+                code="review_git_transform",
+            )
+        empty = no_config_file(self._store)
+        return (*self.configuration_arguments(), "-c", f"attr.tree={source}", "-c", f"core.attributesFile={empty}")
+
     def run(
         self,
         *args: str,

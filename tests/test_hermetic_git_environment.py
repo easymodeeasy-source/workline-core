@@ -339,8 +339,13 @@ class ClassBConfigurationTests(EnvironmentCase):
         self.assertEqual(caught.exception.code, "review_hooks_path_invalid")
         self.assertTrue(os.path.isdir(named))
 
-    def test_no_attribute_pin_is_carried(self) -> None:
-        """IP-8(b) is a later unit: nothing here resolves attributes against a tree."""
+    def test_no_attribute_pin_is_carried_by_the_ordinary_class_b_form(self) -> None:
+        """IP-8(b) qualifies the invocations that RESOLVE attributes, not every class B one.
+
+        The pin belongs to :meth:`attribute_configuration_arguments`, which
+        composes from these arguments; an ordinary class B command - a
+        ``cat-file``, an ``update-ref`` - resolves no attribute and carries none.
+        """
         self.assertNotIn("attr.tree", self.settings)
         self.assertNotIn("GIT_ATTR_SOURCE", self.hermetic.environment())
 
@@ -449,10 +454,18 @@ class GateBoundaryTests(unittest.TestCase):
         self.assertTrue(hasattr(gitcmd, "commit_parents"))
         self.assertTrue(hasattr(gitcmd, "descends_from"))
 
-    def test_no_attribute_pin_machinery_exists_yet(self) -> None:
-        """IP-8(b)/IP-11/IP-12 are a later unit."""
-        self.assertFalse(hasattr(gitcmd, "P3_WORK_ATTR_PIN_GIT_MIN"))
+    def test_the_attribute_pin_machinery_lives_outside_this_unit(self) -> None:
+        """IP-8(b)/IP-11/IP-12 landed as their own foundation; this module only composes the arguments."""
+        from workline.review import attributes
+
+        self.assertEqual(gitcmd.P3_WORK_ATTR_PIN_GIT_MIN, (2, 43, 0))
         self.assertNotIn("attr.tree", "".join(f"{k}={v}" for k, v in hermetic.CLASS_B_CONFIGURATION))
+        self.assertTrue(hasattr(hermetic.HermeticGit, "attribute_configuration_arguments"))
+        for name in ("require_work_attribute_source", "probe_attribute_pin", "parse_source",
+                     "require_attribute_pin_capability", "MATERIAL_ATTRIBUTES"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(hermetic, name))
+                self.assertTrue(hasattr(attributes, name))
 
     def test_the_review_v1_work_persistence_identity_is_still_not_dispatchable(self) -> None:
         from workline import mutation
