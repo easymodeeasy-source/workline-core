@@ -2889,8 +2889,14 @@ ONE STEP = ONE DISTINCT FULL COMMIT OID whose literal parent headers are request
     Distinct by full object id. The SAME oid reached again within the same evaluation — as a
     merge's two sides reaching a shared ancestor do — consumes NO further step, because its
     parent headers are already known to that evaluation and are not requested a second time.
-    Counting requests rather than visits is what makes the bound deterministic over a DAG: the
-    same history answers the same question with the same count every time.
+
+    DE-DUPLICATION ALONE DOES NOT MAKE THE BOUND DETERMINISTIC, and an earlier draft of this
+    clarification claimed it did. It does not: counting only distinct requests still leaves WHICH
+    oids get requested, and in what order, to the walk. Over a merge DAG two conforming walks can
+    therefore consume the budget on different parts of the history and answer differently. The
+    determinism comes from FOUR things together — the FIFO schedule frozen below, the stored
+    parent-header order, first-discovery de-duplication, and the per-evaluation budget — and the
+    schedule is the part that was missing.
 
 THE 4096th distinct oid MAY be requested. Before requesting the 4097th, the evaluation stops and
     answers UNKNOWN, and that object is NOT read as part of it. UNKNOWN fails closed exactly as
@@ -2900,6 +2906,109 @@ THE 4096th distinct oid MAY be requested. Before requesting the 4097th, the eval
 REFLEXIVE. `raw_descends_from(commit, commit)` is YES from the equality the definition above
     already states. It requests no parent headers and therefore consumes ZERO steps, so it is
     answerable at any budget.
+```
+
+**IP26-B1, continued — THE CANONICAL SCHEDULE FOR `raw_descends_from`.** A budget is only as
+determinate as the walk that spends it. This freezes the request sequence, and nothing else: the
+answers YES, NO and UNKNOWN keep the meanings §7.1.8 already gives them, and no other predicate
+changes.
+
+```text
+raw_descends_from(commit, ancestor), after the full-oid requirements above are satisfied:
+
+    commit == ancestor  ->  YES, with 0 RAW_PARENTS requests and 0 steps (the reflexive rule).
+
+    Otherwise:
+        queue  = [commit]          a FIFO queue
+        seen   = {commit}
+        steps  = 0
+
+    and then, repeatedly:
+
+    A. queue empty                 -> NO.
+    B. take the OLDEST oid off the queue; call it `current`.
+    C. BEFORE requesting RAW_PARENTS(current): if steps == P3_RAW_ANCESTRY_STEP_BUDGET, the
+       answer is UNKNOWN and FAILS CLOSED, and `current` is NOT read. This is what makes the
+       4097th distinct request impossible rather than merely discouraged.
+    D. otherwise request RAW_PARENTS(current); steps += 1. RAW_PARENTS(current) UNKNOWN ->
+       the whole answer is UNKNOWN and FAILS CLOSED.
+    E. only AFTER that request has succeeded — so the object is locally available and parses —
+       `current == ancestor` -> YES.
+    F. take current's parents in their LITERAL STORED HEADER ORDER (§7.1.8, M-60). For each one
+       not already in `seen`: add it to `seen` at that moment, and append it to the END of the
+       queue. One already in `seen` is not enqueued again, costs no further step, and is not
+       requested again within this evaluation.
+
+WHY YES REQUIRES THE READ. An oid that merely APPEARS in another commit's parent header is not
+    proof that the object is here. Returning YES on the header alone would make a shallow
+    boundary's named-but-absent parent a successful ancestry proof, which is exactly what
+    §7.1.8's "locally unavailable -> UNKNOWN, never a root" forbids. So a non-reflexive YES is
+    always backed by a successful read of the ancestor's own commit object. The reflexive case
+    needs no read because no header is being trusted: the two oids are the same value.
+
+WHY NO IS SAFE. `queue empty` is reached only after every oid the schedule reached was requested
+    successfully and none equalled `ancestor`. Any unavailable or unparseable object on the way
+    would already have answered UNKNOWN at D, so NO never stands in for "could not tell".
+
+DETERMINISM. For a fixed (commit, ancestor, raw commit-object graph) the sequence of first-time
+    RAW_PARENTS requests is uniquely determined by the FIFO order, the stored parent order and
+    first-discovery de-duplication. Two implementations may hold the queue and the seen set in
+    whatever structures they like; they must produce that same logical request sequence, and
+    therefore the same budget outcome.
+
+WORKED CASE, which is where an order-free rule failed. H's stored parents are [R1, L1]; L1's
+    parent is A; R1 begins a long unrelated chain. For raw_descends_from(H, A) the schedule is
+    H, then R1, then L1, then A: reading H discovers R1 then L1 in header order, FIFO takes R1
+    first, R1's newly discovered parent is appended BEHIND the already-queued L1, so L1 is read
+    next and enqueues A. The answer is YES after RAW_PARENTS(A) succeeds, in four steps. The long
+    R chain cannot starve L1, and a depth-first walk — which could have spent the whole budget
+    inside R and answered UNKNOWN — is not a conforming schedule. This is a worked case of the
+    frozen rule, not a new measurement.
+```
+
+**IP26-B1, continued — `raw_range` KEEPS ITS SINGLE-PARENT SHAPE.** The schedule above is for
+`raw_descends_from` and is not a general graph traversal for anything else. `raw_range` is not
+turned into a merge-DAG enumerator, because nothing asks it to be one: its only consumer is §8.2
+L-2 (and §8.5's identical restatement), whose first requirement is that every commit in the range
+has exactly one parent, and §8.6 already lists "a merge commit anywhere in the range" among the
+things that are never a lineage answer.
+
+```text
+BUDGET. Each distinct commit oid whose RAW_PARENTS the range walk successfully requests consumes
+    one step, under the same P3_RAW_ANCESTRY_STEP_BUDGET = 4096 and the same boundary: the
+    4096th may be requested, and before a 4097th the answer is UNKNOWN and the object is not
+    read.
+
+AT A COMMIT WITH MORE THAN ONE RAW PARENT the walk STOPS. It does not pick a parent to keep the
+    range going, and it does not enumerate both. The non-linear condition is surfaced to the
+    lineage caller, which refuses it under L-2. Choosing a branch would manufacture a linear
+    range that the stored objects do not have, and the refusal is the contract's answer, not an
+    obstacle to work around.
+
+NO ORDERING IS DEFINED HERE, and none is needed: a single-parent chain has exactly one order.
+    This clarification introduces no DFS, no BFS and no topological output order for raw_range.
+
+AN UNREACHABLE BASE IS NOT GIVEN A NEW MEANING. §8.2 L-1 positively proves that
+    declared_base.base_commit is equal to, or an ancestor of, the range head BEFORE L-2's range
+    is accepted, and L-1 is answered by raw_descends_from. A range walk that nonetheless reaches
+    a root, or an unavailable object, without meeting `base` has met a state its prerequisite
+    proof excludes: it fails closed and never returns a truncated range as though it were lawful.
+```
+
+**IP26-B1, continued — `seen` IS EVALUATION-LOCAL, AND §21.15 IS UNAFFECTED.** §21.15 B says
+RAW_PARENTS "re-reads the stored object every time it is asked, so there is no window in which an
+earlier check is relied upon". That remains exactly true.
+
+```text
+NOT ASKED AGAIN is not ASKED AGAIN WITHOUT RE-READING. Within one public evaluation an oid in
+    `seen` is not asked a second time at all, so no stale answer is ever served. Every request
+    RAW_PARENTS does receive reads the stored object, as it always did.
+
+`seen` AND THE STEP COUNT LIVE AND DIE WITH ONE PUBLIC EVALUATION. A later evaluation asking
+    about the same oid asks again, and reads again. There is no process-wide cache, no
+    Work-operation-wide cache, and no carrying of either structure between questions — which is
+    what keeps §21.15 B's "a graft file appearing mid-Run changes nothing" true: every answer is
+    still built from objects read during the evaluation that gives it.
 ```
 
 ```text
