@@ -2957,13 +2957,28 @@ DETERMINISM. For a fixed (commit, ancestor, raw commit-object graph) the sequenc
     therefore the same budget outcome.
 
 WORKED CASE, which is where an order-free rule failed. H's stored parents are [R1, L1]; L1's
-    parent is A; R1 begins a long unrelated chain. For raw_descends_from(H, A) the schedule is
-    H, then R1, then L1, then A: reading H discovers R1 then L1 in header order, FIFO takes R1
-    first, R1's newly discovered parent is appended BEHIND the already-queued L1, so L1 is read
-    next and enqueues A. The answer is YES after RAW_PARENTS(A) succeeds, in four steps. The long
-    R chain cannot starve L1, and a depth-first walk — which could have spent the whole budget
-    inside R and answered UNKNOWN — is not a conforming schedule. This is a worked case of the
-    frozen rule, not a new measurement.
+    parent is A; R1's parent is R2, which continues a long unrelated chain. For
+    raw_descends_from(H, A) the schedule runs the queue down exactly like this:
+
+        read H    parents [R1, L1] appended in header order      queue [R1, L1]
+        read R1   R2 appended BEHIND the already-queued L1       queue [L1, R2]
+        read L1   A appended BEHIND the already-queued R2        queue [R2, A]
+        read R2   any R3 appended BEHIND the already-queued A    queue [A, R3]
+        read A    A == ancestor, and its object read cleanly  -> YES
+
+    So the request prefix is H, R1, L1, R2, A and the minimal count is FIVE reads. An earlier
+    draft of this paragraph said "H, then R1, then L1, then A ... in four steps", which does not
+    follow the rule above: L1's read APPENDS A, and R2 is already in front of it. Four is only
+    reachable by answering YES when A is ENQUEUED, and "WHY YES REQUIRES THE READ" forbids
+    exactly that, because a parent named in a header may not be here. The rule is authority and
+    the count follows it; this paragraph does not set a second one.
+
+    What the case is about is unchanged and is the thing to take from it: FIFO puts a bound on
+    how far the unrelated R branch runs before L1 is reached, so that branch cannot starve L1
+    however long it is, and a depth-first walk — which could spend the whole budget inside R and
+    answer UNKNOWN — is not a conforming schedule. FIFO does not make already-queued R nodes
+    disappear; it only stops them from going first. This is a worked case of the frozen rule, not
+    a new measurement.
 ```
 
 **IP26-B1, continued — `raw_range` KEEPS ITS SINGLE-PARENT SHAPE.** The schedule above is for
