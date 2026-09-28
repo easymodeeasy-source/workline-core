@@ -348,6 +348,26 @@ class HermeticGit:
         )
         return gitcmd.run_git(self.root, *self.configuration_arguments(), *args, check=check, env=environment)
 
+    def run_bytes(self, *args: str) -> gitcmd.GitBytes:
+        """Run one class B Git command and keep its output as BYTES, undecoded and untranslated.
+
+        The same envelope as :meth:`run` - the same environment and the same
+        configuration arguments, from the same two methods - differing only in
+        that nothing decodes the result.
+
+        That difference is load-bearing for whoever reads a stored object.
+        Measured: a commit object whose header block holds a line that is a lone
+        CR can exist in the store, and text mode's universal-newline translation
+        turns that CR into a newline, so the header block appears to end early
+        and a `parent` header below it disappears. Two parents read as one, which
+        is the "the walk ended, so this is a root" reading §7.1.8 forbids - and
+        it fails OPEN. A reader of literal headers must see literal bytes.
+
+        This carries no identity, no dates and no ``GIT_INDEX_FILE``: it is for
+        reading, and a read writes no commit and touches no index.
+        """
+        return gitcmd.run_git_bytes(self.root, *self.configuration_arguments(), *args, env=self.environment())
+
 
 def _promisor_remotes(hermetic: "HermeticGit") -> tuple[str, ...]:
     """The Project's promisor-configured remotes, read at entry so the condition is visible (M-54).

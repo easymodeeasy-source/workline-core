@@ -428,11 +428,24 @@ class OrderingTests(EnvironmentCase):
 class GateBoundaryTests(unittest.TestCase):
     """The foundation is inert: it builds environments and dispatches nothing."""
 
-    def test_no_raw_ancestry_reader_exists_yet(self) -> None:
-        """IP-26 is the next unit; the revision-view helpers stay as they are, backing no proof."""
-        self.assertFalse(hasattr(hermetic, "RAW_PARENTS"))
-        self.assertFalse(hasattr(hermetic, "raw_descends_from"))
-        self.assertFalse(hasattr(hermetic, "raw_range"))
+    def test_raw_ancestry_lives_in_its_own_unit_not_in_this_one(self) -> None:
+        """IP-26 has since landed in the unit that owns it (``review.ancestry``).
+
+        This pinned its absence while Unit 1 was the unit being built. What still has to
+        hold is the separation: the class B authority learned to return BYTES, which is a
+        generic execution primitive, and learned no ancestry. No parent reader, no walk and
+        no step budget lives here, and the revision-view helpers stay where they are,
+        backing no proof.
+        """
+        from workline.review import ancestry
+
+        for name in ("RAW_PARENTS", "raw_parents", "raw_descends_from", "raw_range",
+                     "P3_RAW_ANCESTRY_STEP_BUDGET"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(hermetic, name))
+                self.assertFalse(hasattr(hermetic.HermeticGit, name))
+        self.assertTrue(hasattr(hermetic.HermeticGit, "run_bytes"))
+        self.assertTrue(hasattr(ancestry, "raw_parents"))
         self.assertTrue(hasattr(gitcmd, "commit_parents"))
         self.assertTrue(hasattr(gitcmd, "descends_from"))
 
