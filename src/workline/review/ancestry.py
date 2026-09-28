@@ -99,17 +99,25 @@ def _parse_parents(raw: bytes, oid: str) -> tuple[str, ...] | Answer:
     """The literal ``parent`` headers of a stored commit object, in stored order.
 
     ``raw`` is the object's bytes, undecoded. The header block is everything
-    before the FIRST literal ``b"\\n\\n"``; a lone CR inside it is an ordinary
-    byte of some header's value and ends nothing. Message text below that
-    boundary is not parsed at all, so a message line reading ``parent
-    <something>`` is not a parent.
+    before the FIRST literal ``b"\\n\\n"``, and that terminator MUST BE THERE: an
+    object whose bytes never reach an empty line has no header block, so it is
+    not parsed at all and the answer is UNKNOWN. Taking the whole object as its
+    own header block instead would fail OPEN twice over - message text would be
+    read as headers, and an object with nothing header-shaped in it would be
+    reported as a genuine root. A lone CR is not that terminator; it is an
+    ordinary byte of some header's value and ends nothing.
+
+    Message text below the boundary is not parsed at all, so a message line
+    reading ``parent <something>`` is not a parent.
 
     A malformed ``parent`` line makes the whole answer UNKNOWN rather than a
     shorter list: returning the parents before it would be reporting a commit as
     having fewer parents than it stores, which is the one error this module
     exists to prevent.
     """
-    block = raw.split(_HEADER_TERMINATOR, 1)[0]
+    block, terminator, _message = raw.partition(_HEADER_TERMINATOR)
+    if not terminator:
+        return UNKNOWN
     parents: list[str] = []
     for line in block.split(b"\n"):
         if not line.startswith(_PARENT_PREFIX):

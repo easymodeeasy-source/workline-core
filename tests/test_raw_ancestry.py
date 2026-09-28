@@ -174,6 +174,53 @@ class LoneCarriageReturnTests(RealRepositoryCase):
         self.assertEqual(len(ancestry.raw_parents(self.hermetic, oid)), 2)
 
 
+class HeaderTerminatorTests(RealRepositoryCase):
+    """No first empty line means no header block, and no header block means UNKNOWN.
+
+    The boundary is the whole of what separates headers from message. An object
+    that never reaches one has not been parsed, and answering from its bytes
+    anyway reads message text as headers - or, with nothing that looks like a
+    header in it, reports a genuine root. Both fail OPEN.
+    """
+
+    def unterminated(self, tail: bytes) -> tuple[str, bytes]:
+        """A stored commit object whose bytes never reach an empty line."""
+        body = (
+            b"tree " + EMPTY_TREE.encode() + b"\n"
+            b"author A <a@x> 1700000000 +0000\n"
+            b"committer A <a@x> 1700000000 +0000\n"
+            b"a line standing where the empty line should be\n"
+            + tail
+        )
+        self.assertNotIn(b"\n\n", body, "the fixture must hold no header terminator at all")
+        oid = self.literal_object(body)
+        # Git accepts it as a commit and hands it back byte for byte, so UNKNOWN
+        # below is the parser refusing to parse it, not a read that failed.
+        self.assertEqual(self.plain("cat-file", "-t", oid), "commit")
+        self.assertEqual(self.hermetic.run_bytes("cat-file", "commit", oid).stdout, body)
+        return oid, body
+
+    def test_a_missing_terminator_with_a_later_parent_line_is_unknown(self) -> None:
+        """A valid-looking parent below the message is not a parent of anything."""
+        oid, _ = self.unterminated(b"parent " + ("1" * 40).encode() + b"\n")
+        found = ancestry.raw_parents(self.hermetic, oid)
+        self.assertIs(found, UNKNOWN)
+        self.assertNotEqual(found, ("1" * 40,))
+
+    def test_a_missing_terminator_with_no_parent_line_is_unknown_not_a_root(self) -> None:
+        """An object that could not be parsed must never answer 'genuine root'."""
+        oid, _ = self.unterminated(b"and nothing here looks like a header\n")
+        found = ancestry.raw_parents(self.hermetic, oid)
+        self.assertIs(found, UNKNOWN)
+        self.assertNotEqual(found, ())
+
+    def test_a_terminated_root_and_an_unterminated_object_stay_distinct(self) -> None:
+        """``()`` is a read genuine root; UNKNOWN is an object that was never parsed."""
+        self.assertEqual(ancestry.raw_parents(self.hermetic, self.commit("root")), ())
+        unterminated, _ = self.unterminated(b"and nothing here looks like a header\n")
+        self.assertIs(ancestry.raw_parents(self.hermetic, unterminated), UNKNOWN)
+
+
 class MalformedObjectTests(RealRepositoryCase):
     """Anything the header block cannot be trusted for is UNKNOWN, never a shorter answer."""
 
