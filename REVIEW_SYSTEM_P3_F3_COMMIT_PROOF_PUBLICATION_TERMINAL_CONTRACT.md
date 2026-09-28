@@ -2870,6 +2870,38 @@ Every ancestry predicate this contract relies on is built from RAW_PARENTS and n
     exceeds a frozen step budget is UNKNOWN rather than an infinite loop.
 ```
 
+**IP26-B1 — THE WALK BUDGET, FROZEN.** The paragraph above and IP-26 both require "a frozen step
+budget" without naming one, which left the value to the implementer. It is normative rather than
+incidental — crossing it turns a provable ancestry answer into UNKNOWN, and UNKNOWN fails closed —
+so it is frozen here. This adds a value to an existing rule and changes no other ancestry semantics.
+
+```text
+P3_RAW_ANCESTRY_STEP_BUDGET = 4096
+
+THE BUDGET IS PER PUBLIC EVALUATION. It bounds one call of `raw_descends_from(commit, ancestor)`
+or of `raw_range(base, head)`, and is reset for the next one. It is not a lifetime quota, not a
+per-operation quota across several questions, and not a limit on RAW_PARENTS itself: RAW_PARENTS
+reads ONE named object and is never refused because "the walk budget is zero".
+
+ONE STEP = ONE DISTINCT FULL COMMIT OID whose literal parent headers are requested through
+           RAW_PARENTS during that evaluation.
+
+    Distinct by full object id. The SAME oid reached again within the same evaluation — as a
+    merge's two sides reaching a shared ancestor do — consumes NO further step, because its
+    parent headers are already known to that evaluation and are not requested a second time.
+    Counting requests rather than visits is what makes the bound deterministic over a DAG: the
+    same history answers the same question with the same count every time.
+
+THE 4096th distinct oid MAY be requested. Before requesting the 4097th, the evaluation stops and
+    answers UNKNOWN, and that object is NOT read as part of it. UNKNOWN fails closed exactly as
+    every other UNKNOWN in this section does; it is never "the walk ended, so this is a root",
+    and never a NO.
+
+REFLEXIVE. `raw_descends_from(commit, commit)` is YES from the equality the definition above
+    already states. It requests no parent headers and therefore consumes ZERO steps, so it is
+    answerable at any budget.
+```
+
 ```text
 FORBIDDEN as an authority, in §8.2's lineage rule, in C-2's items, in §7.1.3's resume matrix and
 anywhere else a proof depends on the answer:
@@ -6655,7 +6687,9 @@ IP-26 THE RAW COMMIT ANCESTRY READER of §7.1.8, which must NOT be built from, o
           LOCALLY UNAVAILABLE PARENT -> UNKNOWN, FAIL CLOSED, and never "this is a root" (M-59)
           FULL OID WIDTHS for both hashes: 40 hex for SHA-1 and 64 hex for SHA-256, matched
             exactly, with no abbreviation accepted or produced anywhere
-          a frozen step budget, beyond which the answer is UNKNOWN rather than an unbounded walk
+          the frozen step budget P3_RAW_ANCESTRY_STEP_BUDGET = 4096 of §7.1.8 IP26-B1, counted
+            as distinct requested oids per public evaluation, beyond which the answer is UNKNOWN
+            rather than an unbounded walk
 
       Every lineage, range, descent and parentage question in §8.2, §9, §15, §16 and §7.1.3 is
       answered by this reader and by nothing else.
