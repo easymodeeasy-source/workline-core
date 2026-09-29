@@ -175,8 +175,16 @@ def _require_sha256(value: object, described: str) -> str:
     that are not hexadecimal are not one of them. That the builder always emits a
     real digest is not the property a strict reader is for: the reader is the
     boundary that decides whether a record is a Context of this contract version.
+
+    ``fullmatch``, not ``match``: the canonical pattern ends in ``$``, and in
+    Python ``$`` also matches immediately BEFORE a final newline, so
+    ``<digest>\\n`` satisfies ``match`` and is not a digest of anything. A
+    trailing newline is not part of a SHA-256. The pattern is P1's and is not
+    touched here - what this new boundary owes is that its own frozen shape,
+    exactly sixty-four characters from ``0-9a-f`` and nothing else, is the shape
+    it actually tests.
     """
-    if not isinstance(value, str) or records.DIGEST_RE.match(value) is None:
+    if not isinstance(value, str) or records.DIGEST_RE.fullmatch(value) is None:
         raise _invalid(f"{described} is {value!r}, which is not a lowercase SHA-256 digest")
     return value
 

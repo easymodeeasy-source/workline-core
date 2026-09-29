@@ -30,7 +30,7 @@ from unittest import mock
 from helpers import WorklineTestCase, git
 from workline import gitcmd
 from workline.errors import StopError
-from workline.review import hermetic, paths as review_paths, resulting_tree as rt
+from workline.review import hermetic, paths as review_paths, records, resulting_tree as rt
 from workline.store import ProjectStore
 
 ZERO_40 = "0" * 40
@@ -633,6 +633,46 @@ class ContradictoryEntryTests(TreeCase):
         # the real one composes, with no payload supplied, from the store's own blob
         with rt.composed(self.store, self.hermetic, self.base, [entry(real)], {}) as composition:
             self.assertEqual(composition.entries()["copy.txt"].oid, held.oid)
+
+    def test_a_content_digest_with_anything_after_it_is_refused_with_no_bytes_supplied(self) -> None:
+        """A trailing newline is not part of a SHA-256, and here nothing else would catch it.
+
+        The canonical pattern ends in ``$``, and Python's ``$`` also matches
+        immediately BEFORE a final newline - so ``<digest>\\n`` satisfies
+        ``re.match``. On the no-payload path the shape check is the whole check,
+        because the Candidate supplies no bytes to compare the digest against.
+        """
+        held = self.held["keep.txt"]
+        real = hashlib.sha256((self.store.root / "keep.txt").read_bytes()).hexdigest()
+        self.assertIsNotNone(records.DIGEST_RE.match(real + "\n"), "the pattern really does admit it")
+        self.assertIsNone(records.DIGEST_RE.fullmatch(real + "\n"), "and fullmatch is what refuses it")
+
+        def entry(digest):
+            return rt.Entry("copy.txt", "A", "absent", "000000", ZERO_40, "file", "100644", held.oid, digest)
+
+        for name, suffix in (("LF", "\n"), ("CRLF", "\r\n"), ("CR", "\r"), ("space", " "),
+                             ("tab", "\t"), ("two LFs", "\n\n")):
+            for label, value in ((f"digest + {name}", real + suffix), (f"{name} + digest", suffix + real)):
+                with self.subTest(case=label):
+                    error = self.refusal(lambda value=value: self.compose([entry(value)]))
+                    self.assertIn("not a lowercase SHA-256 digest", str(error))
+        # unchanged: the exact digest still composes from the store's own blob
+        with rt.composed(self.store, self.hermetic, self.base, [entry(real)], {}) as composition:
+            self.assertEqual(composition.entries()["copy.txt"].oid, held.oid)
+
+    def test_a_supplied_payload_whose_digest_carries_a_newline_is_refused_too(self) -> None:
+        """The payload path agrees with the no-payload one; it does not go the other way."""
+        data = b"brand new bytes\n"
+        real = hashlib.sha256(data).hexdigest()
+        oid = gitcmd.hash_blob(self.store.root, data)
+        for label, value in (("exact", real), ("digest + LF", real + "\n")):
+            with self.subTest(case=label):
+                entry = rt.Entry("new.txt", "A", "absent", "000000", ZERO_40, "file", "100644", oid, value)
+                if value == real:
+                    with rt.composed(self.store, self.hermetic, self.base, [entry], {"new.txt": data}) as found:
+                        self.assertEqual(found.entries()["new.txt"].oid, oid)
+                else:
+                    self.refusal(lambda entry=entry: self.compose([entry], {"new.txt": data}))
 
 
 # --------------------------------------------------------------------------- both object formats

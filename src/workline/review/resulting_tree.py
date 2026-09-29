@@ -223,9 +223,14 @@ def _require_content_digest(entry: Entry, payload: bytes | None) -> None:
     (see :func:`_materialize`), so the comparison below never runs and the shape
     check is the only thing standing between a frozen content identity and a
     sixty-four character string that is not a digest of anything.
+
+    ``fullmatch``, not ``match``: the canonical pattern ends in ``$``, which in
+    Python also matches immediately BEFORE a final newline, so ``<digest>\\n``
+    would satisfy ``match``. A trailing newline is not part of a SHA-256, and on
+    this path there is nothing behind the shape check to catch it.
     """
     if entry.new_kind in BYTE_KINDS:
-        if not isinstance(entry.content_sha256, str) or records.DIGEST_RE.match(entry.content_sha256) is None:
+        if not isinstance(entry.content_sha256, str) or records.DIGEST_RE.fullmatch(entry.content_sha256) is None:
             raise _unavailable(
                 f"the entry for {entry.path!r} is a {entry.new_kind} whose content_sha256 is "
                 f"{entry.content_sha256!r}, which is not a lowercase SHA-256 digest"

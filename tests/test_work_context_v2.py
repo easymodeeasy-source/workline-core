@@ -17,12 +17,13 @@ version 1, and there is no tolerant unknown field in either direction.
 from __future__ import annotations
 
 import hashlib
+import inspect
 from pathlib import Path
 import unittest
 
 from workline.errors import StopError
 from workline.implementation import package_directory
-from workline.review import serialize, work_context as wctx
+from workline.review import records, serialize, work_context as wctx
 
 WORKSPACE = Path(__file__).resolve().parents[1]
 BASE_TREE = "a" * 40
@@ -403,6 +404,64 @@ class DigestShapeTests(ContextCase):
         for wrong in self.NOT_DIGESTS:
             with self.subTest(value=wrong):
                 self.refusal(lambda wrong=wrong: wctx.activation_binding(wrong, ACTIVATION_HEAD))
+
+    #: Exactly the right sixty-four characters, and then something after them.
+    #: ``<digest>\n`` is the one that matters: the canonical pattern ends in ``$``
+    #: and Python's ``$`` also matches immediately BEFORE a final newline, so a
+    #: trailing newline slips past ``re.match`` while being no part of a SHA-256.
+    TRAILING = (
+        ("LF", "\n"),
+        ("CRLF", "\r\n"),
+        ("CR", "\r"),
+        ("space", " "),
+        ("tab", "\t"),
+        ("two LFs", "\n\n"),
+    )
+
+    def test_the_repository_predicate_is_why_this_boundary_uses_fullmatch(self) -> None:
+        """The measurement the repair exists for, pinned so it cannot quietly change."""
+        digest = hashlib.sha256(b"a real one").hexdigest()
+        self.assertIsNotNone(records.DIGEST_RE.match(digest + "\n"))
+        self.assertIsNone(records.DIGEST_RE.fullmatch(digest + "\n"))
+        self.assertIsNotNone(records.DIGEST_RE.fullmatch(digest))
+        self.assertIn("fullmatch", inspect.getsource(wctx._require_sha256))
+
+    def test_loader_identity_refuses_anything_after_the_sixty_four_characters(self) -> None:
+        digest = hashlib.sha256(b"a real one").hexdigest()
+        for name, suffix in self.TRAILING:
+            with self.subTest(trailing=name):
+                broken = dict(record())
+                broken["loader_identity"] = digest + suffix
+                self.refusal(lambda broken=broken: wctx.require_context(broken))
+
+    def test_loader_identity_refuses_anything_before_them_too(self) -> None:
+        digest = hashlib.sha256(b"a real one").hexdigest()
+        for name, prefix in self.TRAILING:
+            with self.subTest(leading=name):
+                broken = dict(record())
+                broken["loader_identity"] = prefix + digest
+                self.refusal(lambda broken=broken: wctx.require_context(broken))
+
+    def test_an_authority_digest_refuses_a_trailing_newline(self) -> None:
+        digest = hashlib.sha256(b"a real one").hexdigest()
+        for name, suffix in self.TRAILING:
+            for index in (0, -1):
+                with self.subTest(trailing=name, entry=index):
+                    broken = dict(record())
+                    good = list(broken["authority"])
+                    good[index] = {**good[index], "digest": digest + suffix}
+                    broken["authority"] = good
+                    self.refusal(lambda broken=broken: wctx.require_context(broken))
+
+    def test_the_activation_record_digest_refuses_a_trailing_newline(self) -> None:
+        """It flows through the same ``_require_sha256``, on read and on the way in."""
+        digest = hashlib.sha256(b"a real one").hexdigest()
+        for name, suffix in self.TRAILING:
+            with self.subTest(trailing=name):
+                broken = dict(record())
+                broken["activation"] = {**activation(), "record_digest": digest + suffix}
+                self.refusal(lambda broken=broken: wctx.require_context(broken))
+                self.refusal(lambda s=suffix: wctx.activation_binding(digest + s, ACTIVATION_HEAD))
 
     def test_a_real_lowercase_digest_is_accepted_everywhere(self) -> None:
         digest = hashlib.sha256(b"a real one").hexdigest()
