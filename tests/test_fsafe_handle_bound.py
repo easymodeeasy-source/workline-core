@@ -451,6 +451,274 @@ class SubmoduleAdversarialTests(SubmoduleCase):
         self.refusal(lambda: fsafe.submodule_head(fsafe.Chain([])))
 
 
+class GitOracleGrammarTests(SubmoduleCase):
+    """The gitfile grammar is Git's, measured against Git, not a grammar of our own.
+
+    The reader exists to reproduce the commit Git names for a submodule. A
+    spelling Git refuses as a gitfile therefore has no commit to reproduce, and
+    synthesising one by tidying whitespace would report an identity for a
+    working tree Git itself cannot open.
+    """
+
+    def git_says(self, *args: str) -> str:
+        found = subprocess.run(
+            ["git", "-C", str(self.super / "sub"), *args], capture_output=True, text=True,
+            env={**{k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")},
+                 "GIT_AUTHOR_NAME": "R", "GIT_AUTHOR_EMAIL": "r@p",
+                 "GIT_COMMITTER_NAME": "R", "GIT_COMMITTER_EMAIL": "r@p"},
+        )
+        return found.stdout.strip() if found.returncode == 0 else "REFUSE"
+
+    def reader_says(self) -> str:
+        try:
+            return self.read()
+        except ValidationError:
+            return "REFUSE"
+
+    def gitfile(self, raw: bytes) -> None:
+        where = self.super / "sub" / ".git"
+        where.unlink()                       # Git marks it hidden on Windows
+        where.write_bytes(raw)
+
+    #: (label, bytes, does Git accept it)
+    def spellings(self) -> list:
+        p = b"../.git/modules/sub"
+        return [
+            ("canonical 'gitdir: X'", b"gitdir: " + p + b"\n", True),
+            ("blank line AFTER", b"gitdir: " + p + b"\n\n", True),
+            ("no final newline", b"gitdir: " + p, True),
+            ("no space 'gitdir:X'", b"gitdir:" + p + b"\n", False),
+            ("two spaces 'gitdir:  X'", b"gitdir:  " + p + b"\n", False),
+            ("tab after the colon", b"gitdir:\t" + p + b"\n", False),
+            ("trailing space", b"gitdir: " + p + b" \n", False),
+            ("trailing tab", b"gitdir: " + p + b"\t\n", False),
+            ("blank line BEFORE", b"\ngitdir: " + p + b"\n", False),
+            ("space before 'gitdir'", b" gitdir: " + p + b"\n", False),
+            ("upper-case GITDIR:", b"GITDIR: " + p + b"\n", False),
+            ("declaration with no path", b"gitdir: \n", False),
+            ("stray line after", b"gitdir: " + p + b"\nstray\n", False),
+            ("second declaration", b"gitdir: " + p + b"\ngitdir: ../elsewhere\n", False),
+        ]
+
+    def test_the_reader_agrees_with_git_on_every_measured_spelling(self) -> None:
+        head = self.oracle()
+        for label, raw, git_accepts in self.spellings():
+            with self.subTest(case=label):
+                self.gitfile(raw)
+                said = self.git_says("rev-parse", "HEAD")
+                self.assertEqual(said, head if git_accepts else "REFUSE",
+                                 f"the Git oracle changed for {label}; re-measure before trusting this test")
+                self.assertEqual(self.reader_says(), said,
+                                 f"the reader must not differ from Git for {label}")
+
+    def test_no_malformed_spelling_is_normalized_into_an_object_id(self) -> None:
+        """The decisive half: not one Git-refused spelling yields an OID."""
+        for label, raw, git_accepts in self.spellings():
+            if git_accepts:
+                continue
+            with self.subTest(case=label):
+                self.gitfile(raw)
+                self.refusal(self.read)
+
+    def test_the_declaration_is_matched_as_exact_bytes_not_a_stripped_prefix(self) -> None:
+        import inspect
+
+        source = inspect.getsource(fsafe._gitdir_components)
+        self.assertIn("GITDIR_DECLARATION", source)
+        self.assertIn("raw.startswith(GITDIR_DECLARATION)", source)
+        self.assertEqual(fsafe.GITDIR_DECLARATION, b"gitdir: ")
+        # the declared VALUE is never tidied; the only strip left detects a non-empty leftover line
+        value_line = [line for line in source.splitlines() if "value =" in line]
+        self.assertTrue(value_line, "the value assignment must be findable")
+        for line in value_line:
+            self.assertNotIn("strip", line, f"the value is taken verbatim: {line.strip()}")
+
+    def test_a_lawful_path_holding_a_space_is_still_accepted(self) -> None:
+        """Verbatim must not become 'no spaces anywhere': a directory may legitimately hold one."""
+        head = self.oracle()
+        modules = self.super / ".git" / "modules"
+        os.replace(modules / "sub", modules / "with space")
+        try:
+            self.gitfile(b"gitdir: ../.git/modules/with space\n")
+            self.assertEqual(self.git_says("rev-parse", "HEAD"), head)
+            self.assertEqual(self.read(), head)
+        finally:
+            os.replace(modules / "with space", modules / "sub")
+
+    def test_crlf_stays_refused_and_is_the_deferred_finding(self) -> None:
+        """Git accepts a CRLF gitfile and HEAD; this reader refuses. Fail-closed, and left alone."""
+        self.gitfile(b"gitdir: ../.git/modules/sub\r\n")
+        self.assertEqual(self.git_says("rev-parse", "HEAD"), self.oracle())
+        self.refusal(self.read)
+        self.gitfile(b"gitdir: ../.git/modules/sub\n")
+        (self.gitdir / "HEAD").write_bytes(b"ref: refs/heads/main\r\n")
+        self.assertEqual(self.git_says("rev-parse", "HEAD"), self.oracle())
+        self.refusal(self.read)
+
+
+class AlternateDataStreamTests(SubmoduleCase):
+    """A colon is not part of a ref name, and on NTFS it addresses a hidden stream."""
+
+    def test_the_bounded_audit_of_git_invalid_spellings(self) -> None:
+        """Only the colon reaches a hidden alternate of the real object; the rest are ordinary files."""
+        where = self.new_dir("vectors")
+        (where / "main").write_bytes(b"REAL\n")
+        with fsafe.SafeDirectory.open_root(where) as root:
+            for name in ("main[x]", "main~1", "main^", "main.lock"):
+                with self.subTest(name=name):
+                    (where / name).write_bytes(b"OTHER\n")
+                    self.assertIn(name, [entry.name for entry in root.entries()],
+                                  "an ordinary file, visible in a listing")
+                    self.assertEqual(root.read_file("main"), b"REAL\n", "and the real ref is untouched")
+
+    @unittest.skipUnless(WINDOWS, "an alternate data stream is an NTFS feature")
+    def test_a_stream_beside_a_ref_is_invisible_and_reads_back_differently(self) -> None:
+        """The fact that makes the refusal necessary - kept, not deleted."""
+        where = self.new_dir("ads")
+        (where / "main").write_bytes(b"REAL\n")
+        try:
+            with open(str(where / "main") + ":evil", "w", encoding="utf-8", newline="\n") as handle:
+                handle.write("ADS\n")
+        except OSError:
+            self.skipTest("this filesystem does not support alternate data streams")
+        with fsafe.SafeDirectory.open_root(where) as root:
+            self.assertEqual([entry.name for entry in root.entries()], ["main"],
+                             "no listing of the namespace shows the stream")
+            self.assertEqual(root.read_file("main"), b"REAL\n")
+            self.assertEqual(root.read_file("main:evil"), b"ADS\n",
+                             "read_file can open it, which is exactly why the refname must refuse first")
+
+    @unittest.skipUnless(WINDOWS, "an alternate data stream is an NTFS feature")
+    def test_a_stream_can_never_become_the_submodule_identity(self) -> None:
+        real = self.oracle()
+        evil = "1" * 40
+        main = self.gitdir / "refs" / "heads" / "main"
+        try:
+            with open(str(main) + ":evil", "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(evil + "\n")
+        except OSError:
+            self.skipTest("this filesystem does not support alternate data streams")
+        self.assertEqual(main.read_text().strip(), real)
+        # Git refuses the name and refuses the HEAD that points at it
+        environment = {**{k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}}
+        refused = subprocess.run(["git", "-C", str(self.super / "sub"), "check-ref-format",
+                                  "refs/heads/main:evil"], capture_output=True, text=True, env=environment)
+        self.assertNotEqual(refused.returncode, 0, "git check-ref-format must reject the name")
+
+        (self.gitdir / "HEAD").write_bytes(b"ref: refs/heads/main:evil\n")
+        found = subprocess.run(["git", "-C", str(self.super / "sub"), "rev-parse", "HEAD"],
+                               capture_output=True, text=True, env=environment)
+        self.assertNotEqual(found.returncode, 0, "git rev-parse must refuse such a HEAD")
+        error = self.refusal(self.read)
+        self.assertIn("colon", str(error))
+        self.assertNotIn(evil, str(error), "the stream's content never reaches the answer")
+
+    def test_a_colon_is_refused_in_every_component_position(self) -> None:
+        for refname in ("refs/heads/main:evil", "refs/he:ads/main", "refs/heads/ma:in/x",
+                        "refs/heads/main::x", "C:/refs/heads/main", ":refs/heads/main"):
+            with self.subTest(refname=refname):
+                (self.gitdir / "HEAD").write_text(f"ref: {refname}\n", encoding="utf-8", newline="\n")
+                self.refusal(self.read)
+
+    def test_the_refusal_happens_before_any_filesystem_lookup(self) -> None:
+        """Instrumented: read_file is never reached for a colon-bearing ref name."""
+        (self.gitdir / "HEAD").write_bytes(b"ref: refs/heads/main:evil\n")
+        looked_up: list = []
+        original = fsafe.SafeDirectory.read_file
+
+        def spy(self, name):
+            looked_up.append(name)
+            return original(self, name)
+
+        with mock.patch.object(fsafe.SafeDirectory, "read_file", spy):
+            self.refusal(self.read)
+        self.assertNotIn("main:evil", looked_up, "the colon must be refused before the lookup")
+        self.assertTrue(any(name == "HEAD" for name in looked_up), "HEAD itself was still read")
+
+    def test_the_shared_component_predicate_was_not_changed(self) -> None:
+        """The refusal belongs to Unit 5's refname rule, not to fsafe's general component rule."""
+        where = self.new_dir("predicate")
+        (where / "a:b").write_bytes(b"x\n") if False else None
+        with fsafe.SafeDirectory.open_root(where) as root:
+            self.assertIsNone(root.read_file("nothing:here"),
+                              "read_file still treats a colon name as an ordinary absent name")
+
+
+class PackedRefUniquenessTests(SubmoduleCase):
+    """One exact referenced object id, or a refusal - never whichever record was scanned first."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.head = self.oracle()                           # while the loose ref still answers
+        (self.gitdir / "refs" / "heads" / "main").unlink()   # then force the packed path
+        self.other = "2" * 40
+
+    def packed(self, text: str) -> None:
+        (self.gitdir / "packed-refs").write_text(text, encoding="utf-8", newline="\n")
+
+    def test_a_single_valid_record_still_answers(self) -> None:
+        self.packed(f"{self.head} refs/heads/main\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_headers_and_peeled_lines_are_still_tolerated(self) -> None:
+        self.packed(f"# pack-refs with: peeled fully-peeled sorted \n"
+                    f"{self.head} refs/heads/main\n^{self.other}\n"
+                    f"{'3' * 40} refs/tags/v1\n^{'4' * 40}\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_duplicate_records_binding_the_same_oid_are_one_identity(self) -> None:
+        self.packed(f"{self.head} refs/heads/main\n{self.head} refs/heads/main\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_duplicate_records_binding_different_oids_are_refused(self) -> None:
+        for label, text in (
+            ("head then other", f"{self.head} refs/heads/main\n{self.other} refs/heads/main\n"),
+            ("other then head", f"{self.other} refs/heads/main\n{self.head} refs/heads/main\n"),
+            ("three, two distinct", f"{self.head} refs/heads/main\n{self.head} refs/heads/main\n"
+                                    f"{self.other} refs/heads/main\n"),
+        ):
+            with self.subTest(case=label):
+                self.packed(text)
+                error = self.refusal(self.read)
+                self.assertIn("different object ids", str(error))
+
+    def test_a_malformed_record_for_the_target_is_refused_in_either_order(self) -> None:
+        for label, bad in (("not an id", "notanoid"), ("abbreviated", self.head[:12]),
+                           ("uppercase", self.head.upper()), ("too long", self.head + "0")):
+            for order, text in (
+                ("bad first", f"{bad} refs/heads/main\n{self.head} refs/heads/main\n"),
+                ("bad last", f"{self.head} refs/heads/main\n{bad} refs/heads/main\n"),
+            ):
+                with self.subTest(case=f"{label} / {order}"):
+                    self.packed(text)
+                    self.refusal(self.read)
+
+    def test_an_unrelated_malformed_line_is_not_validated_and_not_authoritative(self) -> None:
+        """The parser stays narrow: it is not a checker of the whole ref graph."""
+        self.packed(f"garbage-without-a-space\nnotanoid refs/heads/elsewhere\n"
+                    f"{self.head} refs/heads/main\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_near_names_are_never_the_target(self) -> None:
+        self.packed(f"{self.other} refs/heads/main2\n{self.other} refs/heads/mainx\n"
+                    f"{self.other} refs/heads/mai\n{self.other} refs/heads/MAIN\n")
+        self.refusal(self.read)
+        self.packed(f"{self.other} refs/heads/main2\n{self.head} refs/heads/main\n"
+                    f"{self.other} refs/heads/mainx\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_no_target_record_is_refused(self) -> None:
+        self.packed(f"# only a header\n{self.other} refs/tags/v1\n")
+        self.refusal(self.read)
+
+    def test_the_parser_no_longer_returns_on_the_first_match(self) -> None:
+        import inspect
+
+        source = inspect.getsource(fsafe._packed_ref)
+        self.assertIn("bindings", source)
+        self.assertIn("different object ids", source)
+
+
 class SubmoduleSha256Tests(FsafeCase):
     """G-5 accepts a 64-hex object id, parsed the same way as a 40-hex one."""
 

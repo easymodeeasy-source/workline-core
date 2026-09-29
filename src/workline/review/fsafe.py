@@ -760,7 +760,13 @@ def walk(root: Path, parts: list[str], *, create: bool = False) -> Chain | None:
 #: The name a submodule's git directory is reached through, as a directory or as a gitfile.
 GIT_NAME = ".git"
 
-#: What a gitfile declares, and the only declaration it may hold.
+#: What a gitfile declares, and the only declaration it may hold - the LITERAL eight bytes
+#: Git writes and accepts, colon then exactly ONE space. Measured on Git 2.54.0.windows.1
+#: against a real local submodule: `gitdir:X` and `gitdir:\tX` are "invalid gitfile format",
+#: a blank line or a space BEFORE the declaration is too, and `gitdir:  X` / a trailing space
+#: or tab leave Git looking for a path that is not there. So the spelling is not whitespace to
+#: be tidied up - it is the grammar, and the value after it is taken VERBATIM.
+GITDIR_DECLARATION = b"gitdir: "
 GITDIR_PREFIX = "gitdir:"
 
 #: What a symbolic HEAD or ref names another ref with.
@@ -802,21 +808,34 @@ def _gitdir_components(raw: bytes, described: str) -> list[str]:
     Absolute in every spelling is refused, because an absolute gitdir is exactly
     the pathname re-resolution this reader exists to avoid: it cannot be walked
     against the held chain, so there is no chain left to bind to.
+
+    THE SPELLING IS THE GRAMMAR, AND THE VALUE IS TAKEN VERBATIM. An earlier
+    draft matched the prefix ``gitdir:`` and then stripped spaces and tabs around
+    what followed, which quietly turned six spellings Git REFUSES -
+    ``gitdir:X``, ``gitdir:  X``, ``gitdir:\\tX``, a trailing space, a trailing
+    tab, and a blank line before the declaration - into the canonical path, and
+    so synthesised an authoritative gitlink identity for a submodule Git itself
+    cannot open. Nothing is tidied up here now: the file must BEGIN with the
+    exact eight bytes :data:`GITDIR_DECLARATION`, and the rest of that first line
+    is the path as written. A stray space then survives into a component that
+    does not exist, and the walk refuses it for the same reason Git does.
     """
     if b"\0" in raw:
         raise _refuse(f"{described} holds a NUL byte")
+    if not raw.startswith(GITDIR_DECLARATION):
+        raise _refuse(
+            f"{described} does not begin with {GITDIR_DECLARATION.decode('ascii')!r}; that exact spelling - "
+            "colon, one space, then the path - is the gitfile grammar, and this reader does not repair a "
+            "declaration into it"
+        )
+    head, _, rest = raw.partition(b"\n")
+    for line in rest.split(b"\n"):
+        if line.strip():
+            raise _refuse(f"{described} holds {line!r} after the declaration; a gitfile declares once and stops")
     try:
-        text = raw.decode("utf-8")
+        value = head[len(GITDIR_DECLARATION):].decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _refuse(f"{described} is not UTF-8: {exc}") from exc
-    declarations = [line for line in text.split("\n") if line.startswith(GITDIR_PREFIX)]
-    leftover = [line for line in text.split("\n") if line.strip() and not line.startswith(GITDIR_PREFIX)]
-    if len(declarations) != 1 or leftover:
-        raise _refuse(
-            f"{described} is not a gitfile: it holds {len(declarations)} {GITDIR_PREFIX!r} declaration(s) "
-            f"and {len(leftover)} other non-empty line(s); a gitfile holds exactly one"
-        )
-    value = declarations[0][len(GITDIR_PREFIX):].strip(" \t")
     if not value:
         raise _refuse(f"{described} declares an empty gitdir")
     if "\\" in value:
@@ -887,9 +906,32 @@ def _git_directory(chain: "Chain", opened: list[SafeDirectory]) -> SafeDirectory
 
 
 def _require_refname(refname: str, described: str) -> list[str]:
-    """The components of a ref name, or a refusal. A ref name is a path inside the git directory."""
+    """The components of a ref name, or a refusal. A ref name is a path inside the git directory.
+
+    A COLON IS REFUSED WHEREVER IT APPEARS, not only in the first component.
+    Measured on NTFS: ``refs/heads/main:evil`` names an ALTERNATE DATA STREAM of
+    the real ``main`` ref - it reads back different bytes, it is attached to the
+    legitimate file, and a directory listing shows only ``main``, so nothing that
+    enumerates the namespace can see it. ``git check-ref-format`` rejects that
+    name and ``git rev-parse`` refuses such a HEAD, so a spelling Git will not
+    accept as a ref must not become a commit identity here merely because the
+    filesystem can address it. The refusal belongs at this boundary: the shared
+    component predicate and :meth:`SafeDirectory.read_file` both predate this
+    unit and mean something else by a name.
+
+    The same bounded audit found no other equivalent vector among the spellings
+    ``git check-ref-format`` rejects: ``main[x]``, ``main~1``, ``main^`` and
+    ``main.lock`` are ordinary separate files, visible in a listing and no more
+    reachable than any other name, and ``main*`` / ``main?`` cannot be created on
+    NTFS at all. Only the colon addresses a hidden alternate of the real object.
+    """
     if not refname:
         raise _refuse(f"{described} names an empty ref")
+    if ":" in refname:
+        raise _refuse(
+            f"{described} names {refname!r}; a colon is not part of a Git ref name, and on NTFS it addresses "
+            "an alternate data stream of the ref beside it - a hidden object no listing of the namespace shows"
+        )
     if "\\" in refname or "\0" in refname:
         raise _refuse(f"{described} names {refname!r}, which holds a backslash or a NUL")
     if refname.startswith("/") or ":" in refname.split("/")[0]:
@@ -919,7 +961,24 @@ def _packed_ref(gitdir: SafeDirectory, refname: str) -> str:
 
     Narrow on purpose: an ordinary ``<oid> <refname>`` record, with ``#`` headers
     and ``^`` peeled lines skipped because a lawful file holds them. An unrelated
-    line is never allowed to answer for the ref that was asked about.
+    line is never allowed to answer for the ref that was asked about, and an
+    unrelated MALFORMED line is not validated either - this reader is not a
+    checker of the whole ref graph.
+
+    EVERY record for the requested ref is read before any answer is given. An
+    earlier draft returned on the first exact name match, which does not
+    establish an identity at all: measured against Git, two records binding the
+    same ref to different commits made this reader answer with the FIRST and Git
+    with the LAST - opposite commits from the same bytes, decided by scan order -
+    and a valid record followed by a malformed one for that ref made Git refuse
+    while this reader answered. So the whole file is scanned, every binding for
+    the requested ref must parse, and the answer is given only when those
+    bindings agree on ONE commit.
+
+    Contradictory duplicates FAIL CLOSED here rather than reproducing Git's
+    last-record rule. G-5 requires one exact referenced object id or a refusal,
+    and "whichever record came last" is not an identity a Candidate should be
+    frozen against.
     """
     raw = gitdir.read_file("packed-refs")
     if raw is None:
@@ -932,6 +991,7 @@ def _packed_ref(gitdir: SafeDirectory, refname: str) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _refuse(f"{gitdir.described}/packed-refs is not UTF-8: {exc}") from exc
+    bindings: list[str] = []
     for line in text.split("\n"):
         line = line.rstrip("\r")
         if not line or line.startswith("#") or line.startswith("^"):
@@ -939,8 +999,17 @@ def _packed_ref(gitdir: SafeDirectory, refname: str) -> str:
         oid, separator, name = line.partition(" ")
         if not separator or name != refname:
             continue
-        return _require_oid(oid, f"the packed-refs record for {refname}")
-    raise _refuse(f"{gitdir.described}/packed-refs does not bind {refname!r}")
+        # a malformed binding for the ref being asked about is a refusal, never a record to skip
+        bindings.append(_require_oid(oid, f"the packed-refs record for {refname}"))
+    if not bindings:
+        raise _refuse(f"{gitdir.described}/packed-refs does not bind {refname!r}")
+    unique = set(bindings)
+    if len(unique) != 1:
+        raise _refuse(
+            f"{gitdir.described}/packed-refs binds {refname!r} to {len(unique)} different object ids "
+            f"({', '.join(sorted(unique))}); that is not one identity, and this reader will not pick one"
+        )
+    return bindings[0]
 
 
 def submodule_head(chain: "Chain") -> str:
