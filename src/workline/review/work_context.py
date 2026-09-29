@@ -61,7 +61,7 @@ from typing import Any, Mapping
 
 from .. import gitcmd
 from ..errors import StopError
-from . import serialize
+from . import records, serialize
 
 #: The record kind, unchanged from F2 §10.1: the same kind, at a new version.
 SCHEMA_CONTEXT = "review-work-context"
@@ -166,6 +166,21 @@ def _require_full_oid(value: object, described: str) -> str:
     return value
 
 
+def _require_sha256(value: object, described: str) -> str:
+    """An exact lowercase SHA-256 digest, by the repository's own canonical predicate.
+
+    Length alone is not the identity. F2 §10.2 freezes each authority entry as
+    "the SHA-256 of the file's bytes with CRLF read as LF", and §10.1 makes
+    ``loader_identity`` a content identity of the same kind - so 64 characters
+    that are not hexadecimal are not one of them. That the builder always emits a
+    real digest is not the property a strict reader is for: the reader is the
+    boundary that decides whether a record is a Context of this contract version.
+    """
+    if not isinstance(value, str) or records.DIGEST_RE.match(value) is None:
+        raise _invalid(f"{described} is {value!r}, which is not a lowercase SHA-256 digest")
+    return value
+
+
 def capability_binding(base_tree: str, resulting_tree: str) -> dict[str, str]:
     """The nested mapping of exactly five keys (``F3`` §7.9.6).
 
@@ -192,12 +207,8 @@ def activation_binding(record_digest: str, activation_base_head: str) -> dict[st
     they are inside the record the digest covers, and copying them would create
     the second source of truth F1 prohibits.
     """
-    if not isinstance(record_digest, str) or len(record_digest) != 64 or not all(
-        character in "0123456789abcdef" for character in record_digest
-    ):
-        raise _invalid(f"the activation record digest {record_digest!r} is not a SHA-256 digest")
     return {
-        "record_digest": record_digest,
+        "record_digest": _require_sha256(record_digest, "the activation record digest"),
         "operation_contract": OPERATION_CONTRACT,
         "activation_base_head": _require_full_oid(activation_base_head, "activation.activation_base_head"),
     }
@@ -282,8 +293,7 @@ def require_context(record: Mapping[str, Any]) -> None:
     ):
         if record[field] != expected:
             raise _invalid(f"{field} is {record[field]!r}, not {expected!r}")
-    if not isinstance(record["loader_identity"], str) or len(record["loader_identity"]) != 64:
-        raise _invalid("loader_identity is not a SHA-256 digest")
+    _require_sha256(record["loader_identity"], "loader_identity")
     _require_authority(record["authority"])
     _require_activation(record["activation"])
     _require_capability(record["review_checkout_capability"])
@@ -297,8 +307,7 @@ def _require_authority(authority: object) -> None:
     for item in authority:
         if set(item) != {"id", "digest"}:
             raise _invalid("an authority entry must carry exactly id and digest")
-        if not isinstance(item["digest"], str) or len(item["digest"]) != 64:
-            raise _invalid(f"the digest of {item['id']} is not a SHA-256 digest")
+        _require_sha256(item["digest"], f"the digest of {item['id']}")
 
 
 def _require_capability(capability: object) -> None:

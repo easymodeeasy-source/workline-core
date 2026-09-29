@@ -347,6 +347,76 @@ class StrictValidationTests(ContextCase):
                 self.refusal(lambda value=value: wctx.require_context(value))
 
 
+# --------------------------------------------------------------------------- digest shape
+
+
+class DigestShapeTests(ContextCase):
+    """A canonical identity field holds a SHA-256 digest, not a 64-character string.
+
+    Length alone is not the shape. ``"z" * 64`` is sixty-four characters and is
+    not a digest of anything; neither is the uppercase spelling of a real one,
+    which would make the same identity hash two different ways. Every one of
+    these is a value the builder can never produce, and a strict reader that
+    accepts what its builder cannot produce is not validating the field.
+    """
+
+    #: Right length, wrong alphabet or wrong case; then wrong length; then not text at all.
+    NOT_DIGESTS = (
+        "z" * 64,
+        "A" * 64,
+        "!" * 64,
+        "a" * 63 + "g",
+        "0123456789ABCDEF" * 4,
+        hashlib.sha256(b"x").hexdigest().upper(),
+        "a" * 63,
+        "a" * 65,
+        "",
+        None,
+        1,
+        ["a" * 64],
+    )
+
+    def test_loader_identity_takes_a_digest_and_nothing_else(self) -> None:
+        for wrong in self.NOT_DIGESTS:
+            with self.subTest(value=wrong):
+                broken = dict(record())
+                broken["loader_identity"] = wrong
+                self.refusal(lambda broken=broken: wctx.require_context(broken))
+
+    def test_an_authority_digest_takes_a_digest_and_nothing_else(self) -> None:
+        for wrong in self.NOT_DIGESTS:
+            with self.subTest(value=wrong):
+                broken = dict(record())
+                good = broken["authority"]
+                broken["authority"] = [{**good[0], "digest": wrong}] + list(good[1:])
+                self.refusal(lambda broken=broken: wctx.require_context(broken))
+
+    def test_the_activation_record_digest_takes_a_digest_and_nothing_else(self) -> None:
+        for wrong in self.NOT_DIGESTS:
+            with self.subTest(value=wrong):
+                broken = dict(record())
+                broken["activation"] = {**activation(), "record_digest": wrong}
+                self.refusal(lambda broken=broken: wctx.require_context(broken))
+
+    def test_the_activation_binding_refuses_the_same_values_when_it_is_built(self) -> None:
+        """Not only on the way in: a Context is never BUILT around a non-digest either."""
+        for wrong in self.NOT_DIGESTS:
+            with self.subTest(value=wrong):
+                self.refusal(lambda wrong=wrong: wctx.activation_binding(wrong, ACTIVATION_HEAD))
+
+    def test_a_real_lowercase_digest_is_accepted_everywhere(self) -> None:
+        digest = hashlib.sha256(b"a real one").hexdigest()
+        built = dict(record())
+        built["activation"] = {**activation(), "record_digest": digest}
+        wctx.require_context(built)
+        # what production itself builds keeps passing untouched
+        found = record()
+        wctx.require_context(found)
+        self.assertRegex(found["loader_identity"], r"^[0-9a-f]{64}$")
+        for item in found["authority"]:
+            self.assertRegex(item["digest"], r"^[0-9a-f]{64}$")
+
+
 # --------------------------------------------------------------------------- the unit boundary
 
 

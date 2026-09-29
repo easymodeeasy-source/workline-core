@@ -77,7 +77,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from .. import gitcmd
 from ..errors import StopError
 from ..store import ProjectStore
-from . import paths as review_paths
+from . import paths as review_paths, records
 from .hermetic import HermeticGit
 
 #: The object kinds a Candidate entry may carry, and the modes each one may take (``F2`` §6.3, §6.4).
@@ -216,10 +216,20 @@ def _require_status(entry: Entry) -> None:
 
 
 def _require_content_digest(entry: Entry, payload: bytes | None) -> None:
-    """``content_sha256`` is null except for a file or symlink, and it must match the bytes supplied."""
+    """``content_sha256`` is null except for a file or symlink, and it must match the bytes supplied.
+
+    The SHAPE is checked by the repository's own digest predicate, not by length:
+    when the bytes are already in the Project's store the Candidate supplies none
+    (see :func:`_materialize`), so the comparison below never runs and the shape
+    check is the only thing standing between a frozen content identity and a
+    sixty-four character string that is not a digest of anything.
+    """
     if entry.new_kind in BYTE_KINDS:
-        if not isinstance(entry.content_sha256, str) or len(entry.content_sha256) != 64:
-            raise _unavailable(f"the entry for {entry.path!r} is a {entry.new_kind} with no content_sha256")
+        if not isinstance(entry.content_sha256, str) or records.DIGEST_RE.match(entry.content_sha256) is None:
+            raise _unavailable(
+                f"the entry for {entry.path!r} is a {entry.new_kind} whose content_sha256 is "
+                f"{entry.content_sha256!r}, which is not a lowercase SHA-256 digest"
+            )
         if payload is not None:
             found = hashlib.sha256(payload).hexdigest()
             if found != entry.content_sha256:
@@ -234,34 +244,51 @@ def _require_content_digest(entry: Entry, payload: bytes | None) -> None:
         )
 
 
-def _require_no_path_conflicts(entries: Sequence[Entry], base: Mapping[str, gitcmd.TreeEntry]) -> None:
-    """No duplicate path, and nothing placed beneath a path that holds an object rather than a tree.
+def _require_prefix_free(entries: Sequence[Entry], base: Mapping[str, gitcmd.TreeEntry]) -> None:
+    """No duplicate path, and the RESULTING leaf set holds no path beneath another path.
 
-    Measured: Git accepts `a/b` beside a file `a` in `update-index --index-info`
-    and `write-tree` succeeds, so this conflict is refused here rather than left
-    to produce a tree nobody declared.
+    A Git tree cannot hold both an object at ``dir`` and an object at
+    ``dir/keep.txt``: one of them is a directory node, and the other is not. So
+    the resulting leaf set must be PREFIX-FREE, and that one invariant closes
+    both directions of the conflict:
+
+    ```text
+    existing object k.txt   + new k.txt/child   unless k.txt is explicitly deleted
+    existing subtree dir/*  + new object dir    unless EVERY surviving descendant is deleted
+    ```
+
+    Measured, and this is why the check lives here rather than in Git: Git
+    accepted ``k.txt/child`` beside ``k.txt`` and ``write-tree`` succeeded, and it
+    accepted an object at ``dir`` while ``dir/keep.txt`` was in the index - and
+    then the descendants were simply GONE from the tree it wrote. A path that
+    the Candidate never declared must not disappear as a side effect: §7.9.2's
+    resulting tree is the base tree with THIS Candidate's entries applied, and
+    F2 §6.2 makes the declared set the whole reviewed surface.
+
+    The leaf set is computed the way the tree is: the base's leaves, minus every
+    declared deletion, plus every declared non-absent entry. A Candidate kind is
+    never "directory", so a base directory node needs no entry of its own - what
+    it needs is that each of its surviving leaves is either kept legitimately or
+    explicitly removed.
     """
     seen: set[str] = set()
     for entry in entries:
         if entry.path in seen:
             raise _unavailable(f"the Candidate declares {entry.path!r} more than once")
         seen.add(entry.path)
-    present = {
-        path for path, found in base.items() if found.type == "blob" or found.type == "commit"
-    }
-    remaining = (present | {e.path for e in entries if e.new_kind != "absent"}) - {
-        e.path for e in entries if e.new_kind == "absent"
-    }
-    for entry in entries:
-        if entry.new_kind == "absent":
-            continue
-        prefixes = entry.path.split("/")[:-1]
-        for depth in range(1, len(prefixes) + 1):
-            ancestor = "/".join(prefixes[:depth])
-            if ancestor in remaining:
+    removed = {entry.path for entry in entries if entry.new_kind == "absent"}
+    added = {entry.path for entry in entries if entry.new_kind != "absent"}
+    leaves = (set(base) - removed) | added
+    for path in sorted(leaves):
+        parts = path.split("/")
+        for depth in range(1, len(parts)):
+            ancestor = "/".join(parts[:depth])
+            if ancestor in leaves:
+                declared = " and ".join(sorted(p for p in (ancestor, path) if p in added)) or "the base"
                 raise _unavailable(
-                    f"{entry.path!r} would be placed beneath {ancestor!r}, which holds an object rather "
-                    "than a directory"
+                    f"the resulting tree would hold an object at {ancestor!r} and another at {path!r}, which no "
+                    f"Git tree can do ({declared} declares the newer one); every path that disappears must be a "
+                    "declared deletion, and this one is not"
                 )
 
 
@@ -463,7 +490,7 @@ def composed(
         _require_status(entry)
         _require_content_digest(entry, payloads.get(entry.path))
         _require_old_side_agrees(entry, base, described)
-    _require_no_path_conflicts(entries, base)
+    _require_prefix_free(entries, base)
 
     objects = _objects_directory(hermetic, store)
     object_format = _object_format(hermetic)

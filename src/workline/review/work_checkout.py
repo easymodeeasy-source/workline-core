@@ -67,7 +67,7 @@ from typing import Mapping, Sequence
 from .. import gitcmd
 from ..errors import StopError, ValidationError
 from ..store import ProjectStore
-from . import fsafe, paths, records, serialize
+from . import fsafe, paths, records, serialize, validate
 from .checkout import (
     ATTRIBUTES,
     CANONICAL_RULE,
@@ -80,7 +80,7 @@ from .checkout import (
 )
 from .hermetic import HermeticGit
 from .resulting_tree import Composition
-from .store import ReviewStore
+from .store import GateChain, ReviewStore, _chain_invariants
 
 #: The Work checkout-capability contract identity the Context binds (``F3`` §7.9.6).
 #: Distinct from P2's ``review-v1-planning-checkout-v1``: that contract is about READING planning
@@ -172,13 +172,21 @@ class ResultingTreeReviewStore(ReviewStore):
             )
         return self.composition.read_blob(found.oid)
 
-    def gate_chain(self, review_run_id: str):
+    def gate_chain(self, review_run_id: str) -> GateChain | None:
         """The validated chain for ``review_run_id``, read from the resulting tree.
 
         Overridden because the inherited one walks the FILESYSTEM, which holds
         none of this: it would answer ``None`` for a run that exists only in the
-        tree, and the chain invariants would never run. Tree-backed, so the same
-        shape the committed reader already uses over a commit.
+        tree, and the chain invariants would never run.
+
+        This is the SAME strict reader as P1's over a different byte source, and
+        that equivalence is the whole point of §7.9.4's second condition. It
+        therefore does everything both canonical readers do, and by calling their
+        code rather than restating it: the per-generation path/record identity
+        binding (:meth:`_require_gate_identity`), the canonical parse and
+        round-trip, the ``previous_digest`` chain, the cross-generation
+        :func:`_chain_invariants`, and a validated :class:`GateChain` as the
+        answer. A chain the canonical reader refuses is refused here.
         """
         run_dir = paths.run_dir(review_run_id)
         listed = self.entries(run_dir)
@@ -213,7 +221,7 @@ class ResultingTreeReviewStore(ReviewStore):
                 f"found {numbers}, expected {expected}",
                 code="review_gate_chain",
             )
-        generations = []
+        generations: list[records.GateGeneration] = []
         digests: list[str] = []
         for number in numbers:
             relative = paths.gate_rel(review_run_id, number)
@@ -225,6 +233,7 @@ class ResultingTreeReviewStore(ReviewStore):
             found, text = self._parse(
                 raw, f"Review gate {relative} of the resulting tree", records.GateGeneration.from_record
             )
+            self._require_gate_identity(found, review_run_id, number, relative)
             if number > records.FIRST_GENERATION and found.previous_digest != digests[-1]:
                 raise ValidationError(
                     f"Review gate {relative} names predecessor digest {found.previous_digest}, but generation "
@@ -233,7 +242,8 @@ class ResultingTreeReviewStore(ReviewStore):
                 )
             generations.append(found)
             digests.append(serialize.digest_of_text(text))
-        return generations
+        _chain_invariants(review_run_id, generations)
+        return GateChain(review_run_id, tuple(generations), tuple(digests))
 
 
 def review_record_paths(composition: Composition) -> list[str]:
@@ -426,11 +436,37 @@ def _require_strict_reader(store: ProjectStore, composition: Composition, record
         raise
 
 
-def _read_every_record(reader: ResultingTreeReviewStore, records: Sequence[str]) -> None:
-    """Parse each record through its own typed reader, so the P1 invariants actually run."""
+def _require_closed_activation_area(reader: ResultingTreeReviewStore) -> None:
+    """The activation area holds exactly one canonical record path, by P1's own rule.
+
+    Reading ``read_activation()`` once per enumerated activation entry would
+    leave an unknown record BESIDE the canonical one enumerated and then never
+    looked at, which is the one hole a closed namespace must not have. The rule
+    that closes it already exists: P1-REV-008 fully enumerates ``activation/``
+    and fails closed on an unknown entry, a nested directory or an indirection.
+    So this calls that rule over the resulting tree rather than restating it -
+    the same equivalence :meth:`ResultingTreeReviewStore.gate_chain` rests on -
+    and the allowlist of modules that may name the activation path is left
+    exactly as P1 drew it.
+    """
+    problems = validate._activation(reader)
+    if problems:
+        first = problems[0]
+        raise ValidationError(
+            f"the resulting tree's activation area is not the one P1 defines: {first.message}", code=first.code
+        )
+
+
+def _read_every_record(reader: ResultingTreeReviewStore, record_paths: Sequence[str]) -> None:
+    """Parse each record through its own typed reader, so the P1 invariants actually run.
+
+    The ENUMERATED path is what is validated, never a fixed path stood in for it:
+    an entry under a closed area is either a canonical record this reads, or a
+    refusal.
+    """
     prefix = paths.REVIEW_DIR + "/"
     runs: set[str] = set()
-    for relative in records:
+    for relative in record_paths:
         rest = relative[len(prefix):]
         area, _, tail = rest.partition("/")
         stem = tail[:-5] if tail.endswith(".yaml") else tail
@@ -447,6 +483,7 @@ def _read_every_record(reader: ResultingTreeReviewStore, records: Sequence[str])
         elif area == "task-inputs":
             reader.read_task_input(stem)
         elif area == "activation":
+            _require_closed_activation_area(reader)
             reader.read_activation()
     for review_run_id in sorted(runs):
         reader.gate_chain(review_run_id)

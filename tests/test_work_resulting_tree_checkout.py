@@ -28,9 +28,10 @@ from workline import gitcmd
 from workline.errors import StopError, ValidationError
 from workline.ids import new_id
 from workline.implementation import package_directory
-from workline.review import hermetic, paths as review_paths, records, resulting_tree as rt
+from workline.review import hermetic, paths as review_paths, records, resulting_tree as rt, serialize
 from workline.review import work_checkout as wc, work_context as wctx
-from workline.review.store import ReviewStore
+from workline.review.committed import CommittedReviewStore
+from workline.review.store import GateChain, ReviewStore
 
 CANONICAL_LINE = ".workline/review/** !text eol=lf -filter -ident -working-tree-encoding\n"
 ZERO_40 = "0" * 40
@@ -314,6 +315,212 @@ class StrictReaderTests(CapabilityCase):
 
 
 # --------------------------------------------------------------------------- the decisive regression
+
+
+class StrictGateChainTests(CapabilityCase):
+    """§7.9.4: the resulting-tree reader is P1's strict reader over another byte source.
+
+    Not "it parses the YAML". A chain the canonical P1 readers refuse must be
+    refused here, so every one of these builds the SAME logical records and
+    asserts both readers refuse - the tree-backed one and ``CommittedReviewStore``
+    over a real commit.
+    """
+
+    def gate(self, run_id: str, generation: int, previous_digest, **overrides) -> dict:
+        fields = dict(
+            review_run_id=run_id, generation=generation,
+            previous_generation=None if generation == records.FIRST_GENERATION else generation - 1,
+            previous_digest=previous_digest, review_kind="work-result-v1", target_identity="wk_target",
+            operation_identity="op", candidate_hash="a" * 64, review_context_hash="b" * 64,
+            effective_policy_hash="c" * 64, evidence_digest="d" * 64, coverage_digest="e" * 64,
+            raw_report_set_digest="f" * 64, adjudication_digest="0" * 64, obligation_digest="1" * 64,
+            accepted_tasks=(), settled_tasks=(), status="open", receipt_id=None,
+        )
+        fields.update(overrides)
+        return records.GateGeneration(**fields).to_record()
+
+    def chain(self, run_id: str, generations):
+        """Entries and payloads placing ``generations`` at ``run_id``'s canonical gate paths."""
+        entries, payloads = [], {}
+        for number, record in generations:
+            data = ReviewStore.render(record).encode("utf-8")
+            relative = review_paths.gate_rel(run_id, number)
+            entries.append(self.added(relative, data))
+            payloads[relative] = data
+        return entries, payloads
+
+    def committed_refuses(self, run_id: str, generations) -> str:
+        """The same records committed to a real commit, read by the canonical P1 committed reader."""
+        for number, record in generations:
+            self.write(review_paths.gate_rel(run_id, number), ReviewStore.render(record))
+        commit = self.commit("records for the committed reader")
+        reader = CommittedReviewStore(self.store.root, commit)
+        try:
+            reader.gate_chain(run_id)
+        except ValidationError as exc:
+            return exc.code or "ValidationError"
+        return "ACCEPTED"
+
+    def both_refuse(self, run_id: str, generations) -> None:
+        entries, payloads = self.chain(run_id, generations)
+        self.refusal(lambda: self.capability(entries, payloads), "review_checkout_unsafe")
+        self.assertNotEqual(self.committed_refuses(run_id, generations), "ACCEPTED",
+                            "the canonical committed reader must refuse this too")
+
+    def test_the_override_calls_the_p1_helpers_rather_than_restating_them(self) -> None:
+        import inspect
+
+        source = inspect.getsource(wc.ResultingTreeReviewStore.gate_chain)
+        self.assertIn("_require_gate_identity", source)
+        self.assertIn("_chain_invariants", source)
+        self.assertIn("GateChain(", source)
+
+    def test_a_valid_chain_returns_a_validated_gate_chain(self) -> None:
+        run_id = new_id("review_run")
+        first = self.gate(run_id, 1, None)
+        digest = serialize.digest_of_text(ReviewStore.render(first))
+        second = self.gate(run_id, 2, digest)
+        entries, payloads = self.chain(run_id, [(1, first), (2, second)])
+        with rt.composed(self.store, self.hermetic, self.base, entries, payloads) as composition:
+            found = wc.ResultingTreeReviewStore(self.store, composition).gate_chain(run_id)
+        self.assertIsInstance(found, GateChain)
+        self.assertEqual(len(found.generations), 2)
+
+    def test_a_record_declaring_another_run_is_refused(self) -> None:
+        run_a, run_b = new_id("review_run"), new_id("review_run")
+        self.both_refuse(run_a, [(1, self.gate(run_b, 1, None))])
+
+    def test_a_record_declaring_another_generation_is_refused(self) -> None:
+        run_id = new_id("review_run")
+        self.both_refuse(run_id, [(1, self.gate(run_id, 2, "a" * 64))])
+
+    def test_an_immutable_fact_changing_across_generations_is_refused(self) -> None:
+        """target_identity and review_kind are immutable facts of a Run (_chain_invariants)."""
+        for field, changed in (("target_identity", "wk_other"), ("review_kind", "planning-roadmap-v1")):
+            with self.subTest(field=field):
+                run_id = new_id("review_run")
+                first = self.gate(run_id, 1, None)
+                digest = serialize.digest_of_text(ReviewStore.render(first))
+                second = self.gate(run_id, 2, digest, **{field: changed})
+                self.both_refuse(run_id, [(1, first), (2, second)])
+
+    def accepted_task(self, **overrides) -> dict:
+        task = {
+            "task_id": new_id("review_task"), "task_kind": "work-result-review",
+            "task_slot": "work-result-reviewer", "reviewer_identity": "r", "reviewer_version": "1",
+            "candidate_hash": "a" * 64, "candidate_material_digest": "2" * 64,
+            "reconstruction_mode": records.RECONSTRUCTION_SNAPSHOT, "request_digest": "3" * 64,
+            "task_input_digest": "4" * 64, "review_context_hash": "b" * 64,
+            "effective_policy_hash": "c" * 64,
+        }
+        task.update(overrides)
+        return task
+
+    def test_a_dropped_accepted_task_is_refused_by_the_invariants_alone(self) -> None:
+        """Each record parses; only the cross-generation invariant makes the chain unlawful."""
+        task = self.accepted_task()
+        run_id = new_id("review_run")
+        first = self.gate(run_id, 1, None, accepted_tasks=(task,))
+        digest = serialize.digest_of_text(ReviewStore.render(first))
+        second = self.gate(run_id, 2, digest, accepted_tasks=())
+        # both records parse on their own - the chain is what refuses them
+        for record in (first, second):
+            records.GateGeneration.from_record(record, "probe")
+        self.both_refuse(run_id, [(1, first), (2, second)])
+
+    def test_the_dropped_task_is_caught_by_nothing_else_in_the_reader(self) -> None:
+        """The differential itself: neutralize ONLY ``_chain_invariants`` and the chain is accepted.
+
+        This is what makes the previous test evidence rather than assertion. Every
+        other layer - the path/record identity binding, the canonical parse, the
+        ``previous_digest`` link - passes this chain, so the refusal it produces
+        can only have come from the cross-generation invariants.
+        """
+        task = self.accepted_task()
+        run_id = new_id("review_run")
+        first = self.gate(run_id, 1, None, accepted_tasks=(task,))
+        digest = serialize.digest_of_text(ReviewStore.render(first))
+        second = self.gate(run_id, 2, digest, accepted_tasks=())
+        entries, payloads = self.chain(run_id, [(1, first), (2, second)])
+        self.refusal(lambda: self.capability(entries, payloads), "review_checkout_unsafe")
+        with mock.patch.object(wc, "_chain_invariants", lambda *_: None):
+            found = self.capability(entries, payloads)
+        self.assertEqual(found.capability_contract, wc.WORK_CHECKOUT_CONTRACT)
+
+    def test_a_carried_task_whose_descriptor_changed_is_refused(self) -> None:
+        first_task = self.accepted_task()
+        changed_task = {**first_task, "reviewer_version": "2"}
+        run_id = new_id("review_run")
+        first = self.gate(run_id, 1, None, accepted_tasks=(first_task,))
+        digest = serialize.digest_of_text(ReviewStore.render(first))
+        second = self.gate(run_id, 2, digest, accepted_tasks=(changed_task,))
+        for record in (first, second):
+            records.GateGeneration.from_record(record, "probe")
+        self.both_refuse(run_id, [(1, first), (2, second)])
+
+
+class ClosedActivationTests(CapabilityCase):
+    """§7.9.4: the activation area holds exactly one canonical record path, and no other."""
+
+    def activation_bytes(self) -> bytes:
+        return ReviewStore.render(
+            records.WorkTerminalActivation(
+                operation_contract=records.OPERATION_CONTRACT_REVIEW_V1,
+                activation_base_head="b" * 40, legacy_event_count=0,
+                legacy_event_prefix_sha256=hashlib.sha256(b"").hexdigest(),
+            ).to_record()
+        ).encode("utf-8")
+
+    def test_the_area_is_closed_by_p1s_own_rule_rather_than_a_restatement(self) -> None:
+        import inspect
+
+        self.assertIn("validate._activation", inspect.getsource(wc._require_closed_activation_area))
+        # and P1's allowlist of modules that may name the activation path is left as P1 drew it
+        source = Path(wc.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("WORK_TERMINAL_ACTIVATION_REL", source)
+
+    def test_the_canonical_name_held_as_a_directory_is_refused(self) -> None:
+        """Inherited from P1-REV-008 by calling it: the right name is not enough, it must be a plain file."""
+        data = self.activation_bytes()
+        nested = f"{review_paths.WORK_TERMINAL_ACTIVATION_REL}/child.yaml"
+        self.refusal(lambda: self.capability([self.added(nested, data)], {nested: data}),
+                     "review_checkout_unsafe")
+
+    def test_the_one_canonical_activation_record_passes(self) -> None:
+        data = self.activation_bytes()
+        relative = review_paths.WORK_TERMINAL_ACTIVATION_REL
+        found = self.capability([self.added(relative, data)], {relative: data})
+        self.assertEqual(found.record_paths, (relative,))
+
+    def test_an_unknown_activation_record_is_refused(self) -> None:
+        data = self.activation_bytes()
+        stray = f"{review_paths.ACTIVATION_DIR}/evil.yaml"
+        error = self.refusal(lambda: self.capability([self.added(stray, data)], {stray: data}),
+                             "review_checkout_unsafe")
+        self.assertIn("evil.yaml", str(error))
+
+    def test_an_unknown_activation_record_beside_the_valid_one_is_refused(self) -> None:
+        data = self.activation_bytes()
+        valid = review_paths.WORK_TERMINAL_ACTIVATION_REL
+        stray = f"{review_paths.ACTIVATION_DIR}/evil.yaml"
+        entries = [self.added(valid, data), self.added(stray, data)]
+        self.refusal(lambda: self.capability(entries, {valid: data, stray: data}),
+                     "review_checkout_unsafe")
+
+    def test_a_nested_unknown_activation_entry_is_refused(self) -> None:
+        data = self.activation_bytes()
+        nested = f"{review_paths.ACTIVATION_DIR}/nested/evil.yaml"
+        self.refusal(lambda: self.capability([self.added(nested, data)], {nested: data}),
+                     "review_checkout_unsafe")
+
+    def test_unknown_entries_in_every_other_subdirectory_stay_refused(self) -> None:
+        data = b"schema: not-a-record\nversion: 1\n"
+        for area in ("gates", "receipts", "consumptions", "supersessions",
+                     "candidate-snapshots", "task-inputs"):
+            with self.subTest(area=area):
+                stray = f"{review_paths.REVIEW_DIR}/{area}/evil.yaml"
+                self.refusal(lambda stray=stray: self.capability([self.added(stray, data)], {stray: data}),
+                             "review_checkout_unsafe")
 
 
 class UnsafeTreeStaysExpressibleTests(CapabilityCase):

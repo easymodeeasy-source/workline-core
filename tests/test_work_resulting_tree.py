@@ -388,6 +388,105 @@ class ContainmentTests(TreeCase):
 # --------------------------------------------------------------------------- contradictory input
 
 
+class PrefixFreeTests(TreeCase):
+    """A Git tree cannot hold an object at `dir` and another at `dir/a`, and neither may vanish silently.
+
+    The resulting leaf set must be PREFIX-FREE, and that one invariant closes
+    both directions. Measured, and the reason the check cannot be left to Git:
+    Git accepted an object at `dir` while `dir/a` was in the index, `write-tree`
+    succeeded, and the descendants were simply GONE from the tree it wrote -
+    paths the Candidate never declared, disappearing as a side effect. §7.9.2's
+    resulting tree is the base tree with THIS Candidate's entries applied, and
+    F2 §6.2 makes the declared set the whole reviewed surface.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.write("dir/a.txt", "a\n")
+        self.write("dir/b.txt", "b\n")
+        self.base = self.commit("with a subtree")
+        self.base_tree = rt.root_tree_id(self.hermetic, self.base)
+        self.held = rt.tree_entries(self.hermetic, self.base_tree)
+
+    def over_dir(self, kind: str):
+        """An entry that puts an object at `dir`, where the base holds a directory."""
+        data = b"dir is now an object\n"
+        if kind == "gitlink":
+            return rt.Entry("dir", "A", "absent", "000000", ZERO_40, "gitlink", "160000", "1" * 40, None), {}
+        mode = "120000" if kind == "symlink" else "100644"
+        oid, digest = self.blob(data)
+        return rt.Entry("dir", "A", "absent", "000000", ZERO_40, kind, mode, oid, digest), {"dir": data}
+
+    def test_replacing_a_directory_with_an_object_refuses_when_descendants_are_undeclared(self) -> None:
+        for kind in ("file", "symlink", "gitlink"):
+            with self.subTest(kind=kind):
+                entry, payloads = self.over_dir(kind)
+                error = self.refusal(lambda entry=entry, payloads=payloads: self.compose([entry], payloads))
+                self.assertIn("dir", str(error))
+
+    def test_declaring_only_some_descendants_still_refuses(self) -> None:
+        for kind in ("file", "symlink", "gitlink"):
+            with self.subTest(kind=kind):
+                entry, payloads = self.over_dir(kind)
+                self.refusal(lambda entry=entry, payloads=payloads:
+                             self.compose([self.deleted("dir/a.txt"), entry], payloads))
+
+    def test_declaring_every_descendant_lets_the_replacement_through(self) -> None:
+        for kind in ("file", "symlink", "gitlink"):
+            with self.subTest(kind=kind):
+                entry, payloads = self.over_dir(kind)
+                entries = [self.deleted("dir/a.txt"), self.deleted("dir/b.txt"), entry]
+                with rt.composed(self.store, self.hermetic, self.base, entries, payloads) as composition:
+                    listing = composition.entries()
+                    self.assertIn("dir", listing)
+                    self.assertEqual(listing["dir"].mode, entry.new_mode)
+                    self.assertNotIn("dir/a.txt", listing)
+                    self.assertNotIn("dir/b.txt", listing)
+
+    def test_a_child_beneath_an_existing_object_refuses_unless_that_object_is_deleted(self) -> None:
+        data = b"child\n"
+        child = self.added("keep.txt/child", data)
+        self.refusal(lambda: self.compose([child], {"keep.txt/child": data}))
+        with rt.composed(self.store, self.hermetic, self.base,
+                         [self.deleted("keep.txt"), child], {"keep.txt/child": data}) as composition:
+            listing = composition.entries()
+            self.assertNotIn("keep.txt", listing)
+            self.assertIn("keep.txt/child", listing)
+
+    def test_a_deeper_descendant_is_caught_too(self) -> None:
+        self.write("deep/x/y/z.txt", "z\n")
+        self.base = self.commit("deeper")
+        self.base_tree = rt.root_tree_id(self.hermetic, self.base)
+        self.held = rt.tree_entries(self.hermetic, self.base_tree)
+        data = b"deep is now a file\n"
+        oid, digest = self.blob(data)
+        entry = rt.Entry("deep/x", "A", "absent", "000000", ZERO_40, "file", "100644", oid, digest)
+        self.refusal(lambda: self.compose([entry], {"deep/x": data}))
+
+    def test_every_accepted_composition_preserves_the_whole_unrelated_leaf_map(self) -> None:
+        """Not just the declared paths and not just the root oid: every other entry, exactly."""
+        self.write("sibling/one.txt", "one\n")
+        self.write("link", "target")
+        self.base = self.commit("siblings")
+        self.base_tree = rt.root_tree_id(self.hermetic, self.base)
+        self.held = rt.tree_entries(self.hermetic, self.base_tree)
+        data = b"added\n"
+        entries = [self.added("added.txt", data), self.deleted("dir/a.txt")]
+        declared = {entry.path for entry in entries}
+        with rt.composed(self.store, self.hermetic, self.base, entries, {"added.txt": data}) as composition:
+            listing = composition.entries()
+        for path, held in self.held.items():
+            if path in declared:
+                continue
+            with self.subTest(path=path):
+                self.assertIn(path, listing)
+                self.assertEqual(
+                    (listing[path].mode, listing[path].type, listing[path].oid),
+                    (held.mode, held.type, held.oid),
+                )
+        self.assertEqual(set(listing) - declared - set(self.held), set())
+
+
 class ContradictoryEntryTests(TreeCase):
     """The composer never manufactures a tree from entry data that disagrees with the base."""
 
@@ -512,6 +611,28 @@ class ContradictoryEntryTests(TreeCase):
         built = rt.entries_from_records(records)
         self.assertEqual(built[0].path, "added.txt")
         self.assertFalse(built[0].inert)
+
+    def test_a_content_digest_that_is_not_a_digest_is_refused_even_with_no_bytes_supplied(self) -> None:
+        """The same defect as the Context's digest fields, on the path that has nothing else to check.
+
+        When the blob is already in the Project's store the Candidate supplies no
+        bytes, so the digest is never compared against anything - and a shape
+        check by LENGTH would let a sixty-four character non-digest stand as the
+        frozen content identity of the entry.
+        """
+        held = self.held["keep.txt"]
+        real = hashlib.sha256((self.store.root / "keep.txt").read_bytes()).hexdigest()
+
+        def entry(digest):
+            return rt.Entry("copy.txt", "A", "absent", "000000", ZERO_40, "file", "100644", held.oid, digest)
+
+        for wrong in ("z" * 64, real.upper(), "!" * 64, "a" * 63, "a" * 65, None, 1):
+            with self.subTest(value=wrong):
+                error = self.refusal(lambda wrong=wrong: self.compose([entry(wrong)]))
+                self.assertIn("not a lowercase SHA-256 digest", str(error))
+        # the real one composes, with no payload supplied, from the store's own blob
+        with rt.composed(self.store, self.hermetic, self.base, [entry(real)], {}) as composition:
+            self.assertEqual(composition.entries()["copy.txt"].oid, held.oid)
 
 
 # --------------------------------------------------------------------------- both object formats
