@@ -56,6 +56,10 @@ RUNTIME_ATTR_EVAL_DIR = f"{RUNTIME_REVIEW_DIR}/attr-eval"
 #: A probe repository is created under a fresh name here and removed again; nothing in it is
 #: this Project's repository, index, worktree or refs.
 RUNTIME_ATTR_PROBE_DIR = f"{RUNTIME_REVIEW_DIR}/attr-probe"
+#: Throw-away repositories the resulting tree of a frozen Candidate is composed in (``F3`` §7.9.2).
+#: The composition borrows this Project's objects read-only and writes its own; the tree it builds
+#: exists before K1 does, and nothing in it is this Project's repository, index, worktree or refs.
+RUNTIME_RESULTING_TREE_DIR = f"{RUNTIME_REVIEW_DIR}/resulting-tree"
 
 
 def runtime_report_rel(review_task_id: str) -> str:
