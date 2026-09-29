@@ -640,24 +640,244 @@ class SourceEnumerationTests(AttributeCase):
         later = self.commit("drifted")
         self.refusal(lambda: self.require(later))
 
+    def failing(self, verb: str):
+        """Make the class B reader's ``verb`` invocation fail, and nothing else.
+
+        Patched at :meth:`HermeticGit.run_bytes`, which is the seam every source
+        read now goes through, so what is being tested is Git refusing rather
+        than a helper being mocked.
+        """
+        real = hermetic.HermeticGit.run_bytes
+
+        def refusing(instance, *args, **kwargs):
+            if verb in args:
+                return gitcmd.GitBytes(returncode=128, stdout=b"", stderr=b"refused for the test")
+            return real(instance, *args, **kwargs)
+
+        return mock.patch.object(hermetic.HermeticGit, "run_bytes", refusing)
+
     def test_a_gitattributes_that_is_not_a_regular_blob_refuses(self) -> None:
         base = self.canonical_base()
-        entries = gitcmd.tree_entries(self.store.root, base)
-        self.assertTrue(any(entry.path == ".gitattributes" for entry in entries))
-        with mock.patch.object(gitcmd, "tree_entries", return_value=[
+        self.assertTrue(any(entry.path == ".gitattributes"
+                            for entry in attributes._work_tree_entries(self.hermetic, base)))
+        with mock.patch.object(attributes, "_work_tree_entries", return_value=[
             gitcmd.TreeEntry(mode="120000", type="blob", oid=OID, path=".gitattributes")
         ]):
             self.assertIn("120000", str(self.refusal(lambda: self.require(base))))
 
     def test_an_unreadable_source_blob_refuses(self) -> None:
         base = self.canonical_base()
-        with mock.patch.object(gitcmd, "read_blob", return_value=None):
-            self.refusal(lambda: self.require(base))
+        with self.failing("cat-file"):
+            self.assertIn("cannot read", str(self.refusal(lambda: self.require(base))))
 
     def test_a_tree_git_cannot_enumerate_refuses(self) -> None:
         base = self.canonical_base()
-        with mock.patch.object(gitcmd, "tree_entries", return_value=None):
-            self.refusal(lambda: self.require(base))
+        with self.failing("ls-tree"):
+            self.assertIn("enumerate", str(self.refusal(lambda: self.require(base))))
+
+    def test_a_listing_record_that_cannot_be_classified_refuses(self) -> None:
+        """The byte parser accepts `<mode> <type> <full-oid>\\t<path>` and nothing else."""
+        base = self.canonical_base()
+        real = hermetic.HermeticGit.run_bytes
+        for malformed in (b"100644 blob\tonly-two-fields\0",
+                          b"100644 blob " + OID.encode() + b"no-tab\0",
+                          b"100644 blob nothexoid\t.gitattributes\0",
+                          b"100644 blob " + OID.encode() + b"\t\0"):
+            with self.subTest(record=malformed[:34]):
+                def answering(instance, *args, _m=malformed, **kwargs):
+                    if "ls-tree" in args:
+                        return gitcmd.GitBytes(returncode=0, stdout=_m, stderr=b"")
+                    return real(instance, *args, **kwargs)
+
+                with mock.patch.object(hermetic.HermeticGit, "run_bytes", answering):
+                    self.refusal(lambda: self.require(base))
+
+
+class SourceAuthorityTests(AttributeCase):
+    """The source proof reads objects under the Unit 1 class B authority, and under nothing else.
+
+    ``gitcmd.tree_entries`` / ``gitcmd.read_blob`` run with ``env=None`` and no
+    class B configuration, so they see Git's ordinary ``refs/replace`` view and
+    whatever ``GIT_*`` the parent process exported; they also memoize by
+    ``(kind, repo, oid)`` with no environment in the key, so one answer taken
+    under a poisoned view outlives the poison. Measured on the stopped
+    candidate, both of those turned an unsafe basis into a PASS. These tests
+    hold the repaired reader to the class B envelope on the ACTUAL invocations.
+    """
+
+    def require(self, basis: str) -> None:
+        attributes.require_work_attribute_source(self.store, self.hermetic, basis)
+
+    def plain(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(self.store.root), *args],
+                              capture_output=True, text=True, env=clean_env())
+
+    def two_bases(self) -> tuple[str, str]:
+        """An UNSAFE basis (canonical + a material rule) and a SAFE one (canonical only)."""
+        self.write(".gitattributes", CANONICAL_LINE + "*.txt text\n")
+        self.write("a.txt", "x\n")
+        unsafe = self.commit("unsafe")
+        self.write(".gitattributes", CANONICAL_LINE)
+        safe = self.commit("safe")
+        return unsafe, safe
+
+    def tearDown(self) -> None:
+        # the generic cache is process-wide; no test may leak an answer into another
+        gitcmd.forget_object_answers()
+        super().tearDown()
+
+    # ---- refs/replace ---------------------------------------------------
+
+    def test_a_replacement_cannot_make_an_unsafe_basis_pass(self) -> None:
+        """M-58/M-49: an oid means the object it names, never a refs/replace view."""
+        unsafe, safe = self.two_bases()
+        gitcmd.forget_object_answers()
+        self.refusal(lambda: self.require(unsafe))
+        self.plain("replace", "-f", unsafe, safe)
+        self.assertTrue(self.plain("rev-parse", f"refs/replace/{unsafe}").returncode == 0,
+                        "the replacement ref must really be installed")
+        gitcmd.forget_object_answers()
+        self.assertIn("text", str(self.refusal(lambda: self.require(unsafe))))
+
+    def test_a_replacement_cannot_make_a_safe_basis_refuse(self) -> None:
+        """The converse: the replacement is invisible in both directions."""
+        unsafe, safe = self.two_bases()
+        self.plain("replace", "-f", safe, unsafe)
+        gitcmd.forget_object_answers()
+        self.require(safe)
+
+    def test_a_poisoned_generic_object_cache_cannot_reach_the_proof(self) -> None:
+        """A false answer taken under the ordinary view must not survive into this proof."""
+        unsafe, safe = self.two_bases()
+        self.plain("replace", "-f", unsafe, safe)
+        gitcmd.forget_object_answers()
+        # seed the generic cache under the ordinary, replacement-honouring view
+        seeded = gitcmd.tree_entries(self.store.root, unsafe, recursive=True)
+        self.assertIsNotNone(seeded)
+        for entry in seeded:
+            if entry.path == ".gitattributes":
+                cached = gitcmd.read_blob(self.store.root, entry.oid)
+                self.assertNotIn(b"*.txt text", cached, "the seeded answer is the replacement's, as intended")
+        # the proof must still read the ORIGINAL object, cache or no cache
+        self.refusal(lambda: self.require(unsafe))
+        self.plain("replace", "-d", unsafe)
+        self.refusal(lambda: self.require(unsafe))
+
+    def test_the_proof_takes_no_answer_from_the_generic_cache(self) -> None:
+        """Stated directly: neither generic helper is called while the proof runs."""
+        base = self.canonical_base()
+        gitcmd.forget_object_answers()
+        with mock.patch.object(gitcmd, "tree_entries", side_effect=AssertionError("tree_entries used")):
+            with mock.patch.object(gitcmd, "read_blob", side_effect=AssertionError("read_blob used")):
+                self.require(base)
+
+    # ---- the inherited environment --------------------------------------
+
+    def test_an_inherited_object_directory_is_stripped(self) -> None:
+        """M-61: an exported GIT_OBJECT_DIRECTORY hides the repository's own objects."""
+        unsafe, _ = self.two_bases()
+        hostile = self.new_dir("hostile-objects")
+        control = subprocess.run(
+            ["git", "-C", str(self.store.root), "ls-tree", "-r", unsafe],
+            capture_output=True, text=True, env={**clean_env(), "GIT_OBJECT_DIRECTORY": str(hostile)},
+        )
+        self.assertNotEqual(control.returncode, 0, "the hostile directory should really hide the objects")
+        with mock.patch.dict(os.environ, {"GIT_OBJECT_DIRECTORY": str(hostile)}):
+            gitcmd.forget_object_answers()
+            # the strip is in force, so the basis is read and judged on its own content
+            self.assertIn("text", str(self.refusal(lambda: self.require(unsafe))))
+
+    def test_an_inherited_alternate_object_directory_is_stripped(self) -> None:
+        unsafe, _ = self.two_bases()
+        hostile = self.new_dir("hostile-alternates")
+        with mock.patch.dict(os.environ, {"GIT_ALTERNATE_OBJECT_DIRECTORIES": str(hostile)}):
+            gitcmd.forget_object_answers()
+            self.assertIn("text", str(self.refusal(lambda: self.require(unsafe))))
+
+    # ---- the actual invocations ------------------------------------------
+
+    def captured(self, basis: str):
+        seen: list[tuple[tuple[str, ...], dict]] = []
+        real = gitcmd.run_git_bytes
+
+        def recording(repo, *args, **kwargs):
+            seen.append((args, dict(kwargs)))
+            return real(repo, *args, **kwargs)
+
+        with mock.patch.object(gitcmd, "run_git_bytes", recording):
+            self.require(basis)
+        return seen
+
+    def settings(self, arguments: tuple[str, ...]) -> dict[str, str]:
+        return dict(
+            argument.split("=", 1)
+            for position, argument in enumerate(arguments)
+            if position > 0 and arguments[position - 1] == "-c"
+        )
+
+    def test_every_source_read_is_a_class_b_invocation(self) -> None:
+        base = self.canonical_base()
+        calls = self.captured(base)
+        reads = [call for call in calls if "ls-tree" in call[0] or "cat-file" in call[0]]
+        self.assertGreaterEqual(len(reads), 2, "one listing and at least one blob read")
+        for args, kwargs in reads:
+            with self.subTest(verb=args[:8]):
+                names = {name for name in kwargs["env"] if name.upper().startswith("GIT_")}
+                self.assertEqual(names, set(hermetic.CLASS_B_ALLOWLIST))
+                self.assertEqual(kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
+                self.assertEqual(kwargs["env"]["GIT_NO_LAZY_FETCH"], "1")
+                self.assertEqual(os.path.getsize(kwargs["env"]["GIT_CONFIG_GLOBAL"]), 0)
+                self.assertNotIn("GIT_INDEX_FILE", kwargs["env"])
+                for name in hermetic.CLASS_B_IDENTITY_VARIABLES:
+                    self.assertNotIn(name, kwargs["env"])
+                settings = self.settings(args)
+                for key, value in hermetic.CLASS_B_CONFIGURATION:
+                    self.assertEqual(settings.get(key), value)
+                self.assertEqual(os.listdir(settings["core.hooksPath"]), [])
+
+    def test_the_listing_is_the_exact_command(self) -> None:
+        base = self.canonical_base()
+        listings = [args for args, _ in self.captured(base) if "ls-tree" in args]
+        self.assertEqual(len(listings), 1)
+        self.assertEqual(listings[0][-5:], ("ls-tree", "-z", "--full-tree", "-r", base))
+
+    def test_no_attribute_pin_is_carried_by_a_raw_object_read(self) -> None:
+        """Object reads need exact object semantics, not attribute resolution."""
+        base = self.canonical_base()
+        for args, _ in self.captured(base):
+            if "ls-tree" in args or "cat-file" in args:
+                with self.subTest(verb=args[:8]):
+                    self.assertNotIn("attr.tree", self.settings(args))
+
+    # ---- the exact basis --------------------------------------------------
+
+    def test_only_an_exact_full_object_id_is_accepted_as_the_basis(self) -> None:
+        base = self.canonical_base()
+        branch = git(self.store.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        # every one of these is refused by the identity guard itself; a well-formed 64-hex id is NOT
+        # here, because that is a valid basis shape and belongs to the reader (see below)
+        for basis in ("HEAD", branch, f"refs/heads/{branch}", base[:12], base.upper(), base + "0",
+                      base[:39], f"{base}^", f"{base}^{{commit}}", f"{base}^{{tree}}", "", "HEAD~1"):
+            with self.subTest(basis=basis):
+                gitcmd.forget_object_answers()
+                self.refusal(lambda basis=basis: self.require(basis))
+
+    def test_an_invalid_basis_is_refused_before_git_is_asked(self) -> None:
+        self.canonical_base()
+        branch = git(self.store.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        for basis in ("HEAD", branch, "0123456789ab", "", f"{OID}^"):
+            with self.subTest(basis=basis):
+                with mock.patch.object(gitcmd, "run_git_bytes",
+                                       side_effect=AssertionError("Git was asked")) as never:
+                    self.refusal(lambda basis=basis: self.require(basis))
+                    never.assert_not_called()
+
+    def test_a_full_object_id_of_either_width_reaches_the_reader(self) -> None:
+        base = self.canonical_base()
+        self.assertEqual(len(base), 40)
+        self.require(base)
+        # a well-formed 64-hex id this repository does not hold is refused by the READER, not the guard
+        self.assertIn("enumerate", str(self.refusal(lambda: self.require(OID_256))))
 
 
 class InfoAttributesTests(AttributeCase):

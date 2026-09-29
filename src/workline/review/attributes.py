@@ -287,20 +287,95 @@ def parse_source(data: bytes, origin: str, directory: str) -> list[Rule]:
 
 
 # --------------------------------------------------------------------------- the sources, enumerated completely
+#
+# EVERY Git subprocess that decides this proof runs through the Unit 1 class B
+# authority, and none of it goes through the generic object helpers.
+#
+# `gitcmd.tree_entries` and `gitcmd.read_blob` run with `env=None` and no class B
+# configuration, so they inherit the ambient environment and Git's ordinary
+# refs/replace view. MEASURED on the stopped candidate: with
+# `git replace <unsafe original> <safe replacement>` installed, the source proof
+# read the REPLACEMENT and answered PASS for a basis whose own object carries
+# `*.txt text`; and with the roles reversed an unsafe replacement made a SAFE
+# basis refuse. An oid must mean the object it names (M-58/M-49), so these reads
+# need `GIT_NO_REPLACE_OBJECTS=1` - and they need the strip too, since an
+# inherited `GIT_OBJECT_DIRECTORY` can hide the repository's own objects (M-61).
+#
+# Those helpers also memoize in a process-wide cache keyed by (kind, repo, oid)
+# with no environment or replacement policy in the key, so one answer taken under
+# a poisoned view outlives the poison. MEASURED: after removing the replace ref
+# the false PASS was still served from that cache. Adding the right variables to
+# a later command cannot undo an answer already taken under the wrong view, so
+# this proof takes no answer from that cache at all. It runs once at entry and
+# correctness dominates the saved subprocesses.
 
 
-def _committed_sources(store: ProjectStore, basis: str) -> list[tuple[str, str, bytes]]:
+def _require_exact_basis(basis: object) -> None:
+    """The persistence basis is an exact full object id, or nothing is read at all.
+
+    Checked BEFORE any Git command, because the whole point of a pin is that the
+    identity cannot move between the evaluation and the commit it governs.
+    ``HEAD``, a branch, ``refs/heads/main``, an abbreviation Git would happily
+    resolve, an uppercase spelling, a wrong width and every ``<oid>^...``
+    revision expression are refused here rather than left to fail somewhere
+    inside Git - the same exact-identity rule
+    :meth:`HermeticGit.attribute_configuration_arguments` and
+    :func:`require_pinned_path_evaluation` already hold to.
+    """
+    if not gitcmd.full_commit_id(basis):
+        raise _transform(
+            f"the persistence basis must be an exact full object id, and {basis!r} is not one; a basis Git "
+            "resolves at use time can name a different object when the commit it governs is made"
+        )
+
+
+def _work_tree_entries(hermetic: HermeticGit, basis: str) -> list[gitcmd.TreeEntry]:
+    """``git ls-tree -z --full-tree -r <basis>``, as a CLASS B invocation, parsed from bytes.
+
+    No attribute pin is carried: this is asking what objects the basis holds, not
+    what attributes apply to them, and making the object listing depend on
+    attribute resolution would be circular.
+    """
+    listed = hermetic.run_bytes("ls-tree", "-z", "--full-tree", "-r", basis)
+    if not listed.ok:
+        raise _transform(f"Git cannot enumerate the tree of {basis}, so its attribute sources cannot be listed")
+    entries: list[gitcmd.TreeEntry] = []
+    for item in listed.stdout.split(b"\0"):
+        if not item:
+            continue
+        head, separator, path = item.partition(b"\t")
+        fields = head.split(b" ")
+        if not separator or len(fields) != 3 or not path:
+            raise _transform(f"Git's listing of {basis} holds a record this parser cannot classify")
+        try:
+            mode, kind, oid = (field.decode("ascii") for field in fields)
+        except UnicodeDecodeError as exc:
+            raise _transform(f"Git's listing of {basis} holds a non-ASCII mode, type or object id") from exc
+        if not gitcmd.full_commit_id(oid):
+            raise _transform(f"Git's listing of {basis} names {oid!r} where a full object id belongs")
+        # Git writes a path's bytes as they are; surrogateescape keeps any byte that is not UTF-8 exactly,
+        # which is what the repository's other raw readers do.
+        entries.append(gitcmd.TreeEntry(mode, kind, oid, path.decode("utf-8", "surrogateescape")))
+    return entries
+
+
+def _work_read_blob(hermetic: HermeticGit, oid: str, described: str) -> bytes:
+    """``git cat-file blob <oid>``, as a CLASS B invocation; unreadable is a refusal, never a fallback."""
+    found = hermetic.run_bytes("cat-file", "blob", oid)
+    if not found.ok:
+        raise _transform(f"Git cannot read the attribute source {described}")
+    return found.stdout
+
+
+def _committed_sources(hermetic: HermeticGit, basis: str) -> list[tuple[str, str, bytes]]:
     """Every ``.gitattributes`` blob of ``basis``, at the root and at EVERY depth, found by enumeration.
 
     Enumerated from the tree, never guessed at from a fixed list of locations
     and never read from the working tree (§7.8.3). Each entry is
     ``(origin, directory, bytes)``.
     """
-    entries = gitcmd.tree_entries(store.root, basis, recursive=True, trees=False)
-    if entries is None:
-        raise _transform(f"Git cannot enumerate the tree of {basis}, so its attribute sources cannot be listed")
     found: list[tuple[str, str, bytes]] = []
-    for entry in entries:
+    for entry in _work_tree_entries(hermetic, basis):
         directory, _, name = entry.path.rpartition("/")
         if fold(name) != GITATTRIBUTES:
             continue
@@ -309,9 +384,7 @@ def _committed_sources(store: ProjectStore, basis: str) -> list[tuple[str, str, 
                 f"{basis} holds {entry.path!r} as {entry.type} {entry.mode}; an attribute source is the regular "
                 f"blob {GITATTRIBUTES}, mode {REGULAR_FILE_MODE}"
             )
-        data = gitcmd.read_blob(store.root, entry.oid)
-        if data is None:
-            raise _transform(f"Git cannot read the attribute source {entry.path!r} of {basis}")
+        data = _work_read_blob(hermetic, entry.oid, f"{entry.path!r} of {basis}")
         found.append((f"{basis}:{entry.path}", directory, data))
     return found
 
@@ -377,7 +450,8 @@ def require_work_attribute_source(store: ProjectStore, hermetic: HermeticGit, ba
     Nothing is written, no Review state is touched, and a success is not
     remembered: a later evaluation asks again.
     """
-    sources = _committed_sources(store, basis) + _info_attributes(store, hermetic)
+    _require_exact_basis(basis)
+    sources = _committed_sources(hermetic, basis) + _info_attributes(store, hermetic)
     rules: list[Rule] = []
     for origin, directory, data in sources:
         rules.extend(parse_source(data, origin, directory))
