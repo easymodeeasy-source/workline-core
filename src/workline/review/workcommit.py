@@ -53,7 +53,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
-import json
 import os
 from pathlib import Path
 import re
@@ -75,9 +74,11 @@ from ..mutation import (
     _BYTES,
     _MADE_COMMIT,
     _last_wrote,
+    appended_event_log,
     effect_path,
+    rendered_ledger,
 )
-from ..store import Relation, render_relations
+from ..store import Relation
 from . import ancestry, hermetic as hermetic_module, ownership
 from . import paths as review_paths
 from .hermetic import HermeticGit
@@ -309,23 +310,20 @@ def _ledger(data: bytes, path: str) -> list[Relation]:
 
 
 def render_effect(effect: dict[str, Any], accumulator: bytes, path: str) -> bytes:
-    """One recorded effect applied to the ACCUMULATOR by that kind's own live rendering rule (§7.1.1)."""
+    """One recorded effect applied to the ACCUMULATOR by that kind's own live rule (§7.1.1, IP-22).
+
+    The rules are the writer's own (:func:`workline.mutation.rendered_ledger`,
+    :func:`workline.mutation.appended_event_log` - what ``planned_write`` applies
+    to the working tree), applied here to the parent object's bytes instead.
+    Nothing under ``review/`` renders a ledger or an entity of its own.
+    """
     kind, payload = effect["kind"], effect["payload"]
     if kind in ("write_file", "create_file"):
         return payload["content"].encode("utf-8")
-    if kind == "add_relation":
-        relations = _ledger(accumulator, path)
-        relations.append(Relation.from_record(payload["record"]))
-        return render_relations(relations).encode("utf-8")
-    if kind == "remove_relation":
-        relations = [relation for relation in _ledger(accumulator, path) if relation.id != payload["record"]["id"]]
-        return render_relations(relations).encode("utf-8")
+    if kind in ("add_relation", "remove_relation"):
+        return rendered_ledger(effect, _ledger(accumulator, path)).encode("utf-8")
     if kind == "append_event":
-        text = _universal(accumulator, path)
-        if text and not text.endswith("\n"):
-            text += "\n"
-        line = json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":"))
-        return (text + yamlish.escape_line_separators(line) + "\n").encode("utf-8")
+        return appended_event_log(effect, _universal(accumulator, path)).encode("utf-8")
     raise _defect(f"a {kind} effect writes no file and contributes no material")
 
 
@@ -1048,20 +1046,54 @@ def generation_commit_effect(mutation: Mutation, message: str) -> Effect:
     exactly as it is.
     """
     basis = mutation.invocation.get("persistence_basis")
-    if not gitcmd.full_commit_id(basis):
+    branch = mutation.invocation.get("persistence_branch")
+    if not gitcmd.full_commit_id(basis) or not isinstance(branch, str) or not branch.startswith("refs/heads/"):
         raise _defect(
-            "a Work Review generation mutation names the exact persistence basis its commits pin to, and this one "
-            "does not"
+            "a Work Review generation mutation names the exact persistence basis its commits pin to and the "
+            "declared branch they advance, and this one does not"
         )
     git = hermetic_module.enter(mutation.store)
     ref = _head_ref(git)
     parent = None if ref is None else ref_value(git, ref)
     if ref is None or parent is None:
         raise _defect("HEAD is not on a branch holding a commit, so the generation commit has no exact parent")
+    if ref != branch:
+        raise _reconcile(
+            f"HEAD is on {ref}, and the Work Review's generation commits advance {branch}, the branch its Candidate "
+            "declared (F3 §7.1.5); nothing is committed on another branch"
+        )
     effects = mutation.effects
     plan = effect_plan(git, parent=parent, ref=ref, message=message, plan_class=CLASS_GENERATION,
                        effects=finalized_effects(effects, len(effects)))
     return commit_effect(plan, attr_basis=basis)
+
+
+def stage_commit_effect(mutation: Mutation, message: str, *, plan_class: str) -> Effect | None:
+    """A review-v1 Work mutation's own Git stage: S-c0 (``entry``) or a pre-completion stage (``work-stage``).
+
+    Its plan is the parent object plus the file effects this mutation recorded
+    since its last commit - never the working tree - and ``None`` when that plan
+    changes nothing, so no stage is recorded (§4.3: "only when there is something
+    to commit"). The pin is the commit's own exact parent. For S-c0 that parent
+    IS ``PRE_S_C0_BASE`` (§7.1.11). A pre-completion stage is made before any
+    declared base exists, and its parent carries the attribute sources every
+    later basis carries: no START-owned write ever touches an attribute source.
+    """
+    if plan_class not in (CLASS_ENTRY, CLASS_WORK_STAGE):
+        raise _defect(f"{plan_class!r} is not a class a review-v1 Work mutation's own Git stage is made in")
+    git = hermetic_module.enter(mutation.store)
+    ref = _head_ref(git)
+    parent = None if ref is None else ref_value(git, ref)
+    if ref is None or parent is None:
+        raise _defect("HEAD is not on a branch holding a commit, so the stage commit has no exact parent")
+    effects = finalized_effects(mutation.effects, len(mutation.effects))
+    changed = effect_plan(git, parent=parent, ref=ref, message=message, plan_class=CLASS_WORK_STAGE, effects=effects)
+    if not changed.entries:
+        return None
+    plan = changed if plan_class == CLASS_WORK_STAGE else effect_plan(
+        git, parent=parent, ref=ref, message=message, plan_class=plan_class, effects=effects
+    )
+    return commit_effect(plan, attr_basis=parent)
 
 
 def require_generation_persisted(mutation: Mutation, expected: dict[str, bytes]) -> None:

@@ -40,6 +40,7 @@ from .mutation import (
     stage_writes_already_committed,
 )
 from .oplock import project_operation
+from .review import work_invocation
 from .ops import (
     DECIDED_DISPLAY,
     Finalization,
@@ -425,6 +426,9 @@ class _Session:
         mode: str,
         executor: Executor,
         derivations: "tuple[_ProvenDerivation, ...]" = (),
+        *,
+        review: Any = None,
+        activation: Any = None,
     ) -> None:
         self.store = store
         self.mutation = mutation
@@ -441,9 +445,19 @@ class _Session:
         # What the paths already changed when this operation began held, read once
         # before any executor of this session runs (:meth:`_protect_preexisting`).
         self._preexisting: dict[str, tuple[bytes, int] | None] | None = None
+        # review-v1 (F1-D1): the selector this START was invoked with, and the activation it
+        # proved under the lock before the mutation opened (F1 §6.4). None on the legacy path.
+        self.review = review
+        self.activation = activation
 
     # git ---------------------------------------------------------------
     def _commit(self, prefix: str, message: str, paths: list[str], *, include_canonical: bool = True) -> None:
+        if self.review is not None:
+            # review-v1: every Git stage is one review-v1-work-local-v2 commit and never a push (F3 §4.3)
+            from . import start_review
+
+            start_review.commit_stage(self, prefix, message)
+            return
         stage = stage_name(self.mutation, prefix)
         owned = sorted(set(paths) | (set(owned_canonical_paths(self.mutation)) if include_canonical else set()))
         dirty = gitcmd.changed_against_head(self.store.root, owned)
@@ -873,6 +887,12 @@ class _Session:
 
     # completion ------------------------------------------------------------
     def _complete(self, view: ProjectView, work: Entity, outcome: Completed) -> StartResult:
+        if self.review is not None:
+            # review-v1: the completion is frozen, reviewed and authorized before anything of it is
+            # committed as a result (F3 §5.1 steps 5a ... 16)
+            from . import start_review
+
+            return self._terminal_reviewed(start_review.freeze_and_review(self, view, work, outcome))
         result_paths = tuple(p.replace("\\", "/") for p in outcome.result_paths)
         deleted_paths = tuple(p.replace("\\", "/") for p in outcome.deleted_paths)
         # Created, modified and deleted results are one owned set: they are
@@ -905,6 +925,31 @@ class _Session:
             self._drop_refused_result(work.id)
         self._lifecycle(work, ["work_target_removed", "work_completed"])
         return self._finalize_completion(work)
+
+    def finish_review(self, run: Any) -> StartResult:
+        """Continue the Work Review Run this review-v1 START already began, from its records (F3 §5.4).
+
+        Nothing of the completion is decided again: the executor is not asked,
+        the Candidate is not frozen again, and the Run resumes at its earliest
+        unfinished generation.
+        """
+        from . import start_review
+
+        return self._terminal_reviewed(start_review.continue_run(self, run))
+
+    def _terminal_reviewed(self, sealed: Any) -> StartResult:
+        """F3 §5.1 steps 17 ... 37 for a sealed Work Review Run: not in this build.
+
+        The proof, publication and terminal path of a sealed Run is not
+        implemented yet, so a sealed Run stops here with nothing of the
+        terminal recorded, the mutation left pending and the Receipt unconsumed.
+        """
+        raise StopError(
+            f"Work Review Run {sealed.run.review_run_id} is sealed, and this build does not carry a sealed Work Review "
+            "through its proof, publication and terminal stages; nothing further is recorded and the mutation is left "
+            "pending",
+            code="review_terminal_unavailable",
+        )
 
     def _finalize_completion(self, work: Entity) -> StartResult:
         """The Git stage of a completion: the commit carrying its events, the push, the postcheck."""
@@ -1870,7 +1915,9 @@ class _CancelRecord:
         return [event["type"] for event in self.events]
 
 
-def _cancel_to_finish(store: ProjectStore, entry: Entity, mode: str) -> _ProvenCancel | None:
+def _cancel_to_finish(
+    store: ProjectStore, entry: Entity, mode: str, invocation: dict[str, Any] | None = None
+) -> _ProvenCancel | None:
     """The cancel an interrupted run of exactly this START recorded and a retry carries on, or ``None``.
 
     Read before anything is judged on the current Project, before the mutation
@@ -1900,7 +1947,8 @@ def _cancel_to_finish(store: ProjectStore, entry: Entity, mode: str) -> _ProvenC
     * ``ops._refuse_before_replay`` - what is still to come refused the way
       recording and applying it would refuse, before any of it runs.
     """
-    invocation = {"operation": OWNER, "work_id": entry.id, "mode": mode}
+    if invocation is None:
+        invocation = {"operation": OWNER, "work_id": entry.id, "mode": mode}
     try:
         records = [
             record for record in MutationController(store).list_pending()
@@ -3134,32 +3182,92 @@ def _recorded_registration(
     return work_ids, resolved
 
 
-def start(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
+def start(
+    store: ProjectStore, work_id: str, mode: str, executor: Executor, *, review: object = None
+) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
+    details: dict[str, Any] = {"work_id": work_id, "mode": mode}
+    if review is not None:
+        # review-v1 (F1-D1, F3 §5.1 steps 1-2b): the selector and every entry refusal come before the
+        # lock and write nothing; the lock's holder description then names only the static contract
+        # marker, never a caller value.
+        from . import start_review
+
+        review = start_review.entry_gate(store, review)
+        details = dict(start_review.LOCK_DETAILS)
     # Project execution lock (rules/git): everything that decides a write is read
     # under it, the executor runs inside it, and it is released when START
     # returns. A question wait releases it too; the mutation stays pending for
     # the invocation that resumes it under a fresh lock.
-    with project_operation(store, OWNER, {"work_id": work_id, "mode": mode}):
-        return _start_locked(store, work_id, mode, executor)
+    with project_operation(store, OWNER, details):
+        return _start_locked(store, work_id, mode, executor, review)
 
 
-def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Executor) -> StartResult:
+def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, review_v1: bool) -> None:
+    """F1-D3: every pending START record of this slot must fit this invocation's contract, or reconcile.
+
+    Read from the durable invocation alone, under the lock and before the
+    mutation is opened; the record is never written. A legacy invocation is
+    refused only by a pending record that carries a review marker - which no
+    legacy run writes, so every legacy outcome is otherwise exactly as it was.
+    A review-v1 invocation continues only a record carrying exactly the frozen
+    marker pair and nothing else: partial, unknown and extra markers are never
+    read as either contract.
+    """
+    slot = ("start", work_id, mode)
+    live = {"operation", "work_id", "mode"}
+    try:
+        pending = MutationController(store).list_pending()
+    except ReconcileRequired:
+        return  # an unreadable recovery area proves nothing here; it is reported where it always was, at open
+    for record in pending:
+        invocation = record.get("invocation")
+        if record.get("owner") != OWNER or not isinstance(invocation, dict):
+            continue
+        if (invocation.get("operation"), invocation.get("work_id"), invocation.get("mode")) != slot:
+            continue
+        marked = any(key in invocation for key in work_invocation.MARKER_KEYS)
+        if not review_v1 and not marked:
+            continue
+        exact = set(invocation) == live | set(work_invocation.markers())
+        if review_v1 and exact and work_invocation.classify(invocation) == work_invocation.WORK:
+            continue
+        carried = {key: invocation.get(key) for key in work_invocation.MARKER_KEYS if key in invocation}
+        raise ReconcileRequired(
+            f"the unfinished START mutation {record.get('mutation_id')} carries "
+            f"{'review markers ' + str(carried) if carried else 'no review markers'}, and this is "
+            f"{'a review-v1 Work invocation' if review_v1 else 'a legacy invocation'}; it is neither upgraded nor "
+            "downgraded and is left untouched: reconcile required",
+            reason="review_marker_mismatch",
+        )
+
+
+def _start_locked(
+    store: ProjectStore, work_id: str, mode: str, executor: Executor, review: Any = None
+) -> StartResult:
     work = store.read_entity("work", work_id)  # stable resolve; no fallback
+    _require_marker_compatible(store, work_id, mode, review_v1=review is not None)
+    invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
+    if review is not None:
+        from . import start_review
+
+        invocation = start_review.invocation(work_id, mode)
     # A cancel an interrupted run of this START recorded is answered from its record first: the current Project
     # shows that cancel part-way, and is judged as it stood when the cancel was decided.
-    cancel = _cancel_to_finish(store, work, mode)
+    cancel = _cancel_to_finish(store, work, mode, invocation)
     view = cancel.view if cancel is not None else _structure_or_stop(store, "start precheck")
     gitops.ensure_git_ready(store.root)
     # Before the mutation exists: an unpinned or drifted push destination STOPs
     # here, with no intent record, no domain write and no network contact.
     destination = gitops.ensure_push_destination(store)
+    # review-v1: activation is verified under the lock, before any intent record exists (F1 §6.4).
+    activation = start_review.require_activation(store) if review is not None else None
 
     controller = MutationController(store)
     # invocation identity = the required START inputs (stable Work ID and mode);
-    # a pending START mutation on the same Work with another mode is a conflict → reconcile required
-    invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
+    # a pending START mutation on the same Work with another mode is a conflict → reconcile required.
+    # A review-v1 START writes its two markers beside them, at this first durable write (F1-D2).
     mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     with abandon_on_stop(mutation):
         if cancel is not None and mutation.id != cancel.mutation_id:
@@ -3185,7 +3293,10 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         if state.terminal and not mutation.resumed:
             raise SpecViolation(f"Work {work_id} is {state.state}")
 
-        session = _Session(store, mutation, destination, mode, executor, derivations)
+        session = _Session(store, mutation, destination, mode, executor, derivations, review=review, activation=activation)
+        # review-v1: a Work Review Run this START already began is continued from its records,
+        # and never frozen again (F3 §5.4).
+        reviewing = start_review.run_in_flight(mutation) if review is not None and mutation.resumed else None
         phase_id = work.phase_id
         current: Entity | None = work
         result: StartResult
@@ -3193,6 +3304,8 @@ def _start_locked(store: ProjectStore, work_id: str, mode: str, executor: Execut
         if cancel is not None:
             # The cancel ends this START as it would have uninterrupted: no other Work is chosen or run after it.
             result = session.finish_cancel(cancel)
+        elif reviewing is not None:
+            result = session.finish_review(reviewing)
         elif finishing is not None:
             result = session.finish_completion(finishing)
         elif holding is not None:

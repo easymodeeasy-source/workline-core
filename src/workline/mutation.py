@@ -1863,22 +1863,37 @@ def planned_write(store: ProjectStore, record: dict[str, Any]) -> tuple[Path, st
     payload = record["payload"]
     if kind in ("write_file", "create_file"):
         return store.abs(payload["path"]), payload["content"]
-    if kind == "add_relation":
-        relations = store.read_relation_file(payload["file"])
-        relations.append(Relation.from_record(payload["record"]))
-        return store.relation_file(payload["file"]), render_relations(relations)
-    if kind == "remove_relation":
-        relations = [r for r in store.read_relation_file(payload["file"]) if r.id != payload["record"]["id"]]
-        return store.relation_file(payload["file"]), render_relations(relations)
+    if kind in ("add_relation", "remove_relation"):
+        return store.relation_file(payload["file"]), rendered_ledger(record, store.read_relation_file(payload["file"]))
     if kind == "append_event":
-        text = _normalize(store.events_text())
-        if text and not text.endswith("\n"):
-            text += "\n"
-        text += yamlish.escape_line_separators(json.dumps(payload["record"], ensure_ascii=False, separators=(",", ":"))) + "\n"
-        return store.events_jsonl, text
+        return store.events_jsonl, appended_event_log(record, store.events_text())
     if kind in ("git_commit", "git_push"):
         return None
     raise ValidationError(f"unknown effect kind: {kind}")
+
+
+def rendered_ledger(record: dict[str, Any], relations: "list[Relation]") -> str:
+    """The ledger text a relation effect leaves, from the relations the ledger held before it.
+
+    :func:`planned_write`'s own rule, taken out so that it stays the only one:
+    the object-driven Work commit (``F3`` §7.1.1, IP-22) applies exactly this to
+    the relations its PARENT OBJECT holds, where the writer applies it to what
+    the working tree holds.
+    """
+    payload = record["payload"]
+    if record["kind"] == "add_relation":
+        return render_relations([*relations, Relation.from_record(payload["record"])])
+    return render_relations([r for r in relations if r.id != payload["record"]["id"]])
+
+
+def appended_event_log(record: dict[str, Any], text: str) -> str:
+    """The event log text an ``append_event`` leaves after ``text``: :func:`planned_write`'s own rule (IP-22)."""
+    text = _normalize(text)
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text + yamlish.escape_line_separators(
+        json.dumps(record["payload"]["record"], ensure_ascii=False, separators=(",", ":"))
+    ) + "\n"
 
 
 # --------------------------------------------------------------------------- review-v1 planning (private helpers)

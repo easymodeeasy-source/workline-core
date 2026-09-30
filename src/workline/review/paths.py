@@ -64,6 +64,10 @@ RUNTIME_RESULTING_TREE_DIR = f"{RUNTIME_REVIEW_DIR}/resulting-tree"
 #: recorded commit effect, created fresh and discarded again; never the repository's real index, and a
 #: partially built one is never reused across an attempt or a resume.
 RUNTIME_WORK_INDEX_DIR = f"{RUNTIME_REVIEW_DIR}/work-index"
+#: The isolated verification workspaces of a frozen Work Candidate (``F2`` §13.4 V-2, IP-6): a scratch
+#: repository borrowing this Project's objects read-only, and the workspace it materializes. Never
+#: canonical, never authorization, removed once the verification has read it back.
+RUNTIME_WORK_VERIFY_DIR = f"{RUNTIME_REVIEW_DIR}/work-verify"
 
 
 def runtime_report_rel(review_task_id: str) -> str:

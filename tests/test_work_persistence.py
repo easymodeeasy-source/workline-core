@@ -704,7 +704,8 @@ class ModeTests(PersistenceCase):
         run_id = new_id("review_run")
         gate_path = review_paths.gate_rel(run_id, 1)
         invocation = {"operation": "review-generation", "review_kind": "work-result-v1", "review_run_id": run_id,
-                      "generation": 1, "transition": "accept", "persistence_basis": self.base}
+                      "generation": 1, "transition": "accept", "persistence_basis": self.base,
+                      "persistence_branch": self.branch}
         gen = MutationController(self.store).open(
             "start", invocation, WriteScope(files=(gate_path, review_paths.serialization_token_rel(run_id))))
         gen.add_effects(rr.STAGE_GENERATION, [Effect.create_file(gate_path, "record: 1\n")])
@@ -731,16 +732,35 @@ class ModeTests(PersistenceCase):
         self.assertNotIn(workcommit.PREPARED_COMMIT, commit)
 
     def test_a_work_generation_without_its_persistence_basis_records_nothing(self) -> None:
+        live = {"operation": "review-generation", "review_kind": "work-result-v1", "generation": 1, "transition": "accept"}
+        for name, extra in (("no basis, no branch", {}), ("no branch", {"persistence_basis": self.base}),
+                            ("no basis", {"persistence_branch": self.branch}),
+                            ("a short branch name", {"persistence_basis": self.base, "persistence_branch": "main"})):
+            with self.subTest(case=name):
+                run_id = new_id("review_run")
+                gate_path = review_paths.gate_rel(run_id, 1)
+                gen = MutationController(self.store).open(
+                    "start", {**live, "review_run_id": run_id, **extra},
+                    WriteScope(files=(gate_path, review_paths.serialization_token_rel(run_id))))
+                gen.add_effects(rr.STAGE_GENERATION, [Effect.create_file(gate_path, "record: 1\n")])
+                with self.assertRaises(StopError):
+                    rr._finish_generation(self.store, gen)
+                self.assertFalse(gen.has_stage(rr.STAGE_GENERATION_COMMIT))
+
+    def test_a_work_generation_is_never_committed_on_another_branch_than_the_declared_one(self) -> None:
         run_id = new_id("review_run")
         gate_path = review_paths.gate_rel(run_id, 1)
         invocation = {"operation": "review-generation", "review_kind": "work-result-v1", "review_run_id": run_id,
-                      "generation": 1, "transition": "accept"}
+                      "generation": 1, "transition": "accept", "persistence_basis": self.base,
+                      "persistence_branch": "refs/heads/elsewhere"}
         gen = MutationController(self.store).open(
             "start", invocation, WriteScope(files=(gate_path, review_paths.serialization_token_rel(run_id))))
         gen.add_effects(rr.STAGE_GENERATION, [Effect.create_file(gate_path, "record: 1\n")])
-        with self.assertRaises(StopError):
+        before = self.head()
+        with self.assertRaises(ReconcileRequired):
             rr._finish_generation(self.store, gen)
         self.assertFalse(gen.has_stage(rr.STAGE_GENERATION_COMMIT))
+        self.assertEqual(self.head(), before)
 
 
 if __name__ == "__main__":
