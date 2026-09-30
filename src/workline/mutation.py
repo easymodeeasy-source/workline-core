@@ -1589,6 +1589,8 @@ _PLANNING_OPERATIONS = ("roadmap-create", "phase-entry")
 _GENERATION_OPERATION = "review-generation"
 _STAGE_REGISTRATION_COMMIT = "review-registration-commit"
 _STAGE_CONSUMPTION = "review-consumption"
+#: The live START invocation a review-v1 Work START carries its two markers beside (F1-D2, F3 §11.1).
+_WORK_START_KEYS = frozenset({"operation", "work_id", "mode"})
 
 
 def _publication_contract(invocation: object) -> str:
@@ -1597,8 +1599,10 @@ def _publication_contract(invocation: object) -> str:
     ``current-combined`` (no marker, not a generation mutation - every legacy
     mutation), ``planning`` (the frozen marker pair on a planning operation,
     with or without the recovery key), ``generation`` (a generation mutation:
-    it publishes nothing), and ``invalid`` for any other presence, value or
-    combination - which fails closed, never falling back to current-combined.
+    it publishes nothing), ``work`` (a review-v1 Work START: exactly its two
+    markers beside the live START invocation, ``F3`` §11.1), and ``invalid`` for
+    any other presence, value or combination - which fails closed, never
+    falling back to current-combined.
     """
     if not isinstance(invocation, dict):
         return "current-combined"
@@ -1612,6 +1616,13 @@ def _publication_contract(invocation: object) -> str:
         and invocation.get("operation") in _PLANNING_OPERATIONS
     ):
         return "planning"
+    from .review import work_invocation
+
+    if (
+        work_invocation.classify(invocation) == work_invocation.WORK
+        and set(invocation) == _WORK_START_KEYS | set(work_invocation.markers())
+    ):
+        return "work"
     return "invalid"
 
 
@@ -1686,6 +1697,37 @@ def _planning_publication(
     return _Publication(commit, ref)
 
 
+def _work_publication(
+    repo: Path, effects: list[dict[str, Any]], position: int, mutation_record: dict[str, Any]
+) -> "_Publication | _Refused":
+    """``review-v1-work-publication-v1`` (``F3`` §11.2): exactly the commit one proof note names, or a refusal.
+
+    V-1 is decided here, from the record's shape: a push that shares its stage
+    is refused, and one sharing it with a commit is the combined stage - a push
+    in the same apply pass as its commit, which is a push before proof. V-2 ...
+    V-7 are the Work validator's (:func:`workline.start_review.work_publication`),
+    which re-evaluates the full C-2 of exactly that commit before a push not yet
+    applied is made; V-8 is the exact refspec the Controller already pushes.
+    """
+    stage = effects[position].get("stage")
+    members = [index for index, effect in enumerate(effects) if effect.get("stage") == stage]
+    if members != [position]:
+        combined = any(effects[index].get("kind") == "git_commit" for index in members)
+        return _Refused(
+            "a review-v1 Work mutation publishes by a push-only stage, and this push shares its stage"
+            + (" with a commit (a combined commit and push)" if combined else ""),
+            "review_publication_contract_invalid" if combined else "review_publication_invalid",
+        )
+    from .start_review import work_publication
+
+    try:
+        commit, ref = work_publication(ProjectStore(repo), effects, position, mutation_record)
+    except StopError as exc:
+        # whichever item failed, the push names no commit it may publish
+        return _Refused(exc.message, "review_publication_invalid")
+    return _Publication(commit, ref)
+
+
 def _recorded_publication(
     repo: Path, effects: list[dict[str, Any]], position: int, mutation_record: dict[str, Any] | None = None
 ) -> "_Publication | _Refused | str":
@@ -1733,6 +1775,8 @@ def _recorded_publication(
         )
     if contract == "planning":
         return _planning_publication(repo, effects, position, mutation_record or {})
+    if contract == "work":
+        return _work_publication(repo, effects, position, mutation_record or {})
     push = effects[position]
     stage = push.get("stage")
     commit = effects[position - 1] if position > 0 else {}

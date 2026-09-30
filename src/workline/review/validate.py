@@ -77,7 +77,11 @@ RECEIPT_CONSUMPTION_BINDING = (
 
 def validate_review(store: ProjectStore) -> list[ReviewProblem]:
     """Structural problems in this Project's Review namespace; empty when there are none."""
-    review = ReviewStore(store)
+    return review_problems(ReviewStore(store))
+
+
+def review_problems(review: ReviewStore) -> list[ReviewProblem]:
+    """:func:`validate_review` over any P1 reader - the working tree's, or one commit's committed records."""
     try:
         if not review.exists():
             return []  # a Project that has never used Review is a valid Project

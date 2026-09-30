@@ -938,18 +938,14 @@ class _Session:
         return self._terminal_reviewed(start_review.continue_run(self, run))
 
     def _terminal_reviewed(self, sealed: Any) -> StartResult:
-        """F3 §5.1 steps 17 ... 37 for a sealed Work Review Run: not in this build.
+        """F3 §5.1 steps 17 ... 37 for a sealed Work Review Run: proof, publication and the terminal stage.
 
-        The proof, publication and terminal path of a sealed Run is not
-        implemented yet, so a sealed Run stops here with nothing of the
-        terminal recorded, the mutation left pending and the Receipt unconsumed.
+        Every step reads what is already durable first, so a resume continues at
+        the earliest unsatisfied checkpoint and never decides anything again.
         """
-        raise StopError(
-            f"Work Review Run {sealed.run.review_run_id} is sealed, and this build does not carry a sealed Work Review "
-            "through its proof, publication and terminal stages; nothing further is recorded and the mutation is left "
-            "pending",
-            code="review_terminal_unavailable",
-        )
+        from . import start_review
+
+        return start_review.terminalize(self, sealed)
 
     def _finalize_completion(self, work: Entity) -> StartResult:
         """The Git stage of a completion: the commit carrying its events, the push, the postcheck."""
@@ -1437,7 +1433,18 @@ def _stage_events(mutation: Mutation, stage: str) -> list[dict]:
 
 
 def _recorded_completion(mutation: Mutation, stage: str, work_id: str) -> bool:
-    """Whether ``stage`` is exactly the lifecycle stage a completion of ``work_id`` records."""
+    """Whether ``stage`` is exactly the lifecycle stage a completion of ``work_id`` records.
+
+    A review-v1 Work mutation records its completion as the three-effect
+    terminal stage of F3 §13.3 (IP-3), and a legacy one as its two events; each
+    is recognized only in its own contract's shape, so an unknown or malformed
+    review-v1 terminal stage never falls back to the legacy reading.
+    """
+    if work_invocation.is_work(mutation.invocation):
+        from . import start_review
+
+        return isinstance(stage, str) and stage.rsplit(":", 1)[0] == f"{work_id}:lifecycle" and \
+            start_review.is_terminal_stage(mutation, stage, work_id)
     effects = mutation.stage_effects(stage)
     events = _stage_events(mutation, stage)
     return (
@@ -3329,6 +3336,10 @@ def _start_locked(
             result = session.run_work(work.id)
 
     while mode == "outer" and result.status in ("completed", "moved"):
+        if review is not None and result.status == "completed":
+            # A review-v1 Work mutation holds exactly one completion - one Candidate, at most two pushes,
+            # each proof note written once (F3 §4.5, §11.3.1) - so START returns with it (step 37).
+            break
         just_completed = result.work_id if result.status == "completed" else None
         view = ProjectView.load(store)
         if phase_id is not None:

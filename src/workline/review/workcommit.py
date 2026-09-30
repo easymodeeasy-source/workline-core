@@ -1096,6 +1096,24 @@ def stage_commit_effect(mutation: Mutation, message: str, *, plan_class: str) ->
     return commit_effect(plan, attr_basis=parent)
 
 
+def terminal_commit_effect(mutation: Mutation, message: str, *, attr_basis: str) -> Effect:
+    """S-c2's commit (``F3`` §7.1.1, the K2 class): the terminal stage's recorded effects over the exact parent.
+
+    Its bytes are the parent object plus the effects the terminal stage
+    recorded - the two appended events and the Consumption's immutable create -
+    and never a reread of either file. It is pinned to ``declared_base.base_commit``
+    (§7.1.11).
+    """
+    git = hermetic_module.enter(mutation.store)
+    ref = _head_ref(git)
+    parent = None if ref is None else ref_value(git, ref)
+    if ref is None or parent is None:
+        raise _defect("HEAD is not on a branch holding a commit, so the terminal commit has no exact parent")
+    effects = finalized_effects(mutation.effects, len(mutation.effects))
+    plan = effect_plan(git, parent=parent, ref=ref, message=message, plan_class=CLASS_TERMINAL, effects=effects)
+    return commit_effect(plan, attr_basis=attr_basis)
+
+
 def require_generation_persisted(mutation: Mutation, expected: dict[str, bytes]) -> None:
     """``R3`` §10 for a Work Review generation: the commit C-1 owns holds every record's exact bytes, on its branch.
 

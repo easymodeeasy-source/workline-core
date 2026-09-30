@@ -51,7 +51,8 @@ from workline.store import ProjectStore
 
 WINDOWS = sys.platform == "win32"
 FORM_L = b".workline/review/** !text eol=lf -filter -ident -working-tree-encoding\n"
-TERMINAL_UNAVAILABLE = "review_terminal_unavailable"
+#: What a test that stops after the seal raises in place of the terminal path (see ``ReviewCase``).
+TERMINAL_UNAVAILABLE = "test_stopped_after_seal"
 
 
 def git(where: Path, *args: str, check: bool = True, input: bytes | None = None) -> str:
@@ -101,12 +102,26 @@ class Reviewer:
 
 
 class ReviewCase(WorklineTestCase):
-    """A real, activated Project: one registered Work, the canonical form-L rule committed."""
+    """A real, activated Project: one registered Work, the canonical form-L rule committed.
+
+    ``stop_after_seal`` keeps these tests about F3 §5.1 steps 1-16: the terminal path of a sealed
+    Run (steps 17-37) is replaced by a STOP, so what these tests read is the state the seal
+    leaves. The terminal path has its own tests (``test_work_terminal``), which turn it off.
+    """
 
     remote = False
+    stop_after_seal = True
 
     def setUp(self) -> None:
         super().setUp()
+        if self.stop_after_seal:
+            def stop(session, sealed):
+                raise StopError(f"stopped after sealing Run {sealed.run.review_run_id} for this test",
+                                code=TERMINAL_UNAVAILABLE)
+
+            patcher = mock.patch.object(start_review, "terminalize", side_effect=stop)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.store = self.new_project(remote=self.remote)
         self.root = self.store.root
         git(self.root, "config", "user.name", "Real Person")
