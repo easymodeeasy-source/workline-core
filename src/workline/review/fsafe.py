@@ -788,15 +788,21 @@ _REFNAME_FORBIDDEN = frozenset(" ~^:?*[\\" + "".join(chr(code) for code in range
 #: silently loses a binding Git honours.
 PACKED_SEPARATORS = " \t\v\f"
 
-#: The only ``#`` line Git tolerates, and only as the FIRST line. Measured: an
-#: arbitrary ``# comment`` makes Git refuse the whole file even at the top, so
-#: ``#`` is not a comment introducer here and this reader must not treat it as
-#: one; and a header anywhere but the first line is a malformed file - in a
-#: submodule git directory ``git rev-parse HEAD`` refuses it outright, while in a
-#: plain repository ``rev-parse`` resolves the target early and ``git show-ref``
-#: refuses. ``rev-parse HEAD`` alone is therefore not a stable oracle for whole-file
-#: validity, and this reader takes the answer both commands agree on.
-PACKED_HEADER = "# pack-refs with:"
+#: The only ``#`` line Git tolerates, and only as the FIRST line. The TRAILING
+#: SPACE is part of the spelling, measured: ``# pack-refs with: `` with no traits
+#: at all is accepted and so is ``# pack-refs with: unknown``, while
+#: ``# pack-refs with:``, ``# pack-refs with:peeled`` and ``# pack-refs with:X``
+#: are each refused before the ref resolves. So the trait vocabulary is NOT
+#: validated - Git allows traits it does not know - but the prefix is exact.
+#:
+#: An arbitrary ``# comment`` makes Git refuse the whole file even at the top, so
+#: ``#`` is not a comment introducer here; and a header anywhere but the first
+#: line is a malformed file - in a submodule git directory ``git rev-parse HEAD``
+#: refuses it outright, while in a plain repository ``rev-parse`` resolves the
+#: target early and ``git show-ref`` refuses. ``rev-parse HEAD`` alone is
+#: therefore not a stable oracle for whole-file validity, and this reader takes
+#: the answer both commands agree on.
+PACKED_HEADER = "# pack-refs with: "
 
 #: A full object id, and nothing shorter, longer or upper-case. ``fullmatch`` is used
 #: everywhere below: ``$`` alone would also match before a final newline, and a digest
@@ -1024,6 +1030,13 @@ def _packed_records(text: str, described: str) -> list[tuple[str, str]]:
     reason Git tolerates them is not documented behaviour to reproduce, and
     guessing at it would be worse than failing closed.
     """
+    if text and not text.endswith("\n"):
+        # MEASURED: Git refuses a packed-refs file whose last line is not
+        # LF-terminated, however lawful the record itself looks - with a bare
+        # record, after a header, after another record and after a peeled line.
+        # This is packed-refs only; a GITFILE with no final newline is lawful and
+        # stays accepted.
+        raise _refuse(f"{described} does not end with a newline, so its last record is unterminated")
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines = lines[:-1]  # the final newline terminates the last record; it is not an empty line
@@ -1031,7 +1044,11 @@ def _packed_records(text: str, described: str) -> list[tuple[str, str]]:
     after_record = False
     for number, line in enumerate(lines, start=1):
         where = f"{described} line {number}"
-        line = line.rstrip("\r")
+        # A carriage return is NOT stripped. Measured: Git reads `<id> refs/heads/main\r`
+        # as a binding for the ref named `refs/heads/main\r`, which is a different ref -
+        # so it resolves `refs/heads/main` from the LF record beside it, and refuses when
+        # the CRLF record is the only one. Stripping it invented a binding Git does not
+        # have. Left in place, the name simply does not match what was asked for.
         if line.startswith("#"):
             if number != 1 or not line.startswith(PACKED_HEADER):
                 raise _refuse(
@@ -1064,11 +1081,14 @@ def _packed_records(text: str, described: str) -> list[tuple[str, str]]:
 def _packed_ref(gitdir: SafeDirectory, refname: str) -> str:
     """The OID ``packed-refs`` binds to ``refname``, by exact name, or a refusal.
 
-    Narrow on purpose: an ordinary ``<oid> <refname>`` record, with ``#`` headers
-    and ``^`` peeled lines skipped because a lawful file holds them. An unrelated
-    line is never allowed to answer for the ref that was asked about, and an
-    unrelated MALFORMED line is not validated either - this reader is not a
-    checker of the whole ref graph.
+    Narrow about IDENTITY, total about SHAPE. An unrelated line is never allowed
+    to answer for the ref that was asked about, and an unrelated record's id is
+    never checked for being hexadecimal - Git resolves the target past forty
+    non-hex characters and past an upper-case id. But the FILE's shape is
+    validated as a whole by :func:`_packed_records`, because Git reads it as a
+    whole: one line it cannot parse and it refuses every ref in the file. An
+    earlier draft of this reader said unrelated malformed lines are never
+    validated at all; that was measured wrong and is withdrawn.
 
     EVERY record for the requested ref is read before any answer is given. An
     earlier draft returned on the first exact name match, which does not

@@ -839,13 +839,17 @@ class RefnameGrammarTests(SubmoduleCase):
                 if not created:
                     self.skipTest(f"this filesystem cannot hold a file named {leaf!r}")
                 try:
-                    self.assertFalse(self.git_ok("check-ref-format", f"refs/heads/{leaf}"))
-                    self.assertFalse(self.git_ok("rev-parse", "HEAD") if False else False)
+                    # the oracle runs AFTER HEAD points at the planted ref, or it proves nothing
+                    self.assertFalse(self.git_ok("check-ref-format", f"refs/heads/{leaf}"),
+                                     f"git check-ref-format must reject refs/heads/{leaf!r}")
                     self.refname(f"refs/heads/{leaf}")
+                    self.assertFalse(self.git_ok("rev-parse", "HEAD"),
+                                     f"git rev-parse HEAD must refuse a HEAD naming refs/heads/{leaf!r}")
                     error = self.refusal(self.read)
                     self.assertNotIn("7" * 40, str(error), "the planted id never reaches the answer")
                 finally:
                     where.unlink()
+                    self.refname("refs/heads/main")
 
     def test_a_valid_symbolic_ref_still_resolves_after_the_tightening(self) -> None:
         head = self.oracle()
@@ -1022,11 +1026,118 @@ class PackedWholeFileTests(SubmoduleCase):
                 self.assertEqual(self.git_head(), self.head, "Git still resolves the target")
                 self.refusal(self.read)
 
+    def test_the_header_prefix_includes_the_space_after_the_colon(self) -> None:
+        """MEASURED: the trailing space is part of the spelling, and the trait list is not validated.
+
+        `# pack-refs with: ` with no traits at all resolves, and so does an
+        unknown trait - Git allows traits it does not know. But
+        `# pack-refs with:`, `# pack-refs with:peeled` and `# pack-refs with:X`
+        are each refused before the ref resolves, so a prefix without the space
+        accepted three states Git rejects.
+        """
+        self.assertEqual(fsafe.PACKED_HEADER, "# pack-refs with: ")
+        for label, header, accepted in (
+            ("canonical, several traits", "# pack-refs with: peeled fully-peeled sorted ", True),
+            ("required space, no traits", "# pack-refs with: ", True),
+            ("unknown trait", "# pack-refs with: unknown", True),
+            ("doubled space", "# pack-refs with:  peeled ", True),
+            ("no space after the colon", "# pack-refs with:", False),
+            ("trait with no space", "# pack-refs with:peeled", False),
+            ("junk with no space", "# pack-refs with:X", False),
+            ("wrong case", "# pack-refs WITH: peeled ", False),
+        ):
+            with self.subTest(case=label):
+                self.packed(f"{header}\n{self.head} {self.target}\n")
+                said = self.git_head()
+                self.assertEqual(said, self.head if accepted else "REFUSE",
+                                 f"the Git oracle changed for {header!r}")
+                if accepted:
+                    self.assertEqual(self.read(), self.head)
+                else:
+                    self.refusal(self.read)
+
+    def test_an_unterminated_final_record_is_refused(self) -> None:
+        """MEASURED: Git refuses a packed-refs file whose last line carries no LF."""
+        for label, text in (
+            ("bare record", f"{self.head} {self.target}"),
+            ("after a header", f"# pack-refs with: peeled \n{self.head} {self.target}"),
+            ("after another record", f"{self.other} {self.elsewhere}\n{self.head} {self.target}"),
+            ("after a peeled line", f"{self.head} {self.target}\n^{self.other}"),
+        ):
+            with self.subTest(case=label):
+                self.packed(text)
+                self.assertEqual(self.git_head(), "REFUSE", f"the Git oracle changed for {label}")
+                error = self.refusal(self.read)
+                self.assertIn("newline", str(error))
+        # and the terminated form still works
+        self.packed(f"{self.head} {self.target}\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_a_carriage_return_is_not_normalized_away(self) -> None:
+        """MEASURED: Git reads `<id> refs/heads/main\\r` as a binding for a DIFFERENT ref.
+
+        So it resolves `refs/heads/main` from the LF record beside it, and refuses
+        when the CRLF record is the only one. Stripping the `\\r` invented a
+        binding Git does not have.
+        """
+        for label, text, expected in (
+            ("target CRLF alone", f"{self.head} {self.target}\r\n", "REFUSE"),
+            ("header LF + target CRLF", f"# pack-refs with: peeled \n{self.head} {self.target}\r\n", "REFUSE"),
+            ("header CRLF + target CRLF", f"# pack-refs with: peeled \r\n{self.head} {self.target}\r\n", "REFUSE"),
+            ("header CRLF + target LF", f"# pack-refs with: peeled \r\n{self.head} {self.target}\n", "HEAD"),
+            ("LF record then CRLF record, same ref",
+             f"{self.head} {self.target}\n{self.other} {self.target}\r\n", "HEAD"),
+            ("CRLF record then LF record, same ref",
+             f"{self.other} {self.target}\r\n{self.head} {self.target}\n", "HEAD"),
+        ):
+            with self.subTest(case=label):
+                self.packed(text)
+                want = self.head if expected == "HEAD" else "REFUSE"
+                self.assertEqual(self.git_head(), want, f"the Git oracle changed for {label}")
+                if want == "REFUSE":
+                    self.refusal(self.read)
+                else:
+                    self.assertEqual(self.read(), self.head,
+                                     "a CRLF record names another ref; it must not shadow the LF one")
+
+    def test_a_carriage_return_separator_is_refused_and_disclosed(self) -> None:
+        """DISCLOSED: Git accepts CR as the one record separator; this reader does not.
+
+        Adding it to the separator set is the wrong trade: `\\r` would then have to
+        be both a separator and a legal tail of a ref name, and a CRLF record
+        beside a valid one would become invisible again - the exact defect the
+        separator repair closed. Refusing is fail-closed and recorded here.
+        """
+        self.assertNotIn("\r", fsafe.PACKED_SEPARATORS)
+        self.packed(f"{self.head}\r{self.target}\n")
+        self.assertEqual(self.git_head(), self.head, "Git accepts a CR separator")
+        self.refusal(self.read)
+
+    def test_a_peeled_line_follows_the_f3_oracle_not_whole_repository_validity(self) -> None:
+        """§8A: for every peeled shape, `git rev-parse HEAD` answers and so does this reader.
+
+        `git show-ref` refuses several of them, and that difference is recorded
+        rather than adopted: the frozen standard is the commit the submodule's
+        HEAD names, not whole-repository validity.
+        """
+        for label, peeled in (
+            ("valid id", f"^{self.other}"),
+            ("garbage", "^garbage"),
+            ("abbreviated", f"^{self.head[:12]}"),
+            ("over-long", f"^{(self.head * 2)[:41]}"),
+            ("valid id plus junk", f"^{self.other}junk"),
+        ):
+            with self.subTest(case=label):
+                self.packed(f"{self.head} {self.target}\n{peeled}\n")
+                self.assertEqual(self.git_head(), self.head, f"the Git oracle changed for {label}")
+                self.assertEqual(self.read(), self.head)
+
     def test_the_whole_file_grammar_is_a_named_boundary(self) -> None:
         import inspect
 
         self.assertIn("_packed_records", inspect.getsource(fsafe._packed_ref))
-        self.assertEqual(fsafe.PACKED_HEADER, "# pack-refs with:")
+        # the header's exact spelling is pinned by test_the_header_prefix_includes_the_space_after_the_colon
+        self.assertTrue(fsafe.PACKED_HEADER.startswith("# pack-refs with:"))
 
 
 class SubmoduleSha256Tests(FsafeCase):
