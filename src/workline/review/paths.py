@@ -60,6 +60,10 @@ RUNTIME_ATTR_PROBE_DIR = f"{RUNTIME_REVIEW_DIR}/attr-probe"
 #: The composition borrows this Project's objects read-only and writes its own; the tree it builds
 #: exists before K1 does, and nothing in it is this Project's repository, index, worktree or refs.
 RUNTIME_RESULTING_TREE_DIR = f"{RUNTIME_REVIEW_DIR}/resulting-tree"
+#: The isolated index files a ``review-v1-work-local-v2`` commit is built in (``F3`` §7.1.2 O-1). One per
+#: recorded commit effect, created fresh and discarded again; never the repository's real index, and a
+#: partially built one is never reused across an attempt or a resume.
+RUNTIME_WORK_INDEX_DIR = f"{RUNTIME_REVIEW_DIR}/work-index"
 
 
 def runtime_report_rel(review_task_id: str) -> str:

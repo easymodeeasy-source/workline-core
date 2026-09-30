@@ -1228,10 +1228,11 @@ class UnitBoundaryTests(unittest.TestCase):
         self.assertTrue(hasattr(gitops, "require_no_planning_transform"))
 
     def test_later_unit_machinery_is_still_absent(self) -> None:
+        """The Work persistence engine (P3 F3 Batch B) landed as its own module; none of it lives here."""
         from workline import mutation
         from workline.review.store import ReviewStore
 
-        self.assertFalse(hasattr(mutation, "WORK_COMMIT_MODE"))
+        self.assertEqual(mutation.WORK_COMMIT_MODE, "review-v1-work-local-v2")
         self.assertEqual(mutation.PLANNING_COMMIT_MODE, "review-v1-planning-local-v1")
         for name in ("CommitTreePlan", "prepared_commit_id", "compose_resulting_tree"):
             with self.subTest(name=name):

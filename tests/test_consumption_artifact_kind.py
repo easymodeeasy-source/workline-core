@@ -271,14 +271,20 @@ class GateBoundaryTests(unittest.TestCase):
             with self.subTest(writer=writer):
                 self.assertFalse(hasattr(ReviewStore, writer), f"ReviewStore.{writer} exists; Gate 3 stays unproduced")
 
-    def test_the_review_v1_work_persistence_identity_is_still_not_dispatchable(self) -> None:
-        """P3 F3 IP-1: git_commit still accepts the planning mode alone."""
+    def test_the_work_persistence_identity_is_a_separate_closed_value(self) -> None:
+        """P3 F3 IP-1 landed with the persistence engine (Batch B); this ordered-gate pin is retired.
+
+        What still holds here: the planning identity is not redefined, the Work identity is its
+        own value in a CLOSED set, and a value outside that set - the withdrawn v1 spelling
+        included - is refused. The Consumption record this unit repaired is not touched by it.
+        """
         from workline import mutation
 
         self.assertEqual(mutation.PLANNING_COMMIT_MODE, "review-v1-planning-local-v1")
-        self.assertFalse(hasattr(mutation, "WORK_COMMIT_MODE"))
+        self.assertEqual(mutation.WORK_COMMIT_MODE, "review-v1-work-local-v2")
+        self.assertEqual(mutation.COMMIT_MODES, (mutation.PLANNING_COMMIT_MODE, mutation.WORK_COMMIT_MODE))
         with self.assertRaises(ValidationError):
-            mutation._validate_planning_commit({"mode": "review-v1-work-local-v2", "paths": [], "message": "m"})
+            mutation._validate_planning_commit({"mode": "review-v1-work-local-v1", "paths": [], "message": "m"})
 
     def test_gate_1_is_preserved(self) -> None:
         """The landed Event metadata carrier still carries, and still holds only lifecycle fields as lifecycle."""

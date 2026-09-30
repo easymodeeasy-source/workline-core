@@ -740,10 +740,11 @@ class UnitBoundaryTests(unittest.TestCase):
                 self.assertNotIn(f'run_bytes("{forbidden}', source)
 
     def test_later_unit_machinery_is_still_absent(self) -> None:
+        """The persistence engine (P3 F3 Batch B) landed in its own module; the composer commits nothing."""
         from workline import mutation
         from workline.review.store import ReviewStore
 
-        self.assertFalse(hasattr(mutation, "WORK_COMMIT_MODE"))
+        self.assertEqual(mutation.WORK_COMMIT_MODE, "review-v1-work-local-v2")
         self.assertEqual(mutation.PLANNING_COMMIT_MODE, "review-v1-planning-local-v1")
         for name in ("CommitTreePlan", "prepared_commit_id", "compose_commit"):
             with self.subTest(name=name):

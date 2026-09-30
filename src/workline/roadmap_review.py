@@ -1445,21 +1445,39 @@ def _generation_commit_message(generation: int, review_run_id: str) -> str:
 
 
 def _finish_generation(store: ProjectStore, gen: Mutation) -> None:
-    """Apply a generation mutation's stage, commit it with the planning primitive, prove it persisted, complete it."""
+    """Apply a generation mutation's stage, commit it, prove it persisted, complete it.
+
+    Which persistence primitive commits it is read from the generation
+    mutation's DURABLE invocation (``F3`` §7.1.7, C3-1): a Work Review Run's
+    generation (``review_kind`` ``work-result-v1``) commits under
+    ``review-v1-work-local-v2``, and every planning kind with the planning
+    primitive exactly as before.
+    """
+    from .review import work_context, workcommit
+
     stage = gen.stage_effects(STAGE_GENERATION)
     paths = [effect["payload"]["path"] for effect in stage]
     expected = {effect["payload"]["path"]: effect["payload"]["content"].encode("utf-8") for effect in stage}
+    work = gen.invocation.get("review_kind") == work_context.REVIEW_KIND
     gen.apply()
     if not gen.has_stage(STAGE_GENERATION_COMMIT):
-        git_persistence_preflight(store, paths, paths)
-        generation = gen.invocation.get("generation")
-        gen.add_effects(STAGE_GENERATION_COMMIT, [
-            gitops.review_commit_effect(
-                store, _generation_commit_message(int(generation), str(gen.invocation.get("review_run_id"))), paths
-            )
-        ])
+        if work:
+            generation = gen.invocation.get("generation")
+            message = _generation_commit_message(int(generation), str(gen.invocation.get("review_run_id")))
+            gen.add_effects(STAGE_GENERATION_COMMIT, [workcommit.generation_commit_effect(gen, message)])
+        else:
+            git_persistence_preflight(store, paths, paths)
+            generation = gen.invocation.get("generation")
+            gen.add_effects(STAGE_GENERATION_COMMIT, [
+                gitops.review_commit_effect(
+                    store, _generation_commit_message(int(generation), str(gen.invocation.get("review_run_id"))), paths
+                )
+            ])
         gen.apply()
-    require_committed_records(store, expected)
+    if work:
+        workcommit.require_generation_persisted(gen, expected)
+    else:
+        require_committed_records(store, expected)
     gen.complete()
 
 

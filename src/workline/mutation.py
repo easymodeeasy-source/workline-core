@@ -494,7 +494,11 @@ class Mutation:
         _require_finalized_branch(self, f"recording stage {stage!r}")
         for index, record in enumerate(pending_records):
             if record["kind"] == "git_commit":
-                _require_own_bytes_committed(self, recorded + pending_records, len(recorded) + index, record)
+                _require_commit_mode_fits(self, record)
+                if _is_work_commit(record):
+                    _require_work_commit_recordable(self, recorded + pending_records, len(recorded) + index, record)
+                else:
+                    _require_own_bytes_committed(self, recorded + pending_records, len(recorded) + index, record)
         self.record["effects"] = recorded + pending_records
         self._save()
 
@@ -526,6 +530,11 @@ class Mutation:
         outcomes: list[tuple[int, str]] = []
         effects = self.record.get("effects") or []
         for position, record in enumerate(effects):
+            if _is_work_commit(record):
+                # The object-driven primitive decides its own resume from this record alone (F3 §7.1.3):
+                # never "nothing left to commit", never the branch tip.
+                outcomes.append((int(record["seq"]), _replay_work_commit(self, effects, position, record)))
+                continue
             classification = _classify_recorded(self.controller, effects, position, self.record)
             if classification == MISMATCH:
                 base_exact = record["kind"] == "git_commit" and record["payload"].get("base_exact") is True
@@ -1093,11 +1102,31 @@ def _on_recorded_branch(repo: Path, payload: dict[str, Any]) -> bool:
 #: recorded with it is staged and made with no hook, no signing and no background maintenance.
 PLANNING_COMMIT_MODE = "review-v1-planning-local-v1"
 
+#: The review-v1 WORK persistence contract (``F3`` §7.1, amendment A-7): a NEW identity because the
+#: behaviour is new - a commit tree plan committed object by object with a durable prepared-commit
+#: checkpoint (:mod:`workline.review.workcommit`), never ``git add`` / ``git commit``. The planning
+#: identity above is not redefined and keeps its exact behaviour.
+WORK_COMMIT_MODE = "review-v1-work-local-v2"
+
+#: The CLOSED set of persistence modes a recorded ``git_commit`` may name (IP-1). No mode at all is the
+#: live combined commit; any value outside this set is refused, never read as either.
+COMMIT_MODES = (PLANNING_COMMIT_MODE, WORK_COMMIT_MODE)
+
 
 def _validate_planning_commit(payload: dict[str, Any]) -> None:
-    """``mode`` only as the planning primitive; ``base_exact`` only ``true``, with that mode, a full base and a branch."""
-    if "mode" in payload and payload["mode"] != PLANNING_COMMIT_MODE:
-        raise ValidationError(f"git_commit mode must be {PLANNING_COMMIT_MODE}")
+    """``mode`` only from the closed set; ``base_exact`` only ``true``, with the planning mode, a full base and a branch.
+
+    The planning mode keeps its rules exactly. A Work-mode payload has a closed
+    shape of its own (:func:`workline.review.workcommit.validate_payload`), and
+    never carries ``base_exact``: it is base-exact by construction.
+    """
+    if "mode" in payload and payload["mode"] not in COMMIT_MODES:
+        raise ValidationError(f"git_commit mode must be one of {', '.join(COMMIT_MODES)}")
+    if payload.get("mode") == WORK_COMMIT_MODE:
+        from .review import workcommit
+
+        workcommit.validate_payload(payload)
+        return
     if "base_exact" in payload and not (
         payload["base_exact"] is True
         and payload.get("mode") == PLANNING_COMMIT_MODE
@@ -1108,6 +1137,74 @@ def _validate_planning_commit(payload: dict[str, Any]) -> None:
         raise ValidationError(
             "git_commit base_exact is only true, with the planning commit mode, a full base_head and a branch"
         )
+
+
+def _is_work_commit(record: dict[str, Any]) -> bool:
+    """Whether ``record`` is a ``git_commit`` recorded under the Work persistence contract."""
+    payload = record.get("payload")
+    return record.get("kind") == "git_commit" and isinstance(payload, dict) and payload.get("mode") == WORK_COMMIT_MODE
+
+
+def _commits_under_work_contract(mutation: Mutation) -> bool:
+    """Whether every commit ``mutation`` makes is a Work-mode commit, by its durable invocation alone.
+
+    A review-v1 Work START mutation (the F1 marker pair), and a generation
+    mutation whose invocation names the Work Review kind (``F3`` §7.1.7, C3-1),
+    commit only under ``review-v1-work-local-v2``; every other mutation never
+    does. START markers that are partial, unknown or contradictory select
+    neither: nothing is committed under them at all.
+    """
+    from .review import work_invocation
+    from .review.work_context import REVIEW_KIND
+
+    invocation = mutation.invocation
+    operation = invocation.get("operation")
+    if operation == _GENERATION_OPERATION:
+        return invocation.get("review_kind") == REVIEW_KIND
+    if operation == work_invocation.OPERATION:
+        kind = work_invocation.classify(invocation)
+        if kind == work_invocation.INVALID:
+            raise ValidationError(
+                f"mutation {mutation.id}'s durable invocation carries partial, unknown or contradictory review-v1 "
+                "markers, so no commit contract is selected and nothing is recorded"
+            )
+        return kind == work_invocation.WORK
+    return False
+
+
+def _require_commit_mode_fits(mutation: Mutation, record: dict[str, Any]) -> None:
+    """A Work mutation commits only in the Work mode, and nothing else commits in it (IP-1, IP-23)."""
+    work = _commits_under_work_contract(mutation)
+    if work and not _is_work_commit(record):
+        raise ValidationError(
+            f"mutation {mutation.id} is a review-v1 Work mutation, which commits only under {WORK_COMMIT_MODE}; a "
+            "git_commit with no mode or with the planning mode is not recorded in it"
+        )
+    if _is_work_commit(record) and not work:
+        raise ValidationError(
+            f"{WORK_COMMIT_MODE} is the review-v1 Work persistence contract, and mutation {mutation.id} is not a "
+            "review-v1 Work mutation by its durable invocation"
+        )
+
+
+def _require_work_commit_recordable(
+    mutation: Mutation, effects: list[dict[str, Any]], position: int, record: dict[str, Any]
+) -> None:
+    from .review import workcommit
+
+    workcommit.require_recordable(mutation, effects, position, record)
+
+
+def _replay_work_commit(mutation: Mutation, effects: list[dict[str, Any]], position: int, record: dict[str, Any]) -> str:
+    from .review import workcommit
+
+    return workcommit.replay(mutation, effects, position, record)
+
+
+def _classify_work_commit(store: ProjectStore, record: dict[str, Any]) -> str:
+    from .review import workcommit
+
+    return workcommit.classify(store, record)
 
 
 def _head_advanced_independently(repo: Path, payload: dict[str, Any], head: str) -> bool:
@@ -2265,6 +2362,8 @@ class MutationController:
                     return MATCHING if event.to_record() == rec else MISMATCH
             return UNAPPLIED
         if kind == "git_commit":
+            if payload.get("mode") == WORK_COMMIT_MODE:
+                return _classify_work_commit(self.store, record)
             return self._classify_commit(payload, record.get("applied") is True, record.get(_MADE_COMMIT, _NO_MADE_COMMIT))
         if kind == "git_push":
             # what a push publishes is named only by the record it was recorded in (:func:`_classify_recorded`)

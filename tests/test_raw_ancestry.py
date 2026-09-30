@@ -801,12 +801,14 @@ class UnitBoundaryTests(unittest.TestCase):
         from workline.review import records
         from workline.review.store import ReviewStore
 
-        # The attribute foundation landed as its own unit; what must stay absent here is any
-        # ancestry involvement in it, and every later unit's machinery.
+        # The attribute foundation landed as its own unit, and the persistence engine (P3 F3
+        # Batch B) as its own module that CONSUMES this reader; what must stay absent here is any
+        # ancestry involvement in either, and Gate 3.
         self.assertFalse(hasattr(ancestry, "attribute_configuration_arguments"))
-        self.assertFalse(hasattr(mutation, "WORK_COMMIT_MODE"))
+        self.assertEqual(mutation.WORK_COMMIT_MODE, "review-v1-work-local-v2")
         self.assertEqual(mutation.PLANNING_COMMIT_MODE, "review-v1-planning-local-v1")
         self.assertFalse(hasattr(ancestry, "CommitTreePlan"))
+        self.assertFalse(hasattr(ancestry, "replay"))
         self.assertTrue(hasattr(records, "WorkTerminalActivation"))
         for writer in ("write_activation", "create_activation", "activate", "produce_activation"):
             with self.subTest(writer=writer):

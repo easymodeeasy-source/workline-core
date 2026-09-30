@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
@@ -1292,21 +1293,36 @@ class UnitBoundaryTests(unittest.TestCase):
                     self.assertNotIn(api, text, f"{name} would make {api} live outside the ownership boundary")
 
     def test_reserved_ownership_and_the_bound_witness_live_in_their_own_module(self) -> None:
+        """The witness is DEFINED in the ownership boundary alone; a consumer names it only through it.
+
+        The persistence engine (P3 F3 Batch B) plans a result commit from the bound witnesses, so a
+        textual "never named elsewhere" pin cannot hold. What must hold is that no other module
+        defines a witness, spells the reserved reason, or imports the class out of its module.
+        """
         for name, text in self.sources().items():
-            for owned in ("review_reserved_namespace", "OwnershipWitness", "ownership_witness",
+            if name == "review/ownership.py":
+                continue
+            for owned in ("review_reserved_namespace", "class OwnershipWitness", "ownership_witness",
                           "declare_own_content_witness"):
-                if name == "review/ownership.py":
-                    continue
                 with self.subTest(module=name, owned=owned):
                     self.assertNotIn(owned, text, f"{name} names {owned}, which the ownership boundary owns")
+            with self.subTest(module=name, consumed="OwnershipWitness"):
+                unqualified = re.findall(r"(?<![\w.])OwnershipWitness\b", text)
+                self.assertEqual(unqualified, [], f"{name} must name the witness as ownership.OwnershipWitness")
         self.assertIn("review_reserved_namespace", self.sources()["review/ownership.py"])
-        self.assertIn("OwnershipWitness", self.sources()["review/ownership.py"])
+        self.assertIn("class OwnershipWitness", self.sources()["review/ownership.py"])
 
-    def test_the_persistence_engine_has_not_arrived_through_the_ownership_boundary(self) -> None:
-        joined = "\n".join(self.sources().values()) + self.fsafe.read_text(encoding="utf-8")
-        for absent in ("CommitTreePlan", "prepared_commit_id", "WORK_COMMIT_MODE"):
-            with self.subTest(absent=absent):
-                self.assertNotIn(absent, joined)
+    def test_the_persistence_engine_did_not_arrive_through_the_ownership_boundary(self) -> None:
+        """The engine landed in P3 F3 Batch B as its own module; neither fsafe nor the ownership boundary holds it."""
+        sources = self.sources()
+        owners = {"CommitTreePlan": {"review/workcommit.py"}, "prepared_commit_id": {"review/workcommit.py"},
+                  "WORK_COMMIT_MODE": {"review/workcommit.py", "mutation.py"}}
+        for name, allowed in owners.items():
+            for module in allowed:
+                self.assertIn(name, sources[module], f"{module} owns {name}")
+            with self.subTest(name=name):
+                self.assertNotIn(name, self.fsafe.read_text(encoding="utf-8"))
+                self.assertNotIn(name, sources["review/ownership.py"])
 
     def test_fsafe_still_decides_nothing_about_review_semantics(self) -> None:
         text = self.fsafe.read_text(encoding="utf-8")

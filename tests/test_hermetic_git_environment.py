@@ -467,15 +467,27 @@ class GateBoundaryTests(unittest.TestCase):
                 self.assertFalse(hasattr(hermetic, name))
                 self.assertTrue(hasattr(attributes, name))
 
-    def test_the_review_v1_work_persistence_identity_is_still_not_dispatchable(self) -> None:
+    def test_the_work_persistence_engine_lives_outside_this_unit(self) -> None:
+        """P3 F3 Batch B made the Work identity dispatchable; this ordered-gate pin is retired.
+
+        The separation that still holds: the engine is its own module built ON the class B
+        authority, and the class B authority learned no commit machinery of its own - only the
+        generic writing runner every class B write goes through.
+        """
         from workline import mutation
+        from workline.errors import ValidationError
+        from workline.review import workcommit
 
         self.assertEqual(mutation.PLANNING_COMMIT_MODE, "review-v1-planning-local-v1")
-        self.assertFalse(hasattr(mutation, "WORK_COMMIT_MODE"))
-        from workline.errors import ValidationError
-
+        self.assertEqual(mutation.WORK_COMMIT_MODE, "review-v1-work-local-v2")
+        self.assertTrue(hasattr(workcommit, "CommitTreePlan"))
+        self.assertTrue(hasattr(hermetic.HermeticGit, "execute"))
+        for name in ("CommitTreePlan", "build", "replay", "refresh_real_index", "PREPARED_COMMIT"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(hermetic, name))
+                self.assertFalse(hasattr(hermetic.HermeticGit, name))
         with self.assertRaises(ValidationError):
-            mutation._validate_planning_commit({"mode": "review-v1-work-local-v2", "paths": [], "message": "m"})
+            mutation._validate_planning_commit({"mode": "review-v1-work-local-v1", "paths": [], "message": "m"})
 
     def test_gate_3_activation_is_still_not_produced(self) -> None:
         from workline.review import records

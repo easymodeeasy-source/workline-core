@@ -408,6 +408,29 @@ class HermeticGit:
             self.root, *self.configuration_arguments(), *args, input=input, env=self.environment()
         )
 
+    def execute(
+        self,
+        *args: str,
+        input: bytes | None = None,
+        index_file: str | None = None,
+        date: str | None = None,
+    ) -> gitcmd.GitBytes:
+        """Run one class B Git command that may WRITE - an object, an isolated index, a commit - keeping bytes.
+
+        The same envelope as :meth:`run` and :meth:`run_bytes`, from the same two
+        methods, and nothing added to it but what the one command names:
+        ``GIT_INDEX_FILE`` only when ``index_file`` is given (so no command
+        touches an index by accident), and the captured identity with its date
+        only when ``date`` is given (the one command that writes a commit
+        object). ``input`` is fed to standard input exactly as given.
+        """
+        environment = (
+            self.environment(index_file=index_file)
+            if date is None
+            else self.commit_environment(date, index_file=index_file)
+        )
+        return gitcmd.run_git_bytes(self.root, *self.configuration_arguments(), *args, input=input, env=environment)
+
 
 def _promisor_remotes(hermetic: "HermeticGit") -> tuple[str, ...]:
     """The Project's promisor-configured remotes, read at entry so the condition is visible (M-54).
