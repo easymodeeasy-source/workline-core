@@ -772,6 +772,32 @@ GITDIR_PREFIX = "gitdir:"
 #: What a symbolic HEAD or ref names another ref with.
 SYMREF_PREFIX = "ref:"
 
+#: Every character Git refuses anywhere in a ref name, measured against
+#: ``git check-ref-format`` on Git 2.54: the ASCII control range and DEL, a
+#: space, and the six characters it reserves for revision syntax. Characters it
+#: ACCEPTS are deliberately not listed - ``]``, ``{``, ``}``, ``%``, ``;``,
+#: ``|``, ``<``, ``>``, quotes, ``&``, ``$``, ``#``, ``+``, ``=``, ``!``, ``(``,
+#: ``,`` and ``@`` all appear in names Git takes, and refusing them would refuse
+#: a submodule HEAD Git resolves.
+_REFNAME_FORBIDDEN = frozenset(" ~^:?*[\\" + "".join(chr(code) for code in range(0x20)) + "\x7f")
+
+#: The single character Git accepts between a packed record's id and its ref name.
+#: Measured: exactly ONE of these. Two spaces, space+TAB, TAB+space and no
+#: separator at all each make Git refuse the file, and TAB, vertical tab and form
+#: feed each work exactly as a space does - which is why a space-only parser
+#: silently loses a binding Git honours.
+PACKED_SEPARATORS = " \t\v\f"
+
+#: The only ``#`` line Git tolerates, and only as the FIRST line. Measured: an
+#: arbitrary ``# comment`` makes Git refuse the whole file even at the top, so
+#: ``#`` is not a comment introducer here and this reader must not treat it as
+#: one; and a header anywhere but the first line is a malformed file - in a
+#: submodule git directory ``git rev-parse HEAD`` refuses it outright, while in a
+#: plain repository ``rev-parse`` resolves the target early and ``git show-ref``
+#: refuses. ``rev-parse HEAD`` alone is therefore not a stable oracle for whole-file
+#: validity, and this reader takes the answer both commands agree on.
+PACKED_HEADER = "# pack-refs with:"
+
 #: A full object id, and nothing shorter, longer or upper-case. ``fullmatch`` is used
 #: everywhere below: ``$`` alone would also match before a final newline, and a digest
 #: with a newline after it is not a digest.
@@ -932,14 +958,34 @@ def _require_refname(refname: str, described: str) -> list[str]:
             f"{described} names {refname!r}; a colon is not part of a Git ref name, and on NTFS it addresses "
             "an alternate data stream of the ref beside it - a hidden object no listing of the namespace shows"
         )
-    if "\\" in refname or "\0" in refname:
-        raise _refuse(f"{described} names {refname!r}, which holds a backslash or a NUL")
-    if refname.startswith("/") or ":" in refname.split("/")[0]:
-        raise _refuse(f"{described} names the absolute ref {refname!r}")
+    for character in refname:
+        if character in _REFNAME_FORBIDDEN:
+            raise _refuse(
+                f"{described} names {refname!r}, which holds {character!r}; Git refuses that character in a "
+                "ref name, so no ref of that name exists for this reader to report"
+            )
+    if not refname.startswith("refs/"):
+        # MEASURED, and the one place this reader must be stricter than
+        # `check-ref-format`: that command accepts `heads/mainx`, but a symbolic
+        # HEAD naming it does NOT resolve - `git rev-parse HEAD` refuses. The
+        # question here is only ever what HEAD names.
+        raise _refuse(f"{described} names {refname!r}, which is not under 'refs/', so a symbolic HEAD cannot name it")
+    if refname.endswith("."):
+        raise _refuse(f"{described} names {refname!r}, which ends with '.'")
+    if ".." in refname:
+        raise _refuse(f"{described} names {refname!r}, which holds '..'")
+    if "@{" in refname:
+        raise _refuse(f"{described} names {refname!r}, which holds '@{{'")
     components = refname.split("/")
+    if len(components) < 2:
+        raise _refuse(f"{described} names {refname!r}, which is not a two-component ref name")
     for component in components:
-        if component in ("", ".", ".."):
-            raise _refuse(f"{described} names {refname!r}, which would leave the git directory")
+        if component == "":
+            raise _refuse(f"{described} names {refname!r}, which holds an empty component")
+        if component.startswith("."):
+            raise _refuse(f"{described} names {refname!r}, whose component {component!r} begins with '.'")
+        if component.endswith(".lock"):
+            raise _refuse(f"{described} names {refname!r}, whose component {component!r} ends with '.lock'")
         _require_component(component)
     return components
 
@@ -954,6 +1000,65 @@ def _loose_ref(gitdir: SafeDirectory, components: list[str], opened: list[SafeDi
         opened.append(found)
         directory = found
     return directory.read_file(components[-1])
+
+
+def _packed_records(text: str, described: str) -> list[tuple[str, str]]:
+    """Every ``(id token, ref name)`` the file declares, or a refusal for the WHOLE file.
+
+    Git reads ``packed-refs`` as a whole: a line it cannot parse makes it refuse
+    every ref in the file, not only the malformed one. Measured, and this is why
+    "unrelated lines are never validated" could not stand - with a garbage line,
+    an abbreviated id, an id with no ref, a ref with no id, an empty line, a
+    stray ``#`` comment or a peeled line before any record, ``git rev-parse
+    HEAD`` refuses outright while a target-only parser still produced an id.
+
+    The grammar is deliberately the narrow shape Git's accepted cases share, and
+    an id TOKEN is not validated as hexadecimal here: measured, Git resolves a
+    ref from a file whose OTHER record holds forty non-hex characters or an
+    upper-case id, so refusing those would refuse a state Git answers. The
+    token of the ref actually being asked about is validated by the caller, as
+    an identity rather than a shape.
+
+    Known and deliberate: a 39- or 41-character unrelated token is refused here
+    although Git resolves past it. Those are not object ids in any spelling, the
+    reason Git tolerates them is not documented behaviour to reproduce, and
+    guessing at it would be worse than failing closed.
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]  # the final newline terminates the last record; it is not an empty line
+    records: list[tuple[str, str]] = []
+    after_record = False
+    for number, line in enumerate(lines, start=1):
+        where = f"{described} line {number}"
+        line = line.rstrip("\r")
+        if line.startswith("#"):
+            if number != 1 or not line.startswith(PACKED_HEADER):
+                raise _refuse(
+                    f"{where} is {line!r}; the only '#' line Git accepts is its own {PACKED_HEADER!r} header, "
+                    "and only as the first line"
+                )
+            continue
+        if line.startswith("^"):
+            if not after_record:
+                raise _refuse(f"{where} is a peeled line with no record before it")
+            after_record = False
+            continue
+        if not line:
+            raise _refuse(f"{where} is empty; Git refuses the whole file for an empty line")
+        cut = min((line.find(character) for character in PACKED_SEPARATORS if character in line), default=-1)
+        if cut <= 0:
+            raise _refuse(f"{where} is {line!r}, which is not an id followed by a ref name")
+        token, name = line[:cut], line[cut + 1:]
+        if len(token) not in (40, 64):
+            raise _refuse(
+                f"{where} names the id {token!r}, which is {len(token)} characters; a packed record's id is 40 or 64"
+            )
+        if not name or name[0] in PACKED_SEPARATORS:
+            raise _refuse(f"{where} is {line!r}, whose ref name is empty or begins with a separator")
+        records.append((token, name))
+        after_record = True
+    return records
 
 
 def _packed_ref(gitdir: SafeDirectory, refname: str) -> str:
@@ -991,16 +1096,11 @@ def _packed_ref(gitdir: SafeDirectory, refname: str) -> str:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise _refuse(f"{gitdir.described}/packed-refs is not UTF-8: {exc}") from exc
-    bindings: list[str] = []
-    for line in text.split("\n"):
-        line = line.rstrip("\r")
-        if not line or line.startswith("#") or line.startswith("^"):
-            continue
-        oid, separator, name = line.partition(" ")
-        if not separator or name != refname:
-            continue
-        # a malformed binding for the ref being asked about is a refusal, never a record to skip
-        bindings.append(_require_oid(oid, f"the packed-refs record for {refname}"))
+    bindings = [
+        _require_oid(token, f"the packed-refs record for {refname}")
+        for token, name in _packed_records(text, f"{gitdir.described}/packed-refs")
+        if name == refname
+    ]
     if not bindings:
         raise _refuse(f"{gitdir.described}/packed-refs does not bind {refname!r}")
     unique = set(bindings)

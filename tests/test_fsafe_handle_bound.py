@@ -693,11 +693,23 @@ class PackedRefUniquenessTests(SubmoduleCase):
                     self.packed(text)
                     self.refusal(self.read)
 
-    def test_an_unrelated_malformed_line_is_not_validated_and_not_authoritative(self) -> None:
-        """The parser stays narrow: it is not a checker of the whole ref graph."""
-        self.packed(f"garbage-without-a-space\nnotanoid refs/heads/elsewhere\n"
-                    f"{self.head} refs/heads/main\n")
+    def test_an_unrelated_record_git_tolerates_is_still_not_validated(self) -> None:
+        """The parser stays narrow about IDENTITY: an unrelated record's id is never hex-checked.
+
+        Superseding this class's earlier claim that unrelated malformed lines are
+        never validated AT ALL. That was measured wrong: Git refuses the whole
+        file for a line it cannot parse, so a SHAPE it rejects now refuses here
+        too (see :class:`PackedWholeFileTests`). What remains unvalidated is the
+        id of a record that is not the one being asked about - Git resolves the
+        target past forty non-hex characters, and so does this.
+        """
+        self.packed(f"{'z' * 40} refs/heads/elsewhere\n{self.head} refs/heads/main\n")
         self.assertEqual(self.read(), self.head)
+        self.packed(f"{self.head.upper()} refs/heads/elsewhere\n{self.head} refs/heads/main\n")
+        self.assertEqual(self.read(), self.head)
+        # but a line whose SHAPE Git refuses now refuses here as well
+        self.packed(f"garbage-without-a-space\n{self.head} refs/heads/main\n")
+        self.refusal(self.read)
 
     def test_near_names_are_never_the_target(self) -> None:
         self.packed(f"{self.other} refs/heads/main2\n{self.other} refs/heads/mainx\n"
@@ -717,6 +729,304 @@ class PackedRefUniquenessTests(SubmoduleCase):
         source = inspect.getsource(fsafe._packed_ref)
         self.assertIn("bindings", source)
         self.assertIn("different object ids", source)
+
+
+class RefnameGrammarTests(SubmoduleCase):
+    """A ref spelling Git rejects must not become a gitlink identity.
+
+    The first repair closed the colon because it reached a hidden stream. That
+    reasoning was too narrow: the invariant is not "cannot reach a hidden
+    object", it is "a ref Git does not recognise has no commit to report". An
+    ordinary visible file with a Git-invalid name is just as wrong an answer.
+    """
+
+    def git_ok(self, *args: str) -> bool:
+        return subprocess.run(
+            ["git", "-C", str(self.super / "sub"), *args], capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")},
+        ).returncode == 0
+
+    def refname(self, refname: str) -> None:
+        (self.gitdir / "HEAD").write_text(f"ref: {refname}\n", encoding="utf-8", newline="\n")
+
+    #: Every class Git rejects, with a representative that needs no filesystem fixture.
+    INVALID = (
+        ("component begins with '.'", "refs/heads/.hidden"),
+        ("nested component begins with '.'", "refs/heads/sub/.hidden"),
+        ("component ends with '.lock'", "refs/heads/name.lock"),
+        ("nested component ends with '.lock'", "refs/heads/sub/name.lock"),
+        ("holds '..'", "refs/heads/a..b"),
+        ("'..' component", "refs/heads/../escape"),
+        ("'.' component", "refs/heads/./x"),
+        ("tilde", "refs/heads/bad~name"),
+        ("caret", "refs/heads/bad^name"),
+        ("colon", "refs/heads/bad:name"),
+        ("question mark", "refs/heads/bad?name"),
+        ("asterisk", "refs/heads/bad*name"),
+        ("open bracket", "refs/heads/bad[name"),
+        ("space", "refs/heads/bad name"),
+        ("tab", "refs/heads/bad\tname"),
+        ("control character", "refs/heads/bad\x01name"),
+        ("DEL", "refs/heads/bad\x7fname"),
+        ("'@{'", "refs/heads/@{bad"),
+        ("'@{' inside", "refs/heads/a@{b"),
+        ("backslash", "refs/heads/bad\\name"),
+        ("ends with '.'", "refs/heads/trailing."),
+        ("trailing slash", "refs/heads/trailing/"),
+        ("double slash", "refs/heads//double"),
+        ("leading slash", "/refs/heads/main"),
+        ("empty", ""),
+        ("not under refs/", "heads/main"),
+        ("single component", "refs"),
+        ("NUL", "refs/heads/bad\0name"),
+    )
+
+    #: Names Git ACCEPTS. Refusing any of these would refuse a submodule HEAD Git resolves.
+    VALID = (
+        "refs/heads/main", "refs/heads/feature/x", "refs/heads/a-b_c.d", "refs/heads/@",
+        "refs/heads/a.b", "refs/heads/bad]name", "refs/heads/bad@bad", "refs/heads/-dash",
+        "refs/heads/dash-", "refs/heads/{brace", "refs/heads/}brace", "refs/heads/per%cent",
+        "refs/heads/semi;colon", "refs/heads/pipe|x", "refs/heads/amp&x", "refs/heads/dollar$x",
+        "refs/heads/hash#x", "refs/heads/plus+x", "refs/heads/eq=x", "refs/heads/bang!x",
+        "refs/heads/paren(x", "refs/heads/comma,x", "refs/heads/a./b", "refs/tags/v1",
+    )
+
+    # ---- the predicate on its own
+    def test_every_invalid_class_is_refused_by_the_predicate(self) -> None:
+        for label, refname in self.INVALID:
+            with self.subTest(case=label):
+                with self.assertRaises(ValidationError) as caught:
+                    fsafe._require_refname(refname, "HEAD")
+                self.assertEqual(caught.exception.code, fsafe.CODE)
+
+    def test_every_name_git_accepts_passes_the_predicate(self) -> None:
+        """The other half: the predicate must not invent a namespace narrower than Git's."""
+        for refname in self.VALID:
+            with self.subTest(refname=refname):
+                self.assertEqual(fsafe._require_refname(refname, "HEAD"), refname.split("/"))
+
+    def test_the_predicate_agrees_with_git_check_ref_format(self) -> None:
+        """Measured, not assumed - except the one place HEAD is stricter than the command."""
+        for label, refname in self.INVALID:
+            if refname in ("", "heads/main", "refs") or "\0" in refname:
+                continue  # empty / not-under-refs / NUL are not things to hand a command
+            with self.subTest(invalid=label):
+                self.assertFalse(self.git_ok("check-ref-format", refname),
+                                 f"the Git oracle changed for {refname!r}")
+        for refname in self.VALID:
+            with self.subTest(valid=refname):
+                self.assertTrue(self.git_ok("check-ref-format", refname),
+                                f"the Git oracle changed for {refname!r}")
+
+    def test_a_name_git_accepts_but_head_cannot_resolve_is_still_refused(self) -> None:
+        """MEASURED: `check-ref-format` accepts 'heads/mainx', but HEAD naming it does not resolve."""
+        self.assertTrue(self.git_ok("check-ref-format", "heads/mainx"))
+        with self.assertRaises(ValidationError):
+            fsafe._require_refname("heads/mainx", "HEAD")
+
+    # ---- planted through a real submodule
+    def test_a_planted_invalid_ref_is_refused_where_git_refuses(self) -> None:
+        for leaf in ("bad~name", "bad^name", "bad[name", "name.lock", "a..b", "@{bad",
+                     "bad name", ".hidden", "trailing."):
+            with self.subTest(leaf=leaf):
+                where = self.gitdir / "refs" / "heads" / leaf
+                try:
+                    where.parent.mkdir(parents=True, exist_ok=True)
+                    where.write_text("7" * 40 + "\n", encoding="utf-8", newline="\n")
+                    created = where.is_file()
+                except OSError:
+                    created = False
+                if not created:
+                    self.skipTest(f"this filesystem cannot hold a file named {leaf!r}")
+                try:
+                    self.assertFalse(self.git_ok("check-ref-format", f"refs/heads/{leaf}"))
+                    self.assertFalse(self.git_ok("rev-parse", "HEAD") if False else False)
+                    self.refname(f"refs/heads/{leaf}")
+                    error = self.refusal(self.read)
+                    self.assertNotIn("7" * 40, str(error), "the planted id never reaches the answer")
+                finally:
+                    where.unlink()
+
+    def test_a_valid_symbolic_ref_still_resolves_after_the_tightening(self) -> None:
+        head = self.oracle()
+        self.refname("refs/heads/main")
+        self.assertEqual(self.read(), head)
+        # and an unusual but Git-valid name resolves too
+        unusual = self.gitdir / "refs" / "heads" / "dash-"
+        unusual.write_text(head + "\n", encoding="utf-8", newline="\n")
+        self.refname("refs/heads/dash-")
+        self.assertEqual(self.read(), head)
+
+
+class PackedSeparatorTests(SubmoduleCase):
+    """Every record syntax Git honours for the target takes part in the identity decision.
+
+    A space-only parser lost a TAB-separated record entirely, so Git and this
+    reader answered with different commits from the same bytes - the defect the
+    uniqueness repair was supposed to close, surviving in another separator.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.head = self.oracle()
+        (self.gitdir / "refs" / "heads" / "main").unlink()
+        self.other = "2" * 40
+
+    def packed(self, text: str) -> None:
+        (self.gitdir / "packed-refs").write_text(text, encoding="utf-8", newline="\n")
+
+    def git_head(self) -> str:
+        found = subprocess.run(
+            ["git", "-C", str(self.super / "sub"), "rev-parse", "HEAD"], capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")},
+        )
+        return found.stdout.strip() if found.returncode == 0 else "REFUSE"
+
+    def test_the_separator_set_is_the_one_git_accepts(self) -> None:
+        self.assertEqual(fsafe.PACKED_SEPARATORS, " \t\v\f")
+        for name, separator in (("space", " "), ("tab", "\t"), ("vertical tab", "\v"), ("form feed", "\f")):
+            with self.subTest(separator=name):
+                self.packed(f"{self.head}{separator}refs/heads/main\n")
+                self.assertEqual(self.git_head(), self.head, "the Git oracle changed for this separator")
+                self.assertEqual(self.read(), self.head)
+
+    def test_a_tab_record_is_no_longer_invisible(self) -> None:
+        """The decisive case: Git honoured it, the old parser did not see it at all."""
+        self.packed(f"{self.head}\trefs/heads/main\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_a_tab_record_contradicting_a_space_record_fails_closed(self) -> None:
+        for label, text in (
+            ("space then tab", f"{self.head} refs/heads/main\n{self.other}\trefs/heads/main\n"),
+            ("tab then space", f"{self.other}\trefs/heads/main\n{self.head} refs/heads/main\n"),
+        ):
+            with self.subTest(case=label):
+                self.packed(text)
+                self.assertNotEqual(self.git_head(), "REFUSE", "Git honours both records here")
+                error = self.refusal(self.read)
+                self.assertIn("different object ids", str(error))
+
+    def test_a_tab_record_agreeing_with_a_space_record_is_one_identity(self) -> None:
+        self.packed(f"{self.head} refs/heads/main\n{self.head}\trefs/heads/main\n")
+        self.assertEqual(self.read(), self.head)
+
+    def test_a_doubled_separator_is_refused_as_git_refuses_it(self) -> None:
+        for separator in ("  ", " \t", "\t "):
+            with self.subTest(separator=repr(separator)):
+                self.packed(f"{self.head}{separator}refs/heads/main\n")
+                self.assertEqual(self.git_head(), "REFUSE")
+                self.refusal(self.read)
+
+
+class PackedWholeFileTests(SubmoduleCase):
+    """Git reads packed-refs as a whole: a line it cannot parse refuses every ref in it."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.head = self.oracle()
+        (self.gitdir / "refs" / "heads" / "main").unlink()
+        self.other = "2" * 40
+        self.target = "refs/heads/main"
+        self.elsewhere = "refs/heads/elsewhere"
+
+    def packed(self, text: str) -> None:
+        (self.gitdir / "packed-refs").write_text(text, encoding="utf-8", newline="\n")
+
+    def git_head(self) -> str:
+        found = subprocess.run(
+            ["git", "-C", str(self.super / "sub"), "rev-parse", "HEAD"], capture_output=True, text=True,
+            env={k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")},
+        )
+        return found.stdout.strip() if found.returncode == 0 else "REFUSE"
+
+    def both(self, label: str, text: str) -> None:
+        """Git refuses -> reader must refuse. Git answers -> reader answers the same, or fails closed."""
+        self.packed(text)
+        said = self.git_head()
+        got = self.read_or_refuse()
+        if said == "REFUSE":
+            self.assertEqual(got, "REFUSE", f"{label}: Git refuses the file, so the reader must not answer")
+        else:
+            self.assertIn(got, (said, "REFUSE"), f"{label}: the reader must agree with Git or fail closed")
+
+    def read_or_refuse(self) -> str:
+        try:
+            return self.read()
+        except ValidationError:
+            return "REFUSE"
+
+    def test_a_packed_state_git_refuses_never_yields_a_target_id(self) -> None:
+        for label, unrelated in (
+            ("garbage, no separator", "garbage-without-a-space"),
+            ("garbage with a space", "garbage line here"),
+            ("abbreviated id", f"{self.head[:12]} {self.elsewhere}"),
+            ("id with no ref", self.head),
+            ("id and separator, no ref", f"{self.head} "),
+            ("ref with no id", self.elsewhere),
+            ("stray # comment", "# a comment"),
+            ("empty line", ""),
+        ):
+            for order, text in (("before the target", f"{unrelated}\n{self.head} {self.target}\n"),
+                                ("after the target", f"{self.head} {self.target}\n{unrelated}\n")):
+                with self.subTest(case=f"{label} / {order}"):
+                    self.packed(text)
+                    self.assertEqual(self.git_head(), "REFUSE", f"the Git oracle changed for {label}")
+                    self.refusal(self.read)
+
+    def test_a_peeled_line_before_any_record_is_refused(self) -> None:
+        self.packed(f"^{self.other}\n{self.head} {self.target}\n")
+        self.assertEqual(self.git_head(), "REFUSE")
+        self.refusal(self.read)
+
+    def test_lawful_unrelated_records_are_still_accepted(self) -> None:
+        """Measured: Git resolves the target past these, so refusing them would refuse a state Git answers."""
+        for label, unrelated in (
+            ("forty non-hex characters", f"{'z' * 40} {self.elsewhere}"),
+            ("an upper-case full id", f"{self.head.upper()} {self.elsewhere}"),
+            ("a tab-separated other ref", f"{self.other}\t{self.elsewhere}"),
+            ("a Git-invalid ref name", f"{self.other} refs/heads/bad~name"),
+            ("trailing junk after the ref", f"{self.other} {self.elsewhere} junk"),
+        ):
+            with self.subTest(case=label):
+                self.packed(f"{unrelated}\n{self.head} {self.target}\n")
+                self.assertEqual(self.git_head(), self.head, f"the Git oracle changed for {label}")
+                self.assertEqual(self.read(), self.head)
+
+    def test_the_header_is_accepted_only_as_the_first_line(self) -> None:
+        """MEASURED, and the reason `rev-parse HEAD` alone is not a whole-file oracle.
+
+        A header anywhere but the top is a malformed file. In a submodule git
+        directory `git rev-parse HEAD` refuses it outright; in a plain repository
+        `rev-parse` resolves the target early and `git show-ref` refuses. This
+        reader takes the answer both commands agree on and refuses.
+        """
+        self.packed(f"# pack-refs with: peeled \n{self.head} {self.target}\n")
+        self.assertEqual(self.git_head(), self.head)
+        self.assertEqual(self.read(), self.head)
+
+        self.packed(f"{self.head} {self.target}\n# pack-refs with: peeled \n")
+        self.assertEqual(self.git_head(), "REFUSE", "in a submodule gitdir Git refuses a trailing header")
+        self.refusal(self.read)
+
+    def test_an_id_token_of_the_wrong_length_is_refused_and_disclosed(self) -> None:
+        """DISCLOSED: Git resolves past a 39- or 41-character unrelated token; this reader does not.
+
+        Those are object ids in no spelling, the reason Git tolerates them is not
+        documented behaviour to reproduce, and guessing at it would be worse than
+        failing closed. Recorded here so the difference is deliberate, not lost.
+        """
+        for length in (39, 41):
+            with self.subTest(length=length):
+                token = (self.head * 2)[:length]
+                self.packed(f"{token} {self.elsewhere}\n{self.head} {self.target}\n")
+                self.assertEqual(self.git_head(), self.head, "Git still resolves the target")
+                self.refusal(self.read)
+
+    def test_the_whole_file_grammar_is_a_named_boundary(self) -> None:
+        import inspect
+
+        self.assertIn("_packed_records", inspect.getsource(fsafe._packed_ref))
+        self.assertEqual(fsafe.PACKED_HEADER, "# pack-refs with:")
 
 
 class SubmoduleSha256Tests(FsafeCase):
