@@ -1184,9 +1184,24 @@ def declare_own_content(mutation: Mutation, paths: "Iterable[str]") -> None:
 
 
 def _own_content(mutation: Mutation) -> dict[str, str]:
+    """The legacy own-content digests :func:`declare_own_content` recorded, and nothing else.
+
+    A bound ownership witness (``workline.review.ownership``) is the review-v1
+    Work contract's form of the same note, and it is never read as a digest:
+    passing over it here would leave its path unaccounted for, and on a record
+    holding nothing else that reads as "recorded before a mutation recorded
+    what it writes" - an unowned change committed as the operation's own. So a
+    note holding one is refused rather than filtered.
+    """
     declared = mutation.note(_OWN_CONTENT)
     if not isinstance(declared, dict):
         return {}
+    if any(isinstance(value, dict) for value in declared.values()):
+        raise ReconcileRequired(
+            f"mutation {mutation.id} records a bound ownership witness where only an own-content digest is read; "
+            "the witness form belongs to the review-v1 Work contract and is never read as a digest, so nothing is "
+            "staged, committed or pushed: reconcile required"
+        )
     return {path: value for path, value in declared.items() if isinstance(path, str) and isinstance(value, str)}
 
 

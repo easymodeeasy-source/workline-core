@@ -384,7 +384,7 @@ class HermeticGit:
         )
         return gitcmd.run_git(self.root, *self.configuration_arguments(), *args, check=check, env=environment)
 
-    def run_bytes(self, *args: str) -> gitcmd.GitBytes:
+    def run_bytes(self, *args: str, input: bytes | None = None) -> gitcmd.GitBytes:
         """Run one class B Git command and keep its output as BYTES, undecoded and untranslated.
 
         The same envelope as :meth:`run` - the same environment and the same
@@ -400,9 +400,13 @@ class HermeticGit:
         it fails OPEN. A reader of literal headers must see literal bytes.
 
         This carries no identity, no dates and no ``GIT_INDEX_FILE``: it is for
-        reading, and a read writes no commit and touches no index.
+        reading, and a read writes no commit and touches no index. ``input`` is
+        fed to standard input exactly as given - what ``hash-object --stdin``
+        needs to name the identity of bytes without writing them anywhere.
         """
-        return gitcmd.run_git_bytes(self.root, *self.configuration_arguments(), *args, env=self.environment())
+        return gitcmd.run_git_bytes(
+            self.root, *self.configuration_arguments(), *args, input=input, env=self.environment()
+        )
 
 
 def _promisor_remotes(hermetic: "HermeticGit") -> tuple[str, ...]:

@@ -1262,7 +1262,14 @@ class PreservedSemanticsTests(FsafeCase):
 
 
 class UnitBoundaryTests(unittest.TestCase):
-    """This unit lands readers. It wires them into nothing."""
+    """This unit landed readers; the one consumer they have is the ownership boundary built on them.
+
+    The two pins that held the readers unconsumed and the ownership boundary unstarted were
+    ordered-gate pins, and they failed by design when P3 F3 Batch A (IP-14 / IP-15 / IP-16)
+    landed. They are retired into SEPARATION pins rather than deleted: the readers have exactly
+    one consumer, the reserved-ownership and witness names live in exactly that module, and the
+    persistence engine that comes after it (Batch B) has still not arrived through it.
+    """
 
     def setUp(self) -> None:
         from workline.implementation import package_directory
@@ -1272,20 +1279,32 @@ class UnitBoundaryTests(unittest.TestCase):
         self.assertTrue(self.fsafe.is_file(), f"fsafe.py must be where this test reads it: {self.fsafe}")
 
     def sources(self) -> dict[str, str]:
-        return {path.name: path.read_text(encoding="utf-8")
+        return {path.relative_to(self.package).as_posix(): path.read_text(encoding="utf-8")
                 for path in self.package.rglob("*.py") if path != self.fsafe}
 
-    def test_no_other_production_module_calls_the_new_readers(self) -> None:
+    def test_the_new_readers_have_exactly_the_ownership_boundary_as_their_consumer(self) -> None:
         for name, text in self.sources().items():
             for api in ("final_object", "submodule_head", "FinalObjectInfo"):
+                if name == "review/ownership.py" and api != "FinalObjectInfo":
+                    self.assertIn(api, text, f"the ownership boundary is built on {api}")
+                    continue
                 with self.subTest(module=name, api=api):
-                    self.assertNotIn(api, text, f"{name} would make {api} live")
+                    self.assertNotIn(api, text, f"{name} would make {api} live outside the ownership boundary")
 
-    def test_reserved_ownership_and_the_bound_witness_are_not_started(self) -> None:
+    def test_reserved_ownership_and_the_bound_witness_live_in_their_own_module(self) -> None:
+        for name, text in self.sources().items():
+            for owned in ("review_reserved_namespace", "OwnershipWitness", "ownership_witness",
+                          "declare_own_content_witness"):
+                if name == "review/ownership.py":
+                    continue
+                with self.subTest(module=name, owned=owned):
+                    self.assertNotIn(owned, text, f"{name} names {owned}, which the ownership boundary owns")
+        self.assertIn("review_reserved_namespace", self.sources()["review/ownership.py"])
+        self.assertIn("OwnershipWitness", self.sources()["review/ownership.py"])
+
+    def test_the_persistence_engine_has_not_arrived_through_the_ownership_boundary(self) -> None:
         joined = "\n".join(self.sources().values()) + self.fsafe.read_text(encoding="utf-8")
-        for absent in ("review_reserved_namespace", "OwnershipWitness", "ownership_witness",
-                       "declare_own_content_witness", "CommitTreePlan", "prepared_commit_id",
-                       "WORK_COMMIT_MODE"):
+        for absent in ("CommitTreePlan", "prepared_commit_id", "WORK_COMMIT_MODE"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, joined)
 

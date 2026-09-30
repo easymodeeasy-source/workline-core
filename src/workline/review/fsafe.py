@@ -156,6 +156,25 @@ class FinalObjectInfo:
     is_indirection: bool
 
 
+@dataclass(frozen=True)
+class BoundFile:
+    """A plain file read through ONE handle opened relative to a held directory.
+
+    ``data``, ``identity`` and ``executable`` all come from that same open
+    handle, so they describe one object: nothing is looked up again by name
+    between reading the bytes and saying which object they came from.
+    ``identity`` compares with :attr:`FinalObjectInfo.identity` and with
+    :meth:`SafeDirectory.identity`. ``executable`` is the owner-execute
+    permission bit where the platform carries one, and ``None`` where it does
+    not: a platform without that bit says nothing about it, which is not the
+    same as saying "not executable".
+    """
+
+    data: bytes
+    identity: tuple
+    executable: bool | None
+
+
 def _refuse(message: str) -> ValidationError:
     return ValidationError(message, code=CODE)
 
@@ -287,6 +306,48 @@ class _PosixDirectory:
     def create_file_exclusive(self, name: str, data: bytes, tmp: "_PosixDirectory") -> bool:
         """Refused before anything is written, not even a temporary file: see :func:`immutable_create_supported`."""
         raise _unsupported()
+
+    def identity(self) -> tuple:
+        """This held directory's own identity, from its fd: ``(st_dev, st_ino)``."""
+        info = os.fstat(self.fd)
+        return (info.st_dev, info.st_ino)
+
+    def read_file_bound(self, name: str) -> "BoundFile | None":
+        """``name``'s bytes, identity and owner-execute bit, all from one ``O_NOFOLLOW`` fd."""
+        _require_component(name)
+        described = f"{self.described}/{name}"
+        try:
+            fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0), dir_fd=self.fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _refuse(f"{described} is a symlink, and a plain file is read only from a plain file") from exc
+            raise _refuse(f"{described} cannot be opened: {exc}") from exc
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise _refuse(f"{described} is not a plain file")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return BoundFile(b"".join(chunks), (info.st_dev, info.st_ino), bool(info.st_mode & stat.S_IXUSR))
+        finally:
+            os.close(fd)
+
+    def read_link(self, name: str) -> bytes | None:
+        """The exact target bytes of the link ``name``, by ``readlinkat`` relative to the held fd; never followed."""
+        _require_component(name)
+        described = f"{self.described}/{name}"
+        try:
+            return os.readlink(os.fsencode(name), dir_fd=self.fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _refuse(f"{described} is not a link whose target can be read without following it: {exc}") from exc
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -628,6 +689,60 @@ if sys.platform == "win32":
             finally:
                 _CloseHandle(handle)
 
+        def identity(self) -> tuple:
+            """This held directory's own identity, from its handle: volume serial plus file index."""
+            info = _info(self.handle)
+            return (info.dwVolumeSerialNumber, (info.nFileIndexHigh << 32) | info.nFileIndexLow)
+
+        def read_file_bound(self, name: str) -> "BoundFile | None":
+            """``name``'s bytes and identity from ONE handle opened relative to this held one.
+
+            NTFS carries no owner-execute bit, so ``executable`` is ``None``: the
+            platform says nothing about it, and nothing here guesses.
+            """
+            _require_component(name)
+            described = f"{self.described}\\{name}"
+            status, handle = _nt_open(
+                self.handle, name, _GENERIC_READ | _SYNCHRONIZE, _FILE_SHARE_READ, _FILE_OPEN,
+                _FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+            )
+            if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+                return None
+            if status == _STATUS_FILE_IS_A_DIRECTORY:
+                raise _refuse(f"{described} is a directory, not a plain file")
+            if status != 0:
+                raise _refuse(f"{described} cannot be opened (NTSTATUS 0x{status:08X})")
+            try:
+                info = _info(handle)
+                if info.dwFileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                    raise _refuse(f"{described} is a reparse point, and a plain file is read only from a plain file")
+                chunks: list[bytes] = []
+                chunk = ctypes.create_string_buffer(1 << 16)
+                read = wintypes.DWORD()
+                while True:
+                    if not _ReadFile(handle, chunk, len(chunk), ctypes.byref(read), None):
+                        raise _refuse(f"{described} cannot be read (error {ctypes.get_last_error()})")
+                    if read.value == 0:
+                        break
+                    chunks.append(chunk.raw[: read.value])
+                identity = (info.dwVolumeSerialNumber, (info.nFileIndexHigh << 32) | info.nFileIndexLow)
+                return BoundFile(b"".join(chunks), identity, None)
+            finally:
+                _CloseHandle(handle)
+
+        def read_link(self, name: str) -> bytes | None:
+            """Refused: a reparse point's target is not read through a held handle on this platform.
+
+            What Git stores for a Windows link is its own normalization of the
+            reparse data, and reproducing that here would be a guess about
+            another program's rules rather than a read. Not knowing is refused.
+            """
+            _require_component(name)
+            raise _refuse(
+                f"{self.described}\\{name} is a reparse point, and its target is not read through a held handle on "
+                "this platform"
+            )
+
         def close(self) -> None:
             if self.handle:
                 _CloseHandle(self.handle)
@@ -701,6 +816,33 @@ class SafeDirectory:
         """Create ``name`` holding ``data``; ``False``, with nothing changed, if the name already exists."""
         require_immutable_create()
         return self._backend.create_file_exclusive(name, data, tmp._backend)
+
+    def identity(self) -> tuple:
+        """Which directory object this handle holds, asked of the handle itself - never of a name.
+
+        Comparable with :attr:`FinalObjectInfo.identity`: equal values are one
+        object. Opaque and runtime-only, exactly like that identity.
+        """
+        return self._backend.identity()
+
+    def read_file_bound(self, name: str) -> "BoundFile | None":
+        """The plain file ``name`` - its bytes, identity and execute bit - read through one handle.
+
+        One component, relative to this already-proven directory, opened
+        without following anything: an indirection or anything that is not a
+        plain file is refused exactly as :meth:`read_file` refuses it. ``None``
+        when the name does not exist.
+        """
+        return self._backend.read_file_bound(name)
+
+    def read_link(self, name: str) -> bytes | None:
+        """The exact target bytes of the link ``name``, read relative to this directory and never followed.
+
+        ``None`` when the name does not exist. Where the platform offers no
+        handle-bound read of a link target, this refuses rather than resolving
+        a pathname.
+        """
+        return self._backend.read_link(name)
 
     def close(self) -> None:
         self._backend.close()
