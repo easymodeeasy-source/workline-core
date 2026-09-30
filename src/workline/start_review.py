@@ -1718,15 +1718,25 @@ def terminalize(session: "_Session", sealed: Sealed) -> Any:
     git = hermetic_module.enter(store)
     remote = session.destination is not None
     chain = _chain(store, run)
+    recorded = work_record(mutation.record)
+    terminal_recorded = _terminal_stage(recorded) is not None
+    # 17 - the lineage (§8.2), proven BEFORE anything of the terminal phase is made durable: the first
+    # reservation of the Consumption id and the scope that names its path follow a successful proof and
+    # never precede it (§5.1). Measured to K1's parent, or to K2's with no K1 (§6.2); each is proven
+    # again immediately before the base-exact commit it guards (_result_commit, _terminal).
+    if result:
+        if recorded.one_stage(f"{work_id}:results") is None:
+            require_lineage(git, run, chain, base, _head(git)[1])
+    elif recorded.one_stage(f"{work_id}:finalize") is None and not terminal_recorded:
+        require_lineage(git, run, chain, base, _head(git)[1])
     # 17a - the Consumption id, reserved at or after the seal and before S-c1 (§13.2)
     consumption_id = mutation.reserve_id(gate.review_consumption_key(run.receipt_id), "review_consumption")
     consumption_path = review_paths.consumption_rel(consumption_id)
     if consumption_path not in mutation.scope.files:
         mutation.extend_scope(files=[consumption_path])
     k1: str | None = None
-    terminal_recorded = _terminal_stage(work_record(mutation.record)) is not None
     if result:
-        k1 = _result_commit(session, sealed, git, chain)  # 17, 17b, 18, 19
+        k1 = _result_commit(session, sealed, git, chain)  # 17 again, 17b, 18, 19
         if not terminal_recorded:
             # 20, 21: C-2(K1) re-evaluated until the terminal stage exists. From then on its W12 ("the
             # consumption has not happened") is false by construction, and the stage was recorded only
@@ -1736,9 +1746,6 @@ def terminalize(session: "_Session", sealed: Sealed) -> Any:
             raise _reconcile("the terminal stage is recorded without the result proof note it requires")
         if remote:
             _publish_stage(session, f"{work_id}:results-publication", k1, base["branch"])  # 22 - 24
-    elif work_record(mutation.record).one_stage(f"{work_id}:finalize") is None and not terminal_recorded:
-        branch, tip = _head(git)
-        require_lineage(git, run, chain, base, tip)  # 17, measured to K2's parent (§6.2)
     k2 = _terminal(session, sealed, git, chain, consumption_id, k1)  # 25 - 30
     _write_note(mutation, NOTE_TERMINAL_PROOF, prove_terminal(store, git, mutation.record, k2))  # 31, 32
     if remote:
@@ -1758,7 +1765,7 @@ def _result_commit(session: "_Session", sealed: Sealed, git: HermeticGit, chain:
     prefix = f"{run.work_id}:results"
     if work_record(mutation.record).one_stage(prefix) is None:
         branch, tip = _head(git)
-        require_lineage(git, run, chain, base, tip)  # 17
+        require_lineage(git, run, chain, base, tip)  # 17, again: immediately before the base-exact S-c1
         changing = [entry for entry in work_review.entries_of(material.candidate) if work_review.changing(entry)]
         paths = [entry["path"] for entry in changing]
         pre_base = _pre_s_c0_base(work_record(mutation.record), base["base_commit"])

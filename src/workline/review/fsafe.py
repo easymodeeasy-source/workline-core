@@ -88,6 +88,24 @@ link's own identity comes back, distinct from its target's. An indirection in an
 ANCESTOR is still a containment failure, unchanged: that is what ``child``
 refuses, and nothing here relaxes it.
 
+Reading a link's target, which is not the same as following it
+---------------------------------------------------------------
+
+:meth:`SafeDirectory.read_link` returns the bytes Git stores as the blob of a
+mode-120000 entry for a final link, together with the link's OWN identity:
+
+```text
+POSIX    fstatat(AT_SYMLINK_NOFOLLOW) + readlinkat(<held fd>, name)
+Windows  NtCreateFile(RootDirectory=<held handle>, FILE_OPEN_REPARSE_POINT)
+         + GetFileInformationByHandle + FSCTL_GET_REPARSE_POINT, all on ONE handle
+```
+
+On Windows the bytes are not the reparse data as it lies: Git for Windows
+records a link through its own rule, and :func:`windows_link_target` is that
+rule, taken from its source and measured against it. A reparse point Git does
+not record as a link - a junction, which it treats as a directory and follows,
+or any other tag - has no link target here and is refused, never followed.
+
 Reading a submodule's HEAD without handing out a pathname
 ---------------------------------------------------------
 
@@ -110,6 +128,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import struct
 import sys
 
 from ..errors import ValidationError
@@ -175,6 +194,23 @@ class BoundFile:
     executable: bool | None
 
 
+@dataclass(frozen=True)
+class BoundLink:
+    """A final link's target bytes and its OWN identity, read relative to a held directory without following it.
+
+    ``target`` is what Git stores as the blob of a mode-120000 entry for this
+    link on this platform. ``identity`` is the link object's - never its
+    target's - and compares with :attr:`FinalObjectInfo.identity`. On Windows
+    both come from ONE handle, so they describe one object; POSIX has no handle
+    on a link itself, so there the identity is the no-follow query made
+    immediately before ``readlinkat``, and a caller brackets the read with its
+    own before/after identity comparison.
+    """
+
+    target: bytes
+    identity: tuple
+
+
 def _refuse(message: str) -> ValidationError:
     return ValidationError(message, code=CODE)
 
@@ -196,6 +232,119 @@ def _require_component(name: str) -> None:
 
 def _tmp_name(name: str) -> str:
     return f".{name}.{os.getpid()}.{secrets.token_hex(6)}.tmp"
+
+
+# --------------------------------------------------------------------------- Windows link targets, Git's rule
+#
+# Pure and platform-independent, so the rule is tested everywhere; only reading the reparse data
+# needs Windows. The rule is Git for Windows 2.54.0.windows.1's own (compat/mingw.c at commit
+# 2b8a3ab140826ac423c2845ef81d4c6ac4f7bf3c, the commit `git version --build-options` names here):
+#
+#     file_attr_to_st_mode  S_IFLNK only for IO_REPARSE_TAG_SYMLINK; a junction is S_IFDIR
+#     read_reparse_point    the SUBSTITUTE name, terminated at SubstituteNameLength
+#     normalize_ntpath      "\??\" or "\\?\" stripped, else "\DosDevices\" case-insensitively;
+#                           then a leading "UNC\" becomes "\\"; then every "\" becomes "/"
+#     xwcstoutf(.., MAX_PATH)  UTF-8 into 260 bytes including the NUL, or the read fails
+#
+# MEASURED against that Git, no privilege needed: the system link C:\Users\All Users (tag
+# 0xA000000C, substitute name \??\C:\ProgramData) is staged as 120000 e0316278a6be6fdf... whose
+# blob is the 14 bytes "C:/ProgramData", with core.symlinks false and true alike; a junction
+# (tag 0xA0000003) at a path is "a directory" to `git update-index --add`, and `git add` walks
+# into it and stages its target's files.
+
+#: The one reparse tag Git for Windows stages as a mode-120000 link.
+IO_REPARSE_TAG_SYMLINK = 0xA000000C
+#: A junction: a DIRECTORY to Git for Windows, which follows it. Never a link target here.
+IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+#: The longest target Git for Windows can read, in UTF-8 bytes: MAX_PATH less the NUL.
+GIT_LINK_TARGET_LIMIT = 259
+#: What Git for Windows reads, inside a Windows container, as a mapped volume - a directory.
+CONTAINER_MAPPED_PREFIX = "/ContainerMappedDirectories/"
+
+_REPARSE_HEADER = 8  # ReparseTag (4), ReparseDataLength (2), Reserved (2)
+_SYMLINK_FIELDS = 12  # SubstituteNameOffset/Length, PrintNameOffset/Length (2 each), Flags (4)
+
+
+def _device_prefix(text: str, literal: str, described: str) -> bool:
+    """``wcsnicmp(text, literal, len(literal)) == 0``, decided only where it cannot depend on a locale.
+
+    The comparison stops at the first differing character, as ``wcsnicmp`` does.
+    Only ASCII letters fold alike in every C-runtime locale, so a comparison that
+    would have to fold a non-ASCII character is refused rather than decided.
+    """
+    for index, want in enumerate(literal):
+        if index == len(text):
+            return False  # the terminating NUL differs from every character of the literal
+        found = text[index]
+        if ord(found) > 0x7F:
+            raise _refuse(
+                f"{described} links to a name whose device prefix Git for Windows compares case-insensitively "
+                "over a non-ASCII character, which depends on the C runtime's locale"
+            )
+        if found.lower() != want.lower():
+            return False
+    return True
+
+
+def _normalize_ntpath(target: str, described: str) -> str:
+    """Git for Windows' ``normalize_ntpath``, exactly, over a NUL-free string."""
+    if target.startswith("\\"):
+        if target.startswith(("\\??\\", "\\\\?\\")):
+            target = target[4:]
+        elif _device_prefix(target, "\\DosDevices\\", described):
+            target = target[12:]
+        if _device_prefix(target, "UNC\\", described):
+            target = "\\" + target[3:]  # wbuf += 2; *wbuf = '\\'
+    return target.replace("\\", "/")
+
+
+def windows_link_target(raw: bytes, described: str) -> bytes:
+    """The blob Git for Windows stores for a link whose ``FSCTL_GET_REPARSE_POINT`` data is ``raw``.
+
+    Refused, never reproduced, is everything that rule does not answer the same
+    way every time or does not answer with a link: any tag but
+    ``IO_REPARSE_TAG_SYMLINK`` (a junction included - Git follows it as a
+    directory), a buffer whose lengths disagree with it, a target that is empty
+    or holds a NUL (Git would cut it short) or an unpaired surrogate (Git would
+    substitute U+FFFD), a locale-dependent prefix comparison, a target longer
+    than Git can read, and the Windows-container mapping Git reads as a
+    directory. The link is never followed and its target never has to exist, so
+    a broken link is read exactly like any other.
+    """
+    if len(raw) < _REPARSE_HEADER:
+        raise _refuse(f"{described} returned reparse data too short to hold a reparse tag")
+    tag, data_length = struct.unpack_from("<IH", raw, 0)
+    if tag != IO_REPARSE_TAG_SYMLINK:
+        what = ("a junction, which Git for Windows treats as a directory and follows"
+                if tag == IO_REPARSE_TAG_MOUNT_POINT else "not a symbolic link to Git for Windows")
+        raise _refuse(
+            f"{described} is a reparse point of tag 0x{tag:08X} - {what}; it is never followed, and it has no "
+            "link target here"
+        )
+    if data_length < _SYMLINK_FIELDS or _REPARSE_HEADER + data_length != len(raw):
+        raise _refuse(f"{described} holds symbolic-link reparse data whose length disagrees with its own header")
+    substitute_offset, substitute_length, print_offset, print_length = struct.unpack_from("<HHHH", raw, _REPARSE_HEADER)
+    names = raw[_REPARSE_HEADER + _SYMLINK_FIELDS:]
+    for offset, length in ((substitute_offset, substitute_length), (print_offset, print_length)):
+        if offset % 2 or length % 2 or offset + length > len(names):
+            raise _refuse(f"{described} holds symbolic-link reparse data whose names lie outside it")
+    try:
+        target = names[substitute_offset:substitute_offset + substitute_length].decode("utf-16-le")
+    except UnicodeDecodeError as exc:
+        raise _refuse(f"{described} links to a name holding an unpaired surrogate, which Git for Windows rewrites") from exc
+    if not target or "\0" in target:
+        raise _refuse(f"{described} links to a name that is empty or holds a NUL, which Git for Windows cuts short")
+    normalized = _normalize_ntpath(target, described)
+    if normalized.startswith(CONTAINER_MAPPED_PREFIX):
+        raise _refuse(f"{described} links to {normalized!r}, which Git for Windows reads as a container-mapped directory")
+    data = normalized.encode("utf-8")
+    if not data:
+        raise _refuse(f"{described} links to a name Git for Windows normalizes to nothing")
+    if len(data) > GIT_LINK_TARGET_LIMIT:
+        raise _refuse(
+            f"{described} links to a {len(data)}-byte target, and Git for Windows reads at most {GIT_LINK_TARGET_LIMIT}"
+        )
+    return data
 
 
 # --------------------------------------------------------------------------- POSIX
@@ -338,16 +487,30 @@ class _PosixDirectory:
         finally:
             os.close(fd)
 
-    def read_link(self, name: str) -> bytes | None:
-        """The exact target bytes of the link ``name``, by ``readlinkat`` relative to the held fd; never followed."""
+    def read_link(self, name: str) -> "BoundLink | None":
+        """The link ``name``: its exact target bytes by ``readlinkat`` relative to the held fd, never followed.
+
+        Its identity is the ``fstatat(AT_SYMLINK_NOFOLLOW)`` query made just before
+        the read - POSIX offers no handle on a link itself - so the caller's own
+        before/after identity comparison is what brackets the read.
+        """
         _require_component(name)
         described = f"{self.described}/{name}"
         try:
-            return os.readlink(os.fsencode(name), dir_fd=self.fd)
+            info = os.stat(name, dir_fd=self.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise _refuse(f"{described} cannot be identified without following it: {exc}") from exc
+        if not stat.S_ISLNK(info.st_mode):
+            raise _refuse(f"{described} is not a symbolic link")
+        try:
+            target = os.readlink(os.fsencode(name), dir_fd=self.fd)
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise _refuse(f"{described} is not a link whose target can be read without following it: {exc}") from exc
+        return BoundLink(target, (info.st_dev, info.st_ino))
 
     def close(self) -> None:
         if self.fd >= 0:
@@ -423,6 +586,11 @@ if sys.platform == "win32":
     _WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
     _FlushFileBuffers = _kernel32.FlushFileBuffers
     _FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    _DeviceIoControl = _kernel32.DeviceIoControl
+    _DeviceIoControl.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
+    ]
 
     _INVALID_HANDLE = wintypes.HANDLE(-1).value
 
@@ -461,6 +629,9 @@ if sys.platform == "win32":
     # attributes
     _FILE_ATTRIBUTE_DIRECTORY = 0x10
     _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+    # FSCTL_GET_REPARSE_POINT: CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 42, METHOD_BUFFERED, FILE_ANY_ACCESS)
+    _FSCTL_GET_REPARSE_POINT = 0x000900A8
+    _MAXIMUM_REPARSE_DATA_BUFFER_SIZE = 16 * 1024
     # information classes
     _FileRenameInformation = 10
     _FileDispositionInformation = 13
@@ -499,6 +670,38 @@ if sys.platform == "win32":
         if not _GetFileInformationByHandle(handle, ctypes.byref(info)):
             raise _refuse(f"cannot show what an opened Review path component is (error {ctypes.get_last_error()})")
         return info
+
+    def _reparse_point(parent: int, name: str, described: str) -> "tuple[tuple, bytes] | None":
+        """``(identity, reparse data)`` of the reparse point ``name``, both asked of ONE handle; ``None`` if absent.
+
+        The handle is opened relative to ``parent`` with ``FILE_OPEN_REPARSE_POINT``
+        and neither ``FILE_DIRECTORY_FILE`` nor ``FILE_NON_DIRECTORY_FILE``: the
+        reparse point itself is opened, a file link and a directory link alike, and
+        nothing is resolved through it - its target need not exist. That is the
+        open :meth:`_WindowsDirectory.final_object` identifies with, so the identity
+        here is the link's own, and the data is the data of that same object.
+        """
+        status, handle = _nt_open(
+            parent, name, _FILE_READ_ATTRIBUTES | _SYNCHRONIZE, _QUERY_SHARE, _FILE_OPEN,
+            _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        )
+        if status in (_STATUS_OBJECT_NAME_NOT_FOUND, _STATUS_OBJECT_PATH_NOT_FOUND):
+            return None
+        if status != 0:
+            raise _refuse(f"{described} cannot be opened as itself (NTSTATUS 0x{status:08X})")
+        try:
+            info = _info(handle)
+            if not info.dwFileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                raise _refuse(f"{described} is not a reparse point, so it is not a link")
+            buffer = ctypes.create_string_buffer(_MAXIMUM_REPARSE_DATA_BUFFER_SIZE)
+            returned = wintypes.DWORD()
+            if not _DeviceIoControl(handle, _FSCTL_GET_REPARSE_POINT, None, 0, buffer, len(buffer),
+                                    ctypes.byref(returned), None):
+                raise _refuse(f"the reparse data of {described} cannot be read (error {ctypes.get_last_error()})")
+            identity = (info.dwVolumeSerialNumber, (info.nFileIndexHigh << 32) | info.nFileIndexLow)
+            return identity, buffer.raw[: returned.value]
+        finally:
+            _CloseHandle(handle)
 
     class _WindowsDirectory:
         """A directory held open by handle - pinned, reached without following anything."""
@@ -730,18 +933,22 @@ if sys.platform == "win32":
             finally:
                 _CloseHandle(handle)
 
-        def read_link(self, name: str) -> bytes | None:
-            """Refused: a reparse point's target is not read through a held handle on this platform.
+        def read_link(self, name: str) -> "BoundLink | None":
+            """The symbolic link ``name``: Git's blob for it and its own identity, from ONE handle.
 
-            What Git stores for a Windows link is its own normalization of the
-            reparse data, and reproducing that here would be a guess about
-            another program's rules rather than a read. Not knowing is refused.
+            The reparse data is read through the handle opened relative to this
+            held directory (:func:`_reparse_point`) and turned into bytes only by
+            Git for Windows' own rule (:func:`windows_link_target`): a junction or
+            any other reparse point that Git does not record as a link is refused
+            there, and nothing is ever followed.
             """
             _require_component(name)
-            raise _refuse(
-                f"{self.described}\\{name} is a reparse point, and its target is not read through a held handle on "
-                "this platform"
-            )
+            described = f"{self.described}\\{name}"
+            found = _reparse_point(self.handle, name, described)
+            if found is None:
+                return None
+            identity, raw = found
+            return BoundLink(windows_link_target(raw, described), identity)
 
         def close(self) -> None:
             if self.handle:
@@ -835,12 +1042,12 @@ class SafeDirectory:
         """
         return self._backend.read_file_bound(name)
 
-    def read_link(self, name: str) -> bytes | None:
-        """The exact target bytes of the link ``name``, read relative to this directory and never followed.
+    def read_link(self, name: str) -> "BoundLink | None":
+        """The final link ``name`` - the bytes Git stores for it, and its own identity - never followed.
 
-        ``None`` when the name does not exist. Where the platform offers no
-        handle-bound read of a link target, this refuses rather than resolving
-        a pathname.
+        One component, relative to this already-proven directory. ``None`` when
+        the name does not exist; anything that is not a link Git records as one
+        is refused rather than read some other way. See :class:`BoundLink`.
         """
         return self._backend.read_link(name)
 

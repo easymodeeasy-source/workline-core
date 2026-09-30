@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import unittest
@@ -303,13 +304,14 @@ class WitnessKindTests(OwnershipCase):
         (witness,) = self.bind(results=["link"])
         self.assertEqual((witness.kind, witness.git_mode, witness.material), ("symlink", "120000", b"new-target"))
 
-    @unittest.skipUnless(WINDOWS, "the reparse-point final is the Windows shape of a final indirection")
-    def test_a_final_reparse_point_whose_target_cannot_be_read_handle_bound_fails_closed(self) -> None:
+    @unittest.skipUnless(WINDOWS, "a junction is the Windows reparse point Git follows as a directory")
+    def test_a_final_junction_is_not_a_git_link_and_fails_closed(self) -> None:
+        """Git for Windows stages a junction as the DIRECTORY it leads to (measured); it has no link target here."""
         (self.root / "real").mkdir()
         if not make_junction(self.root / "jn", self.root / "real"):
             self.skipTest("this account cannot create a junction")
         raised = self.unavailable(results=["jn"])
-        self.assertIn("reparse point", raised.message)
+        self.assertIn("reparse point of tag 0xA0000003", raised.message)
 
     def test_a_directory_result_that_is_not_a_submodule_is_unavailable(self) -> None:
         """F2 §6.5: a declared path that is a directory makes the Candidate unavailable."""
@@ -380,6 +382,82 @@ class WitnessKindTests(OwnershipCase):
                 mock.patch.object(mutation_module, "_content_digest", side_effect=AssertionError("digest reread")):
             witnesses = self.bind(results=["src/main.py"], deletions=["tmp/old.txt"])
         self.assertEqual([(w.path, w.kind) for w in witnesses], [("src/main.py", "file"), ("tmp/old.txt", "absent")])
+
+
+def link_buffer(target: str) -> bytes:
+    """A symbolic-link REPARSE_DATA_BUFFER naming ``target`` as both its substitute and its print name."""
+    name = target.encode("utf-16-le")
+    data = struct.pack("<HHHHI", 0, len(name), len(name), len(name), 1) + name + name
+    return struct.pack("<IHH", fsafe.IO_REPARSE_TAG_SYMLINK, len(data), 0) + data
+
+
+@unittest.skipUnless(WINDOWS, "the handle-bound reparse read is the Windows backend")
+class WindowsLinkCaptureTests(OwnershipCase):
+    """Cumulative repair B-1: a final Windows link is witnessed as its link, bound to its OWN identity.
+
+    Making a symlink needs a privilege this account may not hold, so the final object is a REAL
+    reparse point this account can make - a junction - read through the real handle, and only its
+    reparse data is then stated as a symbolic link's: every identity, handle and comparison here is
+    the production one. ``tests/test_windows_link_target.py`` holds the rule and the native read on
+    their own, and a real link wherever one can be made.
+    """
+
+    TARGET = "..\\shared\\config.yml"
+
+    def setUp(self) -> None:
+        super().setUp()
+        import _winapi
+
+        self.winapi = _winapi
+        (self.root / "real").mkdir()
+        (self.root / "other").mkdir()
+        _winapi.CreateJunction(str(self.root / "real"), str(self.root / "ln"))
+        self.real_read = fsafe._reparse_point
+
+    def as_link(self, target: str = TARGET, *, before=None, after=None):
+        """The final object's reparse data, read for real and then stated as a link to ``target``."""
+        def read(parent, name, described):
+            if before is not None:
+                before()
+            identity, _ = self.real_read(parent, name, described)
+            if after is not None:
+                after()
+            return identity, link_buffer(target)
+        return mock.patch.object(fsafe, "_reparse_point", side_effect=read)
+
+    def replace(self) -> None:
+        os.rmdir(self.root / "ln")
+        self.winapi.CreateJunction(str(self.root / "other"), str(self.root / "ln"))
+
+    def test_a_final_link_is_witnessed_as_its_link_and_not_refused_for_being_a_reparse_point(self) -> None:
+        with self.as_link():
+            (witness,) = self.bind(results=["ln"])
+        material = b"../shared/config.yml"
+        self.assertEqual((witness.kind, witness.git_mode, witness.material), ("symlink", "120000", material))
+        self.assertEqual(witness.identity, blob_id(self.root, material))
+
+    def test_a_link_replaced_before_its_target_is_read_is_refused(self) -> None:
+        with self.as_link(before=self.replace):
+            raised = self.unavailable(results=["ln"])
+        self.assertIn("changed while its link target was read", raised.message)
+
+    def test_a_link_replaced_after_its_target_is_read_is_refused(self) -> None:
+        with self.as_link(after=self.replace):
+            raised = self.unavailable(results=["ln"])
+        self.assertIn("changed while its link target was read", raised.message)
+
+    def test_an_ancestor_reparse_point_is_still_refused_with_the_reader_in_place(self) -> None:
+        (self.root / "real" / "inner.txt").write_bytes(b"inner\n")
+        with self.as_link():
+            self.unavailable(results=["ln/inner.txt"])
+
+    def test_the_whole_link_witness_is_what_currentness_compares(self) -> None:
+        with self.as_link():
+            (witness,) = self.bind(results=["ln"])
+            self.assertIsNone(ownership.witness_problem(self.store, self.hermetic, witness, self.base))
+        with self.as_link("..\\shared\\other.yml"):
+            problem = ownership.witness_problem(self.store, self.hermetic, witness, self.base)
+        self.assertIn("identity", problem)
 
 
 class GitlinkTests(OwnershipCase):

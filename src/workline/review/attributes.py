@@ -420,10 +420,10 @@ def _info_attributes(store: ProjectStore, hermetic: HermeticGit) -> list[tuple[s
 def require_work_attribute_source(store: ProjectStore, hermetic: HermeticGit, basis: str) -> None:
     """The universal predicate of ``F3`` §7.8 over the exact persistence basis; unsafe or unknown is a refusal.
 
-    ``basis`` is an exact full object id - ``PRE_S_C0_BASE`` at entry, and
-    ``declared_base.base_commit`` for the commits after it, which §7.1.11 proves
-    carry the same attribute-source state. Nothing here is hardcoded to ``HEAD``
-    or to either of those: the caller names the basis.
+    ``basis`` is an exact full object id - ``PRE_S_C0_BASE`` at entry, and a later
+    commit's own persistence basis after it (§7.1.11, C3-2), none of which this
+    operation's own commits can make differ in attribute-source state. Nothing
+    here is hardcoded to ``HEAD`` or to any of those: the caller names the basis.
 
     Two surfaces, and the difference is not a softening of the first (§7.8.4):
 

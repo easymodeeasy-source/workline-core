@@ -1074,10 +1074,11 @@ def stage_commit_effect(mutation: Mutation, message: str, *, plan_class: str) ->
     Its plan is the parent object plus the file effects this mutation recorded
     since its last commit - never the working tree - and ``None`` when that plan
     changes nothing, so no stage is recorded (§4.3: "only when there is something
-    to commit"). The pin is the commit's own exact parent. For S-c0 that parent
-    IS ``PRE_S_C0_BASE`` (§7.1.11). A pre-completion stage is made before any
-    declared base exists, and its parent carries the attribute sources every
-    later basis carries: no START-owned write ever touches an attribute source.
+    to commit"). The pin is the commit's own exact parent, the ``base_head`` its
+    payload records. For S-c0 that parent IS ``PRE_S_C0_BASE`` (§7.1.11); a
+    pre-completion stage is made before any declared base exists, so it is
+    pinned to its own parent too (C3-2), and no START-owned write ever touches
+    an attribute source.
     """
     if plan_class not in (CLASS_ENTRY, CLASS_WORK_STAGE):
         raise _defect(f"{plan_class!r} is not a class a review-v1 Work mutation's own Git stage is made in")

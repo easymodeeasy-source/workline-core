@@ -230,15 +230,36 @@ class LineageTests(TerminalCase):
 
         return mock.patch.object(start_review, "_seal", side_effect=seal)
 
+    def assert_refused_at_step_17(self, raised, remote: str) -> None:
+        """Cumulative repair B-3: lineage precedes 17a, so a refusal leaves nothing of 17a or later durable.
+
+        No K1, no K2, no push - and neither a reserved Consumption identifier nor its path in the
+        write scope, nor any terminal stage: the frozen order (§5.1 17 -> 17a -> 17b -> 18) says none
+        of them may exist yet, and Mutation.reserve_id / extend_scope are each a durable save.
+        """
+        self.assertEqual(raised.exception.reason, "review_registration_base_moved")
+        record = self.start_record()
+        self.assertEqual([key for key in record.get("reserved_ids") or {} if key.startswith("review-consumption:")], [])
+        scope = (record.get("write_scope") or {}).get("files") or []
+        self.assertEqual([path for path in scope if path.startswith(".workline/review/consumptions/")], [])
+        stages = {str(effect["stage"]).rsplit(":", 1)[0] for effect in record["effects"]}
+        for prefix in ("results", "results-publication", "finalize", "finalize-publication"):
+            self.assertNotIn(f"{self.work_id}:{prefix}", stages)
+        self.assertEqual([e for e in record["effects"] if e["kind"] == "create_file"], [], "no terminal stage")
+        self.assertEqual([e for e in record["effects"] if e["kind"] == "append_event"
+                          and e["payload"]["record"]["type"] in ("work_target_removed", "work_completed")], [])
+        self.assertEqual(self.pushes(record), [])
+        self.assertEqual(self.remote_main(), remote)
+        self.assertEqual(git(self.root, "log", "--format=%H", "--", "out.txt"), "", "no K1")
+
     def test_a_foreign_commit_after_the_seal_fails_the_lineage_and_nothing_is_made_or_pushed(self) -> None:
         remote = self.remote_main()
         with self.seal_then(lambda: self.commit_file("person.txt", b"theirs\n", "a person's commit")):
             with self.assertRaises(ReconcileRequired) as raised:
                 st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
                          review=self.review())
-        self.assertEqual(raised.exception.reason, "review_registration_base_moved")
+        self.assert_refused_at_step_17(raised, remote)
         self.assertEqual(self.subjects(1), ["a person's commit"])
-        self.assertEqual(self.remote_main(), remote)
 
     def test_an_unanswerable_lineage_fails_closed_before_k1(self) -> None:
         from workline.review import ancestry
@@ -248,9 +269,38 @@ class LineageTests(TerminalCase):
             with self.assertRaises(ReconcileRequired) as raised:
                 st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
                          review=self.review())
-        self.assertEqual(raised.exception.reason, "review_registration_base_moved")
-        self.assertEqual(git(self.root, "log", "--format=%H", "--", "out.txt"), "")
-        self.assertEqual(self.remote_main(), remote)
+        self.assert_refused_at_step_17(raised, remote)
+
+    def test_an_unanswerable_descent_from_the_declared_base_fails_closed_before_k1(self) -> None:
+        """L-1 unanswerable - the RAW reader cannot show the base is an ancestor - from the seal on."""
+        from workline.review import ancestry
+
+        remote = self.remote_main()
+        unknown = mock.patch.object(ancestry, "raw_descends_from", return_value=ancestry.UNKNOWN)
+        self.addCleanup(unknown.stop)
+        with self.seal_then(unknown.start):
+            with self.assertRaises(ReconcileRequired) as raised:
+                st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
+                         review=self.review())
+        self.assertIn("L-1", str(raised.exception))
+        self.assert_refused_at_step_17(raised, remote)
+
+    def test_head_moved_off_the_declared_branch_fails_closed_before_k1(self) -> None:
+        remote = self.remote_main()
+        with self.seal_then(lambda: git(self.root, "checkout", "-q", "-b", "elsewhere")):
+            with self.assertRaises(ReconcileRequired) as raised:
+                st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
+                         review=self.review())
+        self.assertIn("L-3", str(raised.exception))
+        self.assert_refused_at_step_17(raised, remote)
+
+    def test_an_empty_artifact_measured_to_k2s_parent_reserves_nothing_when_refused(self) -> None:
+        remote = self.remote_main()
+        with self.seal_then(lambda: self.commit_file("person.txt", b"theirs\n", "a person's commit")):
+            with self.assertRaises(ReconcileRequired) as raised:
+                st.start(self.store, self.work_id, "single-work", self.completing(), review=self.review())
+        self.assert_refused_at_step_17(raised, remote)
+        self.assertEqual(self.subjects(1), ["a person's commit"])
 
     def test_the_lineage_reads_stored_parents_and_a_replacement_object_changes_nothing(self) -> None:
         _, record = self.complete(self.completing(write={"out.txt": b"out\n"}))
@@ -276,6 +326,83 @@ class LineageTests(TerminalCase):
             st.start(self.store, self.work_id, "single-work", self.completing(), review=self.review())
         self.assertEqual(raised.exception.code, "review_repository_grafted")
         self.assertEqual(self.pending(), [])
+
+
+class ConsumptionReservationTests(TerminalCase):
+    """B-3: the FIRST durable Consumption reservation follows a successful step-17 lineage proof, exactly once."""
+
+    def consumption_ids(self, record: dict) -> list[str]:
+        return [value for key, value in (record.get("reserved_ids") or {}).items() if key.startswith("review-consumption:")]
+
+    def test_the_reservation_follows_a_proven_lineage_and_is_made_once(self) -> None:
+        from workline.mutation import Mutation
+
+        order: list = []
+        real_lineage, real_reserve = start_review.require_lineage, Mutation.reserve_id
+
+        def lineage(*args, **kwargs):
+            real_lineage(*args, **kwargs)
+            order.append("lineage proven")
+
+        def reserve(mutation, key, kind):
+            identifier = real_reserve(mutation, key, kind)
+            if key.startswith("review-consumption:"):
+                order.append(("reserved", identifier))
+            return identifier
+
+        with mock.patch.object(start_review, "require_lineage", side_effect=lineage), \
+                mock.patch.object(Mutation, "reserve_id", reserve):
+            _, record = self.complete(self.completing(write={"out.txt": b"out\n"}))
+        first = next(index for index, step in enumerate(order) if isinstance(step, tuple))
+        self.assertIn("lineage proven", order[:first], "a proven lineage precedes the first reservation")
+        self.assertEqual({step[1] for step in order if isinstance(step, tuple)}, set(self.consumption_ids(record)))
+        (consumption_id,) = self.consumption_ids(record)
+        self.assertEqual(record["write_scope"]["files"].count(review_paths.consumption_rel(consumption_id)), 1)
+        self.assertEqual(self.consumption(self.head(), record).consumption_id, consumption_id)
+
+    def test_an_interrupted_terminal_phase_resumes_with_the_same_reservation(self) -> None:
+        real = start_review._result_commit
+        calls: list[int] = []
+
+        def crash_once(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise Crash()
+            return real(*args, **kwargs)
+
+        with mock.patch.object(start_review, "_result_commit", side_effect=crash_once):
+            with self.assertRaises(Crash):
+                st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
+                         review=self.review())
+            reserved = self.consumption_ids(self.start_record())
+            self.assertEqual(len(reserved), 1, "reserved once, after its lineage, before S-c1")
+            result = st.start(self.store, self.work_id, "single-work",
+                              lambda ctx: (_ for _ in ()).throw(AssertionError("the executor ran again")),
+                              review=self.review())
+        self.assertEqual(result.status, "completed")
+        (record,) = self.captured
+        self.assertEqual(self.consumption_ids(record), reserved, "the resumed run reused it, and reserved no other")
+        self.assertEqual(record["write_scope"]["files"].count(review_paths.consumption_rel(reserved[0])), 1)
+        self.assertEqual(self.consumption(self.head(), record).consumption_id, reserved[0])
+
+    def test_a_reservation_already_held_is_left_exactly_as_it_is_when_the_lineage_then_fails(self) -> None:
+        """A pending record holding a reservation is neither discarded nor reinterpreted: lineage decides first."""
+        remote = self.remote_main()
+        with mock.patch.object(start_review, "_result_commit", side_effect=Crash()), self.assertRaises(Crash):
+            st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
+                     review=self.review())
+        before = self.start_record()
+        self.assertEqual(len(self.consumption_ids(before)), 1)
+        self.commit_file("person.txt", b"theirs\n", "a person's commit")
+        with self.assertRaises(ReconcileRequired) as raised:
+            st.start(self.store, self.work_id, "single-work",
+                     lambda ctx: (_ for _ in ()).throw(AssertionError("the executor ran again")), review=self.review())
+        self.assertEqual(raised.exception.reason, "review_registration_base_moved")
+        after = self.start_record()
+        self.assertEqual((after["reserved_ids"], after["write_scope"]), (before["reserved_ids"], before["write_scope"]))
+        self.assertEqual({str(e["stage"]) for e in after["effects"]}, {str(e["stage"]) for e in before["effects"]})
+        self.assertEqual(git(self.root, "log", "--format=%H", "--", "out.txt"), "")
+        self.assertEqual(self.remote_main(), remote)
 
 
 class PublicationTests(TerminalCase):
@@ -409,6 +536,127 @@ class RecognitionTests(TerminalCase):
         legacy["effects"] = [e for e in legacy["effects"] if not (e["stage"] == stage and e["kind"] == "create_file")]
         mutation.record = legacy
         self.assertFalse(st._recorded_completion(mutation, stage, self.work_id))
+
+
+# --------------------------------------------------------------------------- which commit each Work commit is pinned to
+
+
+class PersistenceBasisTests(TerminalCase):
+    """Cumulative repair B-2 - F3 §7.1.11 as corrected by C3-2, and §7.3 - for every Work commit class.
+
+    Every Work-mode commit's DURABLE payload is read at its §7.3 preflight, and every pinned
+    evaluation is recorded with HEAD at that instant. A pre-completion Work commit is pinned to
+    its own exact recorded parent (``attr_basis == base_head``), and its preflight evaluated
+    exactly its path set under exactly that basis while HEAD was still that parent - before the
+    commit existed. Every generation commit, K1 and K2 are pinned to declared_base.base_commit.
+    """
+
+    confirmation = True
+
+    def setUp(self) -> None:
+        super().setUp()
+        from workline.review import attributes
+
+        self.payloads: list[dict] = []
+        self.evaluations: list[tuple[str, tuple[str, ...], str]] = []
+        real_preflight, real_evaluate = workcommit.preflight, attributes.require_pinned_path_evaluation
+
+        def preflight(mutation, git_, record):
+            self.payloads.append(json.loads(json.dumps(record["payload"])))
+            return real_preflight(mutation, git_, record)
+
+        def evaluate(store, git_, basis, paths):
+            self.evaluations.append((basis, tuple(paths), self.head()))
+            return real_evaluate(store, git_, basis, paths)
+
+        for patcher in (mock.patch.object(workcommit, "preflight", side_effect=preflight),
+                        mock.patch.object(attributes, "require_pinned_path_evaluation", side_effect=evaluate)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def of_class(self, plan_class: str) -> list[dict]:
+        """The distinct commits of one class; a commit is preflighted when recorded and again when made."""
+        found: dict[tuple, dict] = {}
+        for payload in self.payloads:
+            if payload["plan_class"] == plan_class:
+                found.setdefault((payload["base_head"], tuple(payload["paths"]), payload["message"]), payload)
+        return list(found.values())
+
+    def assert_preflight_ran_under(self, payload: dict) -> None:
+        """§7.3: exactly its paths, under exactly its basis, while HEAD was still its parent."""
+        self.assertIn((payload["attr_basis"], tuple(payload["paths"]), payload["base_head"]), self.evaluations)
+
+    def assert_pinned_to_its_own_parent(self, plan_class: str) -> list[dict]:
+        commits = self.of_class(plan_class)
+        self.assertTrue(commits, f"no {plan_class} commit was made")
+        for payload in commits:
+            with self.subTest(commit=payload["message"]):
+                self.assertEqual(payload["attr_basis"], payload["base_head"], "C3-2: its own exact recorded parent")
+                self.assert_preflight_ran_under(payload)
+        return commits
+
+    def declared_base(self, record: dict) -> str:
+        (run_id,) = [v for k, v in record["reserved_ids"].items() if k.startswith("review-run:work-result-v1:")]
+        chain = ReviewStore(self.store).gate_chain(run_id)
+        snapshot = ReviewStore(self.store).read_candidate_snapshot(chain.generations[0].candidate_hash)
+        return snapshot.material["candidate"]["declared_base"]["base_commit"]
+
+    def test_a_derived_registration_is_pinned_to_its_parent_and_the_later_classes_to_the_declared_base(self) -> None:
+        outcomes = [st.Derive({"extra": st.DerivedWork("Extra", "more")}), None]
+
+        def execute(ctx):
+            outcome = outcomes.pop(0)
+            if outcome is not None:
+                return outcome
+            (self.root / "out.txt").write_bytes(b"out\n")
+            return st.Completed(("out.txt",))
+
+        _, record = self.complete(execute)
+        (derived,) = self.assert_pinned_to_its_own_parent("work-stage")
+        self.assertIn("derive from", derived["message"])
+        base = self.declared_base(record)
+        self.assertNotEqual(derived["base_head"], base, "made before the declared base existed, so never pinned to it")
+        for entry in self.of_class("entry"):
+            self.assertEqual(entry["attr_basis"], entry["base_head"], "S-c0: PRE_S_C0_BASE, its own exact parent")
+            self.assert_preflight_ran_under(entry)
+        later = self.of_class("generation") + self.of_class("result") + self.of_class("terminal")
+        self.assertEqual([p["plan_class"] for p in later], ["generation"] * 3 + ["result", "terminal"])
+        for payload in later:
+            with self.subTest(commit=payload["message"]):
+                self.assertEqual(payload["attr_basis"], base, "declared_base.base_commit")
+                self.assert_preflight_ran_under(payload)
+        # the durable record keeps exactly that basis for the commit it made
+        recorded = [e["payload"] for e in record["effects"]
+                    if e["kind"] == "git_commit" and e["payload"]["plan_class"] == "work-stage"]
+        self.assertEqual([(p["attr_basis"], p["base_head"]) for p in recorded], [(derived["attr_basis"], derived["base_head"])])
+
+    def test_a_move_is_pinned_to_its_own_parent(self) -> None:
+        move = st.Derive({"fix": st.DerivedWork("Fix", "fixed", derivation_detail="why Fix")}, move=True)
+        result = st.start(self.store, self.work_id, "single-work", lambda ctx: move, review=self.review())
+        self.assertEqual(result.status, "moved")
+        (moved,) = self.assert_pinned_to_its_own_parent("work-stage")
+        self.assertEqual(moved["base_head"], git(self.root, "rev-parse", "HEAD~1"))
+        self.assertEqual(self.of_class("generation") + self.of_class("result"), [], "a move is never reviewed")
+
+    def test_a_human_ng_move_is_pinned_to_its_own_parent(self) -> None:
+        from helpers import completing_executor
+
+        for work in (self.work_id, self.phase_entry.integration_id):  # the confirmation's prerequisites, legacy
+            self.assertEqual(st.start(self.store, work, "single-work", completing_executor(self.store)).status, "completed")
+        self.payloads.clear()
+        self.evaluations.clear()
+        ng = st.HumanNG({"f1": st.DerivedWork("F1", "defect fixed", derivation_detail="why F1")},
+                        st.DerivedWork("I2", "re-integrated"))
+        result = st.start(self.store, self.phase_entry.confirmation_id, "single-work", lambda ctx: ng, review=self.review())
+        self.assertEqual(result.status, "moved")
+        (moved,) = self.assert_pinned_to_its_own_parent("work-stage")
+        self.assertEqual(moved["base_head"], git(self.root, "rev-parse", "HEAD~1"))
+
+    def test_a_hold_is_pinned_to_its_own_parent(self) -> None:
+        result = st.start(self.store, self.work_id, "single-work", lambda ctx: st.Hold("waiting"), review=self.review())
+        self.assertEqual(result.status, "held")
+        (held,) = self.assert_pinned_to_its_own_parent("work-stage")
+        self.assertEqual(held["base_head"], git(self.root, "rev-parse", "HEAD~1"))
 
 
 if __name__ == "__main__":

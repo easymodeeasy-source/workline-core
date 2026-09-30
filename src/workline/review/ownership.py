@@ -477,11 +477,17 @@ def _capture_result(
             if final is None:
                 raise _unavailable(f"{path!r} does not exist")
             if final.is_indirection:
-                target = parent.read_link(name)
+                # the link's own identity, from the read itself, and again after it: an object swapped in
+                # between identifying the name and reading it - or back again before the second look - is
+                # refused, not witnessed
+                link = parent.read_link(name)
                 after = parent.final_object(name)
-                if target is None or after is None or after.identity != final.identity or not after.is_indirection:
+                if (link is None or link.identity != final.identity or after is None
+                        or after.identity != final.identity or not after.is_indirection):
                     raise _unavailable(f"{path!r} changed while its link target was read")
-                return OwnershipWitness(path, KIND_SYMLINK, MODE_SYMLINK, _object_id(hermetic, target, width), target)
+                return OwnershipWitness(
+                    path, KIND_SYMLINK, MODE_SYMLINK, _object_id(hermetic, link.target, width), link.target
+                )
             if final.is_file:
                 bound = parent.read_file_bound(name)
                 if bound is None or bound.identity != final.identity:

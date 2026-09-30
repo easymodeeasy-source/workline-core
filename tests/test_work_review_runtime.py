@@ -111,6 +111,8 @@ class ReviewCase(WorklineTestCase):
 
     remote = False
     stop_after_seal = True
+    #: Whether the Phase also gets a human_confirmation Work (``self.phase_entry.confirmation_id``).
+    confirmation = False
 
     def setUp(self) -> None:
         super().setUp()
@@ -130,7 +132,7 @@ class ReviewCase(WorklineTestCase):
         git(self.root, "add", ".gitattributes")
         git(self.root, "commit", "-m", "form L", "--no-verify")
         roadmap = self.simple_roadmap(self.store)
-        entry = self.simple_entry(self.store, roadmap.phase_ids["a"])
+        self.phase_entry = entry = self.simple_entry(self.store, roadmap.phase_ids["a"], confirmation=self.confirmation)
         self.work_id = entry.work_ids["w1"]
         self.prepare()
         self.activate()

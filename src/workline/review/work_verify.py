@@ -48,9 +48,9 @@ import sys
 from typing import Any
 
 from .. import gitcmd
-from ..errors import ReconcileRequired, StopError
+from ..errors import ReconcileRequired, StopError, ValidationError
 from ..store import ProjectStore
-from . import paths as review_paths, resulting_tree, work_review
+from . import fsafe, paths as review_paths, resulting_tree, work_review
 from .hermetic import HermeticGit
 
 
@@ -214,6 +214,29 @@ def _require_index_entries(run: Any, entries: list[dict[str, Any]]) -> None:
             raise _failed(f"{entry['path']!r} is {found} in the reconstructed index, not {entry['new_mode']} {entry['new_oid']}")
 
 
+def _link_target(workspace: Path, path: str) -> bytes:
+    """The link at ``path`` in the workspace, read the way Git reads it - ``fsafe``'s reader, never ``os.readlink``.
+
+    Git for Windows checks a link out with backslashes and reads one back through
+    its own normalization, while ``os.readlink`` renders the same reparse data its
+    own way (a ``\\\\?\\`` prefix, backslashes kept): compared with Git's bytes, that
+    rendering would refuse every link holding a separator or an absolute target.
+    On POSIX both are the raw target bytes.
+    """
+    parts = path.split("/")
+    try:
+        chain = fsafe.walk(workspace, parts[:-1])
+        if chain is None:
+            raise _failed(f"{path!r} is missing from the workspace")
+        with chain:
+            link = chain.last.read_link(parts[-1])
+    except ValidationError as exc:
+        raise _failed(f"{path!r} cannot be read back as a link: {exc.message}") from exc
+    if link is None:
+        raise _failed(f"{path!r} is missing from the workspace")
+    return link.target
+
+
 def _require_materialized(workspace: Path, entry: dict[str, Any], payload: bytes | None, symlinks: bool) -> None:
     """One entry, read back from the workspace no-follow: its kind and exact bytes as V-2 freezes them."""
     target = workspace.joinpath(*entry["path"].split("/"))
@@ -237,8 +260,7 @@ def _require_materialized(workspace: Path, entry: dict[str, Any], payload: bytes
     if kind == "symlink" and symlinks:
         if not stat.S_ISLNK(info.st_mode):
             raise _failed(f"{entry['path']!r} is not a symbolic link in the workspace")
-        link = os.readlink(os.fsencode(target))
-        if link != payload:
+        if _link_target(workspace, entry["path"]) != payload:
             raise _failed(f"{entry['path']!r} links to something other than the frozen target bytes")
         return
     if not stat.S_ISREG(info.st_mode):

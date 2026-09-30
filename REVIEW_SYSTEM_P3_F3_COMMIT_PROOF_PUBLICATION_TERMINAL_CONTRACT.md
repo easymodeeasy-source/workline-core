@@ -71,7 +71,7 @@ never widens. Every apparent collision was audited item by item in §22.
 
 ```text
 F2 forward amendments:  YES - SEVEN (A-1 ... A-7), all stated in §1.5.
-F3-only corrections:    ONE (C3-1), stated in §1.5, superseding nothing in F2.
+F3-only corrections:    TWO (C3-1, C3-2), stated in §1.5, superseding nothing in F2.
 ```
 
 They are declared there in full, with the exact superseded sentences and the narrow replacement.
@@ -121,12 +121,16 @@ distinct in name as well as in count:
 F2 FORWARD AMENDMENTS          A-1 ... A-7                            COUNT = SEVEN
                                each supersedes a NAMED SENTENCE of the landed F2 contract
 
-F3-ONLY CORRECTIONS            C3-1  the generation mode dispatch     COUNT = ONE
-                               supersedes NOTHING in F2. It corrects an assumption F3 itself
-                               made about live code (`gitops.review_commit_effect` sets the
-                               planning mode unconditionally), and it is recorded here only
-                               because a reader comparing recorded modes must be able to find it.
-                               The label A-8 is RETIRED; this is C3-1.
+F3-ONLY CORRECTIONS            C3-1  the generation mode dispatch     COUNT = TWO
+                               C3-2  the pre-completion persistence basis
+                               each supersedes NOTHING in F2. C3-1 corrects an assumption F3
+                               itself made about live code (`gitops.review_commit_effect` sets
+                               the planning mode unconditionally); C3-2 corrects a timing
+                               contradiction in F3's own §7.1.11 (a pre-completion Work commit
+                               cannot pin to a declared base frozen after it is made). Each is
+                               recorded here only because a reader comparing recorded modes or
+                               recorded bases must be able to find it.
+                               The label A-8 is RETIRED; the mode dispatch is C3-1.
 ```
 
 F3 supersedes seven statements of the landed F2 contract. The F2 file is not edited by either
@@ -638,6 +642,64 @@ F3 §7.6 itself made about live code. An earlier draft labelled it A-8 and count
 forward amendments while simultaneously saying it superseded nothing — a contradiction, now
 resolved by giving it its own class. It is still recorded in full, because a reader comparing
 recorded persistence modes must be able to find it.
+```
+
+---
+
+#### C3-2 — F3-ONLY CORRECTION (not an F2 amendment): the pre-completion persistence basis
+
+```text
+§7.1.11 as frozen said, in effect:
+
+    S-c0                              -> PRE_S_C0_BASE
+    generation commits 1 / 2 / 3      -> declared_base.base_commit
+    every pre-completion Work commit  -> declared_base.base_commit
+    S-c1 / S-c2                       -> declared_base.base_commit
+
+THE THIRD ROW CANNOT HOLD, and the contradiction is F3's own. A pre-completion Work commit — a
+derived registration, a move, a human-NG move, and every other commit-only stage the Work cycle
+records before its executor returns Completed — is MADE BEFORE the Completed outcome from which
+declared_base.base_commit is frozen (§5.1 steps 9a-10, A-1). A commit that has already happened
+cannot have been pinned to a commit that did not exist yet: the same circularity §7.1.11 already
+withdrew for S-c0, one commit class earlier.
+```
+
+**FROZEN — F3-only correction C3-2:**
+
+```text
+S-c0                                   attr_basis = PRE_S_C0_BASE, which is its own exact parent
+each pre-completion Work commit        attr_basis = that commit's EXACT RECORDED PARENT
+Work Review generation commits 1/2/3   attr_basis = declared_base.base_commit
+S-c1 / K1                              attr_basis = declared_base.base_commit
+S-c2 / K2                              attr_basis = declared_base.base_commit
+
+For every pre-completion Work commit:
+    its exact parent is already durable in its git_commit payload, as base_head;
+    §7.3's Git persistence preflight runs against that exact parent, over exactly that commit's
+      path set — before the commit is recorded, and again immediately before it is made;
+    its CommitTreePlan is built from that exact parent object (§7.1.1, §7.1.2);
+    no working-tree attribute source becomes authority.
+```
+
+```text
+WHY THIS KEEPS WHAT THE PIN EXISTS FOR. A pre-completion Work stage commits only what START
+itself recorded — registration and relation ledgers, entity files, the event log — and no
+START-owned write touches an attribute source, so none of this operation's own commits changes
+the attribute state its later commits are pinned to (the argument §7.1.11 makes for S-c0). What a
+pre-completion commit's pin names is exactly the committed tree its CommitTreePlan is built on,
+never the working tree; and §7.3's preflight re-proves the two-surface requirement under that pin,
+over exactly that commit's path set, so a transform-bearing attribute source that reached that
+parent from outside this operation fails that commit closed rather than being carried over from
+an earlier pass.
+```
+
+```text
+THIS IS NOT AN AMENDMENT TO F2, and it amends nothing in F1. F2 does not legislate which commit a
+pre-completion Work stage pins its attribute source to, so there is no F2 sentence to supersede:
+what this corrects is F3's own §7.1.11 table, to the only value the timing permits. It changes no
+Candidate, Context, Evidence or Review record field and no identity string — the Work
+persistence identity stays "review-v1-work-local-v2" — and the planning identity and every
+planning behaviour are untouched.
 ```
 
 ---
@@ -3339,15 +3401,25 @@ An earlier draft said "every commit this operation makes, including S-c0, pins t
 PRE_S_C0_BASE   the exact committed HEAD immediately before S-c0 is recorded.
                 It is a commit that already exists, so there is nothing circular about it.
 
-S-c0                            pins to PRE_S_C0_BASE
+every pre-completion Work commit
+                                pins to ITS OWN EXACT RECORDED PARENT — the base_head its
+                                git_commit payload already carries (C3-2, §1.5). It is made
+                                before the Completed outcome that freezes the declared base,
+                                so it cannot pin to that base any more than S-c0 can
+S-c0                            pins to PRE_S_C0_BASE, which is its own exact parent
 declared_base.base_commit       = the exact post-S-c0 HEAD
 generation commits 1 / 2 / 3    pin to declared_base.base_commit
-every pre-completion Work commit
 S-c1, S-c2                      pin to declared_base.base_commit
 
 When S-c0 is not recorded at all — the event log already matches HEAD — PRE_S_C0_BASE and
 declared_base.base_commit are the same commit and the distinction collapses.
 ```
+
+An earlier text of this table listed "every pre-completion Work commit" among the commits pinned to
+`declared_base.base_commit`. That was the same circularity again, one commit class earlier, and it is
+corrected by C3-2 rather than silently departed from: a commit already made cannot have pinned to a
+commit frozen after it. No START-owned write touches an attribute source, so none of these commits
+changes the attribute state the next one is pinned to, and §7.3 re-proves each one under its own pin.
 
 **Why this is semantically ONE persistence basis, and not two.** The premise has to be guaranteed, not
 assumed, so F3 freezes the restriction that makes it true:
@@ -3452,8 +3524,10 @@ pre-completion Work stage, every Work Review generation commit (§7.1.7), S-c1/K
      and never a nominal one;
 
   2. evaluate the attributes of exactly those paths UNDER THE PINNED SOURCE — the same
-     attr.tree = <tree of declared_base.base_commit>, the same neutralized system and global
-     sources, that the commit itself will run with (§7.1).
+     attr.tree = <tree of THIS commit's persistence basis, §7.1.11: PRE_S_C0_BASE for S-c0, the
+     commit's own exact recorded parent for a pre-completion Work commit (C3-2),
+     declared_base.base_commit for every generation commit, S-c1 and S-c2>, the same neutralized
+     system and global sources, that the commit itself will run with (§7.1).
 
      Evaluating against the working tree instead would let the evaluation and the storage
      disagree, which is precisely the defect M-22 records in the live effective evaluation;
@@ -3660,9 +3734,10 @@ The architecture that actually removes the refusal is the attribute-source pin o
 works is measured, not argued (M-20):
 
 ```text
-Every commit this operation makes runs with a pinned attribute source — S-c0 to PRE_S_C0_BASE,
-every later commit to declared_base.base_commit, which §7.1.11 proves is the same attribute state —
-with the system and global attribute sources neutralized.
+Every commit this operation makes runs with a pinned attribute source — S-c0 to PRE_S_C0_BASE, a
+pre-completion Work commit to its own exact recorded parent (C3-2), every generation commit, S-c1
+and S-c2 to declared_base.base_commit: bases between which this operation's own commits change no
+attribute source (§7.1.11) — with the system and global attribute sources neutralized.
 
 Therefore the persistence semantics this operation commits under are FIXED, at the base, before
 the executor runs — the same base the Candidate's object identities were computed against.
@@ -3862,7 +3937,8 @@ with K1.
 The pin closes this by the same mechanism, applied to the same complete surface:
 
 ```text
-EVERY commit this operation makes is pinned — S-c0 to PRE_S_C0_BASE and every later commit to
+EVERY commit this operation makes is pinned — S-c0 to PRE_S_C0_BASE, a pre-completion Work
+commit to its own exact recorded parent (C3-2), and every generation commit, S-c1 and S-c2 to
 declared_base.base_commit (§7.1.11) — and every persistence evaluation this operation makes is
 evaluated UNDER THAT SAME PIN, over exactly the paths that commit writes:
 
@@ -7499,9 +7575,10 @@ D. S-c0
          attribute state. Activated as PB-9.
 
 E. EVERY LATER COMMIT
-   the generation commits of 13 / 15 / 16, every pre-completion Work commit, S-c1 at 18 and
-   S-c2: all pinned to declared_base.base_commit, with core.autocrlf / core.eol neutralized and
-   the per-commit preflight under that same pin (§7.3, PB-3, PB-9).
+   the generation commits of 13 / 15 / 16, S-c1 at 18 and S-c2: all pinned to
+   declared_base.base_commit; every pre-completion Work commit, made before the declared base
+   exists, pinned to its own exact recorded parent (C3-2). Each with core.autocrlf / core.eol
+   neutralized and the per-commit preflight under its own pin (§7.3, PB-3, PB-9).
 
 F. RESULT PATH INSIDE .workline/review/**   (A-5)
    bound   before the executor ran, by the review-v1 invocation contract (PR-8)
@@ -8344,6 +8421,14 @@ C  true conflict requiring a new forward amendment
     planning, unchanged. The planning identity is never redefined.
     F3-ONLY CORRECTION C3-1 (§1.5) — NOT an F2 amendment. §7.1.7.                            C
 
+27  F3 §7.1.11's own table, which pinned every pre-completion Work commit to
+    declared_base.base_commit although such a commit is made before the Completed outcome that
+    freezes that base (A-1) — the circularity §7.1.11 withdrew for S-c0, one class earlier. No
+    P1, P2, F1 or F2 sentence is involved. Resolved by pinning each pre-completion Work commit to
+    its own exact recorded parent, the base_head its payload already carries; every generation
+    commit, S-c1 and S-c2 keep declared_base.base_commit, and S-c0 keeps PRE_S_C0_BASE.
+    F3-ONLY CORRECTION C3-2 (§1.5) — NOT an F2 amendment. §7.1.11, §7.3.                     C
+
 25  F2 §10.3 — `git_persistence = "review-v1-work-local-v1"`, described there as denoting the
     contained commit primitive. F3 §7.1.2 replaces that primitive, so the value must change or a
     landed sentence becomes false while readers compare against the wrong semantics. The FIELD
@@ -8442,7 +8527,7 @@ C  true conflict requiring a new forward amendment
 ```text
 Forward amendment required: YES
 
-Seven F2 amendments (A-1 ... A-7) and one F3-only correction (C3-1), declared in full in §1.5:
+Seven F2 amendments (A-1 ... A-7) and two F3-only corrections (C3-1, C3-2), declared in full in §1.5:
     A-1  F2 §5.3           base_commit's timing, and that it is K1's parent       row 19
     A-2  F2 §14.4, §16.1   the unqualified "every HEAD advance" consequence       row 3
     A-3  F2 §7.1/7.2/7.3   the result-bearing / no-K1 discriminator               row 21
@@ -8469,6 +8554,11 @@ AND, IN ITS OWN CLASS, superseding no F2 sentence:
     C3-1 F3-ONLY CORRECTION  a Work Review Run's own generation commits use the Work  row 26
                            persistence identity, discriminated by the durable
                            review_kind; every planning Run is untouched. NOT an F2
+                           amendment and NOT counted among the seven.
+    C3-2 F3-ONLY CORRECTION  each pre-completion Work commit pins its attribute       row 27
+                           source to its own exact recorded parent, since it is made
+                           before the declared base exists; every generation commit,
+                           S-c1 and S-c2 keep declared_base.base_commit. NOT an F2
                            amendment and NOT counted among the seven.
 
 No P1, P2 or P3 F1 statement is amended.
@@ -8530,13 +8620,16 @@ PB-5  a review-v1 Work START in a Project with a remote requires the running Git
 PB-6  the Git persistence preflight runs immediately before EVERY commit a review-v1 Work
       mutation makes, for exactly that commit's path set, evaluated under the pinned
       attribute source, and a pass never carries between commits (§7.3)
-PB-9  the attribute-source pin, with its TWO bases (§7.1.11): S-c0 is made with attr.tree set
-      to the tree of PRE_S_C0_BASE — the committed HEAD immediately before it — and EVERY later
-      commit of the mutation with attr.tree set to the tree of declared_base.base_commit. The
-      two are proven to represent the SAME attribute state, because S-c0 commits the event log
-      alone and so can change no attribute source. In both cases the system and global attribute
-      sources are neutralized, so committed object identity equals the Candidate's by
-      construction and no filter program is reachable (§7.1, §7.1.11, §7.4.2)
+PB-9  the attribute-source pin, with its bases (§7.1.11, C3-2): every pre-completion Work commit
+      is made with attr.tree set to the tree of its own exact recorded parent — it is made
+      before the declared base exists; S-c0 with attr.tree set to the tree of PRE_S_C0_BASE —
+      the committed HEAD immediately before it; and every generation commit, S-c1 and S-c2 with
+      attr.tree set to the tree of declared_base.base_commit. PRE_S_C0_BASE and
+      declared_base.base_commit are proven to represent the SAME attribute state, because S-c0
+      commits the event log alone and so can change no attribute source, and no START-owned
+      pre-completion write touches an attribute source either. In every case the system and
+      global attribute sources are neutralized, so committed object identity equals the
+      Candidate's by construction and no filter program is reachable (§7.1, §7.1.11, §7.4.2)
 PB-10 an executor-authored change to Git persistence configuration is an ordinary Work
       result, committed and reviewed as an ordinary file entry, and is never refused
       (§7.4.1, §7.4.2)
@@ -8626,8 +8719,8 @@ TM-6  that a proof note is a recovery pointer and never a proof result, and that
       (§10.2)
 TM-7  the no-K1 discriminator of §6.7: artifact_kind is decided by whether any Candidate entry
       is changing, never by the emptiness of entries or of result_paths
-TM-8  the seven F2 forward amendments of §1.5, and the one F3-only correction C3-1 beside
-      them, which a reader of F2 alone cannot
+TM-8  the seven F2 forward amendments of §1.5, and the two F3-only corrections C3-1 and C3-2
+      beside them, which a reader of F2 alone cannot
       discover from F2
 TM-10 the seal precondition of §7.9: a Review may not seal unless the resulting tree preserves
       canonical Review checkout capability over the Review namespace, proven mechanically
@@ -8914,9 +9007,11 @@ Stop conditions. An implementation that violates any of them is not implementing
 
 20. Every commit this operation makes — the entry-events commit, the Review's own generation
     commits, every pre-completion Work commit, K1 and K2 alike — is made with a pinned attribute
-    source: S-c0 to PRE_S_C0_BASE and every later commit to declared_base.base_commit, which are
-    the same attribute state because S-c0 commits the event log alone (§7.1.11). The Git
-    persistence preflight runs
+    source: every pre-completion Work commit to its own exact recorded parent (C3-2), S-c0 to
+    PRE_S_C0_BASE, and every generation commit, K1 and K2 to declared_base.base_commit.
+    PRE_S_C0_BASE and declared_base.base_commit are the same attribute state because S-c0
+    commits the event log alone, and no START-owned write changes an attribute source
+    (§7.1.11). The Git persistence preflight runs
     immediately before each of them, over exactly that commit's path set, evaluated under that
     same pin. A pass never carries from one commit to another, and an evaluation made against the
     working tree never satisfies it.
@@ -9064,7 +9159,7 @@ Contract status              FROZEN (repaired through successive independent rev
 Architecture blocker         NONE
 HUMAN decision               NONE
 F2 forward amendments        SEVEN (A-1 ... A-7), declared in §1.5
-F3-only corrections          ONE (C3-1), superseding nothing in F2
+F3-only corrections          TWO (C3-1, C3-2), superseding nothing in F2
 Implementation authorized    NO
 P3 implementation            NOT STARTED
 F4 started                   NO
@@ -9089,7 +9184,7 @@ the complete set of §21.1 and is never a weaker summary of it:
   IP-7  F1 Gate 3
   IP-8  the per-invocation environment classes of §7.1.9 — the GIT_* STRIP on EVERY invocation
         including the class A capture, the hermetic allowlist and configuration neutralization on
-        every CLASS B invocation only, the attribute pin with its two bases (§7.1.11) on every
+        every CLASS B invocation only, the attribute pin with its bases (§7.1.11, C3-2) on every
         class B invocation that resolves attributes, literal pathspecs on every class B
         invocation consuming a declared path. NOT "both invocations", and never
         `git add` / `git commit`
