@@ -19,19 +19,28 @@ non-full-snapshot generation chain, a duplicate logical ID, an authorization
 record whose shared identities do not match what issued it, malformed or
 inconsistent provenance, or a contradictory activation state.
 
-P3 activation semantics are not applied. An absent activation record means
-review-v1 Work terminalization is not activated, which is the state P1 leaves
-every Project in, and no terminal event is classified by anything here.
+P3's activation semantics are applied to the working tree (P3 F1 §10,
+:func:`activation_problems`). An absent activation record means review-v1 Work
+terminalization is not activated - a valid, ordinary state - and no completion
+is classified by its position. A present record fixes the pre-activation Events
+by its prefix digest; when that prefix reproduces, every ``work_completed``
+after it is legacy without the review-v1 marker and bound by exactly one Work
+Consumption with it, and when it does not, nothing after it is classified at
+all. Lifecycle derivation never reads any of it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..errors import ValidationError
-from ..store import ProjectStore
+from typing import Any
+
+from ..errors import StopError, ValidationError
+from ..ids import is_valid_id
+from ..store import EVENT_LIFECYCLE_FIELDS, ProjectStore
+from . import activation as work_activation
 from . import paths
-from .records import Consumption, GateGeneration, PlanningConsumption, Receipt
+from .records import OPERATION_CONTRACT_REVIEW_V1, Consumption, GateGeneration, PlanningConsumption, Receipt
 from .store import GateChain, ReviewStore
 
 
@@ -75,9 +84,28 @@ RECEIPT_CONSUMPTION_BINDING = (
 )
 
 
+#: F1 §10's problems. Each refuses this Project's review-v1 use; none is ever a fallback to legacy.
+ACTIVATION_PREFIX_MISMATCH = "review_activation_prefix_mismatch"
+COMPLETION_MARKER_INVALID = "review_completion_marker_invalid"
+COMPLETION_MARKER_CONTRADICTION = "review_completion_marker_contradiction"
+COMPLETION_UNCONSUMED = "review_completion_unconsumed"
+CONSUMPTION_UNBOUND = "review_consumption_unbound"
+
+#: The Review consistency metadata a review-v1 ``work_completed`` carries, and nothing else (P1 R4 §5,
+#: F1 §12.1): the operation-contract marker first, then what binds the Consumption of it.
+COMPLETION_METADATA = ("operation_contract", "review_receipt_id", "review_run_id", "review_generation")
+
+
 def validate_review(store: ProjectStore) -> list[ReviewProblem]:
-    """Structural problems in this Project's Review namespace; empty when there are none."""
-    return review_problems(ReviewStore(store))
+    """Problems in this Project's Review namespace and in its activation classification; empty when there are none.
+
+    The structural pass reads any P1 reader (:func:`review_problems`). The
+    activation pass (:func:`activation_problems`) reads this Project's working
+    tree - its event log and its pending recovery records - so it is made here,
+    for the Project, and never by a reader of one commit's records.
+    """
+    review = ReviewStore(store)
+    return review_problems(review) + activation_problems(store, review)
 
 
 def review_problems(review: ReviewStore) -> list[ReviewProblem]:
@@ -451,6 +479,243 @@ def _task_inputs(review: ReviewStore) -> list[ReviewProblem]:
         except ValidationError as exc:
             problems.append(_problem(exc))
     return problems
+
+
+def activation_problems(store: ProjectStore, review: ReviewStore) -> list[ReviewProblem]:
+    """P3 F1 §10 over this Project's working tree: the activation boundary, and review-v1 totality after it.
+
+    ```text
+    no activation record      valid and not activated; no completion is classified
+                              by its position, and a review-v1 marker contradicts it
+    activation whose prefix   Events 0 .. N-1 are pre-activation legacy and need nothing;
+    reproduces                a work_completed at index >= N is
+                                without the marker        legacy - no Consumption
+                                marked review-v1          bound by exactly one Work
+                                                          Consumption that repeats it
+                                any other marker          invalid
+    activation whose prefix   fails closed: nothing after it is classified
+    does not reproduce
+    ```
+
+    The prefix is read through the one digest implementation
+    (:mod:`workline.review.activation`) over the event log this validation
+    reads, so the indexes it classifies are the indexes the digest fixed.
+
+    A one-sided review-v1 state - the event without its Consumption, or the
+    Consumption without its event - is valid only while a pending review-v1
+    Work START holds the one terminal stage both belong to, with the missing
+    half still unapplied (:func:`workline.start_review.recorded_terminal`);
+    never because of what the files themselves hold. A malformed record is the
+    structural pass's to report, and classifies nothing either way.
+    """
+    try:
+        activation = review.read_activation()
+    except ValidationError:
+        return []
+    events = _event_log(store)
+    if activation is None:
+        return [] if events is None else _unactivated_markers(events)
+    count = activation.legacy_event_count
+    if events is None or work_activation.prefix_digest(events, count) != activation.legacy_event_prefix_sha256:
+        return [
+            ReviewProblem(
+                ACTIVATION_PREFIX_MISMATCH,
+                f"the activation fixes {count} pre-activation Events by their digest, and this event log does not "
+                "reproduce it; no completion after them is classified",
+            )
+        ]
+    try:
+        consumptions = {
+            event_id: found
+            for event_id, found in review.consumption_by_terminal_event().items()
+            if isinstance(found, Consumption) and found.work_kind
+        }
+    except ValidationError:
+        return []  # a conflict between Consumptions is the structural pass's to report
+    terminals = _recorded_terminals(store)
+    problems: list[ReviewProblem] = []
+    bound: set[str] = set()
+    for index, event in enumerate(events):
+        if event.get("type") != "work_completed":
+            continue
+        reviewed, malformed = _marker(event)
+        where = f"work_completed {event['id']} (Event {index}) of {event['entity']}"
+        if malformed is not None:
+            problems.append(ReviewProblem(COMPLETION_MARKER_INVALID, f"{where} {malformed}"))
+            continue
+        if not reviewed:
+            continue  # legacy, before the boundary or after it
+        if index < count:
+            problems.append(ReviewProblem(
+                COMPLETION_MARKER_CONTRADICTION,
+                f"{where} carries the review-v1 marker, and the activation fixes it as one of the {count} "
+                "pre-activation Events, which are never review-v1",
+            ))
+            continue
+        consumption = consumptions.get(event["id"])
+        if consumption is None:
+            if not _event_awaits_consumption(store, review, terminals, event):
+                problems.append(ReviewProblem(
+                    COMPLETION_UNCONSUMED,
+                    f"{where} is a review-v1 completion and no Work Consumption binds it, and no pending terminal "
+                    "stage of a review-v1 START holds them together",
+                ))
+            continue
+        bound.add(consumption.consumption_id)
+        contradicted = _binding_contradictions(event, consumption)
+        if contradicted:
+            problems.append(ReviewProblem(
+                COMPLETION_MARKER_CONTRADICTION,
+                f"{where} and consumption {consumption.consumption_id} that binds it disagree: " + "; ".join(contradicted),
+            ))
+    positions: dict[str, int] = {}
+    for index, event in enumerate(events):
+        positions.setdefault(event["id"], index)
+    for event_id, consumption in sorted(consumptions.items()):
+        if consumption.consumption_id in bound:
+            continue
+        index = positions.get(event_id)
+        if index is None:
+            if _consumption_awaits_event(store, review, terminals, consumption):
+                continue
+            detail = "names a terminal event this event log does not hold"
+        else:
+            detail = f"binds Event {index}, which is not a review-v1 completion after the activation"
+        problems.append(ReviewProblem(
+            CONSUMPTION_UNBOUND,
+            f"Work consumption {consumption.consumption_id} {detail}, and no pending terminal stage of a review-v1 "
+            "START holds them together",
+        ))
+    return problems
+
+
+def _event_log(store: ProjectStore) -> list[dict[str, Any]] | None:
+    """The working tree's event log, parsed by the activation digest's own reader; None when it does not read."""
+    try:
+        data = store.events_jsonl.read_bytes()
+    except OSError:
+        return None
+    return work_activation.parse_event_log(data)
+
+
+def _marker(event: dict[str, Any]) -> tuple[bool, str | None]:
+    """``(review-v1, problem)`` for one ``work_completed``: only true absence of the marker is legacy.
+
+    Review metadata without the marker, an unknown marker, and a review-v1
+    marker whose metadata is not exactly the frozen set of well-formed values
+    are all invalid; none of them is read as legacy (F1 §10.3).
+    """
+    carried = [key for key in COMPLETION_METADATA if key in event]
+    if not carried:
+        return False, None
+    if "operation_contract" not in event:
+        return False, f"carries Review metadata ({', '.join(carried)}) without the operation-contract marker"
+    if event["operation_contract"] != OPERATION_CONTRACT_REVIEW_V1:
+        return False, f"carries the unknown operation-contract marker {event['operation_contract']!r}"
+    metadata = sorted(key for key in event if key not in EVENT_LIFECYCLE_FIELDS)
+    if metadata != sorted(COMPLETION_METADATA):
+        return False, f"carries the review-v1 marker with the metadata {metadata}, not exactly {list(COMPLETION_METADATA)}"
+    generation = event["review_generation"]
+    if (
+        not isinstance(event["review_receipt_id"], str) or not is_valid_id(event["review_receipt_id"], "review_receipt")
+        or not isinstance(event["review_run_id"], str) or not is_valid_id(event["review_run_id"], "review_run")
+        or type(generation) is not int or generation < 1
+    ):
+        return False, "carries the review-v1 marker with malformed receipt, run or generation metadata"
+    return True, None
+
+
+def _unactivated_markers(events: list[dict[str, Any]]) -> list[ReviewProblem]:
+    """With no activation, no completion is review-v1: its marker contradicts the Project, and a malformed one is invalid."""
+    problems: list[ReviewProblem] = []
+    for index, event in enumerate(events):
+        if event.get("type") != "work_completed":
+            continue
+        reviewed, malformed = _marker(event)
+        where = f"work_completed {event['id']} (Event {index}) of {event['entity']}"
+        if malformed is not None:
+            problems.append(ReviewProblem(COMPLETION_MARKER_INVALID, f"{where} {malformed}"))
+        elif reviewed:
+            problems.append(ReviewProblem(
+                COMPLETION_MARKER_CONTRADICTION,
+                f"{where} carries the review-v1 marker, and this Project has not activated review-v1 Work "
+                "terminalization",
+            ))
+    return problems
+
+
+def _binding_contradictions(event: dict[str, Any], consumption: Consumption) -> list[str]:
+    """What the Consumption that binds a review-v1 completion says differently from the completion itself."""
+    expected = {
+        "target_identity": event["entity"],
+        "receipt_id": event["review_receipt_id"],
+        "review_run_id": event["review_run_id"],
+        "review_generation": event["review_generation"],
+    }
+    return [
+        f"the consumption says {name} {getattr(consumption, name)!r}, the completion {value!r}"
+        for name, value in expected.items()
+        if getattr(consumption, name) != value
+    ]
+
+
+def _recorded_terminals(store: ProjectStore) -> list[Any]:
+    """The terminal stages pending review-v1 Work STARTs recorded; an unreadable recovery area excuses nothing."""
+    from ..mutation import MutationController
+    from ..start_review import recorded_terminal
+
+    try:
+        pending = MutationController(store).list_pending()
+    except StopError:
+        return []
+    return [found for found in (recorded_terminal(record) for record in pending) if found is not None]
+
+
+def _stored(review: ReviewStore, relative: str) -> bytes | None | bool:
+    """The bytes at ``relative``; None when absent; False when what is there cannot be read as a record."""
+    try:
+        return review.read_bytes(relative)
+    except ValidationError:
+        return False
+
+
+def _event_awaits_consumption(
+    store: ProjectStore, review: ReviewStore, terminals: list[Any], event: dict[str, Any]
+) -> bool:
+    """A pending terminal stage wrote exactly this completion, the log is as it left it, and its create is unapplied."""
+    from ..mutation import _content_digest
+
+    return any(
+        terminal.completed == event
+        and _stored(review, terminal.consumption_path) is None
+        and terminal.log_after is not None
+        and terminal.log_after == _content_digest(store.events_jsonl)
+        for terminal in terminals
+    )
+
+
+def _consumption_awaits_event(
+    store: ProjectStore, review: ReviewStore, terminals: list[Any], consumption: Consumption
+) -> bool:
+    """A pending terminal stage wrote exactly this Consumption itself, and its replay can still append the events.
+
+    The replay appends an event only to the log its own record says it found
+    there, and commits the Consumption only as the bytes it recorded writing;
+    a Consumption someone else placed, or a log someone else changed, is no
+    half of this stage that the replay could finish, however exact the bytes.
+    """
+    from ..mutation import _content_digest, _text_digest
+
+    relative = paths.consumption_rel(consumption.consumption_id)
+    return any(
+        terminal.consumption_path == relative
+        and terminal.completed.get("id") == consumption.terminal_event_id
+        and _stored(review, relative) == terminal.consumption_content.encode("utf-8")
+        and terminal.consumption_written == _text_digest(terminal.consumption_content)
+        and terminal.log_before is not None
+        and terminal.log_before == _content_digest(store.events_jsonl)
+        for terminal in terminals
+    )
 
 
 def _activation(review: ReviewStore) -> list[ReviewProblem]:

@@ -232,6 +232,31 @@ remoteを正式に変更する場合の順序:
 
 Worklineが保証するのは「どのrepositoryへpushするか」まで。HTTPS credential account / SSH identity / credential manager / provider CLIのlogin accountは保証しない。
 
+### Work-terminal Review activation
+
+review-v1 Work（STARTの明示opt-inでWorkのterminalizationをReview gateに通す。`skills/start` / `skills/review`）は、Projectごとに一度、人間が確認してactivateしたProjectでだけ使える。activateしていないProjectでのreview-v1 STARTは `review_not_activated` でSTOPし、何も始めない。対象Projectを直接開き、Project内で1回だけ次を実行する（`<R>` はそのProjectのconfigured Workline root）。
+
+```powershell
+py -3 -I -B "<R>\run-workline.py" activate-work-terminal-review . --confirm
+```
+
+```text
+単位:     Projectごと（Work単位のactivationは無い）
+確認:     --confirm（人間がこのProject固有ルール変更を確認したことの明示）。無ければ何も読まず書かずにSTOP
+記録:     .workline/review/activation/work-terminal-v1.yaml を1つだけ（1 commit。remoteがあれば承認先へpush）
+          legacy_event_count / prefix digest はHEADがcommitしたevent logから。activation_base_head はそのHEAD
+前提:     他のpending mutationなし / activation pathに未commit変更なし / Review namespaceがcanonicalに読める /
+          HEADがbranch上 / Review pathのcheckout capability（.gitattributes の最後の規則が form L）
+不変:     既存のEvent・Work・Consumption・Review recordを書き換えない（移行しない）
+再実行:   already_activated（作り直さない。境界を動かさない）。recordと違う状態は reconcile required
+```
+
+activationはreview-v1を自動選択しない。review-v1は呼び出しごとの明示opt-in（`start(..., review=WorkReview(...))`）のままで、legacy STARTは activate後も従来どおり使え、そのcompletionはConsumptionを要しない。activationは一度きりで、置き換え・削除・作り直しはしない。
+
+review-v1 WorkのCandidate snapshot materialはcanonicalなrepository contentである。reviewerを呼ぶ前にcommitされ、Review対象の結果のbytesをそのまま含みうる（Reviewが許可しなかった結果のbytesも含む）。
+
+Workline implementationのrepository（workline-core）自身をそのProjectとしてactivateしない。self-hostingは現在のWorkline rulesでサポートしておらず（`rules/git` のUnsupported self-hosting）、activationも `workline_self_hosting_unsupported` でSTOPする。
+
 ## Canonical implementation first
 
 canonical implementationが存在する処理を、Skill実行者が独自に再実装しない。
@@ -253,6 +278,7 @@ implementationは [Runtime](#runtime) の起動形だけで起動する。`pytho
 - implementation: core implemented (registry / mutation / project-start / project-router / bootstrap + backfill / phase-create / create / start / roadmap)
 - post-project Skill discovery: implemented (Project-side bootstrap → canonical router → dynamic registry inventory)
 - push destination identity: implemented (project.yaml pin → entry check → durable git_push destination → pin maintenance)
+- Work-terminal Review activation: implemented (human-confirmed per-Project maintenance → owner-guarded immutable record → START entry proof → activation totality validation); no Project is activated by Workline itself
 
 ## Tests
 

@@ -72,6 +72,7 @@ from .ids import is_valid_id, kind_of, new_id
 from .review import fsafe
 from .review import paths as review_paths
 from .store import (
+    ACTIVATION_OWNERS,
     ENTITY_DIRS,
     INFRA_WRITE_PATHS,
     MUTATIONS_DIR,
@@ -2226,6 +2227,41 @@ class MutationController:
             code="push_pin_owner",
         )
 
+    @staticmethod
+    def _guard_activation_record(path: str, owner: str) -> None:
+        """Only the activation maintenance owner creates the Work-terminal activation record (P3 F1 §8.2).
+
+        The record switches a Project's review-v1 Work terminalization on, so it
+        is Project-specific safety configuration: created once, by the dedicated
+        human-confirmed operation, and by nothing else - not START, not a Review
+        generation, not Roadmap or CREATE, not any other maintenance owner. The
+        refusal is mechanical and comes here, before the effect is written into
+        the record, the push-pin guard's sibling.
+
+        It covers every create into the activation directory, the directory
+        named in any ASCII letter case, because a case-insensitive filesystem
+        lets another spelling land on the same file; and that directory holds
+        the one frozen name and nothing else (F1 §7.2), so no owner creates any
+        other name there. Every other canonical Review record is untouched.
+        """
+        from .review.ownership import ascii_fold  # the frozen ASCII-only fold (P3 F3 §7.8.4)
+
+        parts = path.split("/")
+        if len(parts) < 4 or ascii_fold(parts[2]) != "activation":
+            return
+        if owner not in ACTIVATION_OWNERS:
+            raise ValidationError(
+                f"operation owner {owner} may not create {path}; the Work-terminal activation record is created only "
+                "by the work-terminal-activation maintenance operation, with human confirmation",
+                code="work_terminal_activation_owner",
+            )
+        if path != review_paths.WORK_TERMINAL_ACTIVATION_REL:
+            raise ValidationError(
+                f"{path} is not the Work-terminal activation record; the activation directory holds "
+                f"{review_paths.WORK_TERMINAL_ACTIVATION_REL} and nothing else",
+                code="work_terminal_activation_owner",
+            )
+
     def validate_effect(self, record: dict[str, Any], previous: list[dict[str, Any]], owner: str) -> None:
         kind = record["kind"]
         payload = record["payload"]
@@ -2256,6 +2292,7 @@ class MutationController:
                     raise ValidationError(
                         f"create_file writes canonical Review records; {path!r} is not one"
                     )
+                self._guard_activation_record(path, owner)
                 # Where no create can be kept inside the Project, none is
                 # recorded either: no mutation is left holding one it could
                 # never apply.

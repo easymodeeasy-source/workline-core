@@ -40,13 +40,12 @@ with its C-2 re-evaluated before it is recorded and again before it is applied (
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
 from . import gitcmd, gitops
 from .errors import ReconcileRequired, StopError, ValidationError
-from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import _HELD_BEFORE, _WROTE, Effect, Mutation, MutationController, WriteScope, _last_wrote, abandon_on_stop
 from .ops import stage_name
 from .review import (
     ancestry,
@@ -66,13 +65,14 @@ from .review import (
     work_verify,
     workcommit,
 )
+from .review import activation as work_activation
 from .review import hermetic as hermetic_module
 from .review import paths as review_paths
 from .review.hermetic import HermeticGit
 from .review.committed import CommittedReviewStore
 from .review.store import ReviewStore
 from .state import ProjectView
-from .store import WORK_TERMINAL_EVENTS, Entity, Event, ProjectStore
+from .store import WORK_DESIRED_HEADING, WORK_TERMINAL_EVENTS, Entity, Event, ProjectStore
 
 if TYPE_CHECKING:  # pragma: no cover
     from .start import _Session
@@ -168,50 +168,6 @@ class Activation:
         return work_context.activation_binding(self.record_digest, self.record.activation_base_head)
 
 
-def activation_prefix_digest(git: HermeticGit, commit: str, count: int) -> str | None:
-    """``work-terminal-activation-digest-v1`` over the first ``count`` Events of ``commit``'s event log (F1 §9.1).
-
-    Read from the committed blob through class B, parsed exactly as the live
-    Event reader parses (blank physical lines ignored, CRLF and CR read as LF),
-    each record rendered as canonical JSON - keys sorted by code point, ``,``
-    and ``:`` separators, UTF-8 without ASCII escaping, one LF after each. None
-    when the log cannot be read, a line is not an Event, or fewer than
-    ``count`` Events exist: the prefix is then unprovable, never legacy.
-    """
-    found = git.run_bytes("cat-file", "blob", f"{commit}:{EVENT_LOG}")
-    if not found.ok:
-        return None
-    try:
-        text = found.stdout.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    parsed: list[dict[str, Any]] = []
-    for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(record, dict) or not all(isinstance(record.get(key), str) for key in ("id", "type", "entity", "at")):
-            return None
-        try:
-            parsed.append(Event.from_record(record).to_record())
-        except ValidationError:
-            return None
-    if len(parsed) < count:
-        return None
-    try:
-        canonical = b"".join(
-            json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
-            + b"\n"
-            for record in parsed[:count]
-        )
-    except (TypeError, ValueError):
-        return None
-    return hashlib.sha256(canonical).hexdigest()
-
-
 def require_activation(store: ProjectStore) -> Activation:
     """F1 §6.4: under the lock, before the mutation is opened.
 
@@ -229,7 +185,7 @@ def require_activation(store: ProjectStore) -> Activation:
         )
     git = hermetic_module.enter(store)
     _, head = _head(git)
-    digest = activation_prefix_digest(git, head, record.legacy_event_count)
+    digest = work_activation.committed_prefix_digest(git, head, record.legacy_event_count)
     if digest is None or digest != record.legacy_event_prefix_sha256:
         raise _reconcile(
             f"the activation record's legacy event prefix ({record.legacy_event_count} Events) does not reproduce from "
@@ -304,7 +260,11 @@ def committed_view_at(store: ProjectStore, git: HermeticGit, commit: str) -> Pro
 
 
 def declared_base(store: ProjectStore, git: HermeticGit, base_commit: str, branch: str, work_id: str) -> dict[str, Any]:
-    """F2 §5.3, read from the committed state of ``base_commit`` through the canonical loader, never the working tree."""
+    """F2 §5.3, read from the committed state of ``base_commit`` through the canonical loader, never the working tree.
+
+    The Work's desired state is its canonical body section (``WORK_DESIRED_HEADING``), read as
+    planning reads it: a Work's frontmatter has no desired-state key.
+    """
     from .start import read_obligations
 
     view = committed_view_at(store, git, base_commit)
@@ -323,7 +283,7 @@ def declared_base(store: ProjectStore, git: HermeticGit, base_commit: str, branc
             "work_id": work_id,
             "display": work.display,
             "name": work.name,
-            "desired_state": work.meta.get("desired_state"),
+            "desired_state": work.section(WORK_DESIRED_HEADING),
             "phase_id": work.phase_id,
             "state": view.work_state(work_id).state,
         },
@@ -1069,10 +1029,20 @@ def is_terminal_stage(mutation: Mutation, stage: str, work_id: str) -> bool:
     path. Any other shape is not a review-v1 completion, and is never read as a
     legacy one either.
     """
+    return _terminal_shape(mutation.record, stage, work_id)
+
+
+def _terminal_shape(mutation_record: dict[str, Any], stage: str, work_id: str) -> bool:
+    """:func:`is_terminal_stage` over a durable mutation record alone, pending or loaded."""
     try:
-        record = work_record(mutation.record)
+        record = work_record(mutation_record)
     except ReconcileRequired:
         return False
+
+    def reserved(key: str) -> str | None:  # exactly ``Mutation.reserved``
+        value = (mutation_record.get("reserved_ids") or {}).get(key)
+        return str(value) if value else None
+
     effects = record.stage_effects(stage)
     if [effect.get("kind") for effect in effects] != ["append_event", "append_event", "create_file"]:
         return False
@@ -1081,12 +1051,70 @@ def is_terminal_stage(mutation: Mutation, stage: str, work_id: str) -> bool:
         return False
     if [(event.get("type"), event.get("entity")) for event in events] != [(t, work_id) for t in TERMINAL_EVENTS]:
         return False
-    if any(mutation.reserved(f"{stage}:event:{index}") != event.get("id") for index, event in enumerate(events)):
+    if any(reserved(f"{stage}:event:{index}") != event.get("id") for index, event in enumerate(events)):
         return False
     if {key: value for key, value in events[1].items() if key not in ("id", "type", "entity", "at")} != _completion_metadata(record.run):
         return False
-    consumption_id = mutation.reserved(gate.review_consumption_key(record.run.receipt_id))
+    consumption_id = reserved(gate.review_consumption_key(record.run.receipt_id))
     return consumption_id is not None and effects[2]["payload"].get("path") == review_paths.consumption_rel(consumption_id)
+
+
+@dataclass(frozen=True)
+class RecordedTerminal:
+    """The one review-v1 terminal stage a pending Work START mutation recorded, as its durable record holds it.
+
+    What the activation totality allowance (P3 F1 §10.2, FC-12) may lean on: the
+    stage is one durable unit - both terminal events, then the Consumption create -
+    so an event without its Consumption, or a Consumption without its event, is
+    a half of a stage this record holds. Whether that half is one its own replay
+    can finish is answered from the same record, by what the replay itself
+    requires: ``consumption_written`` is what this mutation recorded writing at
+    the Consumption path (``None`` when it never wrote there); ``log_before`` is
+    what the event log held, by this mutation's own record, right before the
+    stage's first event, and ``log_after`` what it recorded writing there with
+    the stage's second - the state its replay must find before it appends the
+    events again, or after which only the Consumption is left to create.
+    """
+
+    mutation_id: str
+    work_id: str
+    stage: str
+    completed: dict[str, Any]
+    consumption_path: str
+    consumption_content: str
+    consumption_written: str | None
+    log_before: str | None
+    log_after: str | None
+
+
+def recorded_terminal(mutation_record: dict[str, Any]) -> RecordedTerminal | None:
+    """The terminal stage of exactly the frozen shape (F3 §13.3) a pending review-v1 Work START recorded; else None.
+
+    Read from the durable record alone, never from what files hold: a record
+    that is not a review-v1 Work START, holds no terminal stage, holds more than
+    one, or holds one of any other shape excuses nothing.
+    """
+    if mutation_record.get("status") != "pending":
+        return None
+    try:
+        record = work_record(mutation_record)
+        stage = _terminal_stage(record)
+    except ReconcileRequired:
+        return None
+    if stage is None or not _terminal_shape(mutation_record, stage, record.work_id):
+        return None
+    effects = record.stage_effects(stage)
+    everything = list(record.effects)
+    first = next(index for index, effect in enumerate(everything) if effect is effects[0])
+    before = _last_wrote(everything[:first], EVENT_LOG) or effects[0].get(_HELD_BEFORE)
+    after = _last_wrote(everything[:first + 2], EVENT_LOG)
+    written = effects[2].get(_WROTE)
+    return RecordedTerminal(
+        record.mutation_id, record.work_id, stage, dict(effects[1]["payload"]["record"]),
+        str(effects[2]["payload"]["path"]), str(effects[2]["payload"]["content"]),
+        written if isinstance(written, str) else None, before if isinstance(before, str) else None,
+        after if isinstance(after, str) else None,
+    )
 
 
 def _completion_metadata(run: WorkRun) -> dict[str, Any]:
@@ -1288,7 +1316,7 @@ def _activation_at(store: ProjectStore, git: HermeticGit, at: "CommittedRecords"
         raise _proof_failed(item, f"the activation record at {at.commit} does not read: {exc}") from exc
     if found is None:
         raise _proof_failed(item, f"{at.commit} holds no activation record")
-    digest = activation_prefix_digest(git, at.commit, found.legacy_event_count)
+    digest = work_activation.committed_prefix_digest(git, at.commit, found.legacy_event_count)
     if digest is None or digest != found.legacy_event_prefix_sha256:
         raise _proof_failed(item, f"the activation prefix does not reproduce at {at.commit}")
     activation = Activation(found, serialize.digest(found.to_record()))

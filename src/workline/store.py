@@ -53,6 +53,13 @@ PROJECT_YAML_REL = f"{WORKLINE_DIR}/project.yaml"
 # Controller enforces it; it is not left to Skill prose.
 PIN_OWNERS = ("project-start", "push-destination-pin")
 
+# Only this operation owner may create the Work-terminal activation record
+# (``.workline/review/activation/work-terminal-v1.yaml``), the Project's
+# human-confirmed switch for review-v1 Work terminalization (P3 F1 §8.2). The
+# Mutation Controller enforces it, the push-pin guard's sibling; every other
+# canonical Review record stays creatable by whichever owner records it.
+ACTIVATION_OWNERS = ("work-terminal-activation",)
+
 # Initial Project開始 runs before a Project is established and is outside the
 # Project execution lock. Its mutation is opened, resumed and written only
 # inside the pre-project authorization a running Project開始 grants for its own

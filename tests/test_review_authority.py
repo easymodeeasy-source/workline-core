@@ -86,7 +86,9 @@ class RegistryRoutingTests(unittest.TestCase):
         text = (WORKLINE_ROOT / ".claude" / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: review", text)
         self.assertIn("subordinate", text)
-        self.assertIn("NOT ACTIVATED", text)
+        # P3 Gate 3: Work-terminal gating is a per-Project activation crossed with START's explicit opt-in
+        self.assertIn("Work terminal Review gating: ACTIVATED per Project", text)
+        self.assertNotIn("NOT ACTIVATED", text)
 
     def test_review_appears_in_the_skill_inventory(self) -> None:
         self.assertIn("skills/review", skill_inventory(WORKLINE_ROOT))

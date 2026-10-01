@@ -65,6 +65,14 @@ CREATEがRoadmap / STARTのparent operationなしで直接起動された場合�
 
 review-v1 planning operation（`skills/roadmap` の明示opt-inによるRoadmap作成・Phase entry）は、1つのplanning mutationと、それが開始するgeneration mutationをownする。entryで一意対応するmutationはそのplanning mutationである。`planning_mutation_id` とRunのserialization tokenでそれに結び付くpending generation mutationはその従属mutationであり、`skills/review` の順序で先にresume・解決する。それ以外は従来どおり複数件 / 競合として `reconcile required` で停止する。runtime（`.workline/runtime/**`）を失った後は、recovery discoveryが見つけた1つのcanonical Review Runを継続するrecovery planning mutation（invocationに `recovery_of_review_run_id` を持つ、新しいIDのmutation）を開始してよい。失われたmutationのIDやrecord、他のmutationのrecordを自分のものとして扱わない（`skills/roadmap`）。
 
+Work-terminal activation（review-v1 Work terminalizationをそのProjectで使えるようにすること）は、専用のProject maintenance operation `work-terminal-activation` がownerであり、自分のmutationを持つ。START・Review・Roadmap・CREATE・Project開始のどれでもない。Skillではないのでregistryからroutingせず、新しいSkillも作らない（push destination pin maintenance、bootstrap backfillと同じ）。CLIは `activate-work-terminal-review`。
+
+activationはProject固有ルール変更であり（`rules/human-confirmation`）、人間確認の明示入力（CLI `--confirm`、API `confirmed=True`）が無ければ、Project contextの照合とlockより前に `work_terminal_activation_unconfirmed` で停止し、何も読まず書かない。activation recordが無いこと、callerがAIであること、promptの記述、Project state、Review file、test mode、branchの状態を確認の代わりにしない。
+
+activationは、lockの後、他のどのownerのpending mutationも無い時だけ開始する（`pending_operation`）。pendingのSTART（legacyを含む）を後から来た新しいcontractで驚かせず、自分が結び付けるevent logのprefixを読んだ時のまま保つためである。自分のpending mutationは、書かないevent log（`.workline/events/events.jsonl`）もwrite scopeに含め、それが終わるまでevent logへ書くoperationを並べて開かせない（scopeの重なりとして `reconcile required`。activationを再実行すれば自分のmutationがresumeして終わる）。中断したactivationは、同じowner・同じinvocationのpending mutationとして既存のrecoveryでresumeし、記録した決定（record）を作り直さない。branchの先端やfileの存在から自分のactivationを推測して採用しない。
+
+activationが決めるもの、一度だけであること、移行をしないこと、validationでの意味は `skills/review`（Work-terminal activation）が所有する。activationはreview-v1を選ばない。review-v1はSTARTの呼び出しごとの明示opt-inのままで、legacy STARTは変わらない（`skills/start`）。
+
 ### Project context
 
 成立済みWorkline Projectへ書き込むstate-changing operationは、invocation Project contextがtarget Projectと一致する場合だけ実行する。一致しなければ `foreign_project_mutation` としてSTOPする。
@@ -303,7 +311,7 @@ lockを取得するのはtop-level operation ownerだけである。Phase CREATE
 
 Mutation Controllerは、Project開始以外のoperation ownerについて、execution lockを保持していないmutationのopen / resume / 書込みを拒否する。
 
-Project開始（初期化）はexecution lockの対象外であり、同じProjectへProject開始を同時に複数実行することはサポートしない。成立済みProjectに対するmaintenance（bootstrap backfill、push destination pin等）はexecution lockの対象である。
+Project開始（初期化）はexecution lockの対象外であり、同じProjectへProject開始を同時に複数実行することはサポートしない。成立済みProjectに対するmaintenance（bootstrap backfill、push destination pin、Work-terminal activation等）はexecution lockの対象である。
 
 ### Mutation Controller
 
@@ -320,6 +328,10 @@ Roadmap / Phase / Work本体
 Domain Skillは意味を決め、Mutation Controllerは決定済みpayloadをvalidationして適用する。Mutation Controllerは意味判断しない。
 
 正本とrecovery recordのstructured text（YAML subsetのfile、`events/events.jsonl`）では、文字列fieldの中のUnicode line separatorを物理的な行・recordの区切りとして扱わない（`events/events.jsonl` の1件はLFで終わる）。U+0085 / U+2028 / U+2029は合法なtextであり、入力として拒否しない。writerはこれらを文字列の中でJSONのUnicode escapeとして書き、1つの値・1件のrecordを1物理行に収める。readerは、それ以前に文字列の中へraw文字のまま書かれた既存のrecordとfileも読む。そのようなfileは通常のoperationで次に保存されるときにescape表現になり、修復のためだけに書き換えない。
+
+canonical Review recordのimmutable createはownerを問わない。例外はWork-terminal activation record（`.workline/review/activation/work-terminal-v1.yaml`）だけで、それを作れるのは `work-terminal-activation` ownerだけである。Mutation Controllerは、effectをrecordへ書く前のeffect validationで、activation directoryへのcreate（directory名のASCII大文字小文字違いを含む）を、そのowner以外なら `work_terminal_activation_owner` で拒否し、そのownerでもfrozenのfile名以外なら同じcodeで拒否する（push destination pinのowner検査と同じ形）。それ以外のcanonical Review recordはowner非依存のままであり、generic update（`write_file`）がReview pathへ届かないことも変わらない。
+
+event appendは、lifecycleではないmetadata（review-v1 `work_completed` のoperation-contract metadata `operation_contract` / `review_receipt_id` / `review_run_id` / `review_generation`）をrecordに載せたまま、effect record → event log → canonical Event reader → Event model → effect classificationの全経路で運ぶ。lifecycleの導出が読むのは `id` / `type` / `entity` / `at` だけで、metadataはnon-normativeである。metadataを持たないeventは従来と同じbytesで書かれ、読まれ、分類され、digestされる。commit規則はこれで何も変わらない。
 
 ### Multi-write mutation
 
@@ -461,6 +473,27 @@ review-v1の登録commitは、その親の上でのexpected physical projection�
 
 review-v1 planning operationは、その登録が公開された時にだけ成功する（remoteなしではC-2(Km)が通った時）。`not_authorized` または `stale` で終わったoperationは何も登録せず、何も公開しない。そのgeneration commit（sealの後の `stale` ではgeneration 4とSupersessionも）はlocal履歴として残り、そのbranchからの次のpushが運ぶ。
 
+review-v1 Work（`skills/start` のReview-v1 Work）のmutationと、そのWork Review Runのgeneration mutation（durable invocationの `review_kind` が `work-result-v1`）が作るcommitは、すべてWork persistence primitive `review-v1-work-local-v2` で作る。これがWork persistenceのGit persistence semantics identityであり、Work Review Contextの `git_persistence` もこの値である（F3 A-7。F2が名付けた `review-v1-work-local-v1` はcontained commit primitiveを指し、このcontract versionのRunは作らない）。planningの `review-v1-planning-local-v1` は再定義せず、planning Runとそのgeneration commitの振る舞いは変わらない（C3-1）。どちらのidentityでcommitするかはdurable invocationだけが決め、stageの形からは決めない。
+
+`review-v1-work-local-v2` はobject-driven primitiveである。commitは、記録した親objectと、そのmutationが記録したeffectから作るcommit tree plan（親からの完全なdelta）をobject idで組み立て、`git add` / `git commit` / `git commit --only` を使わない。artifactのidentityを示してからcommitされる木までの間に、working treeのpathnameを一度も解決しない。隔離したindexで `hash-object` → `update-index --cacheinfo` → `write-tree` → `commit-tree` の順に作り、hookは走らず署名もしない（`commit-tree` の性質であり、`core.hooksPath` / `commit.gpgSign` は念のため無効化する）。filesystem monitorとbackground maintenanceを使わず、`core.autocrlf` / `core.eol` を無効化する（check-in bytesを変え、attribute pinが届かないため）。何も変えないplanのstageはcommitを記録せず、親と同じ木を書くcommitは作らない（空のcommitは作らない）。branchは記録した親そのものに対するcompare-and-swapの `update-ref` でだけ進む。ownershipは、refが動く前にdurableに記録した `prepared_commit_id` であり、refがそのidを指すことを読み戻した後にだけ、そのcommitを作った（C-1）と記録する。このmutationが書いたが準備をdurableにしなかったobjectは採用せず、「記録したpathsがHEADと違わなくなった」ことをownershipとしない。real indexは、C-1の後に、自分のplanのpathだけを、まだplanが期待したentryのままの時だけ、比較と書込みの間保持するO_EXCLの `index.lock` の下でatomicなrenameにより更新し、そのcommitのownershipを失わせない。すべてのGit呼び出しはhermetic環境（class B: `GIT_NO_LAZY_FETCH`、`GIT_NO_REPLACE_OBJECTS`、`GIT_LITERAL_PATHSPECS`、`reference-transaction` / `post-index-change` を含めて空と測ったhooks directory、configの無効化より前に取ったauthor / committer identity）で実行する。
+
+K1（成果commit）とK2（terminal commit）はbase-exactである。記録した親object idの上でだけ作り、その同じidに対するcompare-and-swapでだけbranchを進めるので、branchが動いていればcommitせずに拒否する。独立なoperationや人のcommitでHEADがbaseから進んだ場合を未適用として扱う上記の段は、K1 / K2に適用しない。
+
+review-v1 Work mutationは、自分が作るすべてのcommitの直前に、そのcommitのpathだけについてGit persistence preflightを、pinしたattribute sourceの下で行い、前のcommitの合格を持ち越さない。attribute sourceのpin（`attr.tree`）は次のとおりで、どの場合もsystemとglobalのattribute sourceは無効化される。
+
+```text
+Workの完了より前のcommit（派生の登録、move、human NG move等のcommit-only stage）
+                                  そのcommitの記録した親そのものの木（C3-2）
+S-c0（このWorkのentry eventだけのcommit）
+                                  その直前のcommitted HEAD（PRE_S_C0_BASE）の木
+Work Review Runのgeneration commit、K1、K2
+                                  declared_base.base_commit の木
+```
+
+S-c0はevent logだけをcommitし、STARTのどのwriteもattribute sourceに触れないので、PRE_S_C0_BASEと `declared_base.base_commit` は同じattribute stateを表す。commitされるobjectのidentityは構成上Candidateのものと等しく、filter programには到達しない。
+
+pinしたsourceが通常のpathへmaterialな変換（alias展開後の `filter`、`ident`、`working-tree-encoding`、`text`、`eol`、その別名 `crlf`）を割り当てることは、lockより前に `review_git_transform` で拒否し、変換を無効化して通すことはしない。これがreview-v1 Workの唯一の変換拒否である。pinしたsourceの規則はprobeではなくparseして評価するので、まだ存在しない成果pathにも及ぶ。`.workline/review/**` だけに一致するpatternのrule（form L）は拒否しない。Reviewのcheckout capabilityが要求するものだからである（`skills/review`）。どちらに当たるかはpatternがそのnamespaceに閉じているかで決め、attribute名で決めない。executorが書いたGit persistence configuration（`.gitattributes` 等）の変更は通常のWork成果としてcommitしreviewし、拒否しない。
+
 ### Push destination
 
 remoteがある通常Projectのpushは、Project正本が承認したpush destinationと一致するときだけ行う。承認先の正本は `.workline/project.yaml`。
@@ -530,6 +563,8 @@ Worklineが保証するのは「どのrepositoryへpushするか」までであ�
 
 durable invocationが `review-v1-planning-publication-v1` を名指すmutation（review-v1 planning mutation）のpushは、それ自身のstage（`review-publication`）であり、payloadが名指すcommit（metadata commit Km）だけを `<commit ID>:refs/heads/<branch>` として公開する。このstageは、C-2(Km)（committed planning proofを含む）が通った後にだけ記録する。上記のcurrent-combinedの規定は、それ以外のすべてのmutationについて変わらない。どちらの規定に従うかはdurable invocationだけが決め、stageの形や内容からは決めない。planning mutationのcommitとpushを同じstageにしたもの、generation mutationのpush、markerが不完全・未知のmutationのpushは、何もpushせずに `reconcile required` で停止する。
 
+durable invocationが operation `start`、`review_contract: review-v1-work-v1`、`publication_contract: review-v1-split-v1` を名指すmutation（review-v1 Work START mutation）は、push-onlyのstageでだけ公開する。各pushは、そのmutationの2つのproof note（result-proof、terminal-proof）のどちらかが名指すcommit（K1またはK2）だけを `<commit ID>:refs/heads/<branch>` としてforceせずに公開し、そのcommitのC-2が通った後にだけ記録し、記録する前と適用する直前にC-2を評価し直す。commitとpushを同じstageにしない。pushの数は、承認先の有無と、CandidateとConsumptionで独立に読んで一致した `artifact_kind` から、2（`result_commit`、remoteあり）・1（`empty`、remoteあり）・0（remoteなし）と決まり、stageの形からは決めない。それ以外のGit stageはcommitだけで、2つのpushのどちらかが公開する証明済みの履歴としてだけ承認先へ届く。markerが不完全・未知・矛盾するSTART mutationのpushは、何もpushせずに `reconcile required` で停止する。current-combined・planning・generationの規定はこれで変わらず、どれに従うかはdurable invocationだけが決める。Mutation Controllerはこのpublication contractをdurable invocationだけから機械的に強制する。
+
 どのoperationのpushも、review-v1 planningの登録commitを履歴に含むcommitを、committed planning proof（`skills/review`）がそのcommitについてその登録のRunを証明しない限り公開しない（publication barrier）。
 
 - pushを含むstageを記録する前（HEADについて）、記録済みpushのdry runが書き込み（`*` / 空白）を示す時、pushの直前に評価する。stageを記録する前に拒否されたoperationは、domain effectを適用したままpending mutationとして待ち、barrierが解けた後に続ける。
@@ -549,6 +584,15 @@ P2_PUBLICATION_GIT_MIN = 2.31.0   publication proof（barrierのregistered-Run d
 - `P2_REVIEW_GIT_MIN` より古いGit、またはversion不明のGitでの明示的なreview-v1 planning invocationは、lockより前に `review_git_unsupported` で停止し、何も開始せず、pending mutationも変えない。
 - `P2_PUBLICATION_GIT_MIN` より古いGit、またはversion不明のGitでは、fast pathが通さない履歴のpushを `review_publication_barrier`（証明不能。Runも登録commitも名指さない）で拒否する。
 - legacy operationは、planning Candidate snapshotを一度も持たない履歴について、今日より新しいGitを要しない。
+
+review-v1 Workにはさらに次が関わる。
+
+```text
+P3_WORK_ATTR_PIN_GIT_MIN = 2.43.0   attribute sourceのpin（attr.tree）を宣言する最小version
+```
+
+- remoteのあるProjectでのreview-v1 Work STARTは `P2_PUBLICATION_GIT_MIN` 以上のGitを要し、それ未満・version不明のGitではlockより前に `review_git_unsupported` で停止する。そのCandidate snapshotが、以後そのProjectのpushをbarrierのfast pathから外すためである。
+- `P3_WORK_ATTR_PIN_GIT_MIN` 未満・version不明のGitは、lockより前に `review_git_unsupported` で停止する。それ以上では、Gitがpinを守るかどうかの実際の権威はversionではなく、lockより前に実行するcapability probeであり、示せなければ同じcodeで停止する。
 
 ---
 
@@ -610,6 +654,7 @@ Phaseのeffective current-plan Work集合は、当該Phaseに所属するWorkの
 - 必須正本が一意解決不能
 - Workline共通ルール / Project固有ルール変更
 - Projectの実行能力・自動実行・外部接続・外部へのデータ開示・書込可能範囲を新たに拡張または変更するtooling / configuration変更
+- Work-terminal activation（review-v1 Work terminalizationのProject単位の有効化。Project固有ルール変更。専用のmaintenance operationが明示の確認入力でだけ実行する。`rules/git` のOperation Owner）
 
 未開始Phase / Workの、上位目的を維持した通常の未来計画調整は一律人間確認にしない。
 
@@ -694,6 +739,8 @@ checkpoint / audit / fix / old specは現在仕様の正本として横断合成
 # Skills
 
 Skill本文はこのregistryに置かない。identityは `workline-id`、現在の物理解決先は `workline-target`。
+
+review-v1 WorkのpublicationとWork commit-proofのstatementは、recordとproofの意味は `skills/review`、operationの流れは `skills/start` へroutingする（Gitの安全性は `rules/git`）。Work-terminal activationはoperation ownerでありSkillではないので、routing entryを持たない。
 
 ## Project開始
 <!-- workline-id: skills/project-start -->

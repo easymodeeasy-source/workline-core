@@ -427,6 +427,80 @@ cancel eventを記録した後に中断・STOPした場合、同じWork・同じ
 
 期待値不一致・divergence・ownership競合はreconcile required。
 
+## Review-v1 Work（明示opt-in）
+
+STARTは、呼び出しごとの明示opt-inでだけWorkのterminalizationをReview gate（`skills/review`）に通す。`start(..., review=WorkReview(reviewer, reviewer_identity, reviewer_version))` がreview-v1 Workであり、選択子は版付きのcontract `review-v1-work-v1` を運ぶ（booleanではない）。`review=None`（既定）はlegacy pathで、従来と1 byteも変わらない。contract modeはAPI境界で固定し、Project state・Review file・Work kind・Workの内容・executorの結果から推測しない。
+
+Projectのactivation（`skills/review` のWork-terminal activation）はreview-v1を選べる条件であり、選ぶことではない。activationを作るのは専用のmaintenance operation（`rules/git` のOperation Owner）で、STARTはactivationを作らず、推測もしない。activateされたProjectでもlegacy STARTはそのまま使え、その `work_completed` はmarkerを持たず、Consumptionを要しない。
+
+**durable marker**: review-v1 STARTのmutationは、最初のdurable writeで、liveのinvocation（operation、work_id、mode）に加えて `review_contract: review-v1-work-v1` と `publication_contract: review-v1-split-v1` をちょうど持つ。どのGit stageよりも前に書く。markerはslot identityではない。
+
+**resume**: pendingのSTART recordのcontractは再実行で変わらない（昇格も降格もしない）。markerの無いrecordをreview-v1で、markerのあるrecordをlegacyで、部分的・未知・余分なmarkerのrecordをどちらで呼んでも、`reconcile required`（reason `review_marker_mismatch`）で停止し、recordを変えず、executorを実行せず、Reviewを読まない。legacyで使えるのは、そのrecordが終わった後の別のinvocationだけである。
+
+**entry順**:
+
+```text
+1  lockより前（何も書かない）: 選択子（review_contract_invalid）、immutable Review createを保てないplatform
+   （review_create_unsupported）、remoteがありP2_PUBLICATION_GIT_MIN未満・version不明のGit（review_git_unsupported）、
+   pinしたattribute source（HEADの木）がReview namespaceの外へmaterialな変換を割り当てる（review_git_transform）、
+   Gitがattribute sourceのpinを守ることを示せない（review_git_unsupported）。規定は rules/git
+2  Project context → self-hosting → Workline implementation → Project execution lock
+   （lock holderの情報はstaticなmarker review_contract だけで、callerの値を書かない）
+3  marker互換（上記のresume）
+4  liveのSTART precheck、Git、push destination（従来どおり）
+5  activation: recordが無ければ review_not_activated で停止する。mutation・executor・Review record・Git write・
+   networkのどれも無い。recordがmalformed、operation_contractが未知ならreaderの ValidationError、prefix digestが
+   HEADのcommitted event logから再現しなければ reconcile required。どれもlegacyへ落とさない
+6  mutationを2つのmarkerとともにopen
+```
+
+`review_not_activated` は、Projectがこの任意のcapabilityを有効にしていないための通常のSTOPであり、`reconcile required` ではない。
+
+**完了の流れ**（executorが `Completed` を返した後。順序固定）:
+
+```text
+5a-6   宣言の正規化（\ を / にするだけ）、正規のspelling、予約namespace、containmentと結合したownership witness、
+       そのwitnessでのownershipの宣言。ここまでdurableなものは何も無い
+7-9    completion precheck、開始時からの変更の分離、pinしたGit persistence preflight
+9a     S-c0: このWorkのentry lifecycle eventがcommitされていなければ、event logだけをcommitする（<W>:entry）
+10-12  Work Candidate（executorが返した時点のwitnessから。K1より前）、snapshot material、resulting tree、
+       Context v2、凍結したCandidateそのもののisolated verification
+13-16  generation 1（accept）、reviewer、generation 2（settle）、checkout capabilityの判定、capableの時だけ
+       generation 3（sealとReceipt）
+17-24  RAW lineage、Consumption IDの予約、S-c1（<W>:results）とK1、C-2(K1)、result-proof note、
+       remoteがあればK1だけのpush（<W>:results-publication）
+25-35  terminal stage（<W>:lifecycle:<n>）、S-c2（<W>:finalize）とK2、C-2(K2)、terminal-proof note、
+       remoteがあればK2だけのpush（<W>:finalize-publication）
+36-37  recorded-completion proofが通った後に completed を返す
+```
+
+- STARTは、宣言したowned set（結果pathと削除path）から、executorが返した時点でWork Candidateを凍結する。それはどの結果commitよりも前である。Candidateはその時のwitness（bytesとGitのidentity）から作り、pathを読み直さない。
+- 対応する結果のobject kind（file、実行可能file、symlink、gitlink、削除）を、entryでもexecutorが返した後でも拒否しない。宣言したowned setを正確にprojectできない時（正規でないspelling、containmentを示せない、directory、読めない）だけ `review_candidate_unavailable` で停止する。
+- 結果を持たないWork（宣言したpathが無い、またはどれも変化しない）はreview-v1の正当な場合で、empty-artifact Candidateになる。K1を作らず、空のcommitを合成せず、Consumptionの `artifact_kind` は `empty` である。
+- STARTは `skills/review` のEvidenceの検査を実行し、凍結したCandidateそのものをisolated verificationで検証し、その結果のdigestをgateへ渡す。
+- 許可された遷移を適用するのはReviewではなくSTARTであり、AuthorizedTransitionProjectionが名指す遷移（`work_target_removed`、`work_completed`）だけを適用する。
+
+**stage**: review-v1 Workのcommitとpushは同じstageにしない。1つのreview-v1 Work mutationが持つpushはたかだか2つで、どちらもpublication stage（K1、K2）である。それ以外のWork cycleのGit stageはすべてcommitだけで、2つのpushのどちらかが公開する証明済みの履歴としてだけ承認先へ届く。commitの作り方、pushの規定、attribute sourceのpinは `rules/git` に従う。1つのreview-v1 Work mutationは1つの完了だけを持つので、outerでもreview-v1の完了の後は次のWorkを選ばずに返る。
+
+**terminal stage**: 1つのlifecycle stageに、予約したIDでの `work_target_removed`、operation-contract metadata（`operation_contract: review-v1`、`review_receipt_id`、`review_run_id`、`review_generation`）を持つ `work_completed`、そのRunのConsumptionのimmutable createの3つを、この順にdurableに記録してから適用する。eventのIDは `<stage>:event:0` / `<stage>:event:1`、Consumption IDは `review-consumption:<receipt_id>` のkeyで予約する。この形でないstageはreview-v1の完了ではなく、legacyの完了としても読まない。
+
+**recorded-completion proof**: `completed` を返すのは、recorded-completion proof（K2がこのmutationのcommitであり、proof noteがそれぞれのcommitを名指し、公開すべきものが公開され、何も未commitで残っていないこと等）が通った後だけである。Receiptがあること、K2があること、承認先へ公開されたことは、それぞれ単独では完了の証明にならない。
+
+**remoteなし**: pushは無く、すべての証明はそのまま行う。legacyのcommitとpushを1つにした形には戻らない。
+
+**resume**: 中断の後の再実行は、そのmutationのrecordとcanonicalなReview recordから導き直し、決め直さない。既に始めたWork Review Runはrecordから続け、Candidateを凍結し直さない。Contextはgeneration 1のacceptより前に不変になる。pendingのreview-v1 mutationはlegacyへ降格しない。
+
+**予約namespace**: review-v1を選ぶことは、executorが走る前に、invocation contractとして次の2つの予約namespaceを縛る。
+
+```text
+.workline/review と .workline/review/**    canonical Review namespace（F3 A-5）
+.workline/events/events.jsonl             lifecycle event log（F3 A-6）
+```
+
+executorはこれらを結果pathとしても削除pathとしてもownできない。規則は静的で選択した時から有効であり、具体的な結果pathのlistを知る必要はない。判定はownershipの宣言（`declare_own_content`）より前に3層で行い、文字列のprefixでは決めない: 正規のspelling（書き直さずに拒否する）、予約namespaceの分類（ASCIIだけのcase foldは前段のfilterで、権威はno-followで開いた祖先、またはpathの最後の要素自身のfilesystem object identity）、Project containment。containmentの検査は結合したownership witnessを作り、宣言はpathを解決し直さずにそのwitnessを永続化する。祖先が無くなっている削除は正当な結果（無いことの証明）であり、拒否しない。予約namespaceの宣言は所有できない状態であり、`reconcile required`（reason `review_reserved_namespace`）で停止する。対応しない結果の形ではなく、`review_candidate_unavailable`（projectability）でもなく、legacyへ落とすこともない。identityを確定できない時はfail closedである。
+
+**STOP codeとreason**: review-v1 WorkのSTOPはcode（`StopError` / `ValidationError`）であり、`reconcile required` は `code == "reconcile_required"` のまま意味を `reason` に持つ。lockより前: `review_contract_invalid`、`review_create_unsupported`、`review_git_unsupported`、`review_git_transform`、hermeticなGit環境に入れない（`review_identity_unavailable`、`review_repository_grafted`、`review_repository_shallow` 等）。lockの後・mutationより前: `review_not_activated`。完了の流れ: `review_base_uncommitted`、`review_candidate_unavailable`、`review_context_unavailable`、`review_namespace_unreadable`、`review_resulting_tree_unavailable`、reviewer（`review_reviewer_failed`、`review_report_invalid`、`review_reviewer_mismatch`。意味は `skills/review`）、sealしないcheckout capability（`review_checkout_unsafe` / `review_checkout_unknown`）、commit（`review_commit_plan_invalid`、`review_index_lock_reconciliation`、`review_local_cleanup_checkpoint`）。reasonは `review_marker_mismatch`、`review_reserved_namespace`、`review_registration_base_moved`、`review_commit_unowned`、`review_publication_invalid`。liveのcode（`detached_head`、`dirty_overlap`、`related_target_missing` 等）は意味を変えない。
+
 ## outer continuation
 
 1 Work完了ごとに同一Phaseのeffective current-plan Work / generated state / dependenciesを再計算する。START再実行（resume）では、そのmutationが記録した直前のWorkのterminal finalization（Terminal finalization参照）を終えるまで次のWorkを再計算しない。記録済みのcancelを続けた再実行は、そのcancelを終えたところでSTARTを終える。記録済みのholdを続けた再実行も同じで、そのholdを終えたところでSTARTを終える（Question wait / temporary move / true hold参照）。

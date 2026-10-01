@@ -27,7 +27,8 @@ was before, down to its bytes.
 
 This is Gate 1 alone. Gate 2 (the Consumption ``artifact_kind`` repair) has since landed in its
 own ordered unit, and the tests below pin that it did not arrive through this one; Gate 3 (the
-activation producer) is not implemented, and they pin that it is still absent.
+activation producer) has landed as its own maintenance operation, and they pin that it did not
+arrive through the carrier either.
 """
 
 from __future__ import annotations
@@ -257,7 +258,7 @@ class PhysicalWriteTests(WorklineTestCase):
 
 
 class GateBoundaryTests(unittest.TestCase):
-    """Gate 1 is a carrier prerequisite. It carries no Gate 2 work, and it does not activate Gate 3."""
+    """Gate 1 is a carrier prerequisite. It carries no Gate 2 work, and it activates nothing itself."""
 
     def test_gate_2_did_not_arrive_through_the_carrier(self) -> None:
         """P3 F1 §12.2 / IP-5: Gate 2 is the Consumption record's own repair, not the Event's.
@@ -276,23 +277,27 @@ class GateBoundaryTests(unittest.TestCase):
         carried = Event.from_record({**LIFECYCLE, "artifact_kind": "empty"})
         self.assertEqual(dict(carried.metadata), {"artifact_kind": "empty"})
 
-    def test_gate_3_activation_is_not_produced(self) -> None:
-        """P3 F1 §12.3 / IP-7: the activation record exists as a type, and nothing writes one."""
+    def test_gate_3_is_its_own_maintenance_operation_not_the_carrier_or_the_store(self) -> None:
+        """P3 F1 §8 / §12.3, IP-7: Gate 3 landed after Gate 1 and Gate 2, as the dedicated producer.
+
+        This pinned Gate 3's absence while the gates before it were being built. What still has to
+        hold is where it lives: the Review store reads the activation and never writes it, the
+        carrier gives metadata no meaning, and the one producer is the human-confirmed
+        ``work-terminal-activation`` maintenance operation, which requires this gate to hold.
+        """
+        from workline import work_terminal_activation
         from workline.review import records
 
         from workline.review.store import ReviewStore
 
-        # P1 already froze the record type and a reader for it. Gate 3 is the PRODUCER, and that is
-        # what must still be absent: the store can say whether a Project is activated, and cannot
-        # make one activated.
         self.assertTrue(hasattr(records, "WorkTerminalActivation"))
         self.assertTrue(hasattr(ReviewStore, "read_activation"))
         self.assertTrue(hasattr(ReviewStore, "activation_exists"))
         for writer in ("write_activation", "create_activation", "activate", "produce_activation"):
             with self.subTest(writer=writer):
-                self.assertFalse(
-                    hasattr(ReviewStore, writer), f"ReviewStore.{writer} exists; Gate 3 must stay unproduced"
-                )
+                self.assertFalse(hasattr(ReviewStore, writer), f"ReviewStore.{writer} exists; the store stays a reader")
+        self.assertEqual(work_terminal_activation.OWNER, "work-terminal-activation")
+        work_terminal_activation.require_prerequisite_gates()
 
     def test_the_work_persistence_identity_is_a_separate_closed_value(self) -> None:
         """P3 F3 IP-1 landed with the persistence engine (Batch B); this ordered-gate pin is retired.

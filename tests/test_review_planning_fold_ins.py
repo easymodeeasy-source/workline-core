@@ -719,7 +719,7 @@ class AuthorityTextTests(unittest.TestCase):
             "## Adjudication", "PlanningConsumption", "`review-planning-delta`", '`"100644"`', "64文字",
             "invalidate", "committed planning proof", "expected physical projection", "`set_aside_runs`",
             "## Checkout capability", "form L", ".workline/review/** !text eol=lf -filter -ident -working-tree-encoding",
-            "subordinate", "NOT ACTIVATED",
+            "subordinate", "Work terminal Review gating: ACTIVATED per Project",
             "callerが渡したmapping（Relatedのcondition等）は、P1 serializerのkey順", "`review_candidate_unrepresentable` で拒否し",
         ):
             with self.subTest(phrase):
@@ -750,11 +750,17 @@ class StaticInvariantTests(unittest.TestCase):
             if path.name != "mutation.py":
                 self.assertNotIn("gitcmd.push(", path.read_text(encoding="utf-8"), path.name)
 
-    def test_p3_stays_inactive_and_nothing_writes_an_activation_record(self) -> None:
+    def test_only_the_activation_producer_and_its_guard_name_the_activation_path(self) -> None:
+        """Gate 3: P1's reader and validator, the Mutation Controller's owner guard, and the one producer."""
+        named = set()
         for path in sorted(SRC.rglob("*.py")):
             text = path.read_text(encoding="utf-8")
             if "WORK_TERMINAL_ACTIVATION_REL" in text:
-                self.assertIn(path.name, ("paths.py", "store.py", "validate.py"), f"{path.name} names the activation path")
+                named.add(path.name)
+                self.assertIn(path.name, ("paths.py", "store.py", "validate.py", "mutation.py", "work_terminal_activation.py"),
+                              f"{path.name} names the activation path")
+        self.assertIn("mutation.py", named)
+        self.assertIn("work_terminal_activation.py", named)
 
     def test_the_object_answer_cache_is_in_process_only(self) -> None:
         text = (SRC / "gitcmd.py").read_text(encoding="utf-8")

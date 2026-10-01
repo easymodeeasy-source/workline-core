@@ -161,12 +161,21 @@ class NamespaceEnumerationTests(WorklineTestCase):
         self.assertEqual([], self._codes())
         self.assertIsNone(self.review.read_activation(), "an absent record means Work-terminal review is not activated")
 
-    def test_valid_activation_record_is_structurally_valid_but_does_not_activate(self) -> None:
-        self._put(paths.WORK_TERMINAL_ACTIVATION_REL, activation_record())
-        self.assertEqual([], self._codes(), "a well-formed activation record is structurally valid")
-        # It is read and validated, but nothing here consumes it: P1 activates no
-        # START, Roadmap or P3 behavior from its presence.
+    def test_a_valid_activation_record_whose_prefix_reproduces_passes(self) -> None:
+        """Gate 3 (P3 F1 §10.1): a present record is valid when its prefix reproduces from this event log."""
+        import hashlib
+
+        self.assertEqual(self.store.events_jsonl.read_bytes().strip(), b"", "a new Project has no Event yet")
+        self._put(paths.WORK_TERMINAL_ACTIVATION_REL,
+                  activation_record(legacy_event_prefix_sha256=hashlib.sha256(b"").hexdigest()))
+        self.assertEqual([], self._codes(), "a well-formed activation record that proves is valid")
         self.assertIsNotNone(self.review.read_activation())
+
+    def test_a_structurally_valid_record_whose_prefix_does_not_reproduce_fails_closed(self) -> None:
+        """P1 activated nothing from a well-formed record; Gate 3 classifies by it, so one that does not prove fails."""
+        self._put(paths.WORK_TERMINAL_ACTIVATION_REL, activation_record())
+        self.assertEqual(["review_activation_prefix_mismatch"], self._codes())
+        self.assertIsNotNone(self.review.read_activation(), "the record itself still reads; it is its prefix that fails")
 
     def test_malformed_activation_record_fails(self) -> None:
         self._put(paths.WORK_TERMINAL_ACTIVATION_REL,

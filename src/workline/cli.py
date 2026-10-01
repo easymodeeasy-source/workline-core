@@ -13,6 +13,7 @@ from .push_pin import pin_push_destination
 from .registry import validate_registry
 from .store import ProjectStore
 from .validate import validate_project
+from .work_terminal_activation import activate_work_terminal_review
 
 
 def _related(items: list[str] | None, rel_type: str) -> list[RelatedSpec]:
@@ -72,6 +73,18 @@ def main(argv: list[str] | None = None) -> int:
     pin.add_argument("--url", action="append", required=True, help="approved push destination (repeatable)")
     pin.add_argument("--remote", default="origin")
 
+    activation = subparsers.add_parser(
+        "activate-work-terminal-review",
+        help="activate review-v1 Work terminalization for an established Workline Project "
+        "(per Project, one-time, human-confirmed; review-v1 stays a per-invocation START opt-in)",
+    )
+    activation.add_argument("project_root", nargs="?", default=".")
+    activation.add_argument(
+        "--confirm",
+        action="store_true",
+        help="state that a human has confirmed this Project-specific Workline rule change (required)",
+    )
+
     check = subparsers.add_parser("validate-project", help="validate a Project's canonical structure")
     check.add_argument("project_root", nargs="?", default=".")
 
@@ -125,6 +138,15 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 f"pin-push-destination: {result.status} ({result.project_root}) "
                 f"{result.remote} -> {result.url} head={result.head} pushed={result.pushed}"
+            )
+            return 0
+
+        if args.command == "activate-work-terminal-review":
+            result = activate_work_terminal_review(Path(args.project_root), confirmed=args.confirm)
+            print(
+                f"activate-work-terminal-review: {result.status} ({result.project_root}) "
+                f"legacy_event_count={result.legacy_event_count} activation_base_head={result.activation_base_head} "
+                f"head={result.head} pushed={result.pushed}"
             )
             return 0
 

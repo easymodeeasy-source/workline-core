@@ -23,7 +23,8 @@ same question.
 
 This is Gate 2 alone. The Candidate side of the F3 §14 agreement does not exist yet, and the
 comparison of the two is read and proven by the F3 terminal-stage and C-2(K2) proofs, not here.
-Gate 3 (the activation producer) is not implemented, and the tests below pin that it is absent.
+Gate 3 (the activation producer) has landed as its own maintenance operation after this gate, and
+the tests below pin that it did not arrive through this record.
 """
 
 from __future__ import annotations
@@ -249,7 +250,7 @@ class PersistenceTests(WorklineTestCase):
 
 
 class GateBoundaryTests(unittest.TestCase):
-    """Gate 2 is the record repair. It does not reach Gate 3, and it does not do F3 §14."""
+    """Gate 2 is the record repair. It is not Gate 3, and it does not do F3 §14."""
 
     def test_the_candidate_side_of_the_f3_agreement_is_not_implemented_here(self) -> None:
         """F3 §14.1: Candidate.content.artifact_kind is F2/F3 body; Gate 2 owns the Consumption side."""
@@ -263,13 +264,17 @@ class GateBoundaryTests(unittest.TestCase):
                 found = read(consumption_record(artifact_kind=kind, authorized_result_commit_sha=commit))
                 self.assertEqual(found.artifact_kind, kind)
 
-    def test_gate_3_activation_is_still_not_produced(self) -> None:
-        """P3 F1 §12.3 / IP-7: the activation record type exists and nothing writes one."""
+    def test_gate_3_is_its_own_maintenance_operation_and_requires_this_gate(self) -> None:
+        """P3 F1 §8 / §12.3, IP-7: the producer landed after this gate, as its own owner, and checks it."""
+        from workline import work_terminal_activation
+
         self.assertTrue(hasattr(records, "WorkTerminalActivation"))
         self.assertTrue(hasattr(ReviewStore, "read_activation"))
         for writer in ("write_activation", "create_activation", "activate", "produce_activation"):
             with self.subTest(writer=writer):
-                self.assertFalse(hasattr(ReviewStore, writer), f"ReviewStore.{writer} exists; Gate 3 stays unproduced")
+                self.assertFalse(hasattr(ReviewStore, writer), f"ReviewStore.{writer} exists; the store stays a reader")
+        self.assertEqual(work_terminal_activation.OWNER, "work-terminal-activation")
+        work_terminal_activation.require_prerequisite_gates()
 
     def test_the_work_persistence_identity_is_a_separate_closed_value(self) -> None:
         """P3 F3 IP-1 landed with the persistence engine (Batch B); this ordered-gate pin is retired.

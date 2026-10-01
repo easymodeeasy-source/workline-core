@@ -590,7 +590,11 @@ POLICY_RECORD: dict[str, Any] = {
     "report_statuses": ["completed", "declined"],
     "severities": ["HIGH", "MID", "LOW"],
     "blocking_severities": ["HIGH", "MID"],
-    "low_disposition": "recorded in the report digest, returned to the caller, non-blocking",
+    "low_disposition": (
+        "non-blocking; represented only by digest, in the settled report and the adjudication (its LOW count); "
+        "P3 keeps no LOW text in a canonical record and returns none to the caller; "
+        "durable finding history is deferred to the later Repair/History work"
+    ),
     "declined_disposition": "the task settles failed; the Work completion is not authorized",
     "error_disposition": "no settlement; the same task is launched again by the next run",
     "timeout_disposition": "none imposed by Workline; a reviewer that gives up returns declined",

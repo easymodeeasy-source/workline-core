@@ -14,21 +14,28 @@ What these tests hold:
 * the resulting tree and the Context v2 bind the proof target, never a verdict;
 * generations 1, 2 and 3 in order, each committed by its own Work-mode generation mutation;
 * the checkout-capability decision: capable seals, unsafe or unknown stops before generation 3;
-* Gate 3 stays off, and legacy START and planning are untouched.
+* the activation the entry proves is a fixture here (Gate 3's producer has its own tests), and
+  legacy START and planning are untouched;
+* ``declared_base.work.desired_state`` is the Work's canonical desired-state section at the
+  committed base, in the Candidate and in the request envelope (F2 §5.3, §12.3);
+* the Work Policy promises only what P3 keeps: a LOW finding is non-blocking and bound only by
+  digest, and the Policy record is the one the Review Skill declares.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import unittest
 from unittest import mock
 
-from helpers import WorklineTestCase
+from helpers import WORKLINE_ROOT, WorklineTestCase
 from workline import start as st
 from workline import start_review
 from workline.errors import ReconcileRequired, StopError, ValidationError
@@ -47,7 +54,7 @@ from workline.review import (
 from workline.review import paths as review_paths
 from workline.review.store import ReviewStore
 from workline.state import ProjectView
-from workline.store import ProjectStore
+from workline.store import WORK_DESIRED_HEADING, ProjectStore
 
 WINDOWS = sys.platform == "win32"
 FORM_L = b".workline/review/** !text eol=lf -filter -ident -working-tree-encoding\n"
@@ -575,6 +582,60 @@ class ContextTests(ReviewCase):
         self.assertEqual(base["branch"], git(self.root, "symbolic-ref", "HEAD"))
 
 
+# --------------------------------------------------------------------------- the Work's desired state at the base
+
+
+class DesiredStateTests(ReviewCase):
+    """``declared_base.work.desired_state`` is the Work's canonical body section, never a frontmatter key."""
+
+    #: the Phase entry is given it padded; the canonical section is its stripped text, both lines kept
+    desired = "W1 の成果が成立している\n二行目もそのまま"
+
+    def simple_entry(self, store, phase_id, works=None, **kwargs):
+        return super().simple_entry(store, phase_id, works or {"w1": f"  {self.desired}\n"}, **kwargs)
+
+    def assert_carried(self) -> None:
+        self.assertEqual(self.candidate()["declared_base"]["work"]["desired_state"], self.desired)
+        first = self.chain().generations[0]
+        stored = ReviewStore(self.store).read_task_input(str(first.accepted_tasks[0]["task_id"]))
+        self.assertEqual(stored.request_envelope["work"]["desired_state"], self.desired)
+        (task,) = self.reviewer.tasks
+        self.assertEqual(task.request_envelope["work"]["desired_state"], self.desired)
+
+    def test_the_work_is_rendered_with_the_section_and_no_frontmatter_key(self) -> None:
+        work = ProjectView.load(self.store).works[self.work_id]
+        raw = git_bytes(self.root, "show", f"HEAD:{work.path}")
+        self.assertIn(f"## {WORK_DESIRED_HEADING}\n{self.desired}\n".encode("utf-8"), raw)
+        self.assertNotIn(b"desired_state", raw)
+        self.assertNotIn("desired_state", work.meta)
+
+    def test_a_result_bearing_candidate_and_its_request_carry_the_desired_state(self) -> None:
+        self.run_start(self.completing(write={"out.txt": b"x\n"}))
+        self.assertEqual(self.candidate()["projection"]["content"]["artifact_kind"], "result_commit")
+        self.assert_carried()
+
+    def test_an_empty_artifact_candidate_and_its_request_carry_the_same_desired_state(self) -> None:
+        self.run_start(self.completing())
+        self.assertEqual(self.candidate()["projection"]["content"]["artifact_kind"], "empty")
+        self.assert_carried()
+
+    def test_an_uncommitted_change_to_the_work_body_never_reaches_the_declared_base(self) -> None:
+        base, branch = self.head(), git(self.root, "symbolic-ref", "HEAD")
+        work = ProjectView.load(self.store).works[self.work_id]
+        path = self.root / work.path
+        changed = "作業ツリーだけの変更"
+        path.write_bytes(path.read_bytes().replace(self.desired.encode("utf-8"), changed.encode("utf-8")))
+        self.assertEqual(ProjectView.load(self.store).works[self.work_id].section(WORK_DESIRED_HEADING), changed)
+        found = start_review.declared_base(self.store, hermetic.enter(self.store), base, branch, self.work_id)
+        self.assertEqual(found["work"]["desired_state"], self.desired)
+        # only a commit moves it, and the earlier base still reads what it held
+        git(self.root, "add", "--", work.path)
+        git(self.root, "commit", "-m", "edit the Work body", "--no-verify")
+        moved = start_review.declared_base(self.store, hermetic.enter(self.store), self.head(), branch, self.work_id)
+        self.assertEqual(moved["work"]["desired_state"], changed)
+        self.assertEqual(start_review.declared_base(self.store, hermetic.enter(self.store), base, branch, self.work_id), found)
+
+
 # --------------------------------------------------------------------------- 13-16: the generations, in order
 
 
@@ -700,6 +761,48 @@ class CommitOnlyTests(ReviewCase):
 # --------------------------------------------------------------------------- boundaries
 
 
+# --------------------------------------------------------------------------- the Work Policy promises only what P3 keeps
+
+
+class LowFindingTests(ReviewCase):
+    def test_a_low_finding_does_not_block_and_is_bound_only_by_digest(self) -> None:
+        finding = work_review.WorkReviewFinding("LOW", "wording", "consider a clearer name for out.txt")
+        self.run_start(self.completing(write={"out.txt": b"x\n"}), self.review(Reviewer(findings=(finding,))))
+        chain = self.chain()
+        self.assertTrue(chain.latest.sealed, "a LOW finding is non-blocking")
+        second = chain.generations[1]
+        (settled,) = second.settled_tasks
+        report = {
+            serialize.SCHEMA_KEY: work_review.SCHEMA_REPORT, serialize.VERSION_KEY: work_review.RECORD_VERSION,
+            "task_id": settled["task_id"], "reviewer_identity": "reviewer-x", "reviewer_version": "1",
+            "status": "completed", "findings": [{"severity": "LOW", "code": "wording", "message": finding.message}],
+        }
+        self.assertEqual(settled["result_digest"], serialize.digest(report))
+        adjudication = work_review.adjudication_record([(settled, report)])
+        self.assertEqual([task["low"] for task in adjudication["tasks"]], [1])
+        self.assertEqual(second.adjudication_digest, serialize.digest(adjudication))
+        self.assertEqual(second.obligation_digest, work_review.empty_obligation_digest())
+        # its text is in no committed record: P3 keeps none and returns none
+        self.assertEqual(git(self.root, "grep", "-l", "-F", finding.message, "HEAD", "--", ".workline", check=False), "")
+
+
+class WorkPolicyAuthorityTests(unittest.TestCase):
+    def test_the_skill_policy_block_equals_the_code_constant(self) -> None:
+        text = (WORKLINE_ROOT / ".claude" / "skills" / "review" / "SKILL.md").read_text(encoding="utf-8")
+        block = re.search(r"```yaml\n(.*?)```", text[text.index("**Work Review Policy**"):], re.S)
+        self.assertIsNotNone(block, "the Review Skill declares the Work Policy record in a yaml block")
+        declared = serialize.parse(block.group(1), "the Work Review Policy")
+        self.assertEqual(serialize.canonical_data(work_review.POLICY_RECORD), serialize.canonical_data(declared))
+        self.assertEqual(serialize.canonical_text(work_review.POLICY_RECORD), block.group(1))
+        self.assertEqual(work_review.policy_hash(), serialize.digest(declared))
+
+    def test_the_low_disposition_promises_no_channel_p3_does_not_have(self) -> None:
+        low = work_review.POLICY_RECORD["low_disposition"]
+        self.assertTrue(low.startswith("non-blocking;"), low)
+        self.assertNotIn("returned to the caller", low)
+        self.assertNotIn("findings", {field.name for field in dataclasses.fields(st.StartResult)})
+
+
 class BoundaryTests(unittest.TestCase):
     def sources(self) -> dict[str, str]:
         from workline.implementation import package_directory
@@ -707,12 +810,14 @@ class BoundaryTests(unittest.TestCase):
         package = package_directory(Path(__file__).resolve().parents[1])
         return {path.relative_to(package).as_posix(): path.read_text(encoding="utf-8") for path in package.rglob("*.py")}
 
-    def test_gate_3_stays_off_no_production_code_writes_the_activation_record(self) -> None:
+    def test_only_the_activation_producer_builds_an_activation_record(self) -> None:
+        """Gate 3 (P3 F1 §8): the record is decided by its one producer; no START or Review code builds one."""
         for name, text in self.sources().items():
-            if name == "review/records.py":
+            if name in ("review/records.py", "work_terminal_activation.py"):
                 continue
             with self.subTest(module=name):
                 self.assertNotIn("WorkTerminalActivation(", text)
+        self.assertIn("WorkTerminalActivation(", self.sources()["work_terminal_activation.py"])
 
     def test_legacy_start_never_imports_the_work_review_path(self) -> None:
         source = self.sources()["start.py"]
