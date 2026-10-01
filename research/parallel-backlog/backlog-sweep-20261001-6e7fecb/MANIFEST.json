@@ -1,0 +1,80 @@
+{
+  "schema": "workline-parallel-research-manifest-v1",
+  "run_id": "backlog-sweep-20261001-6e7fecb",
+  "notice": "NON-CANONICAL RESEARCH ARTIFACT - DO NOT MERGE INTO MAIN",
+  "parent_model": "Opus 5.5",
+  "worker_model": "Sonnet 5.5",
+  "baseline_sha": "6e7fecb784a6ba1f49586761ab1038aa47d1738b",
+  "baseline_tree": "124ee98884bf707218292995a02d07dd659d5268",
+  "backlog_blob": "2034fc818bcda8c0734d5f963894a6887db3b195",
+  "canonical": false,
+  "merge_to_main": false,
+  "baseline_status": "current",
+  "observed_main_at_publication": "6e7fecb784a6ba1f49586761ab1038aa47d1738b",
+  "workers": [
+    {
+      "worker": "R1",
+      "topic": "BL-004",
+      "model": "Sonnet 5.5",
+      "status": "complete",
+      "report": "workers/R1_BL004.md",
+      "done_marker": "workers/R1_BL004.done.json",
+      "report_sha256": "b14faac7d48f4f3ba441998fb743473c938d100a2409640e653cf43d8595f0ea",
+      "done_marker_sha256": "77b19dcc4293b0b354c698f91e590df9c0fa69704fd4208b736a83c3ab0ec483",
+      "blocking_question": null,
+      "closing_verdict": "BL-004 RESEARCH READINESS: READY_FOR_GPT_DESIGN_REVIEW"
+    },
+    {
+      "worker": "R2",
+      "topic": "BL-005",
+      "model": "Sonnet 5.5",
+      "status": "complete",
+      "report": "workers/R2_BL005.md",
+      "done_marker": "workers/R2_BL005.done.json",
+      "report_sha256": "3d5f3d9ccbafd8f59b5c63598e7c08ca0eaf3f1857112dd73965250a555223b7",
+      "done_marker_sha256": "86a2752663edd895c44c34e9a1b21efaf8001dd7e87bc66697e085a4e370e69f",
+      "blocking_question": null,
+      "closing_verdict": "BL-005 EVIDENCE-BASED DISPOSITION: SPLIT (candidate)"
+    },
+    {
+      "worker": "R3",
+      "topic": "BL-006/BL-007",
+      "model": "Sonnet 5.5",
+      "status": "complete",
+      "report": "workers/R3_BL006_BL007.md",
+      "done_marker": "workers/R3_BL006_BL007.done.json",
+      "report_sha256": "c1ccec04b7ca7b14227ca27ca30abb62befb8edc0d6a6f5f792bba32e220f154",
+      "done_marker_sha256": "7f8f03fd95130c69e8529d06216e5ddb0159efce246806f62db6ebce14e4c25a",
+      "blocking_question": null,
+      "closing_verdict": "BL-006 READY_FOR_GPT_DESIGN_REVIEW; BL-007 machine-side READY_FOR_GPT_DESIGN_REVIEW, AI-side/real sizes INSUFFICIENT_EVIDENCE"
+    },
+    {
+      "worker": "R4",
+      "topic": "BL-003",
+      "model": "Sonnet 5.5",
+      "status": "complete",
+      "report": "workers/R4_BL003.md",
+      "done_marker": "workers/R4_BL003.done.json",
+      "report_sha256": "ff8f4f64c8d4923bb0381d557869d87cd91f877dfd3eea76070740cf47fecfd3",
+      "done_marker_sha256": "be10943068ba2ee187cf1e61e950057d23bda8ec5529223473366a40f585d019",
+      "blocking_question": null,
+      "closing_verdict": "BL-003 CAN IMPLEMENT BEFORE BL-004: PARTIAL"
+    }
+  ],
+  "synthesis": "SYNTHESIS.md",
+  "synthesis_sha256": "6c1e591f4825eb1356c448a4d3bb0ebcf420f3942212701b3c837f508bf71318",
+  "next_execution_order": "NEXT_EXECUTION_ORDER.md",
+  "next_execution_order_sha256": "c2a28567d52eed31d8fb03622fcd37ff5e9ddf41145ba6e4ad1cfb8092bc3db4",
+  "parent_verifications": [
+    "start_review.declared_base reads work.meta['desired_state']; Work frontmatter has no such key (create._registration_effects); F2 specifies the desired state at base",
+    "start._derivation_registration adds requires_completion into the unfinished integration only when before_integration is true",
+    "review-v1 outer START breaks after one completion (start.py outer loop)",
+    "bootstrap_state byte-compares the bootstrap; any other content is 'conflict' and backfill_bootstrap STOPs bootstrap_conflict",
+    "research clone status --porcelain --ignored empty after all workers"
+  ],
+  "notes": [
+    "done markers carry the spool-local report path required by the run protocol",
+    "worker measurement tooling and raw data stayed in the local spool (scratch/) and are not published",
+    "R1 added a disclosed extra tag [DESIGN MEMO] for non-normative design memos"
+  ]
+}
