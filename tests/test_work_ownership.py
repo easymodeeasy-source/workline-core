@@ -451,6 +451,29 @@ class WindowsLinkCaptureTests(OwnershipCase):
         with self.as_link():
             self.unavailable(results=["ln/inner.txt"])
 
+    def test_a_container_mapped_target_outside_a_container_is_witnessed_as_its_link(self) -> None:
+        """Git's container rule holds only inside a Windows container; outside one this is an ordinary 120000 link."""
+        with self.as_link("\\ContainerMappedDirectories\\0A1B"), \
+                mock.patch.object(fsafe, "inside_windows_container", return_value=False):
+            (witness,) = self.bind(results=["ln"])
+        material = b"/ContainerMappedDirectories/0A1B"
+        self.assertEqual((witness.kind, witness.git_mode, witness.material), ("symlink", "120000", material))
+        self.assertEqual(witness.identity, blob_id(self.root, material))
+
+    def test_inside_a_container_the_mapped_target_is_not_a_link_and_fails_closed(self) -> None:
+        with self.as_link("\\ContainerMappedDirectories\\0A1B"), \
+                mock.patch.object(fsafe, "inside_windows_container", return_value=True):
+            raised = self.unavailable(results=["ln"])
+        self.assertIn("inside a Windows container", raised.message)
+
+    def test_an_empty_target_is_witnessed_as_gits_empty_blob_and_its_record_round_trips(self) -> None:
+        """A name Git normalizes to nothing is staged as the empty 120000 blob; the witness carries exactly that."""
+        with self.as_link("\\??\\"):
+            (witness,) = self.bind(results=["ln"])
+        self.assertEqual((witness.kind, witness.git_mode, witness.material), ("symlink", "120000", b""))
+        self.assertEqual(witness.identity, blob_id(self.root, b""))
+        self.assertEqual(ownership.OwnershipWitness.from_record("ln", witness.to_record()), witness)
+
     def test_the_whole_link_witness_is_what_currentness_compares(self) -> None:
         with self.as_link():
             (witness,) = self.bind(results=["ln"])

@@ -236,80 +236,155 @@ def _tmp_name(name: str) -> str:
 
 # --------------------------------------------------------------------------- Windows link targets, Git's rule
 #
-# Pure and platform-independent, so the rule is tested everywhere; only reading the reparse data
-# needs Windows. The rule is Git for Windows 2.54.0.windows.1's own (compat/mingw.c at commit
-# 2b8a3ab140826ac423c2845ef81d4c6ac4f7bf3c, the commit `git version --build-options` names here):
+# Only reading the reparse data needs Windows; the rule over it is pure, so it is tested everywhere.
+# It is Git for Windows 2.54.0.windows.1's own (compat/mingw.c and compat/win32/fscache.c at commit
+# 2b8a3ab140826ac423c2845ef81d4c6ac4f7bf3c, the commit `git version --build-options` names here;
+# git.exe imports msvcrt.dll):
 #
-#     file_attr_to_st_mode  S_IFLNK only for IO_REPARSE_TAG_SYMLINK; a junction is S_IFDIR
-#     read_reparse_point    the SUBSTITUTE name, terminated at SubstituteNameLength
-#     normalize_ntpath      "\??\" or "\\?\" stripped, else "\DosDevices\" case-insensitively;
-#                           then a leading "UNC\" becomes "\\"; then every "\" becomes "/"
-#     xwcstoutf(.., MAX_PATH)  UTF-8 into 260 bytes including the NUL, or the read fails
+#     mingw_lstat           reads a reparse point's data first; if read_reparse_point fails, lstat
+#                           fails and Git cannot stage the path at all
+#     read_reparse_point    the SUBSTITUTE name, NUL-terminated at SubstituteNameLength - and, as a C
+#                           wide string, ending at its first NUL
+#     normalize_ntpath      "\??\" or "\\?\" stripped, else "\DosDevices\" by wcsnicmp; then a leading
+#                           "UNC\" (wcsnicmp) becomes "\\"; then every "\" becomes "/"
+#     xwcstoutf             WideCharToMultiByte(CP_UTF8, 0, name, -1, buffer, MAX_PATH, NULL, NULL)
+#     file_attr_to_st_mode  S_IFLNK only for IO_REPARSE_TAG_SYMLINK (a junction is S_IFDIR); and ONLY
+#                           when is_inside_windows_container(), a link whose target starts with
+#                           "/ContainerMappedDirectories/" is S_IFDIR too. fscache asks the same question
+#     is_inside_windows_container  RegOpenKeyExA(HKLM, "SYSTEM\CurrentControlSet\Services\cexecsvc", 0,
+#                           KEY_READ, ...) == ERROR_SUCCESS
 #
-# MEASURED against that Git, no privilege needed: the system link C:\Users\All Users (tag
-# 0xA000000C, substitute name \??\C:\ProgramData) is staged as 120000 e0316278a6be6fdf... whose
-# blob is the 14 bytes "C:/ProgramData", with core.symlinks false and true alike; a junction
-# (tag 0xA0000003) at a path is "a directory" to `git update-index --add`, and `git add` walks
-# into it and stages its target's files.
+# MEASURED, with no privilege:
+#   the system link C:\Users\All Users (tag 0xA000000C, substitute name \??\C:\ProgramData) is staged
+#     as 120000 e0316278a6be6fdf..., the 14 bytes "C:/ProgramData", core.symlinks false and true alike;
+#     a junction (0xA0000003) is "a directory" to `git update-index --add`, and `git add` walks into it;
+#   wcsnicmp: git.exe never sets LC_CTYPE (gettext sets LC_MESSAGES and LC_TIME only), and msvcrt's
+#     _wcsnicmp, over every UTF-16 code unit against every letter of "\DosDevices\" and "UNC\", folds
+#     exactly the ASCII letters - in the "C" locale, and in this user's Japanese_Japan.932 as well;
+#   WideCharToMultiByte with Git's arguments: an unpaired surrogate becomes U+FFFD (EF BF BD), a NUL
+#     ends the string, 259 bytes fit and 260 fail with ERROR_INSUFFICIENT_BUFFER;
+#   FSCTL_SET_REPARSE_POINT validates a symbolic-link buffer BEFORE it checks the privilege: an empty
+#     substitute or print name, an odd offset or length, a name outside the data and a header length
+#     that disagrees are ERROR_INVALID_REPARSE_DATA - no such link can exist - while an embedded NUL,
+#     a leading NUL, an unpaired surrogate, "\??\" alone and a container-mapped target all pass on to
+#     the privilege check: links that can exist, and Git stages each of them.
 
 #: The one reparse tag Git for Windows stages as a mode-120000 link.
 IO_REPARSE_TAG_SYMLINK = 0xA000000C
 #: A junction: a DIRECTORY to Git for Windows, which follows it. Never a link target here.
 IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+#: The buffer Git converts a link target into: MAX_PATH bytes, the terminating NUL included.
+GIT_LINK_TARGET_BUFFER = 260
 #: The longest target Git for Windows can read, in UTF-8 bytes: MAX_PATH less the NUL.
-GIT_LINK_TARGET_LIMIT = 259
-#: What Git for Windows reads, inside a Windows container, as a mapped volume - a directory.
+GIT_LINK_TARGET_LIMIT = GIT_LINK_TARGET_BUFFER - 1
+#: What Git for Windows takes, INSIDE a Windows container only, for a mapped volume - a directory.
 CONTAINER_MAPPED_PREFIX = "/ContainerMappedDirectories/"
+#: The key whose presence is Git for Windows' whole test for running inside a Windows container.
+CONTAINER_SERVICE_KEY = "SYSTEM\\CurrentControlSet\\Services\\cexecsvc"
 
 _REPARSE_HEADER = 8  # ReparseTag (4), ReparseDataLength (2), Reserved (2)
 _SYMLINK_FIELDS = 12  # SubstituteNameOffset/Length, PrintNameOffset/Length (2 each), Flags (4)
+_CP_UTF8 = 65001
 
 
-def _device_prefix(text: str, literal: str, described: str) -> bool:
-    """``wcsnicmp(text, literal, len(literal)) == 0``, decided only where it cannot depend on a locale.
+def _ascii_fold(unit: str) -> str:
+    return chr(ord(unit) + 32) if "A" <= unit <= "Z" else unit
 
-    The comparison stops at the first differing character, as ``wcsnicmp`` does.
-    Only ASCII letters fold alike in every C-runtime locale, so a comparison that
-    would have to fold a non-ASCII character is refused rather than decided.
+
+def _device_prefix(text: str, literal: str) -> bool:
+    """``wcsnicmp(text, literal, len(literal)) == 0`` as git.exe's runtime answers it: ASCII letters fold, nothing else.
+
+    msvcrt's ``_wcsnicmp`` in the locale Git runs it in folds exactly the ASCII
+    letters (measured over every UTF-16 code unit); a shorter name differs at
+    its terminating NUL.
     """
-    for index, want in enumerate(literal):
-        if index == len(text):
-            return False  # the terminating NUL differs from every character of the literal
-        found = text[index]
-        if ord(found) > 0x7F:
-            raise _refuse(
-                f"{described} links to a name whose device prefix Git for Windows compares case-insensitively "
-                "over a non-ASCII character, which depends on the C runtime's locale"
-            )
-        if found.lower() != want.lower():
-            return False
-    return True
+    return len(text) >= len(literal) and all(_ascii_fold(a) == _ascii_fold(b) for a, b in zip(text, literal))
 
 
-def _normalize_ntpath(target: str, described: str) -> str:
-    """Git for Windows' ``normalize_ntpath``, exactly, over a NUL-free string."""
+def _normalize_ntpath(target: str) -> str:
+    """Git for Windows' ``normalize_ntpath``, exactly, over a NUL-free name."""
     if target.startswith("\\"):
         if target.startswith(("\\??\\", "\\\\?\\")):
             target = target[4:]
-        elif _device_prefix(target, "\\DosDevices\\", described):
+        elif _device_prefix(target, "\\DosDevices\\"):
             target = target[12:]
-        if _device_prefix(target, "UNC\\", described):
+        if _device_prefix(target, "UNC\\"):
             target = "\\" + target[3:]  # wbuf += 2; *wbuf = '\\'
     return target.replace("\\", "/")
+
+
+#: ``WideCharToMultiByte`` itself where it exists (assigned in the Windows backend below).
+_native_wide_to_utf8 = None
+
+
+def _wide_to_utf8_written_out(name: str) -> bytes | None:
+    """What :func:`_utf8_as_git_converts` computes natively, written out for a platform without the call.
+
+    Over the UTF-16 code units, as the call sees them: a high surrogate followed
+    by a low one is one code point, every other surrogate code unit becomes
+    U+FFFD - WideCharToMultiByte's own replacement with flags 0 - and a result
+    that does not fit Git's buffer with its NUL is a failed read.
+    """
+    raw = name.encode("utf-16-le", "surrogatepass")
+    units = [int.from_bytes(raw[index:index + 2], "little") for index in range(0, len(raw), 2)]
+    out = bytearray()
+    index = 0
+    while index < len(units):
+        unit = units[index]
+        follower = units[index + 1] if index + 1 < len(units) else 0
+        if 0xD800 <= unit <= 0xDBFF and 0xDC00 <= follower <= 0xDFFF:
+            out += chr(0x10000 + ((unit - 0xD800) << 10) + (follower - 0xDC00)).encode("utf-8")
+            index += 2
+            continue
+        out += ("\ufffd" if 0xD800 <= unit <= 0xDFFF else chr(unit)).encode("utf-8")
+        index += 1
+    return bytes(out) if len(out) < GIT_LINK_TARGET_BUFFER else None
+
+
+def _utf8_as_git_converts(name: str) -> bytes | None:
+    """Git's ``xwcstoutf(buffer, name, MAX_PATH)``: the UTF-8 bytes, or ``None`` where Git's read fails.
+
+    ``name`` holds the link's UTF-16 code units - a valid pair as one code point,
+    an unpaired surrogate as itself. On Windows this is the very call Git makes,
+    with Git's arguments, so the replacement of an unpaired surrogate and the
+    length at which the read fails are the platform's own answer, not a copy of it.
+    """
+    if _native_wide_to_utf8 is not None:
+        return _native_wide_to_utf8(name)
+    return _wide_to_utf8_written_out(name)
+
+
+def inside_windows_container() -> bool:
+    """Git for Windows' ``is_inside_windows_container()``: ``HKLM\\`` :data:`CONTAINER_SERVICE_KEY` opens for KEY_READ.
+
+    Exactly the condition Git asks, and the only one: no environment variable or
+    other sign of a container is consulted, because Git consults none.
+    """
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, CONTAINER_SERVICE_KEY, 0, winreg.KEY_READ).Close()
+    except OSError:
+        return False
+    return True
 
 
 def windows_link_target(raw: bytes, described: str) -> bytes:
     """The blob Git for Windows stores for a link whose ``FSCTL_GET_REPARSE_POINT`` data is ``raw``.
 
-    Refused, never reproduced, is everything that rule does not answer the same
-    way every time or does not answer with a link: any tag but
-    ``IO_REPARSE_TAG_SYMLINK`` (a junction included - Git follows it as a
-    directory), a buffer whose lengths disagree with it, a target that is empty
-    or holds a NUL (Git would cut it short) or an unpaired surrogate (Git would
-    substitute U+FFFD), a locale-dependent prefix comparison, a target longer
-    than Git can read, and the Windows-container mapping Git reads as a
-    directory. The link is never followed and its target never has to exist, so
-    a broken link is read exactly like any other.
+    Wherever Git stages the reparse point as a mode-120000 link, these are the
+    bytes it stores - however its rule ended, rewrote, case-compared or
+    normalized the name on the way: a name ending at its first NUL, an unpaired
+    surrogate as U+FFFD, an empty name as empty bytes. Refused is only what Git
+    itself does not stage as a link or cannot read: a tag that is not a link to
+    Git (a junction is a directory to it, and it follows one), a target too long
+    for Git's read, and - inside a Windows container, decided by Git's own test -
+    a container-mapped volume, which Git takes for a directory. Reparse data the
+    kernel never admits for a link (measured) is refused as malformed. The link
+    is never followed and its target never has to exist, so a broken link is
+    read like any other.
     """
     if len(raw) < _REPARSE_HEADER:
         raise _refuse(f"{described} returned reparse data too short to hold a reparse tag")
@@ -321,28 +396,30 @@ def windows_link_target(raw: bytes, described: str) -> bytes:
             f"{described} is a reparse point of tag 0x{tag:08X} - {what}; it is never followed, and it has no "
             "link target here"
         )
+    # the kernel's own admission rule for symbolic-link reparse data (measured): no other shape exists
     if data_length < _SYMLINK_FIELDS or _REPARSE_HEADER + data_length != len(raw):
         raise _refuse(f"{described} holds symbolic-link reparse data whose length disagrees with its own header")
     substitute_offset, substitute_length, print_offset, print_length = struct.unpack_from("<HHHH", raw, _REPARSE_HEADER)
     names = raw[_REPARSE_HEADER + _SYMLINK_FIELDS:]
     for offset, length in ((substitute_offset, substitute_length), (print_offset, print_length)):
-        if offset % 2 or length % 2 or offset + length > len(names):
-            raise _refuse(f"{described} holds symbolic-link reparse data whose names lie outside it")
-    try:
-        target = names[substitute_offset:substitute_offset + substitute_length].decode("utf-16-le")
-    except UnicodeDecodeError as exc:
-        raise _refuse(f"{described} links to a name holding an unpaired surrogate, which Git for Windows rewrites") from exc
-    if not target or "\0" in target:
-        raise _refuse(f"{described} links to a name that is empty or holds a NUL, which Git for Windows cuts short")
-    normalized = _normalize_ntpath(target, described)
-    if normalized.startswith(CONTAINER_MAPPED_PREFIX):
-        raise _refuse(f"{described} links to {normalized!r}, which Git for Windows reads as a container-mapped directory")
-    data = normalized.encode("utf-8")
-    if not data:
-        raise _refuse(f"{described} links to a name Git for Windows normalizes to nothing")
-    if len(data) > GIT_LINK_TARGET_LIMIT:
+        if not length or offset % 2 or length % 2 or offset + length > len(names):
+            raise _refuse(
+                f"{described} holds symbolic-link reparse data the kernel admits for no link (an empty, odd or "
+                "out-of-range name)"
+            )
+    # read_reparse_point: the substitute name as a C wide string, so it ends at its first NUL
+    name = names[substitute_offset:substitute_offset + substitute_length].decode("utf-16-le", "surrogatepass")
+    data = _utf8_as_git_converts(_normalize_ntpath(name.split("\0", 1)[0]))
+    if data is None:
         raise _refuse(
-            f"{described} links to a {len(data)}-byte target, and Git for Windows reads at most {GIT_LINK_TARGET_LIMIT}"
+            f"{described} links to a target longer than Git for Windows can read ({GIT_LINK_TARGET_LIMIT} UTF-8 "
+            "bytes): its lstat fails and Git stages nothing for it"
+        )
+    # file_attr_to_st_mode: inside a Windows container - and only there - Git takes this for a directory
+    if data.startswith(CONTAINER_MAPPED_PREFIX.encode("ascii")) and inside_windows_container():
+        raise _refuse(
+            f"{described} links to {data!r} inside a Windows container, where Git for Windows takes it for a "
+            "container-mapped directory and not for a link"
         )
     return data
 
@@ -591,6 +668,21 @@ if sys.platform == "win32":
         wintypes.HANDLE, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD, wintypes.LPVOID, wintypes.DWORD,
         ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID,
     ]
+    _WideCharToMultiByte = _kernel32.WideCharToMultiByte
+    _WideCharToMultiByte.restype = ctypes.c_int
+    _WideCharToMultiByte.argtypes = [
+        wintypes.UINT, wintypes.DWORD, ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_int,
+        ctypes.c_void_p, ctypes.c_void_p,
+    ]
+
+    def _wide_to_utf8_native(name: str) -> bytes | None:
+        """``WideCharToMultiByte(CP_UTF8, 0, name, -1, buffer, MAX_PATH, NULL, NULL)``: Git's ``xwcstoutf`` call, as it is."""
+        wide = ctypes.create_string_buffer(name.encode("utf-16-le", "surrogatepass") + b"\0\0")
+        out = ctypes.create_string_buffer(GIT_LINK_TARGET_BUFFER)
+        written = _WideCharToMultiByte(_CP_UTF8, 0, wide, -1, out, GIT_LINK_TARGET_BUFFER, None, None)
+        return out.raw[: written - 1] if written > 0 else None
+
+    _native_wide_to_utf8 = _wide_to_utf8_native
 
     _INVALID_HANDLE = wintypes.HANDLE(-1).value
 
