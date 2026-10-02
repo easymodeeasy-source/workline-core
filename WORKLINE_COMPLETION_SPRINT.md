@@ -2922,24 +2922,626 @@ If implementation proves one of those assumptions impossible and would require a
 RB6 is DESIGN_READY when this contract and its implementation brief/test matrix are prepared.
 
 
-## 16. RB7 — P7 Global promotion
+## 16. RB7 — P7 Global Promotion + Global Policy Change
 
-One Project's recurrence alone cannot justify Global promotion.
+RB7 promotes only sufficiently generalized, sufficiently independent Project evidence into Workline-root adaptive Review policy.
 
-Require:
+It preserves the boundary:
 
-- independent/correlated evidence model
+~~~
+Review
+  -> evaluates Global Policy Change Candidate
+  -> emits Authorization
+
+global-policy-change
+  -> owns Workline-root policy mutation / Git / recovery
+~~~
+
+Workline root is not turned into a Workline Project. P7 does not require or simulate self-hosting.
+
+### 16.1 Global adaptive scope
+
+Global adaptive policy may change only P6-allowed Review execution surfaces.
+
+It remains data interpreted under fixed normative meta-rules owned by registry.md, the canonical Review Skill, and implementation/tests.
+
+Automatic Global Policy Change may not change:
+
+- Work/Phase/Roadmap or lifecycle/completion semantics
+- Problem/Improvement or severity meaning/blocking semantics
+- H-1 through H-4
+- HUMAN boundary
+- product/user requirements
+- canonical authority/routing
+- mutation/Git/security invariants
+- policy strength-class semantics themselves
+- self-hosting support
+
+A desired change crossing those boundaries is ordinary Workline-root implementation/spec work, not adaptive Global Policy Change.
+
+### 16.2 Materialized Global policy
+
+P6 provides a read-only derived GlobalPolicyBaseline.
+
+P7 implementation materializes that exact baseline as:
+
+~~~
+review-policy/global-policy.yaml
+~~~
+
+The P7 implementation landing must prove:
+
+~~~
+normalize(canonical_load(materialized global-policy.yaml))
+==
+P6 derived GlobalPolicyBaseline semantics
+~~~
+
+at the transition point.
+
+That first materialization is a zero-semantic-change implementation migration. It is not recorded as a learned policy change.
+
+After materialization, the same canonical loader interface reads the tracked Global policy artifact.
+
+### 16.3 Root policy layout
+
+P7 owns:
+
+~~~
+review-policy/
+  global-policy.yaml
+  promotion-packets/<promotion_packet_id>.yaml
+  changes/<global_policy_change_id>.yaml
+  evaluations/<evaluation_id>.yaml
+  patch-notes/<global_policy_change_id>.md
+  review/
+    ... root-adapted canonical P1-P4 Review records ...
+~~~
+
+The root review storage adapter reuses common Review record schema/semantics. It does not redefine Gate, TaskInput, Receipt, Supersession or Consumption meaning.
+
+All records are H-3 public-safe.
+
+Global policy is normative adaptive data. Promotion/change/evaluation/review records are evidence/provenance, never lifecycle state.
+
+### 16.4 Evidence-source identity
+
+Global promotion counts independent evidence sources, not raw Project/repository count.
+
+Each source preserves enough provenance to reason about correlation, including where relevant:
+
+- Project/repository identity
+- template/fork/repository lineage
+- relevant base provenance
+- shared upstream dependency/context
+- source Review Run/Finding/Repair/relation IDs
+- generalized failure-pattern and root-cause/mechanism identity
+- incident identity
+- Project-local policy change/evaluation evidence
+- Relevant Opportunity basis
+- material environment/dependency identities
+
+Project IDs alone never prove independence.
+
+### 16.5 Independence relation
+
+Evidence relations are exactly:
+
+~~~
+proven_independent
+known_correlated
+independence_unresolved
+~~~
+
+proven_independent requires positive support that observations are distinct causal/opportunity sources for the generalized mechanism.
+
+Supporting facts may include distinct non-copy repository lineage, distinct triggering incident, distinct affected implementation, and positive proof that any shared dependency is not the common cause.
+
+Absence of discovered correlation is not proof of independence.
+
+known_correlated includes copies/forks/templates affected by the same causal implementation, same upstream incident/change, same causal dependency, or duplicate observations of one failure.
+
+independence_unresolved is used when neither independence nor correlation can be positively established. It is not counted as independent and does not by itself require HUMAN.
+
+### 16.6 Correlation clustering
+
+Known-correlated observations form one evidence cluster for promotion counting.
+
+Unresolved observations may provide context but do not create an additional independent cluster.
+
+Only clusters whose mutual relation is proven_independent count separately.
+
+Do not inflate evidence using repeated runs in one Project, repository copies, multiple reviewers of one defect, multiple Findings from one incident, or multiple local reactions to the same causal event.
+
+### 16.7 Minimum promotion eligibility
+
+Repeated evidence in one Project is never enough by itself.
+
+Automatic Global promotion requires at minimum:
+
+- more than one Project/repository lineage;
+- at least two evidence-source clusters positively proven independent from each other;
+- the same generalized policy mechanism/change;
+- sufficient Relevant Opportunities for the direction;
+- no unresolved requirement/HUMAN boundary;
+- post-change observation and rollback capability.
+
+This is a minimum eligibility floor, not a universal sufficiency count.
+
+Fixed Global meta-policy may require stronger evidence depending on direction, risk, severity/escape consequences and breadth.
+
+Global lightening always requires materially stronger evidence than strengthening.
+
+### 16.8 Generalization requirement
+
+Promotion moves a reusable mechanism, not Project-specific vocabulary or workaround.
+
+Do not promote:
+
+- Project component/file names as generic rules
+- one repository's accidental architecture
+- one local workaround
+- one tool/model quirk without evidence for the relevant scope
+
+The target policy_surface_id must already exist in the fixed P6 adaptive surface.
+
+A proposal requiring a new policy surface/meta-rule is ordinary Workline-root implementation/spec work, not adaptive promotion.
+
+### 16.9 Promotion Packet
+
+Freeze an immutable:
+
+~~~
+review-policy/promotion-packets/<promotion_packet_id>.yaml
+~~~
+
+binding at least:
+
+- current Global policy version/digest
+- target policy surface and strength class
+- direction: strengthen | lighten | adjust | rollback
+- normalized proposed Global after-state
+- generalized mechanism/root-cause identity
+- source Project evidence refs
+- evidence clusters and independence states
+- Relevant Opportunity evidence
+- Project-local policy/evaluation outcomes
+- escape/recurrence/repair-induced evidence where relevant
+- expected effect
+- validation/measurement/observation contract
+- success and rollback criteria
+- supported Project Profile schema versions
+- profile compatibility adapter identity/proof
+- environment/dependency diversity/provenance
+
+Packet existence is evidence, not authorization.
+
+### 16.10 Strengthening and lightening
+
+Global strengthening still requires cross-Project independent evidence. One severe Project incident may justify a P6 local temporary guard but not a permanent Global change by itself.
+
+Global strengthening must stay inside an existing adaptive range, generalize the mechanism, satisfy independent-source eligibility, preserve/strengthen correctness detection, and include observation/rollback.
+
+Global lightening has the highest adaptive evidence burden.
+
+Before lightening authorization freeze:
+
+- representative independent Projects/opportunities support low useful yield/acceptable escape behavior;
+- adequate replacement verification remains;
+- independent shadow/holdout measurement remains after activation;
+- the change cannot remove/weaken its own evaluation channel;
+- observation/success/rollback rules are fixed;
+- Project Profile compatibility is proven.
+
+No-finding counts only where the relevant surface was actually exercised.
+
+One Project's successful lightening experiment is never sufficient for Global lightening.
+
+### 16.11 Profile compatibility is a promotion precondition
+
+Global policy change must not silently invalidate existing valid P6 Profiles.
+
+Every changed Global surface provides a fixed versioned compatibility adapter over all valid records of every still-supported Project Profile schema version.
+
+The adapter maps:
+
+~~~
+old valid Project Profile
++ old Global policy
++ proposed new Global policy
+-> compatible local overlay semantics under the new Global policy
+~~~
+
+The proof is total over the valid schema domain, not merely over known Project files.
+
+Requirements:
+
+- stronger/new mandatory Global constraints cannot be weakened by old local override;
+- stronger local override remains stronger where fixed policy semantics permit;
+- removed/renamed settings have explicit deterministic mapping;
+- no field is silently dropped;
+- no Project-specific guess is used;
+- resulting semantics remain inside the fixed adaptive surface.
+
+If total compatibility cannot be proven:
+
+~~~
+automatic Global promotion is not authorized
+~~~
+
+Redesign the change or handle it through explicit migration/product work outside automatic P7 promotion.
+
+This avoids automatic Project backfill and avoids making existing Projects invalid merely because Global policy evolved.
+
+### 16.12 Next-safe-boundary adoption
+
+An in-progress Review Run keeps its frozen Effective Policy.
+
+A new Global version applies only when a new Review Run freezes policy.
+
+At that boundary:
+
+~~~
+load new Global policy
++ interpret existing Project Profile through compatibility adapter
++ current change/risk context
+-> freeze new Effective Policy hash
+~~~
+
+The Project Profile file need not be rewritten merely because Global policy changed.
+
+No running Review is upgraded mid-flight.
+
+### 16.13 Global Policy Change Review
+
+Global Policy Change uses a root meta-review.
+
+Review receives:
+
+- exact Promotion Packet
+- current Global policy
+- proposed normalized Global after-state
+- fixed meta-policy/constitution
+- compatibility proof
+- evidence/correlation material
+- measurement/rollback contract
+
+It verifies:
+
+- current attributable evidence;
+- supported independence classification;
+- minimum/stronger evidence thresholds;
+- generalized mechanism;
+- adaptive-surface boundary;
+- lightening contract where applicable;
+- total Profile compatibility;
+- exact normalized before/after semantics;
+- root PersistedProjectionAdapter availability;
+- observation/rollback feasibility.
+
+The proposed policy cannot weaken the meta-rules used to authorize itself.
+
+Review emits Authorization only.
+
+### 16.14 Root Review durability
+
+External root-policy review obeys P1 persistence:
+
+~~~
+exact Candidate/Promotion material
++ TaskInput
++ accepted descriptor
+must be committed in root Review storage before external launch
+~~~
+
+The root adapter reuses common immutable CandidateSnapshot, TaskInput, GateGeneration, Receipt, Supersession and Consumption semantics.
+
+Root Review generation commits publish nothing by themselves.
+
+A crash/runtime cleanup must be recoverable from tracked root Review records plus immutable Git objects where positive proof is possible.
+
+Runtime memory is never authority.
+
+### 16.15 Global Policy Change operation owner
+
+Physical mutation is owned by:
+
+~~~
+global-policy-change
+~~~
+
+This is a dedicated Workline-root maintenance operation.
+
+It is not ProjectSTART, a Workline Project mutation, self-hosting, or a Work/Phase/Roadmap operation.
+
+Review evaluates/authorizes; root maintenance owns physical mutation/Git.
+
+### 16.16 Root maintenance runtime area
+
+Root maintenance must never create <workline-root>/.workline/project.yaml.
+
+Noncanonical lock/crash-recovery state lives in a dedicated ignored root runtime area:
+
+~~~
+.workline-root-runtime/
+  global-policy.lock
+  mutations/<mutation_id>.yaml
+  maintenance-authorization.yaml
+  tmp/
+~~~
+
+P7 implementation adds this exact area to root ignore/containment rules.
+
+Nothing there is policy authority.
+
+Runtime-state loss never permits adoption by guess. Recover from canonical root Review/Git identity when positively possible; otherwise STOP/reconcile.
+
+### 16.17 Root maintenance activation / publication pin
+
+When Workline root has a remote, automatic Global Policy Change requires explicit Human-approved root maintenance publication identity before mutation starts.
+
+This is operational authorization under fixed semantics, not a new policy-design decision.
+
+Local activation records:
+
+- exact approved push locator(s)
+- exact full destination branch ref
+- root repository identity needed to bind authorization
+- activation contract/version
+
+in the ignored root runtime area.
+
+Do not infer approval from origin/current remote.
+
+Without the required approved pin:
+
+~~~
+Global Policy Change does not start
+~~~
+
+A remote-less Workline root may use exact local commit semantics.
+
+### 16.18 Root operation safety
+
+global-policy-change freezes:
+
+- exact root branch/full ref
+- exact base commit
+- current Global policy digest/version
 - Promotion Packet
-- Global Policy Change operation
-- root-policy semantic proof
-- adoption at next safe Review Run boundary
-- observe / retain / rollback
+- Authorization/Receipt
+- exact write scope
+- relevant implementation/meta-policy/loader identity
+- publication destination identity
 
-Project mutation and Workline-root Global mutation are separate responsibilities.
+Use single-writer root maintenance serialization.
 
-Self-hosting is separate and is not a completion requirement.
+Do not commit unrelated Workline-root changes.
 
----
+Unrelated dirt may remain untouched only when exact-scope ownership/separability is positively proven.
+
+Unowned changes inside policy/review write scope fail closed.
+
+No reset/rebase/amend/force recovery.
+
+### 16.19 Global policy persistence
+
+Runtime flow:
+
+~~~
+current Global policy
+-> Promotion Packet
+-> Global Policy Change Review / Receipt
+-> root local policy commit
+-> exact artifact/scope proof
+-> canonical loader semantic round-trip proof
+-> current-authorization recheck
+-> exact publication when required
+-> Global Policy Consumption
+~~~
+
+Consumption binds at least:
+
+- Receipt/Review identity
+- global-policy-change operation identity/stage
+- before/after Global version/digest
+- Promotion Packet ID/digest
+- exact root policy projection hash
+- exact root policy commit SHA
+- compatibility adapter identity/digest
+
+No Work-shaped lifecycle event is invented.
+
+### 16.20 Root PersistedProjectionAdapter
+
+Success requires:
+
+~~~
+normalized reviewed Global after-state
+==
+normalize(canonical_load(committed review-policy/global-policy.yaml))
+~~~
+
+Loader/schema/default/meta-policy identity is bound in Review Context.
+
+The complete commit delta must equal the authorized root policy/change/evidence projection and no unrelated root file.
+
+Mismatch:
+
+~~~
+no push
+no silent rewrite/adoption
+-> replacement Candidate/re-review only where explicitly supported
+or
+-> reconcile
+~~~
+
+Publication always names the exact proven commit, never a branch tip.
+
+### 16.21 Root publication race
+
+With configured destination:
+
+- exact authorized commit SHA only;
+- no force;
+- branch/ref/remote pin rechecked immediately before push;
+- remote movement/divergence never causes silent rebase/cherry-pick;
+- if the reviewed candidate is no longer a safe fast-forward, stop/reconcile and require a new candidate/review unless an explicit positive reuse proof exists.
+
+Root Review generation commits reach remote only as ancestors of the authorized Global policy publication.
+
+### 16.22 Global evidence and Patch Notes
+
+Every applied change writes immutable H-3-safe:
+
+~~~
+review-policy/changes/<global_policy_change_id>.yaml
+review-policy/patch-notes/<global_policy_change_id>.md
+~~~
+
+The change record binds before/after identity, Promotion Packet, Review/Receipt, exact policy commit, affected surface, expected effect and measurement/rollback contract.
+
+Patch Notes explain what changed, why, supporting evidence, what became stronger/lighter, what will be monitored, and rollback condition.
+
+Patch Notes are explanation, not policy authority.
+
+### 16.23 Global observation/evaluation
+
+After publication, observe Relevant Opportunities and independent evidence sources under the frozen measurement contract.
+
+Persist immutable:
+
+~~~
+review-policy/evaluations/<evaluation_id>.yaml
+~~~
+
+with outcome:
+
+~~~
+retain
+adjust
+rollback
+inconclusive
+~~~
+
+retain leaves policy unchanged.
+
+adjust creates a new Promotion/Global Policy Change Candidate as required.
+
+rollback is a new Global version/new commit, never history rewrite.
+
+inconclusive is not success and follows frozen experiment safety/rollback rules.
+
+Post-change evidence uses the same independence model; correlated Projects do not become many confirmations.
+
+### 16.24 Project-local policy remains local
+
+Global promotion never deletes Project-local evidence/Profile state.
+
+A Project may remain stricter than later Global default when fixed strength/compatibility rules allow it.
+
+Global policy does not absorb Project-specific names/workarounds.
+
+Project Profile and Global policy remain separate layers combined only by the canonical Effective Policy loader.
+
+### 16.25 No two-repository transaction
+
+Project-local policy mutation and Global policy mutation are separate operations/repositories.
+
+Promotion reads Project evidence and writes only Workline root.
+
+No atomic Project + root mutation is introduced.
+
+Evidence changing after Promotion Packet freeze invalidates/requires re-evaluation according to its bound identity; it does not trigger cross-repository rollback.
+
+### 16.26 Initial materialization compatibility
+
+P7 implementation's initial materialization of P6 derived baseline must not:
+
+- alter Project Effective Policy semantics;
+- require Project Profile backfill;
+- alter in-progress Review;
+- activate self-hosting;
+- pretend a learned Global change occurred.
+
+Tests prove derived-before and explicit-after loader semantics are identical.
+
+After that implementation migration, runtime changes use global-policy-change.
+
+### 16.27 RB1 status handoff
+
+RB7 adds read-only diagnostics:
+
+- current Global policy version/digest
+- source mode: derived-baseline | materialized-global-policy
+- latest Global Policy Change/evaluation
+- root maintenance activation/pin readiness without secret exposure
+- pending root policy maintenance status where observable
+- next-boundary adoption/compatibility identity
+
+No status read mutates Workline root or Project.
+
+### 16.28 RB7 tests
+
+At minimum cover:
+
+**Promotion/correlation**
+- many runs in one Project cannot qualify alone
+- fork/template/same-incident evidence clusters as correlated
+- absence of known correlation does not become independence
+- unresolved independence does not count separately or require HUMAN
+- eligibility needs >1 Project lineage and >=2 proven-independent clusters
+- Project-specific workaround cannot become Global policy
+- adaptive promotion cannot create a new meta-policy surface
+
+**Compatibility**
+- total adapter over every supported valid Profile schema
+- stronger mandatory Global behavior cannot be weakened by old local override
+- no old Profile field silently disappears
+- inability to prove total compatibility blocks automatic promotion
+- no Project backfill required
+- in-progress Run retains old policy
+- next Run deterministically adopts new Global version
+
+**Root authority/storage**
+- initial materialized policy equals P6 derived baseline
+- Workline root never gains .workline/project.yaml
+- dedicated root runtime is ignored/non-authoritative
+- root Review TaskInput durable before external launch
+- runtime cleanup recovers only from positive canonical evidence
+- Review does not physically mutate Global policy
+
+**Root mutation/Git**
+- Human-approved publication pin required when remote exists
+- current remote is never inferred as approval
+- single-writer root lock
+- exact base/policy conflict fails closed
+- unrelated bytes never committed
+- exact semantic round-trip proof
+- no push before proof
+- exact-SHA/non-force publication
+- remote race never silently rebases/cherry-picks
+- crash/resume around Review, commit, proof, push and Consumption
+
+**Observation**
+- Patch Note is explanation, not authority
+- retain/adjust/rollback/inconclusive are immutable evidence
+- rollback is a new version/commit
+- correlated Projects do not inflate retention evidence
+- Global lightening retains independent measurement
+
+### 16.29 RB7 HUMAN status
+
+No new Human design decision is required.
+
+P7 remains non-self-hosting and changes only the frozen adaptive verification surface.
+
+Human action is required to approve root maintenance publication identity on a concrete machine when remote publication is enabled. This is operational authorization, not a new product-policy decision.
+
+If implementation proves Global mutation requires treating Workline root as an ordinary Workline Project/self-hosting target, trigger the frozen conditional HUMAN decision instead.
+
+RB7 is DESIGN_READY when this contract and implementation brief/test matrix are prepared.
+
 
 ## 17. RB8 — BL-011 + BL-013 + BL-020
 
