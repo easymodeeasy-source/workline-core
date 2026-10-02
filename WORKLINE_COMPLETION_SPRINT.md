@@ -791,38 +791,770 @@ P4, not F4, owns:
 
 ## 12. RB3 remaining — P4 / BL-004
 
-P4 must add:
+P4 closes the current-cycle Repair Loop and BL-004 finding classification/convergence problem without turning Review into a second lifecycle controller.
 
-- Finding identity
-- Problem / Improvement / unsupported / HUMAN
-- Repair Batch identity
-- Candidate generation
-- current-cycle resume
-- dependency completeness
+P4 is common Review infrastructure for the already-existing review-v1 planning kinds and review-v1 Work kind. It does not make Review mandatory for every Work and does not change legacy operation behavior.
+
+### 12.1 P4 boundary and precedence
+
+P4 owns:
+
+- durable raw-report material needed to resume the current Review cycle
+- separate discovery and adjudication tasks
+- supported/unsupported/HUMAN adjudication
+- Problem / Improvement classification
+- authoritative severity after adjudication
+- Finding identity and deduplication
+- one Repair Batch per repaired Candidate generation
+- ReviewRepairRequest and repair-task recovery
+- Candidate generations inside one owning operation
+- Repair Coverage Check
+- positive-proof Evidence reuse
 - conservative invalidation
-- A/B/C recurrence
+- A/B/C repair relationship
+- strategy-change trigger
 - impact-scaled reverification
-- isolated Integration
-- normal fix Work reintegration
-- policy versioning
-- in-flight v1 compatibility
-- no semantic round fuse
+- verification-only Integration side-effect contract
+- normal fix Work + reintegration
+- policy/contract versioning and in-flight compatibility
+- convergence by unresolved obligations
 
-Review-v1 is not made mandatory for every Work.
+P4 does not own:
 
-Semantic convergence tracks at least:
+- long-lived cross-run Review history beyond the minimum records needed to resume/prove the current cycle (RB4/P5)
+- Project-local adaptive Policy (RB6/P6)
+- Global promotion (RB7/P7)
+- Phase completion/achievement integration (RB5)
+- lifecycle/progression truth
+- Git finalization
+
+Where old non-normative design notes conflict with frozen H-1/H-4, this Completion Sprint contract wins.
+
+In particular, the old directions:
 
 ~~~
-A               new supported defect
-B_RECURRENCE    known semantic surface recurs
-C_REPAIR_INDUCED defect introduced by repair
+Improvement HIGH/MID -> mandatory current-cycle repair
+every LOW -> automatically create independent Work
+convergence requires every LOW to become a Work
 ~~~
 
-Two consecutive supported B/C failures on the same semantic surface require STRATEGY_CHANGE.
+are withdrawn.
 
-Agent timeout/rate-limit/crash is operational failure, not semantic recurrence.
+The frozen rule is:
 
----
+~~~
+Problem HIGH/MID -> blocking current-cycle obligation
+Problem LOW      -> non-blocking only when the current completion objective still holds
+Improvement any severity -> non-blocking
+desired requirement change -> HUMAN
+LOW/Improvement -> no automatic Work creation
+~~~
+
+### 12.2 Discovery and adjudication are separate
+
+Use:
+
+> discovery is fresh; adjudication is history-aware.
+
+A discovery reviewer receives the fixed Candidate, current requirements/desired state, Context/Policy and the Evidence it needs.
+
+By default it does not receive prior Finding/Repair history.
+
+Discovery reports claims. They do not authoritatively decide Problem/Improvement/HUMAN and do not repair the Candidate.
+
+After all required discovery reports for the fixed Candidate are frozen, a separate adjudication task receives:
+
+- the exact Candidate identity
+- exact raw report records
+- current decided requirement/desired state
+- relevant Review Context and Effective Policy
+- prior Finding/Repair relationships within this current Review cycle
+- relevant Evidence/coverage identities
+
+The adjudicator does not modify the Candidate.
+
+### 12.3 Raw report durability
+
+P2/P3 currently retain settled report identity by digest while Work P3 intentionally does not preserve LOW text canonically.
+
+P4 current-cycle repair cannot recover correctly from only a digest.
+
+Therefore every settled discovery report used by P4 is written canonically before or with the generation that first records its settlement.
+
+Add a content-addressed Review record:
+
+~~~
+.workline/review/reports/<result_digest>.yaml
+~~~
+
+The filename digest equals the canonical report-record digest.
+
+The raw report remains immutable.
+
+It preserves the reviewer's original:
+
+- task identity
+- reviewer identity/version
+- status
+- claimed severity
+- code
+- message
+- versioned coverage declaration where the P4 reviewer contract provides it
+
+Reviewer severity is input to adjudication, not final authority.
+
+P4 never rewrites a raw report to reflect later adjudication.
+
+### 12.4 Adjudication classification
+
+Each raw claim is handled in this order:
+
+~~~
+1. Is the claim supported by the Candidate/requirement/evidence?
+   NO
+   -> unsupported / dismissed
+   -> no Finding obligation
+
+2. Does deciding the claim require changing or choosing
+   product/spec/requirement meaning?
+   YES
+   -> HUMAN
+   -> do not silently define the requirement
+
+3. Does the Candidate fail the currently decided requirement/objective?
+   YES
+   -> Problem
+
+4. Otherwise, is there a genuinely better actionable alternative?
+   YES
+   -> Improvement
+
+5. Otherwise
+   -> dismissed_non_actionable
+~~~
+
+"false positive" is not a content category. It is an unsupported adjudication outcome.
+
+"HUMAN" is not a content category. It is an adjudication outcome saying Review cannot decide the requirement boundary.
+
+Normalized content categories are only:
+
+~~~
+Problem
+Improvement
+~~~
+
+Both may retain HIGH/MID/LOW as importance metadata, but blocking behavior is H-4, not the old uniform Problem/Improvement rule.
+
+A Problem classified LOW is valid as non-blocking only if the current completion objective still holds. If the objective does not hold, the adjudicator must classify it as blocking Problem MID/HIGH, or HUMAN if the requirement itself is unclear.
+
+### 12.5 Normalized Finding identity and deduplication
+
+One adjudication record is canonical for one Candidate/Review Run:
+
+~~~
+.workline/review/adjudications/<review_run_id>.yaml
+~~~
+
+It contains stable reserved Finding IDs and the complete normalized disposition of the frozen raw reports.
+
+A normalized Finding contains at least:
+
+- finding_id
+- review_run_id
+- candidate_hash
+- category: Problem | Improvement
+- severity: HIGH | MID | LOW
+- statement
+- semantic_surface
+- source claims as (task_id, result_digest, finding index)
+- disposition
+- A/B/C relationship where supported
+- linked prior finding/repair IDs where applicable
+- causal evidence digest where B/C is asserted
+
+Unsupported, HUMAN and dismissed_non_actionable raw claims remain explicit adjudication entries even though they are not accepted Problem/Improvement Findings.
+
+Deduplicate by repair identity, not wording alone.
+
+Merge only when all are true:
+
+- the substantive problem/improvement is the same
+- the semantic responsibility is the same
+- one repair/disposition would close all source claims
+
+Keep separate if root cause or repair strategy differs.
+
+If uncertain, keep separate.
+
+When merged source claims disagree on severity, use the strongest severity the adjudication can support and retain every source reference.
+
+### 12.6 P4 Review Run state machine
+
+A P1 Review Run remains bound to exactly one Candidate.
+
+P4 does not mutate a Run to point at a repaired Candidate.
+
+P1 GateGeneration already permits later generations to accept additional immutable tasks, so P4 uses the existing chain rather than adding a second controller.
+
+For a new P4 Review Run:
+
+~~~
+G1  accept discovery task(s)
+    CandidateSnapshot + discovery TaskInput(s) + open gate
+
+G2  settle required discovery task(s)
+    persist raw report record(s)
+    open gate
+
+G3  accept adjudication task
+    adjudication TaskInput is reconstructed from canonical material
+    open gate
+
+G4  settle adjudication
+    persist adjudication record
+    derive obligations
+    open gate
+
+if obligations permit authorization:
+
+G5  seal
+    issue Receipt
+    -> normal owning-operation persistence/Consumption path
+
+if blocking Problem repair is required:
+
+G5  accept one Repair task
+    persist one Repair Batch + Repair TaskInput
+    no Receipt
+
+G6  settle Repair task
+    persist Repair Result
+    freeze CandidateSnapshot N+1
+    no Receipt
+
+then:
+    new Review Run for Candidate N+1
+    previous Run is explicitly set aside/replaced
+~~~
+
+Exact generation count is therefore versioned P4 semantics, not a reinterpretation of P2/P3 v1's fixed three-generation Work/planning flow.
+
+A HUMAN adjudication does not launch a repair that guesses the missing requirement. The current Run remains non-authorizing/HUMAN_WAIT. After the Human decision changes or confirms the requirement, the owning operation freezes a new Candidate/Context as needed and starts a new versioned Run, explicitly setting the old Run aside.
+
+### 12.7 Adjudication task durability
+
+Adjudication is an external task when an external model/agent performs it.
+
+Therefore P1's launch rule applies:
+
+~~~
+no external adjudicator launch
+until its exact TaskInput and accepted descriptor
+are durably persisted in a committed gate generation
+~~~
+
+The adjudication TaskInput binds:
+
+- Candidate hash/material identity
+- Context hash
+- Effective Policy hash
+- ordered raw-report identities
+- prior current-cycle Finding/Repair references it is allowed to use
+- adjudicator identity/version
+- adjudication instruction/version
+
+A crash relaunches the same accepted adjudication task only to the bound adjudicator identity/version.
+
+No in-memory raw report or chat transcript is recovery authority.
+
+### 12.8 One Repair Batch per Candidate generation
+
+After adjudication, all currently decidable blocking Problem HIGH/MID Findings of that Candidate are grouped into one Repair Batch.
+
+Do not repair one blocking Finding while leaving another known blocking Finding from the same frozen Candidate for a later ordinary patch round.
+
+The Repair Batch is immutable and stored as:
+
+~~~
+.workline/review/repair-batches/<repair_batch_id>.yaml
+~~~
+
+It binds at least:
+
+- repair_batch_id
+- operation_identity
+- source review_run_id
+- source candidate_hash
+- ordered blocking finding_ids
+- semantic surfaces
+- repair purpose
+- selected repair strategy
+- allowed repair/result surface
+- strategy-change requirement, if any
+
+Improvement Findings are not inserted into a mandatory Repair Batch.
+
+Problem LOW is not inserted automatically unless a deliberate current-cycle repair is chosen. Its non-blocking disposition remains traceable.
+
+HUMAN claims are never converted into repair instructions.
+
+### 12.9 ReviewRepairRequest and repair ownership
+
+The repair executor receives a versioned ReviewRepairRequest reconstructed only from canonical material.
+
+It contains:
+
+- exact source Candidate reconstruction material
+- exact Repair Batch
+- current decided requirement/desired state
+- repair purpose
+- allowed result surface
+- relevant Evidence/coverage constraints
+
+The repair executor may propose/create the repaired artifact, but Review still does not own lifecycle, top-level Project mutation or Git finalization.
+
+The owning Roadmap/START operation remains the operation owner and is the only component that may adopt the repair result into its Candidate flow.
+
+The repair task itself is accepted durably before external launch under the same P1 task rules.
+
+An exception/invalid return does not settle the task.
+
+An explicit failed/declined repair never authorizes the old Candidate and never becomes a successful repair by inference.
+
+### 12.10 Repair Result and Candidate N+1
+
+A successful repair produces an immutable Repair Result:
+
+~~~
+.workline/review/repair-results/<repair_batch_id>.yaml
+~~~
+
+It binds:
+
+- repair_batch_id
+- source candidate_hash
+- result candidate_hash
+- repair executor identity/version
+- exact repaired semantic surface
+- change-impact class
+- Repair Coverage Check result
+- Evidence reuse/invalidation result
+- causal material needed to judge B/C in the next adjudication
+
+Candidate N+1 is a complete new Candidate, not a patch object.
+
+Its CandidateSnapshot is frozen before the next reviewer launch.
+
+The next Run is a new immutable Review Run with the same owning operation identity and a higher current-cycle Candidate generation.
+
+The old Run is explicitly named in the new request's set-aside/replacement material.
+
+No Review Run changes candidate_hash in place.
+
+### 12.11 Current Review cycle identity
+
+One owning operation may contain several Candidate-specific Review Runs.
+
+The stable current-cycle identity is the owning operation_identity plus its target/review kind.
+
+Candidate generation is an explicit positive integer carried in the P4 request/repair linkage.
+
+The chain is proven from explicit:
+
+- source review_run_id
+- source candidate_hash
+- repair_batch_id
+- result candidate_hash
+- next review_run_id/set-aside linkage
+
+Do not derive generation by file ordering, timestamp or newest ID.
+
+### 12.12 Reviewer coverage
+
+P4 reviewer contracts make coverage explicit.
+
+Each required discovery report states:
+
+- assigned viewpoint/task slot
+- surface actually inspected
+- concrete behavior/questions checked
+- Evidence used
+- relevant surface not inspected or not decidable
+
+A candidate with zero Findings but unknown required coverage is not converged.
+
+Coverage gaps are classified:
+
+~~~
+unrelated to Candidate
+-> explicitly not applicable
+
+relevant and already positively covered
+-> attach valid Evidence
+
+relevant and not sufficiently covered
+-> targeted reviewer/check required
+
+requires requirement/product judgment
+-> HUMAN
+~~~
+
+Do not rerun every base reviewer merely because one targeted coverage gap exists.
+
+### 12.13 Evidence dependency completeness and reuse
+
+Reuse the existing P1/P3 dependency-class vocabulary and typed proof model in review/closure.py.
+
+Evidence is reusable across repaired Candidates only when all are positively proven:
+
+1. the Evidence declaration is complete under the versioned dependency vocabulary;
+2. every required dependency class is covered by a valid observed/pinned/denied proof;
+3. every non-required class is positively excluded or otherwise completely accounted for;
+4. every concrete bound identity relevant to the Evidence is unchanged;
+5. adapter identity/version and proof mechanism identity/version are unchanged;
+6. the repair impact does not change a semantic assumption the Evidence proved.
+
+If any required class is unknown, unaccounted or contradictory:
+
+~~~
+completeness = unknown
+-> Evidence is fresh-use-only
+-> reacquire after repair
+~~~
+
+Absence of observed change is not proof of reuse.
+
+A reviewer report/adjudication from Candidate N is never reused as authorization for Candidate N+1. Formal discovery is against the new fixed Candidate. Only Evidence with the positive-proof reuse contract may be reused.
+
+### 12.14 Impact-scaled reverification
+
+Every successful repair records one change-impact class:
+
+~~~
+LOCAL
+  localized behavior/condition/input-output rule
+
+SHARED
+  shared helper/validator/serializer/common transform
+
+CONTRACT
+  state/event/schema/lifecycle/recovery/authority semantics
+
+FOUNDATION
+  broad infrastructure or assumption used across many operations
+~~~
+
+Minimum reverification follows semantic impact, not file count.
+
+LOCAL:
+- focused tests
+- direct callers/consumers where semantics reach them
+
+SHARED:
+- focused tests
+- representative callers
+- relevant integration checks
+
+CONTRACT:
+- writers and readers
+- failure/interruption/retry/resume
+- adjacent eligibility/progression effects
+- schema/event/contract round-trip where relevant
+
+FOUNDATION:
+- broad targeted integration
+- full suite when whole-system evidence is materially required
+
+For every repair answer:
+
+1. what semantic behavior changed?
+2. who writes it?
+3. who reads/depends on it?
+4. which operations change eligibility/outcome?
+5. what failure/interruption/retry/resume behavior changed?
+6. did schema/event/contract meaning change?
+7. is shared code/authority affected?
+8. which previous Evidence assumptions became invalid?
+
+The Repair Coverage Check occurs before claiming Review Ready.
+
+### 12.15 Repair Coverage Check
+
+The Repair Coverage Check is not exhaustive testing.
+
+It proves that the repair is not merely suppressing the observed site when responsibility is broader.
+
+At minimum it records:
+
+- other paths/sites with the same responsibility
+- whether the common mechanism should be repaired instead
+- whether the affected set is positively enumerable
+- whether the implemented repair covers that set
+- unresolved coverage gap, if any
+
+If the check shows a local repair against a shared responsibility:
+
+~~~
+do not spend another Formal Review round discovering the omission
+-> revise/widen repair first
+~~~
+
+Unknown repair coverage is not PASS.
+
+### 12.16 A/B/C relationship
+
+Timing alone never establishes causality.
+
+For Findings after a repair:
+
+~~~
+A_NEW
+  newly discovered; may have existed before the prior repair
+
+B_RECURRENCE
+  the prior repair failed to close the same substantive Problem/
+  semantic responsibility
+
+C_REPAIR_INDUCED
+  the prior repair positively created a Problem that did not exist before it
+~~~
+
+B/C require positive support.
+
+A B finding names the prior Finding/Repair it recurs from.
+
+A C finding names the causal Repair Batch and carries evidence that the Problem was introduced by that repair.
+
+"observed after repair" is not C.
+
+If causality is unknown, classify A_NEW until stronger evidence exists.
+
+The A/B/C relationship is separate from Problem/Improvement and HIGH/MID/LOW.
+
+### 12.17 Strategy-change trigger
+
+There is no semantic round cap.
+
+Track supported repair failures by semantic surface.
+
+If two consecutive supported B/C repair failures occur in the same semantic surface, including mixed B/C:
+
+~~~
+B -> B
+C -> C
+B -> C
+C -> B
+~~~
+
+the next repair must enter:
+
+~~~
+STRATEGY_CHANGE
+~~~
+
+Do not continue an ordinary local-patch strategy.
+
+Permitted strategy-change classes include:
+
+- repair shared/common responsibility
+- deliberately widen scope
+- reconsider state/lifecycle/authority model
+- replace/rollback unstable prior repair
+- restructure around a simpler coherent invariant
+- HUMAN when the required change crosses a product/spec/security/capability boundary
+
+After a strategy change, run normal impact analysis, Repair Coverage Check and reverification again.
+
+Operational failures such as model timeout, rate limit, crash or unavailable tool do not count as B/C semantic repair failures.
+
+### 12.18 P4 convergence
+
+Convergence is based on unresolved obligations, not round count or raw Finding count.
+
+A Candidate may authorize only when all applicable conditions hold:
+
+- every required discovery task is settled successfully
+- required coverage is satisfied or explicitly resolved
+- every raw report is durably present
+- adjudication is complete
+- unadjudicated raw claims = 0
+- unresolved Problem HIGH = 0
+- unresolved Problem MID = 0
+- every Problem LOW has a traceable disposition and the current completion objective still holds
+- every Improvement has a traceable non-blocking disposition
+- no unresolved HUMAN decision required for this Candidate
+- required post-repair reverification is complete
+- latest Repair Coverage Check is complete when a repair occurred
+- no unresolved repair-induced Problem remains
+- no required STRATEGY_CHANGE remains unperformed
+- all Evidence used for authorization is current under its dependency contract
+
+Therefore:
+
+~~~
+new findings = 0
+~~~
+
+is neither necessary nor sufficient.
+
+The semantic target is:
+
+~~~
+unresolved blocking review obligations = 0
+and required review coverage/evidence is current
+~~~
+
+### 12.19 LOW and Improvement disposition
+
+Under H-1/H-4:
+
+- Problem LOW does not automatically create Work.
+- Improvement HIGH/MID/LOW does not automatically create Work.
+- none of them block merely because of severity/category if the current objective still holds and no requirement decision is missing.
+
+Allowed dispositions include:
+
+- repaired_current_cycle
+- retained_history_only
+- future_work_candidate
+- no_action_after_adjudication
+
+A future Work is created only when clearly valuable under normal Workline ownership/progression rules.
+
+P4 itself does not invent a LOW scheduler or Project-wide maintenance queue.
+
+P5/RB4 owns durable long-lived trace/history and any later workization provenance.
+
+### 12.20 Verification-only Integration
+
+P4 freezes:
+
+~~~
+verification-only
+=
+no persistent mutation to Project domain state
+AND
+no persistent mutation to undeclared external/nested state
+~~~
+
+Integration Evidence adapters declare a side-effect contract.
+
+Preferred verification uses read-only/frozen or disposable resources, such as:
+
+- frozen Candidate filesystem
+- disposable DB/schema
+- temporary build directory
+- isolated container/worktree
+- disposable service fixture
+- explicitly allowed Review runtime/evidence area
+
+Persistent external mutation may support PASS only when isolation/rollback/disposability is mechanically guaranteed and verified by the adapter contract.
+
+Nested repositories/submodules are separate state. A gitlink identity does not authorize mutation of the nested working tree.
+
+If Integration performs undeclared persistent mutation:
+
+~~~
+Integration cannot PASS
+~~~
+
+If Integration reveals a required domain/product repair:
+
+~~~
+create/use a normal fix Work under existing progression ownership
+-> complete that Work normally
+-> Formal Review as required
+-> rerun Integration
+~~~
+
+Integration does not become a hidden repair executor or lifecycle owner.
+
+### 12.21 Versioning and in-flight compatibility
+
+P4 is a new versioned Review contract/policy.
+
+Do not mutate P2/P3 v1 policy meaning in place.
+
+Requirements:
+
+- new invocations use a versioned P4-capable contract/policy identity;
+- already-pending P2/P3 v1 Runs resume under their exact stored v1 contract/policy;
+- old Candidate/TaskInput/Gate/Receipt bytes are never rewritten;
+- a Receipt remains interpreted by the policy/version it actually binds;
+- a v1 Run is never silently upgraded into a P4 repair Run;
+- operation_contract/lifecycle markers already defined by P3 are not reinterpreted by policy version alone;
+- legacy non-Review operations remain unchanged.
+
+The exact identifier strings may use the existing review-v1 family with a new contract/policy version, but they must be distinct durable identities. Compatibility is by explicit version dispatch, never shape inference.
+
+### 12.22 Minimum P4 canonical additions
+
+P4 may extend the closed canonical Review namespace only through explicitly versioned record kinds.
+
+Minimum new logical records:
+
+~~~
+reports/<result_digest>.yaml
+adjudications/<review_run_id>.yaml
+repair-batches/<repair_batch_id>.yaml
+repair-results/<repair_batch_id>.yaml
+~~~
+
+Every new record is:
+
+- immutable create-only
+- strict-schema
+- canonical-byte round-tripped
+- clone-safe
+- validated whether referenced or orphaned
+- included in checkout-capability/path-safety proof
+- never lifecycle truth
+
+P5 may add long-lived summaries/indexing/history around these records but must not retroactively change their P4 execution meaning.
+
+### 12.23 P4 implementation/recovery tests
+
+At minimum cover:
+
+- raw report persists before runtime loss and adjudication can resume
+- adjudicator launch never occurs before accepted TaskInput persistence
+- unsupported claim creates no repair obligation
+- requirement ambiguity becomes HUMAN, not guessed Problem/Improvement
+- Problem HIGH/MID blocks
+- Problem LOW non-blocks only while objective still holds
+- Improvement HIGH/MID/LOW remains non-blocking under H-4
+- no automatic Work is created for LOW/Improvement
+- duplicate raw claims merge only when repair identity matches
+- one Candidate generation creates at most one Repair Batch
+- all blocking Problems for that Candidate are represented in that batch
+- repair launch is durable/replay-safe
+- successful repair freezes a new Candidate/new Run
+- old Run candidate_hash never changes
+- current-cycle recovery survives runtime cleanup
+- incomplete/ambiguous run linkage fails closed
+- unknown Evidence completeness forces reacquisition
+- complete Evidence reuse requires unchanged identities
+- A is not inferred as B/C by timing
+- B/C requires explicit causal linkage
+- second supported same-surface B/C triggers STRATEGY_CHANGE
+- operational tool failures do not increment semantic recurrence
+- Repair Coverage unknown does not converge
+- Integration external/nested side-effect violations cannot PASS
+- normal fix Work + reintegration does not let Review own progression
+- v1 pending Runs remain resumable under v1
+- new P4 Run cannot be mistaken for a v1 fixed-shape Run
+
+### 12.24 P4 HUMAN status
+
+No new Human policy decision is required to freeze P4.
+
+H-1 through H-4 already decide the previously open BL-004 policy questions.
+
+HUMAN remains a runtime adjudication outcome only when a concrete Finding requires a product/spec/requirement decision.
+
+RB3 is DESIGN_READY when RB3-C1 and this P4 contract are both reflected here and their implementation briefs/test matrices are prepared.
+
 
 ## 13. RB4 — P5 / durable Review history
 
