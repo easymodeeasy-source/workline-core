@@ -2074,34 +2074,853 @@ Human only where rules/human-confirmation requires it.
 
 ---
 
-## 15. RB6 — BL-055 + P6
+## 15. RB6 — BL-055 + P6 Project-local Adaptive Policy
 
-Shadow authority is classified by responsibility, not filename.
+RB6 has two connected but distinct responsibilities:
 
-Ordinary README/spec/domain docs are permitted.
+1. preserve Workline authority hygiene in established Projects so that local artifacts cannot silently become a second planning/execution/state authority;
+2. allow a canonical Project-local Review Profile to adapt **how correctness is verified** without redefining correctness.
 
-A canonical Project-local P6 Profile is not shadow authority.
+The P6 Profile is canonical by explicit Workline ownership. It is therefore not shadow authority.
 
-Default shadow detection is advisory/non-refusing.
+### 15.1 Authority boundary retained
 
-Do not:
+Runtime authority remains:
 
-- auto-delete
-- auto-retire
-- auto-backfill existing Projects
-- change bootstrap by default
+~~~
+Workline root:
+  registry.md
+  + registry-routed canonical Skills
+  + implementation/tests
 
-Adaptive policy may not change:
+Project:
+  canonical .workline schemas/records
+  + the exact Project bootstrap entry defined by ProjectSTART
+  + Project/domain authorities only for responsibilities Workline does not own
+~~~
 
-- correctness requirements
-- HUMAN ownership
-- lifecycle semantics
-- product requirements
-- canonical authority boundary
+Project-local documents may define product/domain requirements and may impose stricter Project-specific safety rules.
 
-Produce the read-only Global baseline representation RB7 consumes.
+They do not become Workline operation/lifecycle/progression authority merely because they are newer, more detailed or explicitly named by a user/agent.
 
----
+### 15.2 Shadow authority definition
+
+A Project-local artifact is shadow authority only when it **claims or is used to replace/duplicate a responsibility already owned by canonical Workline authority**.
+
+Workline-owned responsibility includes at least:
+
+- Roadmap / Phase / Work planning state
+- Work/Phase/Roadmap lifecycle or completion state
+- current/next Workline progression
+- Workline relation semantics
+- Workline operation names/meaning
+- Workline Review authorization state
+- Workline Project routing/bootstrap semantics
+- Workline Git/mutation ownership rules
+- canonical Review Policy/Profile semantics
+
+Examples of confirmed shadow-authority behavior:
+
+~~~
+a local tracker is treated as the authoritative current/next Work instead of .workline state
+
+a local Skill invents "BACKLOG add" as a Workline operation and persists a parallel task state
+
+a local automation decides Work/Phase completion outside the canonical operation owner
+
+the Project bootstrap/router is redirected to a Project-local copy of Workline operation semantics
+
+a document claims that its separate Roadmap/Work status overrides canonical Workline state
+~~~
+
+Not shadow authority merely by existence/name:
+
+- README
+- BACKLOG.md
+- TODO.md
+- STATUS.md
+- design/spec documents
+- product/domain Roadmaps that are clearly not Workline lifecycle authority
+- ordinary domain configuration
+- stricter Project-specific CONTRACT/safety rules
+- a Project-local Skill/automation whose responsibility does not duplicate Workline
+- generated reports/dashboards that explicitly remain derived/read-only
+
+Filename and vocabulary alone never establish shadow authority.
+
+### 15.3 Canonical routing prevents shadow operation invention
+
+For an established Workline Project, the Project bootstrap continues to route through the canonical Project router.
+
+When a request uses a noncanonical label such as:
+
+~~~
+"BACKLOGに追加"
+"TODOを次タスクにする"
+"このSTATUSを完了扱いにして"
+~~~
+
+the router/owning Skill resolves the **meaning**, not the filename or alleged operation name.
+
+~~~
+meaning maps uniquely to an existing canonical Workline responsibility
+-> route to that canonical owner
+
+no canonical Workline operation exists, but the request is plainly a domain/document edit
+-> it may remain an ordinary Project artifact edit under that artifact's authority
+
+it is ambiguous whether the user intends a Workline state/progression mutation
+-> rules/human-confirmation
+
+a tool/agent claims a non-existent Workline operation or attempts to substitute another authority
+-> do not invent/fallback to it
+-> report/STOP for that Workline operation
+~~~
+
+A request saying "add it to BACKLOG" does not make BACKLOG a Workline concept.
+
+### 15.4 Project-local Skill and automation boundary
+
+Existing `rules/human-confirmation` already governs addition of Project-local Skills/agent automation that expands executable capability or exposure.
+
+RB6 does not add a second approval system.
+
+A Project-local Skill/automation is allowed when its responsibility is distinct from Workline or when it calls canonical Workline operations rather than duplicating their semantics.
+
+It is not allowed to become a second Workline owner by:
+
+- persisting parallel Workline planning/execution state;
+- copying canonical Workline Skills and then treating the copy as authority;
+- bypassing Project router/operation ownership for Workline mutations;
+- inventing new Workline lifecycle states/operations;
+- treating its own local tracker as current Workline state.
+
+Project-local capability may read canonical Workline state and produce advisory/derived output. Derived output must identify itself as derived and must not be routed as authority.
+
+### 15.5 BL-055 detection classes
+
+Shadow-authority detection is responsibility-based and fail-safe against false positives.
+
+Read-only diagnostics classify evidence as:
+
+~~~
+none
+  no shadow-authority evidence found
+
+suspected
+  an artifact appears to overlap a Workline-owned responsibility,
+  but actual authority substitution cannot be proven
+
+confirmed
+  explicit routing/write/authority evidence shows a noncanonical artifact
+  is being used as Workline authority
+~~~
+
+A filename/content keyword match alone can produce at most `suspected`, never `confirmed`.
+
+Positive confirmation requires concrete evidence such as:
+
+- bootstrap/router delegation to a noncanonical owner;
+- explicit instruction that a noncanonical artifact overrides Workline state;
+- a local Skill/automation whose declared/observed operation writes parallel Workline lifecycle/progression state;
+- an actual noncanonical read/write path used to decide a Workline-owned state transition.
+
+Semantic/model-based inspection may help produce an advisory suspicion but is never itself mutation authority.
+
+### 15.6 Detection is advisory by default
+
+RB6 does **not** make established Projects invalid merely because suspected/confirmed shadow authority exists outside canonical state.
+
+Default behavior:
+
+~~~
+status/validate diagnostic
+-> disclose shadow-authority evidence
+-> identify canonical responsibility that owns the meaning
+-> suggest canonical routing / manual retirement where appropriate
+-> no automatic deletion/edit/migration
+~~~
+
+Canonical Workline operations continue to ignore the shadow source as authority and use their normal canonical inputs.
+
+Existing mutation/write guards still block an unauthorized attempt to change canonical Workline state.
+
+A confirmed external shadow artifact does not gain authority merely because Workline reports it.
+
+No new refusal of ordinary Project operation is introduced by BL-055 alone.
+
+If a future design needs an existing Project to become invalid/refused merely because of shadow-authority presence, that triggers the frozen conditional HUMAN boundary.
+
+### 15.7 BL-011 boundary
+
+BL-011 owns initial migration/retirement of legacy authority when converting a legacy Project.
+
+BL-055 owns **post-establishment reintroduction prevention/detection**.
+
+RB6 does not:
+
+- rerun legacy migration automatically;
+- delete or rewrite a discovered legacy/shadow artifact;
+- change ProjectSTART;
+- backfill existing Projects merely to install shadow-detection state.
+
+A later Human-directed cleanup uses the normal owner of the affected artifact/state.
+
+### 15.8 No ProjectSTART/backfill change for P6
+
+The older learning memo anticipated ProjectSTART initialization of a Project-local Profile.
+
+This Completion Sprint intentionally does not require that.
+
+Frozen rule:
+
+~~~
+Project Profile absent
+-> valid
+-> Effective Policy = Global baseline + current change/risk context
+
+first accepted local policy adaptation
+-> project-policy-change lazily creates the canonical Profile
+~~~
+
+Therefore:
+
+- no existing Project backfill is required;
+- no ProjectSTART bootstrap/layout change is required by P6;
+- absence of the Profile is not a validation warning/error;
+- existing Projects retain current behavior until a P6 policy change is actually applied.
+
+### 15.9 Read-only Global baseline representation
+
+P6 defines one normalized, read-only logical representation of current Global Review policy.
+
+It is produced by a canonical loader from current Workline-root runtime authority; P6 does not mutate Workline root.
+
+Conceptually:
+
+~~~
+GlobalPolicyBaseline {
+  contract/version
+  global_policy_identity
+  root_authority_digests
+  strength/meta-rules
+  policy surfaces and defaults
+  allowed adaptive ranges
+  loader/schema/default-semantics identity
+}
+~~~
+
+Its canonical digest is the Global baseline identity used by Review Context and Project Profiles.
+
+Before RB7 introduces any root policy mutation, the baseline may be **derived** from existing canonical Review policy/Skills/registry.
+
+Derived does not mean weak: the canonical loader and source digests make the baseline exact and reproducible.
+
+RB7 must preserve this loader/interface when it later introduces Global Policy Change.
+
+### 15.10 Policy strength classes
+
+The fixed baseline meta-rules classify each adaptable policy surface as:
+
+~~~
+mandatory
+  Project policy cannot disable or lighten it
+
+default
+  Global standard
+  Project may strengthen
+  Project may lighten only under the stronger lightening contract
+
+adaptive
+  Project may strengthen/lighten inside an explicitly bounded allowed range
+~~~
+
+Classification and allowed ranges are fixed Global/meta-policy facts.
+
+A Project Profile cannot reclassify a surface.
+
+Unknown/unclassified surface is not adaptable.
+
+### 15.11 Absolute non-adaptive surface
+
+Project learning may change **how Workline verifies correctness**.
+
+It may not change **what correctness means**.
+
+Automatic Project Policy Change must not alter:
+
+- Roadmap/Phase/Work semantics
+- lifecycle/completion semantics
+- H-1 through H-4 semantics
+- Problem/Improvement meaning
+- HIGH/MID/LOW meaning or blocking semantics
+- HUMAN decision boundary
+- product/user requirements
+- canonical authority/routing rules
+- Mutation/Git safety invariants
+- non-negotiable security/destructive-operation rules
+- Review-v1 authorization/Consumption correctness
+- Project-local capability approval boundary
+
+A candidate crossing this surface is not a Project Policy Change Candidate.
+
+If the desired change itself is legitimate but changes a Human-owned requirement/authority boundary, route to HUMAN/normal canonical requirement change instead of learning it.
+
+### 15.12 Canonical Project Profile
+
+The canonical Project-local profile is:
+
+~~~
+.workline/review/policy/project-profile.yaml
+~~~
+
+Its absence means no local override.
+
+The file is the current normalized Project-local policy state, not a free-form configuration file.
+
+Minimum logical fields:
+
+~~~
+schema / version
+profile_version
+parent_profile_digest | null
+global_baseline_digest
+global_baseline_version
+loader_semantics_identity
+overrides[]
+active_experiment_refs[]
+~~~
+
+Each override identifies:
+
+- stable policy_surface_id
+- Global strength class
+- direction/effect within the allowed range
+- exact normalized setting
+- supporting policy_change_id
+
+The loader rejects unknown fields/surfaces/settings rather than silently ignoring them.
+
+`profile_version` increases only through the canonical Project Policy Change operation.
+
+A rollback is a new higher version that restores/replaces settings; Git/history is never rewritten.
+
+### 15.13 Effective Policy resolution
+
+At the start of each P6-capable Review Run:
+
+~~~
+read exact GlobalPolicyBaseline
++ read exact Project Profile, or absent
++ current change/risk context
+-> normalized Effective Policy
+-> freeze effective_policy_hash in the Run
+~~~
+
+An in-progress Run never changes policy halfway through because the Global baseline or Project Profile later changes.
+
+A later policy version applies only at the next safe Review Run boundary.
+
+Profile/global compatibility is proven by the canonical loader.
+
+If the Profile names a Global baseline it cannot be reconciled with under fixed compatibility rules:
+
+~~~
+do not guess/merge
+-> no new Review Run under that Profile
+-> policy maintenance/reconciliation path
+~~~
+
+RB7 owns compatibility/adoption when the Global policy itself changes.
+
+### 15.14 Project Policy Change Candidate
+
+A permanent/temporary local adaptation begins from RB4/P5 evidence, not raw run count.
+
+A PolicyChangeCandidate binds at least:
+
+- Project identity
+- before Profile state/digest or explicit absence
+- Global baseline identity/digest
+- normalized proposed after Profile
+- affected_policy_surface
+- strength class
+- direction: strengthen | lighten | temporary_guard | adjust | rollback
+- supporting Run/Finding/Repair/relation IDs
+- Relevant Opportunity definition/evidence
+- expected effect
+- validation plan
+- measurement_contract
+- observation_window
+- success criteria
+- rollback threshold
+- environment/dependency identity
+- overlap classification
+- rollback unit
+
+The Candidate contains exact normalized policy semantics, not an imperative patch script.
+
+### 15.15 Single-event rule
+
+One observation, one Finding, one PASS, or one no-finding run never creates a **permanent learned policy change**.
+
+Permanent adaptation requires repeated relevant evidence and a reviewable trend.
+
+There is no universal fixed count that defines truth.
+
+The fixed meta-policy may define operating thresholds, but:
+
+- denominator is Relevant Opportunity, not raw Review count;
+- evidence quality/independence/causality matters;
+- an unexercised surface does not count as a successful opportunity.
+
+A serious supported escape may create an immediate `temporary_guard` when the guard only strengthens verification inside an already-allowed policy surface.
+
+A temporary guard:
+
+- cannot lighten policy;
+- cannot change correctness/authority;
+- is versioned and reversible;
+- has explicit reevaluation/expiry criteria;
+- does not become permanent without the normal repeated-evidence Policy Change path.
+
+### 15.16 Strengthening contract
+
+Permanent strengthening requires enough relevant evidence to support the pattern and exact affected policy surface.
+
+No hard universal 3/5 count is semantic truth.
+
+Strengthening is allowed only within the Global surface's declared adaptive range and still requires:
+
+- PolicyChangeCandidate
+- Policy Change Review
+- exact persisted-policy proof
+- observation after application
+- rollback/adjust path
+
+A stronger check that changes product/requirement meaning is not "strengthening" and is outside P6.
+
+### 15.17 Lightening contract
+
+Lightening has a materially stronger burden than strengthening.
+
+Before activation, freeze:
+
+- Relevant Opportunity denominator
+- exact pre-change check/behavior being lightened
+- replacement verification or reason coverage remains adequate
+- independent shadow/holdout observation channel
+- observation window
+- success criteria
+- escape/rollback threshold
+- environment/dependency identity
+- affected policy surface
+- rollback unit
+
+The changed policy cannot disable/weaken the channel used to evaluate whether that lightening was safe.
+
+No-finding evidence counts only when the relevant surface was actually exercised.
+
+If adequate independent measurement cannot remain active:
+
+~~~
+lightening is not authorized
+~~~
+
+### 15.18 Shadow/holdout execution semantics
+
+Shadow/holdout verification is measurement, not a weaker correctness channel.
+
+Selection itself is policy-driven; an unselected shadow task has no completion effect.
+
+Once a shadow/holdout task is durably accepted before the Review cutoff:
+
+~~~
+it must settle before that authorization is consumed
+~~~
+
+This preserves P3/P4 stale-authorization ordering.
+
+Disposition of a supported result known before terminal completion:
+
+~~~
+Problem HIGH/MID
+-> promote to normal current Review blocking obligation
+
+Problem LOW
+-> H-1/H-4 non-blocking disposition if objective still holds
+
+Improvement HIGH/MID/LOW
+-> non-blocking disposition under H-4
+
+requirement meaning unclear
+-> HUMAN
+~~~
+
+No Finding:
+
+~~~
+measurement evidence only
+~~~
+
+A relevant result first becoming known after durable terminal completion:
+
+~~~
+historical/downstream escape
+-> no retroactive lifecycle rewrite
+-> durable RB4 relation/evidence
+-> feed current repair / temporary guard / experiment retain-or-rollback evaluation as applicable
+~~~
+
+Shadow mode never authorizes ignoring a supported defect merely because the check was "only experimental."
+
+### 15.19 Policy Change Review
+
+Policy Change itself is reviewed under:
+
+- the **pre-change** Effective Policy; and
+- fixed non-adaptive policy meta-rules.
+
+The candidate policy cannot weaken the rules used to authorize its own change.
+
+Policy Change Review verifies at least:
+
+- evidence provenance and Relevant Opportunity basis
+- affected surface identity
+- strength class / allowed adaptive range
+- no forbidden correctness/authority change
+- lightening measurement contract where applicable
+- experiment overlap state
+- environment/dependency attribution
+- exact rollback unit
+- normalized before/after semantics
+- semantic persisted-projection adapter availability
+
+Review produces Authorization only.
+
+Review does not write the Project Profile or finalize Git.
+
+### 15.20 Project Policy Change operation owner
+
+Physical Project policy mutation is owned by the distinct canonical internal operation:
+
+~~~
+project-policy-change
+~~~
+
+No new Project-facing domain Skill is required.
+
+`skills/review` may coordinate Candidate freeze/meta-review and hand an Authorization to this operation, but it does not write the Profile itself.
+
+`project-policy-change` owns:
+
+~~~
+Project context validation
+-> Project execution lock
+-> pending mutation open/resume
+-> exact before Profile/global baseline check
+-> consume exact Policy Change Authorization
+-> write Project Profile and policy evidence
+-> local commit
+-> PersistedProjectionAdapter proof
+-> complete artifact/scope proof
+-> optional exact publication under rules/git
+-> durable Consumption
+-> completion / recovery cleanup
+~~~
+
+It reuses the canonical Mutation Controller and Git primitives.
+
+No new generic Controller is introduced.
+
+### 15.21 Project Policy Consumption
+
+Policy Change uses the common Authorization/Consumption architecture but Project-policy-specific persisted identity.
+
+Consumption binds at least:
+
+- receipt/review identity
+- operation identity/stage
+- before Profile version/digest or explicit absence
+- after Profile version/digest
+- Global baseline digest used by the Candidate
+- exact normalized persisted-policy projection hash
+- local policy commit SHA
+- policy_change_id
+
+No Work-shaped lifecycle event is invented.
+
+Review history/Consumption is not Project lifecycle truth.
+
+### 15.22 PersistedProjectionAdapter
+
+A Project Policy Change is successful only if:
+
+~~~
+normalized reviewed after-state
+==
+normalize(canonical_load(committed project-profile.yaml))
+~~~
+
+The loader/schema/default-semantics identity is bound in Review Context.
+
+Required persistence discipline:
+
+~~~
+local commit
+-> exact Profile artifact/scope proof
+-> canonical loader semantic round-trip proof
+-> Review authorization still current
+-> only then publication
+~~~
+
+No byte-equivalent-but-semantically-different profile is accepted.
+
+No semantic-equivalent-but-unauthorized byte shape bypasses the exact artifact proof.
+
+If the committed profile or scope mismatches the reviewed Candidate:
+
+~~~
+no push
+no silent rewrite/adoption
+-> P3/P4-compatible mismatch/recovery or reconcile as contractually supported
+~~~
+
+Rollback is a new PolicyChangeCandidate/new profile version/new commit.
+
+### 15.23 Policy storage and evidence
+
+P6 adds:
+
+~~~
+.workline/review/policy/
+  project-profile.yaml
+  changes/<policy_change_id>.yaml
+  evaluations/<evaluation_id>.yaml
+~~~
+
+`project-profile.yaml` is the current canonical local Profile.
+
+`changes/*` are immutable evidence/provenance for applied Policy Changes.
+
+`evaluations/*` are immutable observation evaluations such as retain/adjust/rollback decisions.
+
+Every record is H-3 public-safe.
+
+High-volume observations remain represented through RB4/P5 source references/digests; P6 does not copy raw history into policy files.
+
+### 15.24 Observation state and evaluation
+
+After a Policy Change is applied, it is observed under its frozen measurement contract.
+
+An evaluation result is at least:
+
+~~~
+retain
+adjust
+rollback
+inconclusive
+~~~
+
+`retain`:
+- current Profile remains;
+- immutable evaluation evidence is added.
+
+`adjust`:
+- creates a new PolicyChangeCandidate/version.
+
+`rollback`:
+- creates a new PolicyChangeCandidate/version restoring/replacing the affected setting;
+- never Git reset/revert-history rewrite as the policy mechanism.
+
+`inconclusive`:
+- does not count as success;
+- Profile may remain under its explicitly frozen experiment contract only if that contract permits continued observation safely;
+- otherwise its rollback threshold/rule applies.
+
+### 15.25 Experiment overlap and attribution
+
+Every experiment declares exact `affected_policy_surface`.
+
+Overlap is classified:
+
+~~~
+proven_disjoint
+known_overlap
+overlap_unresolved
+~~~
+
+Only `proven_disjoint` experiments may observe concurrently.
+
+`known_overlap` and `overlap_unresolved` must be:
+
+- serialized; or
+- explicitly superseded; or
+- combined into one compound PolicyChangeCandidate with one measurement/rollback unit.
+
+`overlap_unresolved` does not by itself require HUMAN.
+
+The overlap classifier/meta-rules are fixed and cannot be weakened by the experiment being measured.
+
+### 15.26 Observation environment identity
+
+Where material, observation binds:
+
+- Global baseline version/digest
+- Project Profile base/version
+- reviewer/model identity/version
+- Review/check adapter identity/version
+- toolchain/runtime identity
+- measurement-contract version
+- relevant dependency/environment identity
+
+If a material identity changes during an observation window:
+
+~~~
+split the observation window
+or
+prove the change irrelevant with positive evidence
+otherwise
+-> result inconclusive
+~~~
+
+Do not attribute post-change results to the old experiment by chronology alone.
+
+### 15.27 BL-055 interaction with the Project Profile
+
+The canonical Profile is **not** shadow authority because all are true:
+
+- Workline explicitly owns its schema/path/loader;
+- it only changes allowed Review execution policy;
+- its semantic limits are fixed by Global/meta-policy;
+- it is mutated only through `project-policy-change`;
+- every change is reviewed and exact-persistence-proven;
+- it never becomes Roadmap/Phase/Work lifecycle truth.
+
+A free-form Project file claiming to be the "Review Profile" is not accepted by name similarity.
+
+Only the exact canonical path/schema/loader is Project Profile authority.
+
+### 15.28 RB1 status/validation handoff
+
+RB6 adds read-only diagnostics to the RB1 surface when RB1 exists.
+
+At minimum expose:
+
+- Global baseline identity
+- Project Profile: absent | version/digest
+- Effective Policy identity for an inspected/current Review where applicable
+- active policy experiment IDs/status
+- shadow authority diagnostic: none | suspected | confirmed
+- concise evidence/source for suspected/confirmed shadow authority
+- policy maintenance/reconcile need where applicable
+
+These diagnostics are additive.
+
+They do not mutate Project state.
+
+### 15.29 RB7 handoff
+
+RB7 consumes only the P6 read-only Global baseline interface and RB4/P5/P6 durable evidence.
+
+RB6 does not perform Global promotion.
+
+It exposes enough normalized information for RB7 to reason about:
+
+- Global policy identity/version/digest
+- fixed strength/meta-rules
+- local Profile delta from Global baseline
+- supporting Project evidence
+- experiment result/evaluation
+- affected policy surface
+- environment identity
+- causal/independence evidence refs
+
+A local Project recurrence count alone is not a Promotion Packet.
+
+### 15.30 Compatibility
+
+Existing Projects with no Profile remain valid and use Global baseline only.
+
+Existing Review Runs continue under their frozen Effective Policy hash.
+
+A new Profile version never alters an in-progress Run.
+
+No automatic profile backfill.
+
+No automatic shadow-artifact deletion/retirement/edit.
+
+No automatic conversion of existing Project-local Skills/docs.
+
+P6 does not change Project bootstrap.
+
+### 15.31 RB6 tests
+
+At minimum cover:
+
+**Authority hygiene**
+- README/BACKLOG/TODO/STATUS filename alone is not shadow authority
+- ordinary domain spec/Project CONTRACT is not shadow authority
+- canonical Project bootstrap still routes only through Project router
+- noncanonical Workline-like operation is never invented from user wording
+- unique canonical meaning routes to canonical owner
+- ambiguous Workline-state intent routes to Human confirmation
+- suspected shadow authority is advisory and does not invalidate Project
+- confirmed shadow authority is disclosed but does not become authority
+- no automatic file deletion/edit/migration
+- local Skill that calls canonical Workline owner is allowed
+- local Skill that explicitly substitutes parallel Workline state is detected as confirmed/suspected according to available positive evidence
+
+**Profile/effective policy**
+- absent Profile = Global baseline only
+- no ProjectSTART/backfill requirement
+- first authorized Policy Change lazily creates Profile
+- unknown field/surface/range fails closed
+- mandatory surface cannot be lightened/disabled
+- forbidden correctness/authority change cannot become PolicyChangeCandidate
+- Effective Policy snapshot remains frozen across later Profile change
+- baseline/Profile incompatibility does not guess a merge
+
+**Policy Change operation**
+- distinct `project-policy-change` mutation owner
+- Review authorization does not itself mutate Profile
+- crash/resume at every profile write/commit/proof/push/Consumption boundary
+- exact before-state conflict fails closed
+- semantic canonical-load round-trip equals reviewed after-state
+- no push before proof
+- exact commit publication only
+- rollback creates a new version/commit
+
+**Learning/experiment**
+- one event cannot produce permanent adaptation
+- temporary guard is strengthening-only and reevaluated
+- Relevant Opportunity, not raw run count, is denominator
+- lightening without independent measurement is refused
+- lightening cannot disable its own detector
+- accepted pre-cutoff shadow task must settle
+- pre-terminal shadow Problem HIGH/MID becomes blocking Review obligation
+- post-terminal shadow Finding becomes downstream escape without lifecycle rewrite
+- only proven_disjoint experiments observe concurrently
+- overlap_unresolved is not silently treated as disjoint
+- material environment change makes attribution inconclusive absent irrelevance proof
+
+### 15.32 RB6 HUMAN status
+
+No new Human policy decision is required by this frozen design.
+
+That is because RB6:
+
+- does not invalidate/refuse existing Projects due to shadow artifacts;
+- does not add a new restriction merely for ordinary Project-local Skills/docs;
+- does not auto-edit/delete anything;
+- does not change ProjectSTART/backfill;
+- does not alter correctness/HUMAN/lifecycle/product meaning;
+- reuses the existing human-confirmation boundary for capability-changing local automation.
+
+If implementation proves one of those assumptions impossible and would require a stricter existing-Project or Project-local capability rule, trigger the corresponding conditional HUMAN decision before changing that boundary.
+
+RB6 is DESIGN_READY when this contract and its implementation brief/test matrix are prepared.
+
 
 ## 16. RB7 — P7 Global promotion
 
