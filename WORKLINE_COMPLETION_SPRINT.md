@@ -905,6 +905,19 @@ Reviewer severity is input to adjudication, not final authority.
 
 P4 never rewrites a raw report to reflect later adjudication.
 
+Here "raw report" means **unadjudicated discovery report**, not unsanitized model output.
+
+Before canonical persistence, the report must already satisfy H-3:
+
+- no chain-of-thought or hidden reasoning
+- no raw chat/session transcript
+- no secrets/credentials
+- no unnecessary absolute/local path
+- no unnecessary private/local identifiers
+- only the structured public-safe claim needed for audit/recovery
+
+The reviewer instruction requires public-safe structured output. If an external return cannot be made H-3-safe without changing the substantive claim, it is not persisted or settled as that report; the task remains/re-enters the versioned reviewer path for a safe report. Unsanitized external output is ephemeral and never settlement authority.
+
 ### 12.4 Adjudication classification
 
 Each raw claim is handled in this order:
@@ -1556,26 +1569,487 @@ HUMAN remains a runtime adjudication outcome only when a concrete Finding requir
 RB3 is DESIGN_READY when RB3-C1 and this P4 contract are both reflected here and their implementation briefs/test matrices are prepared.
 
 
-## 13. RB4 — P5 / durable Review history
+## 13. RB4 — P5 / BL-005 front — durable Review history
 
-Required durable history:
+RB4 provides clone/runtime-cleanup-safe Review history, causality and traceability without making history a second source of lifecycle truth.
 
-- Run summary
-- Finding summary
-- Repair summary
-- Finding<->Repair causality
-- cross-run recurrence
-- LOW traceability
-- Improvement traceability
+It closes the Review-history half of BL-005. Phase/Roadmap achievement evidence is completed in RB5.
+
+### 13.1 Source-of-truth rule
+
+P5 does not copy P1-P4 facts into a second independent truth store.
+
+The authoritative execution facts remain the immutable P1-P4 records:
+
+- Candidate snapshots
+- TaskInputs
+- Gate generations
+- Receipts
+- Consumptions
+- Supersessions
+- P4 discovery reports
+- P4 adjudications
+- P4 Repair Batches
+- P4 Repair Results
+- activation and existing operation/lifecycle records
+
+P5 history is an append-only, validated projection/reference layer over those immutable facts plus genuinely new later facts such as cross-run recurrence or downstream escape.
+
+If a P5 summary disagrees with the source record it summarizes:
+
+~~~
+validation failure
+not "latest value wins"
+~~~
+
+Review history never drives ProjectView/state.py progression.
+
+### 13.2 History purpose
+
+Durable history exists only for:
+
+- recovery explanation
+- audit
+- recurrence detection
+- repair causality
+- LOW/Improvement traceability
+- optional future Work provenance
 - HUMAN Decision Evidence
+- later P6/P7 learning/promotion evidence
+- RB5 achievement evidence references
 
-History is structured/sanitized/public-safe under H-3.
+It is not:
 
-Review history is not lifecycle authority.
+- lifecycle truth
+- a scheduler
+- a queue
+- a second Roadmap
+- an automatic Work generator
+- raw AI memory
 
-Future Work from LOW/Improvement is optional and never automatic.
+### 13.3 Minimum history layout
 
----
+P5 adds a versioned history namespace inside canonical Review storage:
+
+~~~
+.workline/review/history/
+  runs/<review_run_id>.yaml
+  findings/<finding_id>.yaml
+  repairs/<repair_batch_id>.yaml
+  relations/<relation_id>.yaml
+  human-decisions/<decision_id>.yaml
+~~~
+
+These records are immutable create-only.
+
+P5 does not create a mutable "current history state" file.
+
+Indexes/caches may later be generated for performance, but they are derived/rebuildable and never outrank the immutable facts above.
+
+### 13.4 Run summary
+
+A Run summary exists for each P5-capable Review Run once that Run reaches a durable disposition relevant to the current Review cycle.
+
+It records only compact structured facts, including at least:
+
+- review_run_id
+- review_kind
+- target_identity
+- operation_identity
+- candidate_hash
+- candidate_generation where P4 applies
+- review_context_hash
+- effective_policy_hash
+- evidence_digest
+- coverage_digest
+- terminal/latest gate generation and digest
+- adjudication reference/digest where P4 applies
+- finding_ids
+- repair_batch_id if this Run entered repair
+- receipt_id if authorized
+- Consumption reference if consumed
+- durable disposition
+
+Allowed disposition vocabulary must distinguish at least:
+
+~~~
+authorized
+repaired_to_next_candidate
+human_wait
+not_authorized
+invalidated
+set_aside
+consumed
+historical_escape
+~~~
+
+The summary does not reproduce Candidate bytes, report prose or Gate records.
+
+It references them by stable identity/digest.
+
+### 13.5 Finding summary
+
+A Finding summary is generated only from one canonical P4 adjudication Finding.
+
+It contains at least:
+
+- finding_id
+- source review_run_id
+- candidate_hash
+- category: Problem | Improvement
+- severity: HIGH | MID | LOW
+- semantic_surface
+- public-safe short summary
+- current-cycle disposition
+- A/B/C relationship from P4 when present
+- source adjudication digest
+- source report digests
+- optional related repair_batch_id
+- later relation IDs as append-only relation references, not mutable fields
+
+The summary's category/severity/disposition must validate exactly against the source adjudication.
+
+A Finding summary never upgrades a dismissed/unsupported/HUMAN raw claim into a Finding.
+
+HUMAN claims use Human Decision Evidence and their adjudication source; they are not disguised as Problem/Improvement Findings.
+
+### 13.6 Repair summary
+
+A Repair summary is generated from one P4 Repair Batch + Repair Result.
+
+It contains at least:
+
+- repair_batch_id
+- source review_run_id
+- source candidate_hash
+- result candidate_hash
+- finding_ids
+- semantic surfaces
+- selected strategy
+- impact class
+- Repair Coverage Check digest/result
+- Evidence reuse/invalidation summary
+- repair executor identity/version
+- durable result/disposition
+- source Repair Batch digest
+- source Repair Result digest
+
+The summary never claims causality merely because a repair and later Finding are adjacent in time.
+
+### 13.7 Durable causal material
+
+For later causal re-evaluation, preserve references/digests sufficient to recover the entire repair-relevant owned delta, not only the initially suspected site.
+
+At minimum retain or reference:
+
+- source/result Candidate hashes
+- complete operation-owned touched delta before/after
+- impact-analysis affected surfaces
+- generated artifacts needed for causal re-evaluation where practical
+- external-state Evidence/fingerprints when safely reconstructible
+- supporting Evidence references
+- Repair Coverage Check
+- relevant policy/context identities
+
+Causal status is one of:
+
+~~~
+supported
+unresolved
+insufficient_evidence
+~~~
+
+Only supported causality may be counted as a confirmed repair-induced C relationship or used as positive causal evidence for later learning/promotion.
+
+Unknown is preserved as unknown.
+
+Do not force C when evidence is insufficient.
+
+### 13.8 Cross-run relation records
+
+P4 owns same-current-cycle A/B/C.
+
+P5 adds later/cross-run relationships without rewriting old Findings.
+
+A relation record has a stable relation_id and records at least:
+
+- relation type
+- source identity
+- target identity
+- semantic_surface
+- causal/relationship status
+- supporting evidence digests
+- public-safe rationale summary
+
+Minimum relation types:
+
+~~~
+cross_run_recurrence
+repair_induced
+downstream_escape
+future_work_link
+~~~
+
+For cross_run_recurrence and repair_induced:
+
+- equality of code/message alone is not proof;
+- semantic responsibility and evidence are required;
+- status may remain unresolved/insufficient_evidence;
+- only supported relations feed confirmed recurrence/causality metrics.
+
+A later relation never edits either endpoint record.
+
+### 13.9 Downstream escape
+
+A defect first discovered after the prior lifecycle transition is completed is a downstream/historical escape.
+
+P5 records an immutable relation from the later supported Finding to the prior Run/Finding/Repair evidence when that link is supportable.
+
+It does not:
+
+- reopen completed lifecycle state
+- rewrite the prior Receipt/Consumption
+- pretend the later Finding participated in the earlier authorization
+- retroactively change an old verdict
+
+The later problem is handled through normal current Workline operations.
+
+### 13.10 LOW and Improvement traceability
+
+H-1/H-4 supersede the old automatic LOW queue design.
+
+P5 does not create a Project-wide LOW queue.
+
+P5 does not automatically create Work from:
+
+- Problem LOW
+- Improvement HIGH
+- Improvement MID
+- Improvement LOW
+
+Every non-blocking Finding still has a durable disposition.
+
+Possible dispositions include:
+
+- repaired_current_cycle
+- retained_history_only
+- future_work_candidate
+- no_action_after_adjudication
+
+If a future Work is later created because it is clearly valuable, it is a normal Work under the existing operation/progression owner.
+
+P5 then appends a future_work_link relation:
+
+~~~
+finding_id -> work_id
+~~~
+
+That provenance link does not add the Work to the originating Phase/Roadmap completion set and does not create reverse completion dependency.
+
+Work selection remains existing Workline progression; P5 invents no maintenance scheduler.
+
+### 13.11 HUMAN Decision Evidence
+
+When a concrete Review outcome reaches HUMAN and the Human actually makes the required decision, preserve a compact Human Decision Evidence record.
+
+It contains at least:
+
+- decision_id
+- affected review_run_id / candidate_hash
+- affected adjudication entry/finding references
+- public-safe decision question summary
+- public-safe Human decision summary
+- canonical requirement/authority identity affected by the decision, if any
+- resulting action class
+- source/effect digests needed to prove what changed
+
+Human Decision Evidence is evidence that a Human decision occurred.
+
+It is not itself a substitute for the canonical requirement/specification/authority that the Human changed or confirmed.
+
+Do not persist the conversation transcript, chain-of-thought, private deliberation or unnecessary personal information.
+
+### 13.12 H-3 sanitation boundary
+
+Every P5 history record is structured, sanitized and public-safe.
+
+Never persist in history:
+
+- chain-of-thought
+- hidden reasoning
+- raw model transcript
+- raw chat transcript
+- secrets or credentials
+- unnecessary personal information
+- unnecessary absolute/local filesystem paths
+- unnecessary machine/user identifiers
+- private/local details that are not required to understand the Review fact
+
+Prefer:
+
+- Workline stable IDs
+- repository-relative identities when needed
+- schema/version identities
+- hashes/digests
+- short public-safe semantic summaries
+- explicit status vocabularies
+
+P3/P4 reconstruction material required to reproduce an exact Candidate is not deleted or weakened by this rule.
+
+Operational reconstruction records and human/audit history have different responsibilities.
+
+### 13.13 P4 discovery-report sanitation amendment
+
+P4's canonical report record is the **sanitized unadjudicated discovery report**.
+
+The unsanitized external model/tool return is ephemeral and is never durable authority.
+
+If a return contains H-3-prohibited material:
+
+~~~
+do not persist it as-is
+do not settle its digest as the canonical report
+-> obtain/construct a semantically equivalent H-3-safe structured report
+   through the versioned reviewer protocol
+or
+-> leave the task unresolved/failed under that protocol
+~~~
+
+Sanitization must not silently change the substantive claim.
+
+### 13.14 Achievement-evidence handoff to RB5
+
+RB4 defines the durable evidence/history substrate but does not decide Phase/Roadmap achievement.
+
+RB5 will bind automatic Phase/Roadmap achievement to evidence that references this durable substrate.
+
+RB4 therefore exposes stable references for RB5 to cite:
+
+- Review Run
+- Receipt/Consumption
+- relevant Finding dispositions
+- unresolved-obligation status
+- required Evidence/coverage identity
+- HUMAN Decision Evidence where applicable
+
+RB5 decides the exact achievement record/event binding.
+
+### 13.15 Backfill and compatibility
+
+No historical backfill is required.
+
+Existing Projects/Runs created before P5 remain valid under their original contracts.
+
+P5-capable contracts/policies require history for new P5-capable Runs only.
+
+Do not reconstruct old missing rationale by guessing from:
+
+- current code
+- later commits
+- current status
+- memory/chat history
+
+Where old evidence is absent, it remains absent.
+
+### 13.16 History creation boundary
+
+For P5-capable Review flows, required history facts must become durable before the operation passes the boundary that would make their later reconstruction impossible.
+
+Prefer creating a summary in the same recoverable generation/operation transition that makes its source fact durable, or in an immediately bound recoverable history mutation whose identity is fixed before the source transition is considered complete.
+
+At minimum:
+
+- discovery report durability precedes adjudication
+- Finding summary durability follows/binds the immutable adjudication
+- Repair summary durability follows/binds Repair Result before next-cycle history is considered complete
+- authorized Run summary is durable before its authorization is consumed/operation returns terminal success
+- Human Decision Evidence is durable before a Human-dependent Review cycle is resumed under that decision
+
+A crash must yield either:
+
+- a recoverable pending history write with exact source identity; or
+- no claim that the P5 history obligation was completed
+
+Never infer completion from a later lifecycle event alone.
+
+### 13.17 Validation
+
+Validation checks every P5 history record independently and against its immutable source.
+
+At minimum detect:
+
+- unknown schema/version
+- malformed stable ID
+- source record missing
+- source digest mismatch
+- category/severity/disposition disagreement
+- repair source/result mismatch
+- relation endpoint missing
+- relation type/status invalid
+- supported causality with missing supporting evidence
+- duplicate logical identity
+- Human Decision Evidence pointing at no affected Review fact
+- future_work_link pointing at a non-existent/nonmatching Work
+
+A broken history relation does not become lifecycle truth.
+
+For a P5-capable Run whose contract requires a history fact before authorization/consumption, missing required history blocks that new transition until recovered.
+
+### 13.18 Learning boundary
+
+RB4/P5 records evidence.
+
+It does not automatically evolve policy.
+
+Generated metrics may later include:
+
+- Finding yield over relevant opportunities
+- downstream escape rate
+- B recurrence rate
+- C repair-induced rate
+- redundant-review overlap
+- review/test cost where safely available
+
+Aggregates are never the raw source of truth and must remain traceable to Run/Finding/Repair/history records.
+
+RB6/P6 owns Project-local adaptive policy.
+
+RB7/P7 owns Global promotion.
+
+### 13.19 RB4 tests
+
+At minimum cover:
+
+- Run/Finding/Repair summary round-trip and strict schema
+- summary/source mismatch fails validation
+- runtime cleanup does not remove canonical history
+- fresh clone reconstructs P5 history references
+- P4 raw/sanitized discovery report distinction
+- H-3-prohibited report cannot be persisted as canonical history/report
+- no chain-of-thought/transcript field exists in schema
+- no automatic Work from LOW/Improvement
+- future_work_link can be added later without rewriting Finding
+- future Work does not become originating Phase/Roadmap dependency
+- supported/unresolved/insufficient causal status round-trip
+- unresolved causality is not counted as C
+- cross-run recurrence requires explicit relation/evidence
+- downstream escape does not reopen prior lifecycle
+- Human Decision Evidence does not replace canonical requirement authority
+- no backfill is attempted for pre-P5 Runs
+- history write interruption is replay-safe
+- P5-capable authorization cannot step over a required missing history fact
+- old v1/P3/P4-only Runs remain valid without P5 summaries
+
+### 13.20 RB4 HUMAN status
+
+No new Human policy decision is required to freeze RB4.
+
+H-1/H-3/H-4 already resolve the prior LOW/history/privacy choices.
+
+Conditional Human escalation remains only if implementation would require deleting/weaking P1-P4 reconstruction capability, which this design explicitly forbids.
+
+RB4 is DESIGN_READY when this contract and its implementation brief/test matrix are prepared.
+
 
 ## 14. RB5 — Phase Review / achievement
 
