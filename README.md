@@ -278,7 +278,7 @@ implementationは [Runtime](#runtime) の起動形だけで起動する。`pytho
 - implementation: core implemented (registry / mutation / project-start / project-router / bootstrap + backfill / phase-create / create / start / roadmap)
 - post-project Skill discovery: implemented (Project-side bootstrap → canonical router → dynamic registry inventory)
 - push destination identity: implemented (project.yaml pin → entry check → durable git_push destination → pin maintenance)
-- Work-terminal Review: implemented and post-land production integration acceptance verified (human-confirmed per-Project activation → explicit per-invocation review-v1 START → Work Candidate → Review Run / Receipt → result and completion commits with exactly one Work Consumption → activation totality validation); legacy START unchanged and still supported after activation; no Project is activated by Workline itself
+- Work-terminal Review: implemented and post-land production integration acceptance verified (human-confirmed per-Project activation → explicit per-invocation review-v1 START → Work Candidate → Review Run / Receipt → K1 result commit only when the Candidate carries result changes → K2 completion commit with exactly one Work Consumption → activation totality validation); legacy START unchanged and still supported after activation; no Project is activated by Workline itself
 
 ## Tests
 
