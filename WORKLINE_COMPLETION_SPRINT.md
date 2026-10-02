@@ -2051,28 +2051,621 @@ Conditional Human escalation remains only if implementation would require deleti
 RB4 is DESIGN_READY when this contract and its implementation brief/test matrix are prepared.
 
 
-## 14. RB5 — Phase Review / achievement
+## 14. RB5 — BL-003 + BL-005 back — Phase Review and Achievement Evidence
 
-Phase Review integrates as the integration Work terminal gate.
+RB5 connects Phase-wide verification to the existing Phase integration Work and makes successful Phase/Roadmap achievement evidence durable.
 
-Do not replace generated Phase completion semantics with a second lifecycle model.
+It preserves existing ownership:
 
-Keep legacy START.
+~~~
+START
+  -> Work execution / integration ownership / Work lifecycle
 
-Do not make review-v1 globally mandatory.
+Roadmap
+  -> Phase planning / continuation / Roadmap achievement
 
-Late Work after integration defaults to disclosure, not refusal.
+state.py
+  -> generated Work / Phase / Roadmap state
 
-Implement:
+Review
+  -> verification / adjudication / authorization
+~~~
 
-- automatic Phase achievement
-- automatic Roadmap achievement
-- H-3-compliant achievement evidence
-- additive RB1 diagnostics
+Review does not become a second Phase lifecycle controller.
 
-Human only where rules/human-confirmation requires it.
+### 14.1 Phase completion remains generated
 
----
+Phase completion remains generated state, not a lifecycle event.
+
+RB5 does not add:
+
+- phase_completed
+- phase_achieved
+- review_passed lifecycle state
+- mutable Phase status
+
+The existing mechanical shape remains: Phase is active; effective current-plan Works are complete; integration exists; no unfinished effective integration remains; structural human_confirmation is complete when present; relation/integration replanning is complete; and structural validation passes.
+
+RB5 strengthens what a **new review-aware integration Work may count as completed**, and adds a mechanical coverage requirement for review-aware integration. Phase state remains derived from canonical Work metadata, events and relations rather than Review metadata.
+
+### 14.2 Compatibility marker
+
+No historical backfill is required.
+
+Existing phase_integration_check Works without an RB5 marker retain legacy completion semantics.
+
+Every integration Work created by the RB5-capable Roadmap/START path carries:
+
+~~~
+phase_review_contract: phase-integration-review-v1
+~~~
+
+This metadata is valid only for work_kind=phase_integration_check. Unknown/non-supported values fail validation.
+
+A Phase containing no effective review-aware integration remains legacy-compatible.
+
+An existing Phase may transition naturally to reviewed integration semantics when a later canonical reintegration is created. No existing Work file is edited merely to opt it in.
+
+### 14.3 Registration ownership
+
+Initial integration meaning remains owned by Roadmap.
+
+Runtime reintegration meaning remains owned by START.
+
+CREATE remains registration core only.
+
+Roadmap/START decide that a newly created integration uses phase-integration-review-v1; CREATE persists the already-decided marker.
+
+No new Project-facing Skill is introduced.
+
+### 14.4 Phase Integration Review kind
+
+Add a dedicated Review kind:
+
+~~~
+phase-integration-v1
+~~~
+
+It is the execution/verification gate for a review-aware phase_integration_check Work.
+
+It is distinct from ordinary Work Formal Review, Phase Design Review, Roadmap Review and human_confirmation.
+
+A review-aware integration Work is verification/evidence-only. It does not own domain-output repair.
+
+### 14.5 Phase Integration Candidate
+
+The Candidate freezes the exact committed Phase basis being integrated.
+
+At minimum it binds:
+
+- Phase ID / Roadmap ID
+- Phase desired state
+- integration Work ID / desired state / phase_review_contract
+- exact committed Git base and branch identity
+- exact effective current-plan Work IDs
+- each relevant Work's kind, desired-state identity and terminal/lifecycle identity
+- exact relevant requires_completion graph
+- Related/authority inputs needed for Phase-wide verification
+- available Work Review/achievement evidence references
+- structural validation identity/result
+- Review Context
+- Effective Policy
+- versioned integration-coverage classification
+
+Candidate material is clone-safe and reconstructible under the P1-P4 rules.
+
+The Candidate is evidence input, never a mutable Phase-status record.
+
+### 14.6 Integration coverage classes
+
+For a candidate integration I, every effective current-plan Work is classified into exactly one of:
+
+~~~
+pre_integration
+  result/state must be integrated before I may complete
+
+current_integration
+  I itself
+
+post_integration_confirmation
+  structural human_confirmation explicitly downstream of I by requires_completion
+
+historical_integration
+  older completed phase_integration_check superseded by current integration purpose
+
+invalid_uncovered
+  anything fitting none of the permitted classes
+~~~
+
+Classification is mechanical from Work kinds and canonical relations.
+
+A normal/fix Work is never post_integration merely by timestamp/order.
+
+A human_confirmation is post_integration only when canonical requires_completion structure makes it downstream of I.
+
+invalid_uncovered is a structural defect and prevents authorization.
+
+### 14.7 Complete pre-integration coverage
+
+For phase-integration-review-v1, every effective non-integration Work that is not an explicitly downstream structural human_confirmation must be represented as a pre_integration responsibility.
+
+Use direct requires_completion edges to make the coverage auditable.
+
+Initial Phase expansion already creates each normal Work -> integration.
+
+For a review-aware reintegration, START creates the complete required predecessor set for that integration, not only the newest fix Work.
+
+Older completed integrations need not be predecessors of the new integration. They are historical_integration and may be inspected through evidence/history.
+
+### 14.8 Generated completion for review-aware Phase
+
+For a Phase whose current integration path is review-aware, generated Phase completion additionally requires at least one **completed covering integration** for the current effective plan.
+
+A covering integration satisfies all:
+
+- work_kind=phase_integration_check;
+- phase_review_contract=phase-integration-review-v1;
+- it has ordinary work_completed lifecycle truth;
+- its direct pre_integration coverage covers the current review-relevant effective Work set;
+- no invalid_uncovered Work exists;
+- any explicitly downstream structural human_confirmation required by the structure is complete before Phase completion;
+- structural validation passes.
+
+This is derived from canonical Work metadata/events/relations. state.py does not read a Receipt/history record as lifecycle truth.
+
+Legacy-only Phases keep the legacy predicate.
+
+### 14.9 Late Work / plan change after integration
+
+Do not refuse legitimate Work merely because a prior integration completed.
+
+When a Workline-owned operation adds/reactivates review-relevant Work after the latest covering integration:
+
+~~~
+unfinished integration exists
+-> add the required dependency/coverage to that integration
+
+no unfinished integration exists and reintegration is required
+-> START creates a new review-aware integration
+-> create complete predecessor coverage
+
+two or more unfinished integrations would exist
+-> existing structural STOP
+~~~
+
+For review-aware Phases, adding a new effective normal/fix Work after a completed covering integration deterministically requires reintegration.
+
+Until reintegration completes, the Phase is not current-complete under reviewed semantics and status discloses stale/missing integration coverage.
+
+An external/manual structure mutation is never auto-repaired; validation reports it.
+
+### 14.10 Verification-only execution
+
+Preferred execution:
+
+~~~
+freeze Phase Integration Candidate
+-> materialize/read frozen Candidate through read-only/disposable verification
+-> run integration checks
+-> persist only Review/evidence records
+~~~
+
+No domain artifact mutation is allowed under this lightweight gate.
+
+If the verifier cannot operate read-only, the P4 side-effect contract applies: isolated/disposable external state or positive before/after proof that no undeclared persistent mutation occurred.
+
+result_paths=() alone is not proof of read-only behavior.
+
+Undeclared Project/external/nested mutation prevents PASS.
+
+### 14.11 Review scope
+
+Phase Integration Review evaluates what individual Work reviews cannot prove alone:
+
+- cross-Work integration/coherence
+- Phase desired-state achievement
+- current authority/ownership consistency
+- lifecycle/relation consistency
+- exact integration coverage
+- unresolved Phase-wide dependency/verification gaps
+- missing responsibility not owned by any effective Work/integration/confirmation
+- evidence/verification sufficiency
+- whether genuine Human confirmation is part of the Phase success condition
+
+It does not rerun full Work Review merely because the Phase is ending.
+
+Valid P4 Evidence may be reused only under positive completeness/reuse proof.
+
+### 14.12 Phase desired-state outcome
+
+The integration adjudication records one outcome:
+
+~~~
+objectively_satisfied
+human_confirmation_required
+not_satisfied
+desired_state_change_required
+~~~
+
+objectively_satisfied means the decided Phase objective is positively satisfied and no Human-owned judgment is required.
+
+human_confirmation_required means the already-decided objective genuinely includes a Human-owned judgment.
+
+not_satisfied means the objective is decided and unmet; blocking Problem/repair handling applies.
+
+desired_state_change_required means passing would require changing the objective itself; route HUMAN.
+
+The outcome never creates lifecycle state by itself.
+
+### 14.13 Dynamic human_confirmation discovered at integration
+
+Existing Workline behavior allows integration-time evidence to reveal that structural human_confirmation is needed even when Phase design did not predict it.
+
+If the Review concludes human_confirmation_required and no valid downstream confirmation exists:
+
+~~~
+do not seal/consume an integration completion authorization yet
+-> START creates the normal human_confirmation Work/relation
+   through existing CREATE ownership
+-> freeze a new Phase Integration Candidate/Run containing that structure
+-> re-evaluate
+~~~
+
+Review never creates the Work directly.
+
+Once reviewed structure contains the required downstream confirmation, the integration may complete; Phase remains incomplete until that confirmation completes.
+
+### 14.14 Blocking Phase Integration Finding
+
+Problem HIGH/MID or not_satisfied prevents integration work_completed.
+
+Domain repair follows:
+
+~~~
+Integration Finding
+-> normal fix Work through START/CREATE
+-> fix Work executes under normal Work semantics
+-> Work Formal Review where required
+-> retry same unfinished integration when it remains the valid target
+-> new Phase Integration Candidate / Review Run
+~~~
+
+Do not create a second unfinished integration merely because the current one found a defect.
+
+If the old integration already completed and a later confirmation/fix requires reintegration, START follows the normal no-unfinished-integration rule and creates a new integration.
+
+Integration Review never patches domain artifacts itself.
+
+### 14.15 P4 semantics apply
+
+phase-integration-v1 uses P4 for:
+
+- durable H-3-safe discovery reports
+- adjudication
+- Problem/Improvement/HUMAN
+- coverage
+- Evidence completeness
+- A/B/C causality where repair cycles apply
+- strategy-change
+- verification-only side-effect contract
+
+However, Phase Integration domain fixes intentionally leave the lightweight Review repair executor and use normal fix Work ownership.
+
+Any domain repair produces a new Phase Integration Candidate/Run.
+
+### 14.16 Integration terminal gate
+
+START may record work_completed for a review-aware integration only when all hold:
+
+- ordinary Work completion precheck passes;
+- Phase Integration Candidate is current;
+- required Review tasks/adjudication complete;
+- no blocking Problem HIGH/MID;
+- Problem LOW/Improvement dispositions satisfy H-1/H-4;
+- Phase outcome is objectively_satisfied, or an already-modeled downstream human_confirmation is required;
+- Review coverage/evidence is current;
+- one valid Receipt authorizes this exact Candidate/integration terminal stage;
+- no invalidation/Supersession/Consumption conflict exists;
+- verification-only side-effect contract passes.
+
+The terminal mutation consumes that exact Receipt while recording the integration Work's ordinary work_completed transition.
+
+Receipt/Consumption never replaces work_completed lifecycle truth.
+
+### 14.17 Integration completion evidence
+
+The integration terminal path makes required P5 history/evidence durable before terminal success returns.
+
+The Run summary/adjudication must be sufficient to explain:
+
+- exact Candidate/basis checked
+- Phase-goal outcome
+- coverage
+- Finding dispositions
+- Receipt/Consumption
+- Evidence identity
+
+No raw transcript/CoT is stored.
+
+### 14.18 Achievement Evidence namespace
+
+Extend RB4 history with:
+
+~~~
+.workline/review/history/achievements/<achievement_evidence_id>.yaml
+~~~
+
+A versioned schema supports at least:
+
+~~~
+kind: phase_completion
+kind: roadmap_achievement
+~~~
+
+These records are evidence/audit facts. They are not lifecycle truth.
+
+### 14.19 Phase Achievement Evidence
+
+For a review-aware Phase, whichever canonical operation first makes the Phase generated-complete must make phase_completion evidence durable in the same recoverable logical transition before Roadmap progression may treat that completion as closed.
+
+It binds at least:
+
+- achievement_evidence_id
+- kind=phase_completion
+- Phase/Roadmap IDs
+- Phase desired-state digest
+- exact effective current-plan Work set / basis digest
+- covering integration Work ID
+- Phase Integration Run/Receipt/Consumption refs
+- Phase-goal outcome
+- completed downstream human_confirmation evidence where applicable
+- structural validation digest/result
+- relevant Work Review/history refs
+- no-blocking-obligation source digests
+- evaluator/reviewer identities/versions
+- H-3-safe rationale
+- operation/mutation identity that caused final generated completion
+
+state.py does not read this record to decide lifecycle state.
+
+### 14.20 Atomic Phase evidence obligation
+
+A review-aware Phase may become complete because of:
+
+- integration work_completed;
+- downstream human_confirmation work_completed;
+- canonical replan/terminal operation that changes effective structure into a complete reviewed basis.
+
+Whichever owner performs that transition includes/recoverably binds the evidence obligation in that operation.
+
+The evidence binds a projected canonical basis digest rather than the SHA of the commit containing itself, avoiding self-reference.
+
+Before final success/progression:
+
+~~~
+reload committed canonical state
+-> recompute Phase basis digest
+-> require equality with evidence
+~~~
+
+A crash may leave a recoverable pending operation, but no caller advances Roadmap from a P5-capable completion whose evidence obligation is unclosed.
+
+No post-loss evidence is fabricated from guess/memory.
+
+### 14.21 Automatic Phase objective decision
+
+H-2 applies.
+
+The Phase outcome may be decided automatically when:
+
+- desired state is clear;
+- required integration evidence exists;
+- required checks/coverage pass;
+- no blocking obligation remains;
+- no Human-owned judgment is part of the objective;
+- no new requirement meaning is invented.
+
+Then objectively_satisfied needs no extra Human confirmation.
+
+### 14.22 Roadmap achievement keeps existing lifecycle semantics
+
+Roadmap achievement remains:
+
+~~~
+all active Phases complete
+-> explicitly evaluate Roadmap desired state
+
+objectively satisfied -> roadmap_achieved
+Human-owned judgment required -> Human
+decided objective unmet -> add Phase/replan without weakening desired state
+desired state itself must change -> HUMAN
+~~~
+
+No second Roadmap completion state is added.
+
+roadmap_achieved remains lifecycle truth.
+
+### 14.23 Automatic Roadmap achievement under H-2
+
+The semantic evaluation may be autonomous when:
+
+- every active Phase is generated-complete;
+- every P5-capable completed Phase has valid achievement evidence;
+- structural validation passes;
+- Roadmap desired state is clear;
+- bound evidence positively supports it;
+- no blocking Review/achievement obligation remains;
+- no unresolved HUMAN decision remains;
+- no new desired-state meaning is invented.
+
+Human is required only where the objective genuinely contains Human-owned judgment or requirement change.
+
+### 14.24 Roadmap Achievement Evidence
+
+Before recording roadmap_achieved, reserve/write roadmap_achievement evidence in the same recoverable Roadmap achievement mutation.
+
+It binds at least:
+
+- achievement_evidence_id
+- kind=roadmap_achievement
+- Roadmap ID
+- Roadmap desired-state digest
+- exact active Phase set
+- Phase achievement refs where P5-capable
+- explicit legacy Phase completion facts where compatibility requires them
+- relevant Review/verification refs
+- structural validation digest/result
+- semantic judgment=achieved
+- evaluator identity/version
+- H-3-safe rationale
+- reserved roadmap_achieved event ID
+- mutation/operation identity
+
+Evidence and event are one logical decision.
+
+The existing event schema is unchanged; evidence references the reserved event ID.
+
+### 14.25 Roadmap achievement ordering
+
+For achieved:
+
+~~~
+freeze semantic evaluation/evidence basis
+-> Project execution lock
+-> recheck canonical structural preconditions
+-> reserve event + evidence IDs
+-> record one recoverable logical stage containing
+     achievement evidence
+     + roadmap_achieved event
+-> apply
+-> commit / exact publication under existing Git rules
+-> read back event/evidence/basis agreement
+-> return achieved
+~~~
+
+The lock still does not claim to atomically snapshot arbitrary external/domain evidence.
+
+Evidence identities are frozen; canonical structure is rechecked under lock.
+
+If a material evidence identity changed and the judgement is no longer supported, do not record achieved; re-evaluate.
+
+### 14.26 Non-achieved Roadmap evaluations
+
+Read-only results:
+
+- not_ready
+- not_achieved
+- human_confirmation_required
+- desired_state_change_required
+
+do not create an achievement event merely to persist diagnostics.
+
+If Human actually makes a required decision, RB4 Human Decision Evidence applies.
+
+If replan/additional Phase follows, that normal operation carries its own durable authority/evidence.
+
+### 14.27 Legacy compatibility
+
+No backfill.
+
+Legacy integrations lacking phase_review_contract keep legacy semantics.
+
+Already-completed legacy Phases remain valid.
+
+Already-pending legacy START/integration mutations resume under stored semantics.
+
+New RB5-capable integration cannot silently fall back to legacy completion.
+
+Roadmap achievement may include legacy-complete Phases in its evidence basis, explicitly marked legacy instead of inventing missing Phase Review history.
+
+Review-v1 is not mandated for every ordinary Work.
+
+### 14.28 RB1 status handoff
+
+RB5 adds read-only diagnostics.
+
+Phase:
+
+- completion mode: legacy | phase-integration-review-v1
+- generated complete/incomplete
+- covering integration ID or missing/stale
+- latest Phase Integration Review disposition
+- Phase Achievement Evidence ID/status
+- downstream human_confirmation status
+
+Roadmap:
+
+- all-active-Phases-complete
+- achievement evidence readiness
+- achieved event/evidence binding
+- HUMAN-required/objective-unmet status where applicable
+
+No diagnostic read mutates state.
+
+### 14.29 Tests
+
+At minimum cover:
+
+**Compatibility/state**
+- Phase completion remains generated and no Phase completion event is added
+- legacy integration/Phase behavior unchanged
+- completed legacy Phase remains valid
+- no backfill
+- new integration carries supported marker
+- unsupported marker fails
+- ordinary Works are not globally forced into review-v1
+
+**Coverage/reintegration**
+- initial reviewed integration covers all required predecessors
+- Work added before unfinished integration gains dependency/coverage
+- Work added after completed integration is allowed and creates/requires reintegration
+- old integration cannot cover expanded effective plan
+- uncovered normal Work prevents reviewed completion
+- downstream human_confirmation classified separately
+- two unfinished integrations remain invalid
+
+**Integration Review**
+- Candidate reconstructs exact Phase/effective Work/relation basis
+- verifier is read-only/disposable
+- undeclared mutation cannot PASS
+- cross-Work/missing-responsibility Finding blocks as required
+- not_satisfied does not complete integration
+- desired_state_change_required routes HUMAN
+- objectively_satisfied may authorize automatically
+- newly required human_confirmation causes START structure change + new Candidate/Review
+- domain fix uses normal fix Work and reruns integration
+- Receipt consumption and work_completed are bound
+- Review metadata is not lifecycle truth
+
+**Late/stale**
+- late Work is not refused merely to preserve old integration
+- canonical plan change creates/requires reintegration
+- stale/missing coverage is visible
+- old Review cannot authorize expanded plan by timestamp/ID
+
+**Achievement**
+- Phase evidence is durable for reviewed completion
+- basis digest round-trips against committed canonical state
+- crash/resume cannot advance Roadmap without closing evidence obligation
+- roadmap_achieved event/evidence are one recoverable decision
+- event schema unchanged
+- automatic achievement works under H-2
+- genuine Human judgement routes HUMAN
+- unmet objective replans instead of weakening desired state
+- legacy Phase appears as legacy evidence, never fake backfilled review
+
+### 14.30 HUMAN status
+
+No new Human design decision is required.
+
+BL-003 originally left Phase completion judgement unresolved; H-2 now supplies the policy boundary while this design preserves generated Phase state and existing operation ownership.
+
+RB5 does not refuse legitimate late Work, globally mandate ordinary Work review-v1, or backfill existing Phases.
+
+If implementation would require one of those stronger behaviors, trigger the corresponding conditional HUMAN decision before changing that boundary.
+
+RB5 is DESIGN_READY when this contract and its implementation brief/test matrix are prepared.
+
 
 ## 15. RB6 — BL-055 + P6 Project-local Adaptive Policy
 
