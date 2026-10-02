@@ -782,10 +782,113 @@ class TotalityTests(ActivationCase):
         self.store.events_jsonl.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
         self.assertEqual(self.totality(), [review_validate.ACTIVATION_PREFIX_MISMATCH], "and nothing after it is classified")
 
+    def test_the_committed_proof_reader_is_not_given_the_working_tree_pass_either(self) -> None:
+        """The committed-authority check belongs to the Project's activation pass, never to one commit's reader."""
+        self.assertNotIn("current_activation", inspect.getsource(review_validate.review_problems))
+        self.assertIn("current_activation", inspect.getsource(review_validate._committed_activation))
+
     def test_the_committed_proof_reader_is_not_given_the_working_tree_pass(self) -> None:
         """``review_problems`` is what C-2 proofs read at one commit; the activation pass stays the Project's."""
         self.assertNotIn("activation_problems", inspect.getsource(review_validate.review_problems))
         self.assertIn("activation_problems(store, review)", inspect.getsource(review_validate.validate_review))
+
+
+def project_tree(root: Path) -> dict[str, str]:
+    """Every directory and file under ``root``, ``.git`` and runtime included, file contents hashed."""
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<dir>"
+        for path in sorted(root.rglob("*"))
+    }
+
+
+class CommittedAuthorityValidationTests(ActivationCase):
+    """F1 §6: validation classifies only by the record current HEAD commits, exactly as the working tree holds it.
+
+    Every validation here is also held to leave the Project exactly as it was: HEAD is read through the
+    read-only class B context, which writes nothing into the Project and captures no identity.
+    """
+
+    def codes(self) -> list[str]:
+        before = project_tree(self.root)
+        found = [problem.code for problem in validate_project(self.store)]
+        self.assertEqual(project_tree(self.root), before, "validation wrote into the Project")
+        return found
+
+    def test_a_record_only_the_working_tree_holds_is_a_conflict_and_classifies_nothing(self) -> None:
+        count, digest = prefix_digest(self.committed_log())
+        self.put_record(REL, records.WorkTerminalActivation("review-v1", count, digest, self.head()).to_record())
+        self.assertEqual(self.codes(), ["review_record_conflict"])
+        self.append_events(completion())
+        self.assertEqual(self.totality(), [], "nothing is classified by an uncommitted record")
+        self.assertIn("review_record_conflict", self.codes())
+
+    def test_a_committed_record_deleted_from_the_working_tree_is_a_conflict(self) -> None:
+        self.activate()
+        (self.root / REL).unlink()
+        self.assertEqual(self.codes(), ["review_record_conflict"])
+
+    def test_a_committed_record_changed_in_the_working_tree_is_a_conflict(self) -> None:
+        result = self.activate()
+        changed = records.WorkTerminalActivation("review-v1", result.legacy_event_count,
+                                                 result.legacy_event_prefix_sha256, "b" * 40)
+        self.put_record(REL, changed.to_record())
+        self.assertEqual(self.codes(), ["review_record_conflict"])
+
+    def test_the_exact_committed_record_is_valid_and_classifies_as_before(self) -> None:
+        self.activate()
+        self.assertEqual(self.codes(), [])
+        self.append_events(completion())
+        self.assertEqual(self.totality(), [review_validate.COMPLETION_UNCONSUMED])
+        self.put_record(review_paths.consumption_rel(CONSUMPTION_ID), consumption_record())
+        self.assertEqual(self.totality(), [])
+
+    def test_where_the_read_only_context_cannot_be_prepared_only_a_working_record_is_refused(self) -> None:
+        """HEAD's record cannot be read then, so a working record is never taken for one; with none, nothing changes."""
+        from workline.review import hermetic
+
+        unavailable = StopError("no scratch for a read-only class B context here", code="review_no_config_file_invalid")
+        with mock.patch.object(hermetic, "read_only", side_effect=unavailable):
+            self.assertEqual(self.codes(), [], "a Project that claims no activation validates as it always did")
+        self.activate()
+        with mock.patch.object(hermetic, "read_only", side_effect=unavailable):
+            self.assertEqual(self.codes(), ["review_no_config_file_invalid"])
+
+    def test_validation_captures_no_identity_and_needs_none(self) -> None:
+        from workline.review import hermetic
+
+        self.activate()
+        git(self.root, "config", "--unset", "user.name")
+        git(self.root, "config", "--unset", "user.email")
+        with mock.patch.object(hermetic, "capture_identity", side_effect=AssertionError("validation captured an identity")):
+            self.assertEqual(self.codes(), [])
+            (self.root / REL).unlink()
+            self.assertEqual(self.codes(), ["review_record_conflict"], "HEAD's record is still read without one")
+
+
+class ReadOnlyValidationTests(ActivationCase):
+    """Validating a Project writes nothing into it - not a file, not a directory, not in ``.git`` or runtime."""
+
+    def unchanged_codes(self, store: ProjectStore) -> list[str]:
+        before = project_tree(store.root)
+        found = [problem.code for problem in validate_project(store)]
+        self.assertEqual(project_tree(store.root), before, "validation wrote into the Project")
+        return found
+
+    def test_a_legacy_project(self) -> None:
+        self.assertEqual(self.unchanged_codes(self.store), [])
+        self.assertFalse((self.root / review_paths.RUNTIME_REVIEW_DIR).exists())
+
+    def test_a_project_with_review_records(self) -> None:
+        self.activate()
+        self.put_record(review_paths.consumption_rel(CONSUMPTION_ID), consumption_record())
+        self.append_events(completion())
+        self.unchanged_codes(self.store)  # whatever it reports, it writes nothing
+
+    def test_another_activated_project_read_from_outside_it(self) -> None:
+        self.activate()
+        self.new_project("other")  # the test now works from inside another Project
+        self.assertNotEqual(Path.cwd().resolve(), self.root.resolve())
+        self.assertEqual(self.unchanged_codes(self.store), [])
 
 
 class LifecycleIndependenceTests(unittest.TestCase):

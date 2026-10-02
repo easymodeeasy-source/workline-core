@@ -487,6 +487,9 @@ def activation_problems(store: ProjectStore, review: ReviewStore) -> list[Review
     ```text
     no activation record      valid and not activated; no completion is classified
                               by its position, and a review-v1 marker contradicts it
+    a record HEAD does not    review_record_conflict: an uncommitted, deleted or
+    hold as the working tree  changed record is never activation, and nothing is
+    holds it                  classified by it
     activation whose prefix   Events 0 .. N-1 are pre-activation legacy and need nothing;
     reproduces                a work_completed at index >= N is
                                 without the marker        legacy - no Consumption
@@ -497,8 +500,10 @@ def activation_problems(store: ProjectStore, review: ReviewStore) -> list[Review
     does not reproduce
     ```
 
-    The prefix is read through the one digest implementation
-    (:mod:`workline.review.activation`) over the event log this validation
+    The activation is the record current HEAD commits, held unchanged by the
+    working tree - the one check START's entry makes too
+    (:func:`workline.review.activation.current_activation`). The prefix is read
+    through the one digest implementation over the event log this validation
     reads, so the indexes it classifies are the indexes the digest fixed.
 
     A one-sided review-v1 state - the event without its Consumption, or the
@@ -508,13 +513,15 @@ def activation_problems(store: ProjectStore, review: ReviewStore) -> list[Review
     never because of what the files themselves hold. A malformed record is the
     structural pass's to report, and classifies nothing either way.
     """
-    try:
-        activation = review.read_activation()
-    except ValidationError:
-        return []
+    found = _committed_activation(store, review)
+    if isinstance(found, list):
+        return found
     events = _event_log(store)
-    if activation is None:
+    if found.state == work_activation.NOT_ACTIVATED:
         return [] if events is None else _unactivated_markers(events)
+    activation = found.record
+    if activation is None:
+        return [ReviewProblem("review_record_conflict", f"{found.conflict()}; no completion is classified by it")]
     count = activation.legacy_event_count
     if events is None or work_activation.prefix_digest(events, count) != activation.legacy_event_prefix_sha256:
         return [
@@ -587,6 +594,49 @@ def activation_problems(store: ProjectStore, review: ReviewStore) -> list[Review
             "START holds them together",
         ))
     return problems
+
+
+def _committed_activation(
+    store: ProjectStore, review: ReviewStore
+) -> work_activation.Currentness | list[ReviewProblem]:
+    """This Project's activation as its current HEAD commits it; or the problems that keep it from being shown.
+
+    HEAD is read through a read-only class B context, which captures no
+    identity and writes nothing into the Project: validating a Project leaves
+    it exactly as it was. A working record the Review store cannot read, or a
+    current record that is malformed or of an unknown contract, is the
+    structural pass's to report and classifies nothing. Whatever keeps HEAD's
+    record from being read is a problem of its own, never an absence.
+    """
+    from . import hermetic
+
+    try:
+        with hermetic.read_only(store.root) as git:
+            return work_activation.current_activation(review, git, work_activation.head_commit(git))
+    except work_activation.CommittedRecordUnreadable as exc:
+        return [ReviewProblem(exc.code, f"{exc}; no completion is classified by it")]
+    except ValidationError:
+        return []
+    except StopError as exc:
+        return _unprovable(review, exc)
+
+
+def _unprovable(review: ReviewStore, exc: StopError) -> work_activation.Currentness | list[ReviewProblem]:
+    """Where HEAD's record cannot be read at all, no working record is ever taken for one.
+
+    That is the case only when the read-only class B context itself cannot be
+    prepared, or its scratch outside the Project fails its proof before a read.
+    A working record is then a problem. With none, nothing claims an
+    activation, and the Project reads as it always did.
+    """
+    try:
+        claimed = review.read_bytes(paths.WORK_TERMINAL_ACTIVATION_REL) is not None
+    except ValidationError:
+        return []
+    if not claimed:
+        return work_activation.Currentness(None, work_activation.NOT_ACTIVATED)
+    return [ReviewProblem(exc.code, f"the activation record cannot be shown to be the one HEAD commits ({exc}); "
+                                    "no completion is classified by it")]
 
 
 def _event_log(store: ProjectStore) -> list[dict[str, Any]] | None:

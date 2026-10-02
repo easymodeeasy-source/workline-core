@@ -22,7 +22,9 @@ the review-v1 Work path stays unavailable, and the tests below pin that.
 
 from __future__ import annotations
 
+import hashlib
 import os
+from pathlib import Path
 import subprocess
 import unittest
 from unittest import mock
@@ -783,6 +785,195 @@ class PromisorEntryTests(RecordingCase):
             },
         ):
             self.assertEqual(hermetic.enter(self.store).promisor_remotes, ())
+
+
+# --------------------------------------------------------------------------- the read-only class B context
+
+
+def project_tree(root: Path) -> dict[str, str]:
+    """Every directory and file under ``root``, ``.git`` and runtime included, file contents hashed."""
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else "<dir>"
+        for path in sorted(root.rglob("*"))
+    }
+
+
+class ReadOnlyClassBTests(EnvironmentCase):
+    """Committed-object reads under the class B envelope: no identity, and nothing written into the Project."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.root = self.store.root
+        (self.root / "kept.txt").write_bytes(b"committed bytes\n")
+        git(self.root, "add", "kept.txt")
+        git(self.root, "commit", "-q", "-m", "a committed file", "--no-verify")
+        self.head = git(self.root, "rev-parse", "HEAD").strip()
+        self.calls: list[tuple[tuple[str, ...], dict]] = []
+        real = gitcmd.run_git_bytes
+
+        def recording(repo, *args, **kwargs):
+            self.calls.append((args, kwargs))
+            return real(repo, *args, **kwargs)
+
+        patcher = mock.patch.object(gitcmd, "run_git_bytes", recording)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def settings_of(self, args: tuple[str, ...]) -> dict[str, str]:
+        return dict(argument.split("=", 1) for position, argument in enumerate(args)
+                    if position > 0 and args[position - 1] == "-c")
+
+    def outside_the_project(self, path: str) -> bool:
+        resolved, root = Path(path).resolve(), self.root.resolve()
+        return resolved != root and root not in resolved.parents
+
+    def read_all(self, reader: hermetic.ReadOnlyGit) -> None:
+        self.assertEqual(reader.run_bytes("rev-parse", "--verify", "HEAD^{commit}").stdout.decode().strip(), self.head)
+        self.assertTrue(reader.run_bytes("ls-tree", "-z", "--full-tree", self.head, "--", "kept.txt").stdout)
+        self.assertEqual(reader.run_bytes("cat-file", "blob", f"{self.head}:kept.txt").stdout, b"committed bytes\n")
+
+    def test_every_read_carries_the_whole_class_b_envelope_from_scratch_outside_the_project(self) -> None:
+        with hermetic.read_only(self.root) as reader:
+            self.read_all(reader)
+            self.assertEqual(len(self.calls), 3)
+            for args, kwargs in self.calls:
+                environment, settings = kwargs["env"], self.settings_of(args)
+                with self.subTest(command=args[len(settings) * 2]):
+                    self.assertEqual(sorted(k for k in environment if k.upper().startswith("GIT_")),
+                                     sorted(hermetic.CLASS_B_ALLOWLIST))
+                    for name, value in hermetic.CLASS_B_FIXED_VALUES.items():
+                        self.assertEqual(environment[name], value)
+                    for key, value in hermetic.CLASS_B_CONFIGURATION:
+                        self.assertEqual(settings[key], value)
+                    config, hooks = environment["GIT_CONFIG_GLOBAL"], settings["core.hooksPath"]
+                    self.assertTrue(self.outside_the_project(config) and self.outside_the_project(hooks))
+                    self.assertTrue(Path(config).is_file() and Path(config).stat().st_size == 0)
+                    self.assertTrue(Path(hooks).is_dir() and not any(Path(hooks).iterdir()))
+                    for name in hermetic.CLASS_B_IDENTITY_VARIABLES:
+                        self.assertNotIn(name, environment)
+                    self.assertNotIn("GIT_INDEX_FILE", environment)
+            scratch = Path(self.calls[0][1]["env"]["GIT_CONFIG_GLOBAL"]).parent
+        self.assertFalse(scratch.exists(), "the context's scratch is removed when it exits")
+
+    def test_it_runs_the_same_class_b_configuration_as_the_write_capable_entry(self) -> None:
+        """One definition of the envelope: the two differ only in where the two empty objects live."""
+        with hermetic.read_only(self.root) as reader:
+            read = self.settings_of(reader.configuration_arguments())
+        written = self.settings_of(hermetic.enter(self.store).configuration_arguments())
+        self.assertEqual({k: v for k, v in read.items() if k != "core.hooksPath"},
+                         {k: v for k, v in written.items() if k != "core.hooksPath"})
+        self.assertEqual(list(read), list(written))
+
+    def test_a_hostile_inherited_environment_does_not_reach_a_read(self) -> None:
+        empty_objects = self.new_dir("empty-objects")
+        hostile = {**HOSTILE, "GIT_OBJECT_DIRECTORY": str(empty_objects), "GIT_INDEX_FILE": str(self.tmp / "hostile-index"),
+                   "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.hooksPath", "GIT_CONFIG_VALUE_0": str(self.tmp)}
+        with mock.patch.dict(os.environ, hostile), hermetic.read_only(self.root) as reader:
+            self.read_all(reader)
+            environment = reader.environment()
+        for name in hostile:
+            with self.subTest(name=name):
+                self.assertNotIn(name, environment)
+        self.assertFalse((self.tmp / "hostile-index").exists())
+
+    def test_a_replacement_object_does_not_govern_a_read(self) -> None:
+        found = subprocess.run(["git", "-C", str(self.root), "hash-object", "-w", "--stdin"], input=b"replaced\n",
+                               capture_output=True, check=True)
+        fake = found.stdout.decode().strip()
+        original = git(self.root, "rev-parse", f"{self.head}:kept.txt").strip()
+        git(self.root, "replace", original, fake)
+        self.assertEqual(git(self.root, "cat-file", "blob", original), "replaced\n", "ambient Git follows the replacement")
+        with hermetic.read_only(self.root) as reader:
+            self.assertEqual(reader.run_bytes("cat-file", "blob", original).stdout, b"committed bytes\n")
+
+    def test_no_identity_is_captured_and_none_is_needed(self) -> None:
+        git(self.root, "config", "--unset", "user.name")
+        git(self.root, "config", "--unset", "user.email")
+        home = self.new_dir("home-unset")
+        with mock.patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+            with self.assertRaises(StopError) as refused:
+                hermetic.enter(self.store)
+            self.assertEqual(refused.exception.code, "review_identity_unavailable", "the write-capable entry still needs one")
+            with mock.patch.object(hermetic, "capture_identity", side_effect=AssertionError("an identity was captured")):
+                with hermetic.read_only(self.root) as reader:
+                    self.read_all(reader)
+
+    def test_the_project_is_unchanged_by_a_read(self) -> None:
+        before = project_tree(self.root)
+        with hermetic.read_only(self.root) as reader:
+            self.read_all(reader)
+        self.assertEqual(project_tree(self.root), before)
+
+    def test_the_project_is_unchanged_by_a_failing_read_and_by_a_failing_body(self) -> None:
+        before = project_tree(self.root)
+        with hermetic.read_only(self.root) as reader:
+            self.assertFalse(reader.run_bytes("cat-file", "blob", "0" * 40).ok)
+            self.assertFalse(reader.run_bytes("ls-tree", "-z", "--full-tree", "0" * 40).ok)
+        with self.assertRaises(RuntimeError), hermetic.read_only(self.root) as reader:
+            scratch = Path(reader.environment()["GIT_CONFIG_GLOBAL"]).parent
+            raise RuntimeError("the body failed")
+        self.assertFalse(scratch.exists())
+        self.assertEqual(project_tree(self.root), before)
+
+    def test_it_can_run_nothing_but_committed_object_reads(self) -> None:
+        for name in ("identity", "commit_environment", "execute", "attribute_configuration_arguments"):
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(hermetic.ReadOnlyGit, name))
+        before = project_tree(self.root)
+        with hermetic.read_only(self.root) as reader:
+            for command in (("commit-tree", "-m", "x", "HEAD^{tree}"), ("hash-object", "-w", "kept.txt"),
+                            ("update-ref", "refs/heads/x", "HEAD"), ("fetch", "origin"), ("push", "origin", "HEAD"),
+                            ("status",), ()):
+                with self.subTest(command=command), self.assertRaises(ValueError):
+                    reader.run_bytes(*command)
+        self.assertEqual(self.calls, [], "a refused command never reaches Git")
+        self.assertEqual(project_tree(self.root), before)
+
+    def test_each_scratch_object_is_reproven_immediately_before_use(self) -> None:
+        with hermetic.read_only(self.root) as reader:
+            hooks = Path(reader.configuration_arguments()[1].split("=", 1)[1])
+            (hooks / "post-checkout").write_text("exit 0\n", encoding="utf-8")
+            with self.assertRaises(StopError) as dropped:
+                reader.run_bytes("rev-parse", "HEAD")
+            self.assertEqual(dropped.exception.code, "review_hooks_path_invalid")
+            (hooks / "post-checkout").unlink()
+            config = Path(reader.environment()["GIT_CONFIG_GLOBAL"])
+            config.write_text("[core]\n\thooksPath = elsewhere\n", encoding="utf-8")
+            with self.assertRaises(StopError) as filled:
+                reader.run_bytes("rev-parse", "HEAD")
+            self.assertEqual(filled.exception.code, "review_no_config_file_invalid")
+
+    def test_a_temporary_area_inside_the_project_is_refused_and_the_project_is_left_as_it_was(self) -> None:
+        before = project_tree(self.root)
+        inside = self.root / "scratch-inside"
+
+        def mkdtemp(prefix: str = "") -> str:
+            inside.mkdir()
+            return str(inside)
+
+        with mock.patch.object(hermetic.tempfile, "mkdtemp", side_effect=mkdtemp):
+            with self.assertRaises(StopError) as refused, hermetic.read_only(self.root):
+                self.fail("no context is given")
+        self.assertEqual(refused.exception.code, "review_no_config_file_invalid")
+        self.assertEqual(project_tree(self.root), before)
+
+    def test_the_write_capable_entry_keeps_its_project_paths_and_its_identity(self) -> None:
+        captured: list[Path] = []
+        real = hermetic.capture_identity
+
+        def capture(root):
+            captured.append(root)
+            return real(root)
+
+        with mock.patch.object(hermetic, "capture_identity", side_effect=capture):
+            built = hermetic.enter(self.store)
+        self.assertEqual(captured, [self.store.root])
+        self.assertEqual((built.identity.name, built.identity.email), ("Real Person", "real@proj"))
+        self.assertEqual(built.environment()["GIT_CONFIG_GLOBAL"],
+                         os.path.abspath(self.root / review_paths.RUNTIME_NO_CONFIG_FILE))
+        self.assertEqual(self.settings_of(built.configuration_arguments())["core.hooksPath"],
+                         os.path.abspath(self.root / review_paths.RUNTIME_NO_HOOKS_DIR))
+        self.assertEqual(built.commit_environment(DATE)["GIT_AUTHOR_NAME"], "Real Person")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ import subprocess
 import sys
 import unittest
 
-from helpers import WorklineTestCase
+from helpers import WorklineTestCase, git
 from workline.review import ReviewStore, paths, records, serialize
 from workline.validate import validate_project
 
@@ -81,6 +81,13 @@ class NamespaceEnumerationTests(WorklineTestCase):
 
     def _put(self, relative: str, record: dict) -> Path:
         return self._put_bytes(relative, serialize.canonical_bytes(record))
+
+    def _commit(self, relative: str) -> None:
+        """Commit ``relative`` with a configured identity: an activation is the record current HEAD commits."""
+        git(self.store.root, "config", "user.name", "Real Person")
+        git(self.store.root, "config", "user.email", "real@proj")
+        git(self.store.root, "add", "--", relative)
+        git(self.store.root, "commit", "-q", "-m", f"commit {relative}", "--no-verify")
 
     def _codes(self) -> list[str]:
         return [problem.code for problem in validate_project(self.store)]
@@ -168,14 +175,26 @@ class NamespaceEnumerationTests(WorklineTestCase):
         self.assertEqual(self.store.events_jsonl.read_bytes().strip(), b"", "a new Project has no Event yet")
         self._put(paths.WORK_TERMINAL_ACTIVATION_REL,
                   activation_record(legacy_event_prefix_sha256=hashlib.sha256(b"").hexdigest()))
+        self._commit(paths.WORK_TERMINAL_ACTIVATION_REL)
         self.assertEqual([], self._codes(), "a well-formed activation record that proves is valid")
         self.assertIsNotNone(self.review.read_activation())
 
     def test_a_structurally_valid_record_whose_prefix_does_not_reproduce_fails_closed(self) -> None:
         """P1 activated nothing from a well-formed record; Gate 3 classifies by it, so one that does not prove fails."""
         self._put(paths.WORK_TERMINAL_ACTIVATION_REL, activation_record())
+        self._commit(paths.WORK_TERMINAL_ACTIVATION_REL)
         self.assertEqual(["review_activation_prefix_mismatch"], self._codes())
         self.assertIsNotNone(self.review.read_activation(), "the record itself still reads; it is its prefix that fails")
+
+    def test_a_record_head_does_not_commit_is_never_an_activation(self) -> None:
+        """F1 §6: valid, proving bytes only in the working tree are a conflict, never an activated Project."""
+        import hashlib
+
+        self._put(paths.WORK_TERMINAL_ACTIVATION_REL,
+                  activation_record(legacy_event_prefix_sha256=hashlib.sha256(b"").hexdigest()))
+        git(self.store.root, "config", "user.name", "Real Person")
+        git(self.store.root, "config", "user.email", "real@proj")
+        self.assertEqual(["review_record_conflict"], self._codes())
 
     def test_malformed_activation_record_fails(self) -> None:
         self._put(paths.WORK_TERMINAL_ACTIVATION_REL,

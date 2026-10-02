@@ -343,6 +343,66 @@ class RemoteEntryTests(ReviewCase):
         self.assertEqual(self.pending(), [])
 
 
+class CommittedActivationEntryTests(ReviewCase):
+    """F1 §6: only the record current HEAD commits, held unchanged by the working tree, admits a review-v1 START.
+
+    Each refusal is made under the lock and before the mutation opens: no
+    executor, no mutation record, no Review record, no commit and no push.
+    """
+
+    remote = True
+
+    def refused_before_the_mutation(self) -> ReconcileRequired:
+        from workline import gitcmd
+
+        self.assertEqual(self.pending(), [], "no activation (or any) mutation is pending")
+        head, remote = self.head(), git(self.remote_path(), "rev-parse", "--verify", "-q", "main", check=False)
+        called: list[str] = []
+        pushed: list[tuple] = []
+        with mock.patch.object(gitcmd, "push", side_effect=lambda *args, **kwargs: pushed.append(args)):
+            with self.assertRaises(ReconcileRequired) as raised:
+                st.start(self.store, self.work_id, "single-work", lambda ctx: called.append("run") or st.Completed(),
+                         review=self.review())
+        self.assertIsNone(raised.exception.reason)
+        self.assertEqual((called, pushed, self.pending(), sorted(self.store.mutations.glob("*.yaml"))), ([], [], [], []))
+        self.assertEqual((self.head(), git(self.remote_path(), "rev-parse", "--verify", "-q", "main", check=False)),
+                         (head, remote))
+        review = ReviewStore(self.store)
+        self.assertEqual((review.run_ids(), review.candidate_snapshot_hashes(), review.task_input_ids(),
+                          review.receipt_ids()), ((), (), (), ()))
+        return raised.exception
+
+    def test_a_record_only_the_working_tree_holds_admits_nothing(self) -> None:
+        """The reachable orphan: the exact bytes the activation would commit, which HEAD does not commit."""
+        rel = review_paths.WORK_TERMINAL_ACTIVATION_REL
+        data = (self.root / rel).read_bytes()
+        git(self.root, "rm", "-q", "--cached", "--", rel)
+        git(self.root, "commit", "-q", "-m", "the activation is no longer committed", "--no-verify")
+        self.assertEqual(git(self.root, "ls-tree", "HEAD", "--", rel), "")
+        self.assertEqual(prefix_digest(git_bytes(self.root, "show", "HEAD:.workline/events/events.jsonl")),
+                         (self.activation.legacy_event_count, self.activation.legacy_event_prefix_sha256),
+                         "the working bytes would pass the prefix check")
+        refused = self.refused_before_the_mutation()
+        self.assertIn("does not commit", str(refused))
+        self.assertEqual((self.root / rel).read_bytes(), data, "never adopted, never removed")
+
+    def test_a_committed_record_missing_from_the_working_tree_admits_nothing(self) -> None:
+        rel = review_paths.WORK_TERMINAL_ACTIVATION_REL
+        (self.root / rel).unlink()
+        self.assertNotEqual(git(self.root, "ls-tree", "HEAD", "--", rel), "")
+        refused = self.refused_before_the_mutation()
+        self.assertIn("does not hold", str(refused))
+        self.assertFalse((self.root / rel).exists())
+
+    def test_a_working_record_other_than_the_committed_one_admits_nothing(self) -> None:
+        rel = review_paths.WORK_TERMINAL_ACTIVATION_REL
+        other = records.WorkTerminalActivation("review-v1", self.activation.legacy_event_count,
+                                               self.activation.legacy_event_prefix_sha256, "b" * 40)
+        (self.root / rel).write_bytes(serialize.canonical_bytes(other.to_record()))
+        refused = self.refused_before_the_mutation()
+        self.assertIn("is not the record", str(refused))
+
+
 # --------------------------------------------------------------------------- 5b-6: the ownership order
 
 

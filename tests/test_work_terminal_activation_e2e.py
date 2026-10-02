@@ -28,6 +28,7 @@ from helpers import completing_executor, scripted_executor
 from test_work_review_runtime import git, git_bytes
 from test_work_terminal import TerminalCase
 
+from workline import gitops
 from workline import start as st
 from workline import start_review
 from workline import work_terminal_activation as wta
@@ -316,6 +317,37 @@ class StartEntryTests(Gate3Case):
         self.legacy(self.works["w1"])
         self.assertNotIn("operation_contract", self.completions()[self.works["w1"]])
         self.produce()
+
+
+class OrphanActivationTests(Gate3Case):
+    """F1 §6: activation is committed authority, so an activation lost before its commit activates nothing."""
+
+    def test_an_activation_whose_commit_and_runtime_were_lost_admits_no_review_v1_start(self) -> None:
+        head, remote = self.head(), self.remote_ref()
+        # the producer applies its create and dies before its commit; then its runtime record is lost too
+        with mock.patch.object(gitops, "finalize", side_effect=Crash):
+            with self.assertRaises(Crash):
+                wta.activate_work_terminal_review(self.root, confirmed=True)
+        (record,) = self.pending()
+        (self.store.mutations / f"{record['mutation_id']}.yaml").unlink()
+        self.assertEqual(self.pending(), [])
+        self.assertTrue((self.root / REL).is_file(), "the orphan: valid record bytes the working tree alone holds")
+        self.assertEqual((git(self.root, "ls-tree", "HEAD", "--", REL), self.head()), ("", head))
+        # validation refuses it rather than classifying by it
+        self.assertIn("review_record_conflict", [problem.code for problem in validate_project(self.store)])
+        # a review-v1 START is refused under the lock, before its mutation: nothing begun, written or sent
+        called: list[str] = []
+        with self.assertRaises(ReconcileRequired):
+            st.start(self.store, self.works["w1"], "single-work", lambda ctx: called.append("run") or st.Completed(),
+                     review=self.review())
+        self.assertEqual((called, self.pending(), self.head(), self.remote_ref()), ([], [], head, remote))
+        review = ReviewStore(self.store)
+        self.assertEqual((review.run_ids(), review.candidate_snapshot_hashes(), review.task_input_ids()), ((), (), ()))
+        # and the producer still never adopts it
+        with self.assertRaises(ReconcileRequired) as raised:
+            wta.activate_work_terminal_review(self.root, confirmed=True)
+        self.assertIn("never adopted", str(raised.exception))
+        self.assertEqual((self.head(), self.remote_ref()), (head, remote))
 
 
 # --------------------------------------------------------------------------- the totality allowance (F1 §10.2)

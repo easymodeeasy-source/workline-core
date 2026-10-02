@@ -751,16 +751,20 @@ class StaticInvariantTests(unittest.TestCase):
                 self.assertNotIn("gitcmd.push(", path.read_text(encoding="utf-8"), path.name)
 
     def test_only_the_activation_producer_and_its_guard_name_the_activation_path(self) -> None:
-        """Gate 3: P1's reader and validator, the Mutation Controller's owner guard, and the one producer."""
+        """Gate 3: P1's reader and validator, the Mutation Controller's owner guard, the one producer, and the one
+        check that the record is the one current HEAD commits (``review/activation.py``)."""
         named = set()
         for path in sorted(SRC.rglob("*.py")):
             text = path.read_text(encoding="utf-8")
             if "WORK_TERMINAL_ACTIVATION_REL" in text:
                 named.add(path.name)
-                self.assertIn(path.name, ("paths.py", "store.py", "validate.py", "mutation.py", "work_terminal_activation.py"),
+                self.assertIn(path.name, ("paths.py", "store.py", "validate.py", "mutation.py", "work_terminal_activation.py",
+                                          "activation.py"),
                               f"{path.name} names the activation path")
         self.assertIn("mutation.py", named)
         self.assertIn("work_terminal_activation.py", named)
+        self.assertIn("activation.py", named)
+        self.assertEqual(1, sum(1 for path in SRC.rglob("activation.py")), "one module of that name: review/activation.py")
 
     def test_the_object_answer_cache_is_in_process_only(self) -> None:
         text = (SRC / "gitcmd.py").read_text(encoding="utf-8")

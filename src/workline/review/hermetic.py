@@ -29,9 +29,16 @@ poisonable — ``git var GIT_AUTHOR_IDENT`` returns the hostile inherited identi
 Strip-then-neutralize-then-capture makes the capture *impossible*, because a
 Project whose identity lives only in global config reads back empty once
 ``GIT_CONFIG_GLOBAL`` points at an empty file (M-64). Only one order is both
-safe and possible, and :func:`enter` is the only way to reach class B: a
-:class:`HermeticGit` cannot be constructed without an identity that was captured
-before the neutralization it is handed to.
+safe and possible, and :func:`enter` is the only way to reach the class B that
+commits: a :class:`HermeticGit` cannot be constructed without an identity that
+was captured before the neutralization it is handed to.
+
+**Read-only class B.** Reading committed objects needs the class B envelope and
+nothing more: no identity, because nothing is committed, and no Project-owned
+scratch. :func:`read_only` gives a :class:`ReadOnlyGit` whose envelope is built
+by the same functions, whose empty configuration file and hooks directory live
+outside the Project, and which runs only committed-object reads. A reader of a
+Project - its validation, above all - therefore writes nothing into it.
 
 This module builds environments. It dispatches nothing: no persistence identity
 names it yet, and the review-v1 Work path stays unavailable until the unit that
@@ -40,11 +47,15 @@ owns that dispatch lands.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
+import tempfile
+from typing import Iterator
 
 from .. import gitcmd
 from ..errors import StopError
@@ -195,24 +206,9 @@ def no_hooks_directory(store: ProjectStore) -> str:
     times for one call with the default hooks directory and not at all with this
     one, and ``update-index`` ran ``post-index-change`` the same way.
     """
-    path = store.root / review_paths.RUNTIME_NO_HOOKS_DIR
-    try:
-        if not os.path.lexists(path):
-            path.mkdir(parents=True)
-        info = os.lstat(path)
-        reparse = getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
-        if not stat.S_ISDIR(info.st_mode) or reparse or any(path.iterdir()):
-            raise StopError(
-                f"{review_paths.RUNTIME_NO_HOOKS_DIR} is not an empty plain directory, so the commit could run "
-                "a hook from it; nothing is committed: STOP",
-                code="review_hooks_path_invalid",
-            )
-    except OSError as exc:
-        raise StopError(
-            f"{review_paths.RUNTIME_NO_HOOKS_DIR} cannot be prepared as the empty hooks directory ({exc}): STOP",
-            code="review_hooks_path_invalid",
-        ) from exc
-    return os.path.abspath(path)
+    return _empty_hooks_directory(
+        store.root / review_paths.RUNTIME_NO_HOOKS_DIR, review_paths.RUNTIME_NO_HOOKS_DIR, _COMMIT_HOOK_CONSEQUENCE
+    )
 
 
 def no_config_file(store: ProjectStore) -> str:
@@ -223,7 +219,49 @@ def no_config_file(store: ProjectStore) -> str:
     invocation's global configuration, which is the one thing the variable
     exists to prevent.
     """
-    path = store.root / review_paths.RUNTIME_NO_CONFIG_FILE
+    return _empty_config_file(
+        store.root / review_paths.RUNTIME_NO_CONFIG_FILE, review_paths.RUNTIME_NO_CONFIG_FILE, _COMMIT_OUTCOME
+    )
+
+
+#: How a refusal of a class B scratch object says what it prevented, for a write-capable and a read-only context.
+_COMMIT_HOOK_CONSEQUENCE = "the commit could run a hook from it; nothing is committed"
+_COMMIT_OUTCOME = "nothing is committed"
+_READ_HOOK_CONSEQUENCE = "a read could run a hook from it; nothing is read"
+_READ_OUTCOME = "nothing is read"
+
+
+def _empty_hooks_directory(path: Path, named: str, consequence: str) -> str:
+    """``path`` as an empty plain directory: created when absent, and proven immediately before every use.
+
+    The one proof of a class B hooks directory wherever it lives - a Project's
+    own (:func:`no_hooks_directory`) or a read-only context's scratch outside
+    the Project (:func:`read_only`). ``named`` is how a refusal names it.
+    """
+    try:
+        if not os.path.lexists(path):
+            path.mkdir(parents=True)
+        info = os.lstat(path)
+        reparse = getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        if not stat.S_ISDIR(info.st_mode) or reparse or any(path.iterdir()):
+            raise StopError(
+                f"{named} is not an empty plain directory, so {consequence}: STOP",
+                code="review_hooks_path_invalid",
+            )
+    except OSError as exc:
+        raise StopError(
+            f"{named} cannot be prepared as the empty hooks directory ({exc}): STOP",
+            code="review_hooks_path_invalid",
+        ) from exc
+    return os.path.abspath(path)
+
+
+def _empty_config_file(path: Path, named: str, outcome: str) -> str:
+    """``path`` as an empty plain file: created empty when absent, and proven immediately before use.
+
+    The one proof of a class B ``GIT_CONFIG_GLOBAL`` file wherever it lives, as
+    :func:`_empty_hooks_directory` is of the hooks directory.
+    """
     try:
         if not os.path.lexists(path):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -232,14 +270,13 @@ def no_config_file(store: ProjectStore) -> str:
         reparse = getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
         if not stat.S_ISREG(info.st_mode) or reparse or info.st_size != 0:
             raise StopError(
-                f"{review_paths.RUNTIME_NO_CONFIG_FILE} is not an empty plain file, so it would be read as this "
-                "invocation's global configuration; nothing is committed: STOP",
+                f"{named} is not an empty plain file, so it would be read as this invocation's global "
+                f"configuration; {outcome}: STOP",
                 code="review_no_config_file_invalid",
             )
     except OSError as exc:
         raise StopError(
-            f"{review_paths.RUNTIME_NO_CONFIG_FILE} cannot be prepared as the empty configuration file "
-            f"({exc}): STOP",
+            f"{named} cannot be prepared as the empty configuration file ({exc}): STOP",
             code="review_no_config_file_invalid",
         ) from exc
     return os.path.abspath(path)
@@ -251,6 +288,34 @@ def _class_b_base(no_config: str) -> dict[str, str]:
     environment.update(CLASS_B_FIXED_VALUES)
     environment["GIT_CONFIG_GLOBAL"] = no_config
     return environment
+
+
+def _configuration_arguments(hooks: str) -> tuple[str, ...]:
+    """The ``-c`` arguments of every class B invocation: ``core.hooksPath`` = ``hooks``, then the frozen controls."""
+    settings = [("core.hooksPath", hooks), *CLASS_B_CONFIGURATION]
+    arguments: list[str] = []
+    for key, value in settings:
+        arguments += ["-c", f"{key}={value}"]
+    return tuple(arguments)
+
+
+def _run(
+    root: Path, configuration: tuple[str, ...], args: tuple[str, ...], environment: dict[str, str], *, check: bool
+) -> gitcmd.GitResult:
+    """One class B command, decoded: the configuration arguments, then ``args``, in ``environment``."""
+    return gitcmd.run_git(root, *configuration, *args, check=check, env=environment)
+
+
+def _run_bytes(
+    root: Path,
+    configuration: tuple[str, ...],
+    args: tuple[str, ...],
+    environment: dict[str, str],
+    *,
+    input: bytes | None = None,
+) -> gitcmd.GitBytes:
+    """One class B command, kept as bytes: the configuration arguments, then ``args``, in ``environment``."""
+    return gitcmd.run_git_bytes(root, *configuration, *args, input=input, env=environment)
 
 
 @dataclass(frozen=True)
@@ -323,11 +388,7 @@ class HermeticGit:
         because it is proven empty *immediately before use* and a hook can be
         dropped there at any later moment.
         """
-        settings = [("core.hooksPath", no_hooks_directory(self._store)), *CLASS_B_CONFIGURATION]
-        arguments: list[str] = []
-        for key, value in settings:
-            arguments += ["-c", f"{key}={value}"]
-        return tuple(arguments)
+        return _configuration_arguments(no_hooks_directory(self._store))
 
     def attribute_configuration_arguments(self, source: str) -> tuple[str, ...]:
         """:meth:`configuration_arguments` plus the attribute-source pin (``F3`` §7.1.9 class (b)).
@@ -382,7 +443,7 @@ class HermeticGit:
             if date is None
             else self.commit_environment(date, index_file=index_file)
         )
-        return gitcmd.run_git(self.root, *self.configuration_arguments(), *args, check=check, env=environment)
+        return _run(self.root, self.configuration_arguments(), args, environment, check=check)
 
     def run_bytes(self, *args: str, input: bytes | None = None) -> gitcmd.GitBytes:
         """Run one class B Git command and keep its output as BYTES, undecoded and untranslated.
@@ -404,9 +465,7 @@ class HermeticGit:
         fed to standard input exactly as given - what ``hash-object --stdin``
         needs to name the identity of bytes without writing them anywhere.
         """
-        return gitcmd.run_git_bytes(
-            self.root, *self.configuration_arguments(), *args, input=input, env=self.environment()
-        )
+        return _run_bytes(self.root, self.configuration_arguments(), args, self.environment(), input=input)
 
     def execute(
         self,
@@ -429,7 +488,7 @@ class HermeticGit:
             if date is None
             else self.commit_environment(date, index_file=index_file)
         )
-        return gitcmd.run_git_bytes(self.root, *self.configuration_arguments(), *args, input=input, env=environment)
+        return _run_bytes(self.root, self.configuration_arguments(), args, environment, input=input)
 
 
 def _promisor_remotes(hermetic: "HermeticGit") -> tuple[str, ...]:
@@ -551,3 +610,96 @@ def enter(store: ProjectStore) -> HermeticGit:
     )
     _require_not_shallow(built)
     return replace(built, promisor_remotes=_promisor_remotes(built))
+
+
+# --------------------------------------------------------------------------- read-only class B
+
+#: Every Git command a read-only class B context may run: reads of committed objects, nothing else.
+READ_ONLY_COMMANDS = ("cat-file", "ls-tree", "rev-parse")
+
+
+@dataclass(frozen=True)
+class ReadOnlyGit:
+    """Class B for reading committed objects, holding nothing inside the repository it reads.
+
+    Its envelope is built by the same functions as :class:`HermeticGit`'s: the
+    strip, the allowlist with its fixed values, an empty ``GIT_CONFIG_GLOBAL``,
+    the frozen configuration controls and a proven-empty ``core.hooksPath``.
+    The two empty objects live in scratch the context owns OUTSIDE the
+    Project, and each is re-proven immediately before use. It carries no
+    identity and captures none, because a read writes no commit; and it runs
+    nothing but :data:`READ_ONLY_COMMANDS`, so it has no commit, no index and
+    no network to reach.
+
+    Reachable only through :func:`read_only`, which owns the scratch.
+    """
+
+    root: Path
+    _no_config: str
+    _no_hooks: str
+
+    def environment(self) -> dict[str, str]:
+        """The class B environment of a read: the strip, then the allowlist, and nothing else."""
+        return _class_b_base(_empty_config_file(Path(self._no_config), self._no_config, _READ_OUTCOME))
+
+    def configuration_arguments(self) -> tuple[str, ...]:
+        """The class B ``-c`` arguments, the scratch hooks directory re-proven empty immediately before use."""
+        hooks = _empty_hooks_directory(Path(self._no_hooks), self._no_hooks, _READ_HOOK_CONSEQUENCE)
+        return _configuration_arguments(hooks)
+
+    def run(self, *args: str, check: bool = True) -> gitcmd.GitResult:
+        """Run one read under the class B envelope, decoded."""
+        _require_read(args)
+        return _run(self.root, self.configuration_arguments(), args, self.environment(), check=check)
+
+    def run_bytes(self, *args: str, input: bytes | None = None) -> gitcmd.GitBytes:
+        """Run one read under the class B envelope, keeping its output as bytes (see :meth:`HermeticGit.run_bytes`)."""
+        _require_read(args)
+        return _run_bytes(self.root, self.configuration_arguments(), args, self.environment(), input=input)
+
+
+def _require_read(args: tuple[str, ...]) -> None:
+    if not args or args[0] not in READ_ONLY_COMMANDS:
+        raise ValueError(f"a read-only class B context runs only {', '.join(READ_ONLY_COMMANDS)}, not {args[:1]!r}")
+
+
+@contextmanager
+def read_only(root: Path) -> Iterator[ReadOnlyGit]:
+    """A read-only class B context over the repository at ``root``, whose scratch lives outside it.
+
+    Nothing is created, changed or removed inside ``root``. The empty
+    configuration file and the empty hooks directory are made in a fresh
+    directory of the operating system's temporary area - refused if that
+    directory lies inside ``root`` - and that directory is removed when the
+    context exits. A scratch that cannot be removed is left where it is:
+    nothing is ever done inside ``root`` to recover.
+
+    No identity is captured, so a Project with no configured ``user.name`` or
+    ``user.email`` is read like any other: that requirement belongs to the
+    write-capable :func:`enter`, whose class B commits.
+    """
+    project = Path(root).resolve()
+    try:
+        scratch = Path(tempfile.mkdtemp(prefix="workline-class-b-read-")).resolve()
+    except OSError as exc:
+        raise StopError(
+            f"no scratch for a read-only class B context can be made ({exc}); nothing is read: STOP",
+            code="review_no_config_file_invalid",
+        ) from exc
+    try:
+        if scratch == project or project in scratch.parents:
+            raise StopError(
+                f"the temporary area {scratch} lies inside {project}, so a read-only class B context would write "
+                "into the Project it reads; nothing is read: STOP",
+                code="review_no_config_file_invalid",
+            )
+        config = scratch / "no-config"
+        hooks = scratch / "no-hooks"
+        built = ReadOnlyGit(
+            root=Path(root),
+            _no_config=_empty_config_file(config, str(config), _READ_OUTCOME),
+            _no_hooks=_empty_hooks_directory(hooks, str(hooks), _READ_HOOK_CONSEQUENCE),
+        )
+        yield built
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)

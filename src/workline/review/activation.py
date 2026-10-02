@@ -34,19 +34,28 @@ Gate 1, and that metadata is part of what is hashed.
 
 Nothing here reads a working tree path by itself, holds a lock or writes.
 ``None`` always means "cannot be shown", and never "legacy".
+
+The record itself is committed canonical authority (F1 §6): a Project is
+activated by the record its current HEAD commits, held unchanged by its working
+tree, and never by bytes that only look like one. :func:`current_activation` is
+the one check of that, which START's entry and the Project's validation share.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import json
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from ..errors import ValidationError
 from ..store import EVENT_LIFECYCLE_FIELDS, Event
+from .paths import WORK_TERMINAL_ACTIVATION_REL
+from .records import WorkTerminalActivation
 
 if TYPE_CHECKING:  # pragma: no cover
-    from .hermetic import HermeticGit
+    from .hermetic import HermeticGit, ReadOnlyGit
+    from .store import ReviewStore
 
 #: The algorithm this module implements, by its frozen name (F1 §9.4).
 DIGEST_ALGORITHM = "work-terminal-activation-digest-v1"
@@ -119,3 +128,122 @@ def committed_prefix_digest(git: "HermeticGit", commit: str, count: int) -> str 
     """
     records = committed_event_records(git, commit)
     return None if records is None else prefix_digest(records, count)
+
+
+# --------------------------------------------------------------------------- the record as committed authority
+
+#: How the working tree and current HEAD can hold the activation record. Only ``CURRENT`` can be activation.
+NOT_ACTIVATED = "not_activated"  # neither holds one
+CURRENT = "current"  # both hold exactly the same bytes
+UNCOMMITTED = "uncommitted"  # the working tree holds one that HEAD does not commit
+MISSING = "missing"  # HEAD commits one that the working tree does not hold
+CHANGED = "changed"  # both hold one, and the bytes differ
+
+
+class CommittedRecordUnreadable(ValidationError):
+    """What HEAD holds at the activation path cannot be read as a record: never taken for "absent"."""
+
+
+@dataclass(frozen=True)
+class Currentness:
+    """The activation record as current HEAD commits it and as the working tree holds it."""
+
+    head: str | None
+    state: str
+    #: Read by the P1 reader from the exact bytes both hold; present only when ``state`` is ``CURRENT``.
+    record: WorkTerminalActivation | None = None
+
+    def conflict(self) -> str | None:
+        """Why the working tree and HEAD disagree about the activation; ``None`` when they do not."""
+        if self.state == UNCOMMITTED:
+            return (f"the working tree holds an activation record that {self.head or 'HEAD'} does not commit; an "
+                    "uncommitted record is never activation, and is never adopted")
+        if self.state == MISSING:
+            return (f"{self.head} commits an activation record that the working tree does not hold; a committed "
+                    "activation is never read as absent")
+        if self.state == CHANGED:
+            return f"the working tree's activation record is not the record {self.head} commits"
+        return None
+
+
+def head_commit(git: "HermeticGit | ReadOnlyGit") -> str | None:
+    """The commit HEAD names, read through class B; ``None`` when HEAD names none yet."""
+    found = git.run_bytes("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    commit = found.stdout.decode("ascii", "replace").strip() if found.ok else ""
+    return commit or None
+
+
+def committed_record_bytes(git: "HermeticGit | ReadOnlyGit", commit: str) -> bytes | None:
+    """The exact blob ``commit`` holds at the activation path, read through class B; ``None`` when it holds none.
+
+    Only a regular ``100644`` blob is a record. Anything else the commit holds
+    there, and a listing or a blob Git cannot give, is
+    :class:`CommittedRecordUnreadable` rather than absence.
+    """
+    listed = git.run_bytes("ls-tree", "-z", "--full-tree", commit, "--", WORK_TERMINAL_ACTIVATION_REL)
+    if not listed.ok:
+        raise CommittedRecordUnreadable(f"Git cannot list what {commit} holds at {WORK_TERMINAL_ACTIVATION_REL}",
+                                        code="review_record_missing")
+    held: list[str] | None = None
+    for item in listed.stdout.split(b"\0"):
+        if not item:
+            continue
+        head, separator, raw_path = item.partition(b"\t")
+        fields = head.split(b" ")
+        if not separator or len(fields) != 3:
+            raise CommittedRecordUnreadable(f"Git's listing of {commit} holds an entry this reader cannot classify",
+                                            code="review_record_invalid")
+        if raw_path.decode("utf-8", "surrogateescape") == WORK_TERMINAL_ACTIVATION_REL:
+            held = [field.decode("ascii", "replace") for field in fields]
+    if held is None:
+        return None
+    mode, kind, oid = held
+    if kind != "blob" or mode != "100644":
+        raise CommittedRecordUnreadable(
+            f"{commit} holds {WORK_TERMINAL_ACTIVATION_REL} as {kind} {mode}, not a record", code="review_record_invalid"
+        )
+    blob = git.run_bytes("cat-file", "blob", oid)
+    if not blob.ok:
+        raise CommittedRecordUnreadable(
+            f"Git cannot read the blob {oid} {commit} holds at {WORK_TERMINAL_ACTIVATION_REL}", code="review_record_missing"
+        )
+    return blob.stdout
+
+
+def read_record(raw: bytes) -> WorkTerminalActivation:
+    """The activation record ``raw`` holds, through the P1 read boundary (canonical, schema-valid, round-tripping)."""
+    from .committed import parse_record  # here, not at import: it brings in the whole Review store
+
+    found, _ = parse_record(raw, f"Review activation {WORK_TERMINAL_ACTIVATION_REL}", WorkTerminalActivation.from_record)
+    return found
+
+
+def current_activation(review: "ReviewStore", git: "HermeticGit | ReadOnlyGit", head: str | None) -> Currentness:
+    """The activation at ``head``: the record that commit holds, exactly as the working tree holds it (F1 §6).
+
+    ```text
+    working tree   HEAD       state
+    absent         absent     NOT_ACTIVATED   genuinely not activated
+    present        absent     UNCOMMITTED     never activation, and never adopted
+    absent         present    MISSING         never read as "not activated"
+    bytes differ              CHANGED         neither copy is taken
+    the same bytes            CURRENT         read by the P1 reader: malformed or unsupported is its refusal
+    ```
+
+    The working tree is read by the Review store's own no-follow reader, and
+    HEAD's blob through class B; the two are compared as exact bytes before
+    either is parsed. Whether a ``CURRENT`` record's prefix proves is the
+    caller's question (:func:`committed_prefix_digest`), asked of the event log
+    it admits or classifies.
+    """
+    working = review.read_bytes(WORK_TERMINAL_ACTIVATION_REL)
+    committed = None if head is None else committed_record_bytes(git, head)
+    if working is None and committed is None:
+        return Currentness(head, NOT_ACTIVATED)
+    if committed is None:
+        return Currentness(head, UNCOMMITTED)
+    if working is None:
+        return Currentness(head, MISSING)
+    if working != committed:
+        return Currentness(head, CHANGED)
+    return Currentness(head, CURRENT, read_record(committed))

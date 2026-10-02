@@ -171,20 +171,27 @@ class Activation:
 def require_activation(store: ProjectStore) -> Activation:
     """F1 §6.4: under the lock, before the mutation is opened.
 
-    Absent is ``review_not_activated``; a malformed record or an unknown
+    The activation is the record current HEAD commits, held unchanged by the
+    working tree (:func:`workline.review.activation.current_activation`).
+    Neither holding one is ``review_not_activated``. One holding a record the
+    other does not, or the two holding different bytes, is reconcile required:
+    neither "not activated" nor activation. A malformed record or an unknown
     operation contract is the reader's own ``ValidationError``; a prefix digest
     that does not reproduce from HEAD's committed event log fails closed, and
     is never a legacy fallback.
     """
-    record = ReviewStore(store).read_activation()
-    if record is None:
+    git = hermetic_module.enter(store)
+    _, head = _head(git)
+    found = work_activation.current_activation(ReviewStore(store), git, head)
+    if found.state == work_activation.NOT_ACTIVATED:
         raise StopError(
             "this Project has not activated review-v1 Work terminalization, so a review-v1 START is refused; nothing "
             "was begun (legacy START is unaffected)",
             code="review_not_activated",
         )
-    git = hermetic_module.enter(store)
-    _, head = _head(git)
+    record = found.record
+    if record is None:
+        raise _reconcile(f"{found.conflict()}; nothing was begun")
     digest = work_activation.committed_prefix_digest(git, head, record.legacy_event_count)
     if digest is None or digest != record.legacy_event_prefix_sha256:
         raise _reconcile(
