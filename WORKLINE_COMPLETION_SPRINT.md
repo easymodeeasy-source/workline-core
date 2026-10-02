@@ -4138,34 +4138,387 @@ RB7 is DESIGN_READY when this contract and implementation brief/test matrix are 
 
 ## 17. RB8 — BL-011 + BL-013 + BL-020
 
-### BL-011
+RB8 closes three deferred items with three different dispositions.
 
-Default migration ownership: Roadmap Skill.
+~~~
+BL-011
+-> implement reusable migration procedure in canonical Roadmap responsibility
 
-ProjectSTART remains unchanged.
+BL-013
+-> complete Workline intentionally non-self-hosting
+-> preserve BL-012 guard and canonicalize the reason
 
-Acceptance uses a disposable legacy Project plus fresh-session recovery.
+BL-020
+-> no real correction case exists
+-> do not invent correction schema
+-> move future safety requirements into canonical authority and retire the backlog item
+~~~
 
-### BL-013
+### 17.1 BL-011 canonical owner
 
-Intentionally non-self-hosting.
+Reusable legacy-to-Workline migration belongs to skills/roadmap as a canonical procedure.
 
-Preserve BL-012 guard.
+It is not a new lifecycle, Controller or Skill.
 
-Canonicalize the reason; do not make self-hosting a completion condition.
+ProjectSTART remains unchanged and owns only establishment of the canonical Workline Project/bootstrap boundary.
 
-### BL-020
+ProjectSTART does not inventory legacy authority, infer old current state, migrate history, retire old automation, or decide migration achievement.
 
-If no real historical-correction example exists:
+### 17.2 Migration preflight
 
-- do not invent speculative schema
-- retire BL-020
-- move the future requirement into its canonical responsibility
-- retarget the historical-related regression
+Before ProjectSTART on a legacy Project, perform a read-only inventory against one frozen repository/state identity.
 
-If a real case creates a new Human boundary, use HUMAN.
+Inventory at least:
 
----
+- legacy current-state/task/progression authority
+- legacy Roadmap/plan authority
+- Project-local CONTRACT/safety
+- Project-local Skills/automation/hooks/agents
+- current in-progress/future obligations
+- domain-specific authorities
+- external authorities needed for current operation
+- Git state relevant to cutover
+- any prior Workline residue
+
+If material authority changes before cutover, refresh/reconcile the inventory rather than migrate a stale snapshot.
+
+### 17.3 Migration classification
+
+Classify by responsibility, never filename.
+
+~~~
+A Workline-owned responsibility
+  -> migrate current/future meaning into canonical Workline
+  -> retire old normative role
+
+B Project/domain authority Workline does not own
+  -> preserve as Project-local authority
+
+C stricter Project-specific safety
+  -> preserve; never weaken through migration
+
+D derived/read-only view
+  -> retain only as derived/non-authoritative if useful
+
+E historical evidence
+  -> retain as history/non-authority where useful
+
+F obsolete
+  -> retire/delete only through its normal owner and required Human boundary
+~~~
+
+ROADMAP, TODO, BACKLOG, STATUS, CLAUDE or similar naming never decides the class.
+
+RB6 shadow-authority rules apply after cutover.
+
+### 17.4 Local safety preservation
+
+Before retiring a legacy authority, identify any still-applicable Project-specific safety/operational rule not already represented by Workline.
+
+Preserve that responsibility in the appropriate Project-local authority.
+
+Do not preserve obsolete tool workflow merely because one safety rule inside it survives.
+
+Capability-changing Project-local Skill/automation changes continue to use rules/human-confirmation.
+
+### 17.5 Current-state migration
+
+After ProjectSTART establishes the Workline Project:
+
+- create a Migration Roadmap;
+- represent the current desired state as Roadmap/Phase/Work;
+- represent genuinely in-progress/future obligations required to reach it;
+- preserve explicit dependencies and Related authority;
+- preserve unresolved meaning as HUMAN rather than guessing.
+
+Do not fabricate historical work_started/work_completed events, historical Phases, Review records, Receipts, Evidence or chronology.
+
+Already-finished legacy work need not be lifecycle-backfilled.
+
+### 17.6 Authority cutover
+
+After ProjectSTART, Workline is authoritative for Workline-owned responsibilities.
+
+Legacy planning/task/status artifacts may remain migration evidence/history, but they do not remain an alternative live progression controller.
+
+Project/domain/safety authorities classified B/C retain authority only for their own responsibility.
+
+This prevents a long dual-authority period.
+
+### 17.7 Legacy authority retirement
+
+For every class-A legacy authority, make the post-cutover role unambiguous through one of:
+
+- delete through its normal owner when safe/authorized;
+- remove/replace its normative claim;
+- mark it historical/non-authoritative;
+- disable old automation under required Human authorization;
+- redirect human guidance to canonical Workline entry.
+
+Do not automatically delete files merely because they contain old vocabulary.
+
+Do not retire B/C Project/domain/safety authority.
+
+RB6 detects later reintroduction of shadow Workline authority.
+
+### 17.8 Project-local Skills during migration
+
+Inventory every Project-local Skill/automation.
+
+~~~
+distinct Project/domain responsibility
+-> keep
+
+calls canonical Workline owner without duplicating semantics
+-> keep
+
+duplicates/replaces Workline planning/lifecycle/Review/Git ownership
+-> retire/refactor
+
+new capability/exposure required
+-> rules/human-confirmation
+~~~
+
+ProjectSTART still installs only the canonical bootstrap entry.
+
+BL-011 does not distribute Project-local copies of canonical Workline Skills.
+
+### 17.9 Standalone recovery acceptance
+
+Migration is not complete merely because old documents were edited.
+
+A fresh session/process, without migration chat/private scratch state, must open the Project through supported bootstrap/canonical authority and determine:
+
+- configured Workline root
+- current Roadmap
+- current Phase
+- current/next Work
+- dependencies/Related obligations
+- surviving Project/domain/safety authority
+
+It must not need retired legacy progression authority to recover current Workline state.
+
+If it does, migration is incomplete.
+
+### 17.10 Migration achievement
+
+Migration Roadmap achievement requires:
+
+- canonical current/future Workline state;
+- preserved local safety/domain authority;
+- retired/non-authoritative overlapping legacy authority;
+- no confirmed shadow authority for migrated Workline responsibilities;
+- fresh-session standalone recovery PASS;
+- normal validation PASS;
+- no unresolved migration Human decision.
+
+Achievement then follows RB5 semantics/evidence.
+
+### 17.11 BL-011 acceptance
+
+Use a disposable legacy Project fixture containing representative:
+
+- legacy state tracker
+- stricter local safety
+- Project-local automation/Skill
+- domain authority
+- obsolete legacy authority
+- current in-progress/future obligation
+
+Acceptance:
+
+~~~
+read-only inventory
+-> ProjectSTART
+-> Migration Roadmap
+-> semantic current-state migration
+-> preserve local safety/domain authority
+-> retire old authority
+-> RB6 shadow-authority check
+-> fresh-session standalone recovery
+-> validation
+-> Migration Roadmap achievement
+~~~
+
+No existing successfully migrated Project requires backfill.
+
+### 17.12 BL-013 intentionally non-self-hosting
+
+Completion Sprint does not implement Workline self-hosting.
+
+Supported completion state:
+
+~~~
+workline-core is Workline root/runtime implementation
+workline-core is NOT a Workline Project
+~~~
+
+BL-012 guard remains mandatory:
+
+- Project root and Workline root must be positively proven different physical directories;
+- same directory or unprovable identity fails closed with workline_self_hosting_unsupported;
+- ProjectSTART stops before Git init/.workline/bootstrap;
+- established unsupported-self-hosting layout blocks state-changing operations before writes;
+- read-only diagnosis remains possible;
+- validate-project does not PASS that layout;
+- no override or auto-repair exists.
+
+RB7 root maintenance is not self-hosting.
+
+### 17.13 Canonical reason for non-self-hosting
+
+Canonical ProjectSTART/rules/git authority must state why self-hosting is intentionally unsupported.
+
+At minimum:
+
+- development/runtime separation is not a self-hosting contract;
+- no release boundary defines which Workline revision governs mutation of itself;
+- mutation/recovery formats may evolve with the implementation being edited;
+- break-glass/reconcile cannot safely depend on the same broken runtime;
+- root operation context and Project context have different routing/authority;
+- public/private planning/evidence disclosure is unresolved for a self-hosted public root;
+- portable root/version identity is not a self-hosting release model.
+
+Therefore self-hosting is an unsupported capability, not an incomplete normal mode.
+
+README mirrors the supported mode for humans.
+
+### 17.14 Future self-hosting reopening
+
+A later explicit product/spec project may reopen self-hosting only after defining/verifying:
+
+- runtime/development separation
+- release/version boundary
+- intent/recovery compatibility
+- break-glass/reconcile path independent of broken runtime
+- root-vs-Project context/routing
+- public/private disclosure
+- portable root/version handling
+
+P6/P7 adaptive policy cannot enable self-hosting.
+
+Current Workline completion has no self-hosting dependency.
+
+### 17.15 BL-013 tests
+
+Preserve/add tests that:
+
+- ProjectSTART rejects same physical root before writes;
+- unprovable identity fails closed;
+- unsupported established self-hosting blocks mutation before lock/write;
+- read-only validation/status can diagnose;
+- no override exists;
+- root Global Policy maintenance never creates .workline/project.yaml;
+- canonical authority explains intentional unsupported status.
+
+### 17.16 BL-020 measured disposition
+
+Repository search found no concrete historical event, derived relation, origin or Related record that has actually been proven mis-recorded and required formal correction.
+
+The current BL-020-specific regression only checks that BACKLOG.md carries future correction requirements.
+
+Therefore:
+
+~~~
+no real correction case
+-> no correction event/schema
+-> no speculative generated-state behavior
+-> retire BL-020 as an implementation item
+~~~
+
+### 17.17 Canonical future correction boundary
+
+Move the future safety boundary into rules/ai-decision.
+
+When a historical fact protected as immutable history is later alleged/proven content-wrong, Workline does not silently edit, delete, ignore or reinterpret it through an ad-hoc correction.
+
+Until a concrete case justifies a generic correction contract:
+
+~~~
+original historical record
+-> remains physically immutable
+
+generic correction/supersession operation
+-> not currently defined
+
+a downstream operation that would need the fact treated as corrected
+-> do not guess
+-> stop and open explicit design/product work for the concrete case
+~~~
+
+Any future generic correction mechanism must satisfy:
+
+1. original record is never physically deleted/rewritten;
+2. correction itself is a formal canonical record;
+3. downstream readers mechanically detect superseded/invalidated historical fact;
+4. superseded/invalidated historical fact is not reused as current truth.
+
+These are future constraints, not a schema.
+
+### 17.18 Existing historical Related stays unchanged
+
+BL-009 remains unchanged.
+
+A terminal Work's Related edge remains historical evidence and is not rewritten merely because a target later changes/disappears.
+
+BL-020 applies only when the recorded historical fact itself is proven wrong.
+
+No such concrete case currently exists in repository evidence.
+
+### 17.19 Retarget test_historical_related
+
+The BACKLOG-specific test that checks BL-020 text must not survive BL-100 deletion.
+
+Retarget it to canonical rules/ai-decision.
+
+The replacement regression verifies the four future-correction constraints in canonical authority while existing historical Related behavioral tests remain unchanged.
+
+Do not create a fake correction fixture for a schema that does not exist.
+
+### 17.20 Future real-case trigger
+
+If a real mis-recorded historical fact later occurs:
+
+- preserve exact concrete evidence;
+- do not hand-edit the historical record;
+- open explicit design/product work;
+- design the narrowest correction contract against that case;
+- generalize only what evidence supports;
+- route HUMAN only if correction changes a Human-owned meaning/requirement boundary.
+
+Completion Sprint does not pre-authorize the future schema.
+
+### 17.21 Expected implementation surfaces
+
+BL-011:
+- skills/roadmap gains Legacy Project Migration procedure
+- disposable migration/fresh-session recovery tests
+- ProjectSTART behavior unchanged
+
+BL-013:
+- rules/git and project-start canonicalize intentional non-self-hosting rationale while preserving BL-012
+- README mirrors current supported mode
+- no self-hosting implementation
+
+BL-020:
+- rules/ai-decision gains future correction safety boundary
+- tests/test_historical_related.py stops depending on BACKLOG
+- no correction record/event/schema
+
+### 17.22 HUMAN status
+
+No new Human design decision is required.
+
+Frozen conditional boundaries are not triggered:
+
+- BL-011 stays in Roadmap responsibility;
+- BL-013 remains non-self-hosting;
+- BL-020 has no real case requiring a new Human-boundary schema.
+
+Any future deviation triggers the corresponding conditional HUMAN decision before implementation.
+
+RB8 is DESIGN_READY when this contract and implementation brief/test matrix are prepared.
+
 
 ## 18. RB10 — runtime hardening
 
