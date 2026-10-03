@@ -5528,77 +5528,666 @@ RB10 is DESIGN_READY except for bounded execution-dependent enumeration/tests fo
 
 ## 19. RB9 — final audit / BL-100 / acceptance
 
-Start only after RB1-RB8 and RB10 are DONE.
+RB9 is the global completion barrier.
 
-### A — completion-map audit
+It begins only when RB1-RB8 and RB10 are LANDED/DONE as applicable and no production writer remains active.
 
-Every completion item has an evidence-backed disposition.
+RB9 does not add a new feature program. It proves that the implemented Workline is internally complete, that obsolete development surfaces no longer masquerade as Workline concepts, and that the exact final production candidate works from both a fresh session and a real Project.
 
-Do not delete BACKLOG.md yet.
+### 19.1 RB9 entry gate
 
-### B — BL-100
+Before Stage A, prove:
 
-Classify remaining repo surfaces:
+- RB1 through RB8 and RB10 each have an evidence-backed final disposition;
+- every runtime rule frozen in this Completion Sprint that was implemented is also present in its canonical runtime owner;
+- no required runtime behavior exists only in WORKLINE_COMPLETION_SPRINT.md, BACKLOG.md or a historical REVIEW_SYSTEM_* file;
+- no unresolved blocking Problem HIGH/MID remains;
+- no Problem LOW invalidates the completion objective;
+- no required Human decision remains except HD-2W if the final landing still needs it and HD-3 for E4 Project selection;
+- no implementation candidate/write branch is still concurrently changing the semantic surface under audit.
+
+If any runtime requirement still lives only in sprint/history text, RB9 stops and routes it to the owning canonical runtime authority before cleanup.
+
+### 19.2 Stage A — completion-map disposition audit
+
+Build one completion map for every Completion Sprint item and every still-live BACKLOG item.
+
+For each item record:
+
+- stable ID / source;
+- current disposition;
+- canonical runtime owner, if any;
+- implementation/test evidence;
+- whether it is complete, intentionally retired, external development tracking, or still unresolved;
+- whether any live file still claims the old responsibility.
+
+BACKLOG.md must not be deleted while any still-valid OPEN/VERIFIED/INVESTIGATE/DEFERRED requirement exists only there.
+
+Permitted final item dispositions are exactly:
 
 ~~~
-A retain
-B historical-only
-C obsolete
-D uncertain
+canonicalized_and_implemented
+integrated_into_existing_responsibility
+moved_to_external_development_tracking
+intentionally_retired
 ~~~
 
-Resolve D.
+"not currently important", "historical", or "probably obsolete" is not enough by itself.
 
-Then, and only then:
+Any item outside these dispositions blocks BL-100 cleanup.
 
-- delete BACKLOG.md
-- delete README BACKLOG reference
+### 19.3 Stage A — canonical-authority closure
 
-Do not mechanically delete BL IDs still useful in tests/history.
+For each implemented Review Block, compare the completion contract against live runtime authority.
 
-### C — final candidate
+The audit asks responsibility-by-responsibility:
 
-- exact candidate SHA/tree
-- required full suite
-- independent Control Plane review
-- race gate
+~~~
+Who owns this behavior now?
+Where is the canonical rule?
+Where is the implementation?
+Where is the regression/acceptance proof?
+Would a fresh reader need the sprint/history file to know the rule?
+~~~
 
-### D — fresh-session acceptance
+The last answer must be NO for every runtime behavior.
 
-A fresh process/session receives only live Workline authority, not sprint conversation/private scratch reasoning.
+Historical rationale may explain why a rule exists, but it may not be required to discover what the current rule is.
 
-Two repeated clear-authority misreads are an authority-clarity defect.
+### 19.4 Stage B — BL-100 repository surface inventory
 
-### E — real Project acceptance
+Inventory the entire tracked repository at one exact main SHA.
 
-Human selects the Project under HD-3.
+Do not inventory only root Markdown files.
 
-At least two Phases must traverse:
+Classify every operationally meaningful surface by responsibility:
+
+~~~
+A CURRENT
+  required by current Workline runtime, public user guidance,
+  canonical tests or supported development/runtime execution
+
+B HISTORICAL_ONLY
+  useful rationale/evidence, but never a current operation,
+  runtime authority, lifecycle or development queue
+
+C OBSOLETE
+  duplicate, superseded, non-Workline operational surface,
+  completed temporary tracking, or unsupported entry/procedure
+
+D UNCERTAIN
+  responsibility cannot yet be proven
+~~~
+
+The inventory includes at least:
+
+- root documents;
+- canonical Skills;
+- registry;
+- source/runtime entrypoints;
+- test-only helpers/data;
+- Review design/contracts/prompts;
+- development procedures;
+- scripts/helpers;
+- generated/tracked artifacts;
+- references from README and other live guidance;
+- local-only/untracked artifacts discovered by the Execution Writer.
+
+Filename alone never decides the class.
+
+No D may remain in the final BL-100 candidate.
+
+### 19.5 Known provisional BL-100 classification
+
+The following classification is frozen unless later implementation creates a concrete dependency requiring a narrower exception.
+
+#### A — retain as current
+
+After their own cleanup/canonicalization:
+
+- README.md
+- registry.md
+- registry-routed canonical Skills
+- run-workline.py
+- pyproject.toml
+- src/workline/**
+- canonical regression/acceptance tests and required test data
+
+BL IDs may remain in test names/comments where they identify a regression or rationale.
+
+A BL number does not imply the BACKLOG system remains live.
+
+#### B — historical evidence, remove from root operational surface
+
+The existing root-level REVIEW_SYSTEM_* design/checkpoint/contract/prompt family is non-normative historical Review-system evidence.
+
+At BL-100 it must no longer appear as a peer of current root authority.
+
+Default disposition:
+
+~~~
+move to docs/history/review-system/
+~~~
+
+with one archive README stating mechanically and prominently:
+
+- historical evidence only;
+- not runtime authority;
+- not an operational entrypoint;
+- not a current implementation plan;
+- current authority is registry.md + routed canonical Skills + live implementation/tests.
+
+A historical file may instead be deleted from the live tree when Git history alone is sufficient and no maintainability/evidence purpose justifies the archive.
+
+Do not leave a selected subset at repository root merely because it is frequently cited.
+
+If source/test comments rely on a historical section for the actual current rule, make the current invariant self-contained or route it to current canonical authority before the historical file leaves the root.
+
+#### C — obsolete/non-Workline tracking
+
+BACKLOG.md is deleted after Stage A has disposed every item and after its live tests/references are retargeted.
+
+README's Improvement Backlog/BACKLOG references are removed.
+
+BACKLOG is not replaced by another hidden Workline backlog system.
+
+A future user request saying "add this to BACKLOG" therefore has no implied Workline operation; the caller must identify an actual destination or create normal Work/Roadmap state where appropriate.
+
+### 19.6 Completion Sprint self-disposition
+
+WORKLINE_COMPLETION_SPRINT.md is active control authority only while the Completion Sprint is in progress.
+
+Once Stage A proves every runtime rule has migrated to its proper owner, the sprint document itself becomes:
+
+~~~
+B HISTORICAL_ONLY
+~~~
+
+before the final production candidate is frozen.
+
+Move it to an explicitly historical completion archive, for example:
+
+~~~
+docs/history/completion/WORKLINE_COMPLETION_SPRINT_2026-10-03.md
+~~~
+
+or an equivalently explicit archive path.
+
+It must not remain at repository root with Status ACTIVE after Workline completion.
+
+The archived document is not provided as an authority package to E3; if a fresh reader discovers it, the archive boundary must make its non-authoritative status unambiguous.
+
+### 19.7 Historical archive is not a new authority
+
+The history archive is inert documentation.
+
+It has no:
+
+- registry routing;
+- Skill entry;
+- state/mutation reader;
+- lifecycle;
+- current task queue;
+- next pointer;
+- automation;
+- authority precedence over runtime docs.
+
+No current README flow routes an ordinary operation through it.
+
+Its only purpose is human/audit provenance.
+
+### 19.8 BACKLOG-dependent tests and references
+
+Before BACKLOG.md deletion:
+
+- retarget tests/test_historical_related.py's BL-020 text assertion to the canonical future-correction boundary in rules/ai-decision;
+- preserve the existing historical Related behavior tests;
+- remove any test whose only purpose is asserting BACKLOG prose after the requirement has a canonical owner;
+- remove README BACKLOG operational guidance;
+- repo-wide search for BACKLOG.md / Improvement Backlog / "BACKLOG" as a Workline system.
+
+Remaining BACKLOG text is allowed only where it explicitly says that BACKLOG is not a Workline concept, if such a regression is useful; do not require even that wording if the absence of the system is mechanically clear.
+
+### 19.9 Local-only artifact gate
+
+GitHub inventory cannot prove local untracked/unpushed state.
+
+Before BL-100 deletion/archival work is finalized, the Execution Writer must inspect:
+
+- canonical local checkout;
+- worktrees;
+- local branches;
+- untracked files;
+- unpushed commits;
+- known local-only P3_F3_IMPLEMENTATION_PROGRAM.md.
+
+Do not delete/reset/clean valuable local state.
+
+For every local-only artifact choose:
+
+~~~
+valuable/current
+-> preserve and integrate or retain explicitly
+
+historical but useful
+-> archive/bundle with provenance
+
+obsolete and safe to remove
+-> remove only after positive classification
+
+uncertain
+-> preserve and report
+~~~
+
+An uncertain local artifact does not authorize destructive cleanup.
+
+### 19.10 BL-100 Human removal manifest
+
+Because BL-100 removes/moves repository surfaces, its exact destructive/archive manifest is a batched Human boundary unless the Human has already explicitly approved that exact manifest.
+
+Present once:
+
+- files/directories to retain;
+- files to archive/move;
+- files to delete;
+- any local-only artifacts affected;
+- live references/tests being retargeted;
+- confirmation that no runtime semantic is being removed.
+
+Human approval is for the exact cleanup manifest, not for reopening already-frozen runtime architecture.
+
+If the inventory reveals genuinely live development tracking that needs a replacement system, trigger H-C11 instead of inventing one.
+
+### 19.11 Stage B completion gate
+
+BL-100 Stage B passes only when:
+
+- every tracked operational surface is A/B/C;
+- D count = 0;
+- every BACKLOG item has a Stage-A final disposition;
+- historical root Review docs are out of the root operational surface;
+- Completion Sprint is archived/non-active;
+- BACKLOG.md is absent;
+- README no longer routes to BACKLOG/legacy Vault/personal absolute root;
+- no canonical test depends on BACKLOG prose;
+- no obsolete entrypoint/helper is presented as supported;
+- local-only valuable state is preserved;
+- current runtime authority/tests still validate.
+
+This cleanup occurs before final-candidate freeze so E3 observes the actual final repository surface.
+
+### 19.12 Stage C — freeze final production candidate
+
+After BL-100 cleanup, freeze one exact candidate:
+
+~~~
+candidate SHA
+parent SHA
+tree SHA
+complete changed-path set from the previous accepted production base
+exact diff/blob identities
+runtime authority identities
+canonical full-suite command(s)
+environment prerequisites
+~~~
+
+No "latest main" shorthand is permitted after freeze.
+
+The candidate includes all BL-100 cleanup bytes.
+
+### 19.13 Stage C — required suite
+
+At freeze time re-read current canonical development/test guidance.
+
+At this baseline, the repository's full regression command is:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+and registry validation is exposed by:
+
+~~~
+run-workline.py validate-registry <workline-root>
+~~~
+
+The final candidate must run the then-current canonical equivalents, not a stale command copied from this sprint if README/entrypoints have legitimately changed.
+
+Required final evidence includes:
+
+- registry validation PASS;
+- full tests PASS;
+- focused completion tests for RB1-RB8/RB10;
+- no unexpected tracked working-tree change from the suite;
+- canonical docs/runtime cross-check;
+- BL-100 absence/archive checks;
+- static public-hygiene checks required by RB10.
+
+Do not invent a lint/type-check gate the repository does not actually define unless it is separately added as canonical development policy.
+
+### 19.14 Stage D — independent exact-candidate review
+
+The Control Plane reviews the exact candidate identity, not a branch name.
+
+If the Control Plane cannot read a local-only candidate directly, the Execution Writer supplies a Candidate Review Package containing at least:
+
+- candidate/parent/tree SHA;
+- exact diff/changed blobs;
+- test/suite results;
+- canonical authority changes;
+- unresolved residuals.
+
+PASS is valid only for those exact bytes.
+
+Any repair produces a new candidate and new review.
+
+Review specifically checks:
+
+- every Completion Sprint decision is either canonicalized or intentionally non-runtime;
+- no historical/obsolete surface still claims current authority;
+- no BL-100 cleanup deleted current semantics;
+- H-1 through H-4 and Human decisions are respected;
+- acceptance preconditions are satisfiable from the live repo alone.
+
+### 19.15 Stage E — landing
+
+Land only the reviewed exact candidate.
+
+All existing landing safety applies:
+
+- fast-forward only;
+- no force;
+- no silent rebase/cherry-pick;
+- serialized landing;
+- race gate immediately before update.
+
+If HD-2W is still unresolved, resolve it immediately before this first final implementation landing.
+
+After landing, prove:
+
+~~~
+live main == reviewed candidate SHA
+live tree == reviewed tree SHA
+~~~
+
+E3/E4 use this exact live main.
+
+### 19.16 E3 — fresh-session authority/recovery acceptance
+
+E3 uses a genuinely fresh session/process.
+
+Do not provide:
+
+- this chat;
+- Completion Sprint prompt/package;
+- private scratch/reasoning;
+- prior implementation conversation;
+- answer key;
+- hidden summary of expected answers.
+
+The session may use only:
+
+- final live repository;
+- canonical Workline authority/routing;
+- one disposable acceptance Project prepared under the final candidate;
+- ordinary supported tooling.
+
+The historical archive remains visible only as ordinary repository content and must identify itself as non-authoritative.
+
+### 19.17 E3 — seven frozen questions
+
+Freeze one disposable acceptance Project state and an answer key before launching the fresh session.
+
+Ask exactly these semantic questions, adapted only with the fixture's stable IDs/display values:
+
+1. **Runtime authority** — What sources define current Workline runtime behavior, and which visible documents are only history?
+2. **Project routing** — Starting from this established Project, how is the configured Workline root and the applicable canonical Skill/rule resolved?
+3. **Current state** — What are the current Roadmap, Phase and Work, and what is the mechanically valid next Work/action or blocker?
+4. **Recovery state** — Is there a pending mutation/reconcile/disposed state? If so, what does it mean and what may happen next?
+5. **Review state** — Is review-v1 activated and what Review authorization/obligation state exists? Does a Receipt by itself mean completion?
+6. **Achievement/policy boundary** — Is Phase/Roadmap achievement currently mechanically decidable, and what Project/Global policy or Human boundary governs any unresolved decision?
+7. **Nonexistent-system check** — A user says "put this in Workline BACKLOG". What canonical Workline operation/authority is that, if any?
+
+The answer key is derived mechanically from the frozen fixture plus current canonical authority.
+
+Question 7 must answer that Workline has no BACKLOG operation/authority/lifecycle. It must not resurrect deleted BACKLOG.md from history as current authority.
+
+### 19.18 E3 evaluation
+
+Classify errors:
+
+~~~
+state/value error
+-> implementation/status/fixture defect as evidence supports
+
+authority/routing misread
+-> authority-clarity candidate
+
+historical archive treated as current authority
+-> authority-clarity candidate
+
+unsupported operation invented
+-> authority-clarity candidate
+~~~
+
+For an authority-clarity candidate, run one second independent fresh session with the same live candidate/fixture/question and no hint about the first answer.
+
+If the same clear authority is materially misread twice:
+
+~~~
+AUTHORITY_CLARITY_DEFECT
+-> production repair required
+~~~
+
+If the second session reads it correctly:
+
+~~~
+single-agent error
+-> record as acceptance evidence
+-> does not by itself require production repair
+~~~
+
+A deterministic implementation/status failure does not need two model mistakes to count as a defect.
+
+E3 PASS requires all seven answer-key outcomes to be recoverable without private sprint context and no repeated authority-clarity defect.
+
+### 19.19 E4 — real Project candidate selection
+
+After E3 PASS, present the Human 2-3 permitted real Project candidates.
+
+For each candidate report only what is needed to choose safely:
+
+- Project identity;
+- current Roadmap/state;
+- Git cleanliness/unpushed risk;
+- remote/no-remote status and approved destination readiness;
+- review-v1 activation status;
+- whether a genuine useful two-Phase acceptance goal is available;
+- mutation/cleanup risk;
+- any Human activation required.
+
+Forbidden:
+
+- PokéTool;
+- retained P3 acceptance Projects;
+- an unspecified/unapproved Project.
+
+Human chooses the Project under HD-3.
+
+Do not infer the choice from prior preferences.
+
+### 19.20 E4 — exact implementation identity
+
+E4 must run against the same final live Workline candidate SHA that passed Stage D/E3.
+
+Before acceptance mutations:
+
+- prove the configured Workline root is the intended final implementation;
+- prove its tracked HEAD is the final candidate;
+- prove no unreviewed source modification changes the running implementation;
+- record Python/Git versions required by current runtime authority.
+
+If the selected real Project points at another Workline root/implementation, do not silently retarget it. Treat that as an explicit migration/configuration step under the Project's normal authority/Human boundary.
+
+### 19.21 E4 — activation boundary
+
+If Work-terminal review-v1 is not activated in the selected Project, Human performs/authorizes the existing Project-specific activation operation.
+
+Completion Sprint does not auto-activate a real Project.
+
+Activation remains one-time and does not make review-v1 the default for unrelated Work.
+
+### 19.22 E4 — real useful workflow
+
+Acceptance is not a dummy test Roadmap in a production Project.
+
+Choose a genuine bounded desired state useful to that Project and represent it through at least two Phases.
+
+The path must exercise:
 
 ~~~
 Project
 -> Roadmap
--> Phase
--> Work
--> Review
--> Repair where applicable
+-> Phase 1
+-> Work(s)
+-> review-v1
+-> repair when a supported blocking finding is actually present
+-> Phase Integration Review
 -> Phase achievement
 -> continuation
+-> Phase 2
+-> Work(s)
+-> review-v1
+-> Phase Integration Review
+-> Phase achievement
 -> Roadmap achievement
 ~~~
 
-Acceptance Work uses review-v1.
+All acceptance Works that terminalize through this path use review-v1.
 
-Require:
+Do not manufacture a defect solely to force a Repair Loop. If no genuine repair is needed, prove the no-repair convergence path and rely on disposable/focused tests for forced repair cases.
 
-- achievement evidence
-- fresh-clone reconstruction
-- H-3 sanitation
-- validate-project PASS
-- no pending mutation
-- no reconcile_required
+### 19.23 E4 evidence
 
-A production repair creates a new candidate and requires affected acceptance to rerun.
+Preserve H-3-compliant evidence for:
+
+- exact Workline candidate SHA;
+- Project/Roadmap/Phase/Work stable IDs;
+- Review Runs/Findings/Repairs needed to prove the path;
+- Phase Integration outcomes;
+- Phase/Roadmap Achievement Evidence;
+- push/commit identities where applicable;
+- validation result;
+- final pending/reconcile status.
+
+Do not put private Project content into the public workline-core repository merely to prove E4.
+
+Public completion evidence uses generalized/result-only facts where needed.
+
+### 19.24 E4 fresh-clone reconstruction
+
+After the real workflow reaches its intended terminal state, reconstruct from a fresh clone/copy of committed state using the supported final Workline implementation.
+
+For a remote-backed Project, prefer the approved remote publication as the clone source after required pushes are complete.
+
+For a remote-less Project, use a fresh clone from the committed repository by a method that does not borrow the original working tree/index/runtime area.
+
+In the fresh reconstruction prove:
+
+- validate-project PASS;
+- RB1 status reconstructs the same canonical current/terminal state;
+- Review/Achievement evidence required for the accepted workflow is present;
+- no pending mutation;
+- no reconcile_required;
+- no private runtime scratch is required for the completed path.
+
+### 19.25 E4 safety
+
+Do not clean/reset/rebase a real Project to make acceptance convenient.
+
+Pre-existing user changes are preserved under normal Workline Git/dirty-overlap rules.
+
+If candidate selection reveals unsafe dirty/unpushed state, present another candidate or obtain the specific Human decision needed; do not normalize it destructively.
+
+Acceptance cleanup may remove only temporary local clone/worktree material positively created for acceptance and proven disposable.
+
+### 19.26 Acceptance-induced repair rule
+
+If E3 or E4 finds a production defect requiring a Workline source/canonical-authority change:
+
+~~~
+repair
+-> new candidate SHA/tree
+-> canonical required suite
+-> independent Control Plane review
+-> exact landing
+-> rerun every acceptance stage whose proof depends on the changed semantics
+~~~
+
+At minimum:
+
+- an E3 authority/status repair reruns E3;
+- an E4 runtime/review/achievement repair reruns the affected E4 path from the earliest invalidated proof;
+- a broad/foundation repair reruns both E3 and E4.
+
+Do not carry PASS across changed bytes without a positive relevance proof.
+
+Documentation-only history-archive metadata that provably does not affect E3's authority surface may use a documented carry proof, but BL-100/README/authority changes are never presumed irrelevant to E3.
+
+### 19.27 RB9 final completion proof
+
+After E3 and E4 PASS, re-read live main and prove:
+
+- main SHA/tree are still the approved candidate;
+- canonical runtime authority validates;
+- full suite evidence belongs to that candidate;
+- no final acceptance action changed workline-core bytes;
+- all Completion Sprint Blocks are DONE;
+- BL-100 is complete;
+- no unresolved completion Human decision remains;
+- no blocking Review obligation remains;
+- required evidence exists;
+- local cleanup did not destroy valuable state.
+
+If main moved, stop completion reporting until the new main is reconciled/reviewed.
+
+### 19.28 Final report
+
+The Completion Sprint final report records at least:
+
+1. final live main SHA;
+2. final tree SHA;
+3. RB1-RB10 final disposition;
+4. capability/landing checkpoint SHAs;
+5. formal Control Plane review outcomes;
+6. Repair Batch/recurrence/STRATEGY_CHANGE outcomes;
+7. final full-suite result and environment;
+8. BL-100 A/B/C inventory summary and Human cleanup approval;
+9. E3 seven-question result and any second-session authority checks;
+10. E4 selected Project generalized identity/result and two-Phase path outcome;
+11. fresh-clone reconstruction result;
+12. remaining non-blocking Problems/Improvements;
+13. evidence locations;
+14. retained local branches/worktrees/untracked artifacts and why;
+15. confirmation of fast-forward/no-force/no-silent-rewrite landing invariants.
+
+Do not require the final report itself to become a new runtime authority.
+
+### 19.29 RB9 HUMAN status
+
+Expected Human actions are bounded:
+
+- approve the exact BL-100 destructive/archive manifest unless already explicitly approved;
+- resolve HD-2W if still unresolved at final landing;
+- choose the E4 real Project under HD-3;
+- perform/approve review-v1 activation for that Project if required;
+- answer only genuinely Human-owned product/requirement decisions discovered by acceptance.
+
+No generic final approval is required merely because a technical proof completed.
+
+RB9 is DESIGN_READY.
+
+Its inventory, cleanup execution, full suite, fresh-session acceptance and real-Project acceptance require execution-capable environments and/or the Human actions above.
 
 ---
 
