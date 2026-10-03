@@ -4522,56 +4522,415 @@ RB8 is DESIGN_READY when this contract and implementation brief/test matrix are 
 
 ## 18. RB10 — runtime hardening
 
-RB10 is completion scope.
+RB10 is completion scope. It closes runtime hardening defects that are already concrete enough to design without reopening P1-P7 architecture.
 
-### N2
+RB10 does not become a general cleanup bucket. Every item receives one of:
 
-Apply effect-pre dirty separability and own-bytes protection consistently across legacy registration owners, at least:
-
-- Roadmap creation
-- Phase entry/add
-- Related maintenance
-- direct CREATE
-
-Human pre-existing uncommitted ledger changes must not be lost/adopted before dirty-overlap/reconcile classification can occur.
-
-### N3(b)
-
-Reject strand/crash-capable malformed inputs before reservation/effect, including invalid tuple mutation values, lone surrogates and equivalent boundary inputs.
-
-### N3(a)
-
-Apply HD-1 to newline truncation, heading injection and equivalent semantic-changing accepted inputs.
-
-### N4
-
-Provide an explicit Human-invoked canonical disposition operation for non-resumable pending mutation/Review state.
-
-Required:
-
-- no record deletion
-- no manual ledger edit
-- explicit disposition
-- durable reason
-- reuse RB3-C1 set-aside meaning
-- RB1 status visibility
-
-N4 must not invent a second set-aside semantic.
-
-### N6
-
-Each of these receives explicit repair or accepted-residual reasoning:
-
-1. Review gate error message with mutation id None
-2. duplicate dirty_overlap messages
-3. unreadable related.yaml classified as not_a_project
-4. commit cleanup=strip rejecting "# only" message
+~~~
+confirmed defect -> repair
+contract-consistent residual -> retain with reason
+execution-dependent uncertainty -> bounded probe, then classify
+~~~
 
 Silent skip is prohibited.
 
-### Canonical text
+### 18.1 N2 — effect-pre dirty separability
 
-ProjectSTART currently says 5 required/common Skills while registry routes 7 canonical Skills:
+Status:
+
+~~~
+CONFIRMED DEFECT
+~~~
+
+The live code already has the correct primitive:
+
+~~~
+gitops.ensure_separable_before_effects(mutation, paths)
+~~~
+
+and uses it on some mutation owners, for example lifecycle and plan-exclusion paths.
+
+But the protection is not universal across legacy registration owners.
+
+The shared Roadmap _open() path currently:
+
+~~~
+open mutation
+-> ensure_git_ready
+-> record_preexisting_dirty
+-> mutation.apply()
+~~~
+
+without first proving that every path the operation is about to write is separable from the captured pre-existing dirty set.
+
+Direct CREATE similarly records pre-existing dirty state and proceeds into register_works without one common effect-pre separability boundary.
+
+This creates an inconsistent contract: some owners refuse before recording/applying domain effects while other owners may first discover the overlap at later Git/finalization or owner-specific checks.
+
+RB10 freezes the invariant:
+
+~~~
+for every state-changing legacy owner,
+once the exact first-stage/all-known-owned path set is known,
+pre-existing dirty overlap with that set is checked
+BEFORE the first domain effect for those paths is recorded or applied.
+~~~
+
+Required owners include at least:
+
+- Roadmap creation
+- Roadmap Phase addition
+- Phase entry / Phase expansion
+- direct standalone CREATE
+- Related maintenance
+- legacy registration helpers shared by those paths
+
+START result/derivation paths that already implement stronger owner-specific refusal/recovery semantics keep those semantics; RB10 does not replace them with a weaker generic check.
+
+Implementation rule:
+
+1. reuse record_preexisting_dirty as the one stable mutation snapshot;
+2. use ensure_separable_before_effects or a single equivalent common helper;
+3. do not take a second snapshot that could treat this operation's own writes as pre-existing;
+4. run the check only once the operation can name the relevant owned path set exactly;
+5. if the exact path set is not yet knowable, no effect touching that still-unknown set may be recorded first;
+6. resume uses the same durable snapshot and does not adopt a Human's pre-existing bytes as Workline-owned.
+
+Acceptance must show that a Human dirty change in each affected canonical ledger/entity path is refused before the operation changes canonical Project state.
+
+### 18.2 N2 non-goals
+
+N2 does not:
+
+- require a globally clean repository;
+- block unrelated dirty paths;
+- remove owner-specific keep/refuse/replay behavior in START;
+- broaden write scope merely to make conflict detection easier;
+- convert dirty_overlap into reconcile_required where current semantics are a clean pre-effect STOP.
+
+The invariant is separability of operation-owned paths, not cleanliness.
+
+### 18.3 N3(a) — semantic-changing text inputs
+
+Status:
+
+~~~
+CONFIRMED DEFECT
+Human decision HD-1 already frozen
+~~~
+
+The live rendering/parser pair demonstrates the defect class:
+
+~~~
+render_body(name, ...)
+-> writes "# " + name
+
+Entity.name
+-> reads the first body line beginning "# "
+-> strips only that line
+~~~
+
+A caller name containing a newline can therefore be accepted as non-empty while the persisted/read-back name becomes only the first line.
+
+Likewise, caller-controlled text that can introduce canonical heading syntax may change section structure when read back.
+
+Current Roadmap/Phase/Work input validation generally checks only non-empty .strip(); that is not a semantic round-trip proof.
+
+Frozen rule:
+
+~~~
+caller text that cannot round-trip through the canonical writer/reader
+without changing structural meaning
+is rejected before reservation/effect.
+~~~
+
+At minimum reject where structurally significant:
+
+- CR/LF/newline in entity names/displays or other single-line identity text;
+- injected entity/section heading syntax in fields whose writer embeds them as Markdown structure;
+- any control/Unicode form the canonical UTF-8/Yamlish/Markdown writer-reader path cannot preserve as one supported semantic value.
+
+This is the intentional compatibility change already approved by HD-1:
+
+~~~
+old: success with mis-stored/mis-read semantic value
+new: refusal before effect
+~~~
+
+Do not repair this by escaping one writer while leaving other canonical writers/readers inconsistent unless the whole canonical round-trip contract is deliberately changed.
+
+### 18.4 N3(b) — crash/stranding malformed inputs
+
+Status:
+
+~~~
+POLICY FROZEN
+EXACT INPUT-SURFACE INVENTORY REQUIRES EXECUTION-CAPABLE IMPLEMENTATION PASS
+~~~
+
+Malformed caller input that can:
+
+- crash serialization/rendering,
+- create an unreadable durable mutation,
+- reserve IDs before later deterministic refusal,
+- strand a pending mutation that cannot be resumed from its own record,
+
+must be rejected before reservation/effect.
+
+Known candidates include:
+
+- lone surrogate text;
+- invalid tuple/record shapes reaching Phase-entry/registration mutation payloads;
+- equivalent values that the durable serializer or canonical reader cannot round-trip.
+
+Implementation must first enumerate the exact public caller surfaces and prove the rejection boundary with focused regression tests.
+
+This is bounded reconnaissance, not an architecture question.
+
+No malformed input is accepted merely because Python can temporarily hold it in memory.
+
+### 18.5 N4 — explicit Human-invoked disposition
+
+Status:
+
+~~~
+DESIGN READY
+depends on RB3-C1 set-aside semantics
+~~~
+
+N4 provides the canonical escape hatch for the case:
+
+~~~
+a pending mutation / Review state is not automatically resumable
+AND
+the Human intentionally decides it must no longer be considered for automatic resume
+AND
+there is no automatic replacement Run whose set_aside_runs can carry that disposition.
+~~~
+
+N4 reuses the RB3-C1 meaning of set-aside:
+
+~~~
+the old immutable state remains evidence
+but automatic recovery selection must not choose it again
+~~~
+
+N4 must not invent a second semantic meaning.
+
+Required operation properties:
+
+- explicitly Human-invoked;
+- names the exact mutation/Review Run by stable ID;
+- requires a non-empty Human disposition reason;
+- verifies the target still has exactly the state being disposed;
+- writes one canonical immutable disposition record;
+- never edits/deletes the old mutation/Review record;
+- never deletes canonical domain history;
+- never rewrites Git history;
+- never marks Work/Phase/Roadmap lifecycle complete;
+- never converts unknown ownership into owned state;
+- refuses if an automatic safe resume/replacement is currently in progress;
+- idempotently returns the same disposition when repeated with the same identity/reason;
+- conflicting second disposition fails closed.
+
+The durable disposition becomes an input to:
+
+- recovery discovery;
+- RB1 status/pending-mutation diagnostics;
+- validation.
+
+A disposed pending state is no longer selected automatically, but remains visible as historical recovery evidence.
+
+### 18.6 N4 physical ownership
+
+The canonical disposition owner is Workline recovery/runtime authority, not Review history and not lifecycle/state.py.
+
+For Review Runs:
+
+- use the RB3-C1 set-aside relation/meaning;
+- Receipt supersession remains the mechanism for an already-authorized sealed Receipt;
+- N4 is primarily for no-replacement/no-Receipt/non-resumable state.
+
+For generic pending mutation state:
+
+- add the minimum immutable canonical disposition record needed to stop automatic resume;
+- do not encode lifecycle semantics into it.
+
+The exact record path/schema is an implementation detail to freeze during the implementation brief, but there must be one canonical owner and one reader path.
+
+### 18.7 N4 status behavior
+
+RB1 must distinguish at least:
+
+~~~
+pending_resumable
+pending_reconcile_required
+disposed_by_human
+~~~
+
+A Human disposition is not reported as completed, cleaned up or silently absent.
+
+Validation may PASS a Project containing historical disposed recovery evidence only when no active pending mutation remains and every disposition record validates against an actual immutable target.
+
+### 18.8 N6-1 — Review gate mutation ID diagnostic
+
+Status:
+
+~~~
+CONFIRMED DIAGNOSTIC DEFECT
+non-semantic
+repair
+~~~
+
+review/gate.py formats pending generation mutation IDs with:
+
+~~~
+record.get("id")
+~~~
+
+but durable Mutation records identify themselves as:
+
+~~~
+mutation_id
+~~~
+
+Therefore conflict/pending diagnostics can print None.
+
+Repair:
+
+~~~
+record.get("mutation_id")
+~~~
+
+or one canonical mutation-ID accessor.
+
+No recovery decision currently depends on the printed value, so this is not a safety defect.
+
+Regression tests pin both one-pending and multiple-pending diagnostics to real mutation IDs.
+
+### 18.9 N6-2 — duplicate dirty_overlap wording
+
+Status:
+
+~~~
+CONTRACT-CONSISTENT RESIDUAL
+no semantic repair required
+~~~
+
+Live code deliberately uses one shared:
+
+~~~
+code = dirty_overlap
+OVERLAP_MESSAGE = "pre-existing changes overlap operation-owned paths and cannot be separated safely: "
+~~~
+
+from several owners.
+
+START's refused-result recovery extends that shared message with owner-specific restoration details; generic ensure_separable uses the common prefix.
+
+The same error identity across these paths is desirable because the semantic condition is the same.
+
+Do not create different error codes merely because the text originates at multiple call sites.
+
+Allowed cleanup only:
+
+- deduplicate literal construction through the common constant/helper where it improves maintenance;
+- keep owner-specific detail where it explains recovery state.
+
+No Completion Sprint obligation remains here unless implementation tests reveal two semantically different conditions being collapsed into dirty_overlap.
+
+### 18.10 N6-3 — unreadable related.yaml reported as not_a_project
+
+Status:
+
+~~~
+CONFIRMED CLASSIFICATION DEFECT
+repair
+~~~
+
+bootstrap.is_established_project() returns only boolean.
+
+It catches any StopError from reading:
+
+- roadmap relations,
+- related relations,
+- events,
+
+and returns False.
+
+backfill-bootstrap then reports:
+
+~~~
+not_a_project
+~~~
+
+even when .workline/project.yaml and the Project identity exist and the actual defect is an unreadable/corrupt canonical ledger such as related.yaml.
+
+That loses the cause and incorrectly describes an established-but-invalid Project as absence/non-establishment.
+
+Frozen repair:
+
+~~~
+Project identity/existence
+!=
+Project canonical validity
+~~~
+
+Backfill/diagnostic code must preserve the structural validation reason.
+
+Required behavior:
+
+- missing/not-established identity may use not_a_project;
+- established Project with malformed/unreadable relation/event canonical state reports the underlying canonical validation code/reason;
+- it is never treated as a fresh initialization opportunity;
+- no automatic overwrite/repair of the unreadable ledger.
+
+Do not solve this by weakening is_established_project into accepting invalid ledgers as valid.
+
+### 18.11 N6-4 — commit cleanup and "#" messages
+
+Status:
+
+~~~
+CONFIRMED ROBUSTNESS DEFECT
+repair
+~~~
+
+Legacy/local commit paths use Git commit machinery without freezing message-cleanup semantics.
+
+The caller contract accepts any non-empty message string, while Git configuration such as:
+
+~~~
+commit.cleanup=strip
+~~~
+
+may reinterpret comment-prefixed message text and can turn a caller-supplied message whose meaningful content is only #... into an empty/changed commit message.
+
+Review-v1 Work's hermetic commit-tree -F - path already treats the message as exact bytes and does not have this ambiguity.
+
+Frozen rule for Workline-owned commit creation:
+
+~~~
+a message Workline accepted as non-empty
+must be committed with deterministic Workline-selected cleanup semantics,
+not repository/user cleanup configuration.
+~~~
+
+For Git commit-based primitives, pin cleanup behavior explicitly so comment syntax is not interpreted as instruction to discard caller content.
+
+The chosen mode must also preserve the existing documented treatment of line endings/trailing cleanup where another recovery invariant depends on it; implementation must update proof/comparison tests accordingly.
+
+Do not reject #-prefixed messages solely to work around ambient Git configuration.
+
+### 18.12 Canonical Skill-count correction
+
+Status:
+
+~~~
+CONFIRMED DOCUMENTATION DEFECT
+~~~
+
+Current registry routes seven canonical Skills:
 
 ~~~
 skills/project-start
@@ -4583,14 +4942,107 @@ skills/start
 skills/review
 ~~~
 
-Correct the canonical text.
+ProjectSTART text still contains "5 Skill ID" / "5 common Skills" wording.
 
-### README hygiene
+Update the canonical text to seven without changing routing/behavior.
 
-Remove at least:
+Regression should derive/compare against the registry-defined required set rather than introducing another manually-maintained count if practical.
 
-- legacy vault reference
-- personal absolute local path
+### 18.13 README public hygiene
+
+Status:
+
+~~~
+CONFIRMED DOCUMENTATION HYGIENE
+~~~
+
+Remove/make portable at least:
+
+- legacy Vault reference that is no longer current authority;
+- personal absolute local path examples such as D:\AIproject\workline-core.
+
+README must describe the Workline root/project relationship portably and route authority to current canonical docs.
+
+Do not rewrite historical contract files solely to remove historical machine paths unless BL-100 classifies them as live public-facing surface.
+
+### 18.14 RB10 implementation ordering
+
+Safe order:
+
+~~~
+N3 input-boundary validation
+-> N2 effect-pre separability
+-> N6 small diagnostics/classification/commit robustness
+-> canonical text + README hygiene
+~~~
+
+N4 implementation waits for:
+
+~~~
+RB3-C1 runtime set-aside semantics LANDED
+AND
+RB1 status surface LANDED
+~~~
+
+N4 design may remain frozen earlier.
+
+N2 and N3 should share one writer when they modify the same registration entrypoints.
+
+N6 items that touch the same modules are serialized with N2/N3 rather than placed on nominally separate branches.
+
+### 18.15 RB10 acceptance matrix
+
+N2:
+
+- pre-dirty roadmap.yaml / related.yaml / entity target tests for every affected owner;
+- refusal occurs before first canonical domain effect;
+- unrelated dirty path remains allowed;
+- resolving/discarding Human change permits safe retry;
+- resume does not adopt operation-produced bytes as pre-existing.
+
+N3:
+
+- newline name;
+- heading injection;
+- CR/LF variants;
+- lone surrogate;
+- invalid durable tuple/shape cases found by implementation inventory;
+- refusal before reservation/effect;
+- valid Unicode and multiline fields whose schema intentionally allows multiline still round-trip.
+
+N4:
+
+- exact-ID disposition;
+- immutable old record remains;
+- recovery no longer selects disposed target;
+- duplicate same disposition idempotent;
+- conflicting disposition fails closed;
+- status shows disposed state;
+- no lifecycle achievement/completion side effect.
+
+N6:
+
+- real mutation IDs in gate diagnostics;
+- dirty_overlap identity unchanged;
+- corrupt related.yaml reports structural invalidity rather than not_a_project;
+- # only/comment-prefixed valid message commits deterministically despite hostile commit.cleanup config.
+
+Docs:
+
+- ProjectSTART count agrees with seven routed Skills;
+- README has no legacy Vault authority claim/personal absolute root path.
+
+### 18.16 RB10 HUMAN status
+
+No new Human design decision is required.
+
+HD-1 already authorizes N3(a)'s success-to-refusal compatibility change.
+
+N4 is Human-invoked at runtime by design, but its existence/semantics do not require a new product decision.
+
+If implementation discovers that one of N3's malformed inputs can only be fixed by changing a currently supported semantic representation rather than rejecting an invalid one, stop and route that specific requirement change to HUMAN.
+
+RB10 is DESIGN_READY except for bounded execution-dependent enumeration/tests for N3(b) and the implementation-only exact N4 record shape after RB3/RB1 land.
 
 ---
 
