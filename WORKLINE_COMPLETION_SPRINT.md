@@ -6725,3 +6725,701 @@ RB3-C1 READY_TO_IMPLEMENT brief complete
 ~~~
 
 Production implementation has not been declared complete merely because the design contracts are committed.
+
+
+---
+
+## 26. RB3-C1 implementation brief
+
+Status:
+
+~~~
+READY_TO_IMPLEMENT
+architecture exploration closed
+bounded implementation probes remain
+~~~
+
+This brief translates RB3-C1 into a production implementation task.
+
+It does not reopen the frozen Class A/B/C, invalidation, successor-Run, publication or set-aside semantics.
+
+### 26.1 Primary implementation surfaces
+
+Expected production surfaces from static inspection:
+
+~~~
+src/workline/start.py
+src/workline/start_review.py
+src/workline/review/work_review.py
+src/workline/review/recovery.py
+src/workline/review/gate.py
+src/workline/review/validate.py
+src/workline/review/store.py
+src/workline/review/paths.py
+src/workline/review/workcommit.py
+src/workline/mutation.py           only if the existing publication hook cannot express the new role cleanly
+~~~
+
+Expected canonical runtime text surfaces:
+
+~~~
+.claude/skills/start/SKILL.md
+.claude/skills/review/SKILL.md
+registry.md rules/git only where the existing generic exact-publication/recovery wording needs the F4 specialization
+~~~
+
+Do not change registry routing or add a new Skill.
+
+No Receipt/Consumption/Supersession schema change is expected under the final same-Run-G4 design.
+
+### 26.2 Existing primitives that must be reused
+
+Reuse rather than duplicate:
+
+- Work generation mutations: start_review._start_generation;
+- work-result-v1 generation commit dispatch: roadmap_review._finish_generation;
+- pending generation resume: start_review.resolve_pending_generation;
+- gate generation allocation/serialization: review.gate;
+- immutable CandidateSnapshot/TaskInput/Gate/Receipt/Supersession storage: ReviewStore;
+- same-Run generation-4 Supersession validation: review.validate;
+- complete stored-object delta/tree/raw-parent readers used by F3 proof;
+- Work hermetic commit primitives and C-1 recovery: review.workcommit;
+- exact-SHA publication primitive and destination pin/barrier;
+- Review namespace containment/checkout proof;
+- current Work Context/Policy/Evidence builders;
+- Mutation durable notes/reservations and idempotent stage replay.
+
+Do not create a second Review store, second publication subsystem or Class-A-specific Git implementation.
+
+### 26.3 First-Run compatibility and successor reservation
+
+Keep the current initial reservation:
+
+~~~
+review_run_key(work-result-v1, work_id)
+~~~
+
+unchanged.
+
+Add a deterministic successor reservation key whose identity is the exact predecessor Review Run.
+
+Recommended semantic shape:
+
+~~~
+review-successor-run:<predecessor_review_run_id>
+~~~
+
+with the usual ID-kind validation.
+
+Add one helper in review.gate rather than constructing the key ad hoc in start_review.
+
+Required invariants:
+
+- same predecessor -> same reserved successor ID on replay;
+- predecessor -> at most one successor in F4;
+- successor target_identity remains the same Work ID;
+- successor operation_identity remains the same Work operation identity;
+- conflicting successor reservation -> reconcile_required;
+- legacy/initial in-flight mutation bytes are unchanged.
+
+### 26.4 Replace run_in_flight single-Run assumption
+
+Current start_review.run_in_flight rejects more than one Work Run reservation.
+
+Replace that assumption with one recovery selector that can distinguish:
+
+- initial Run before any successor;
+- old Run G4 invalidated;
+- successor reserved but G1 not yet committed;
+- successor G1/G2/G3 in progress;
+- successor sealed and ready for adopted-result publication;
+- malformed/ambiguous multiple-successor state.
+
+start.py should continue to have one review-v1 resume branch, but that branch calls the new selector/continuation API instead of assuming the first Run is the only Run.
+
+Do not change legacy START dispatch.
+
+### 26.5 Generalize recovery discovery narrowly
+
+review/recovery.py already has reusable common mechanics:
+
+- matching by review_kind + operation_identity;
+- committed-history discovery;
+- whole-record persistence proof;
+- no age/newest selection;
+- set_aside_runs harvesting;
+- ambiguous-recoverable refusal.
+
+Its classification/reconstruction tail is planning-specific.
+
+Refactor only enough to allow a Work adapter/callback set for:
+
+- chain-shape validation;
+- Candidate/TaskInput reconstruction;
+- authorization predicate;
+- consumed/terminal-effect classification;
+- currency/staleness classification.
+
+Planning behavior and its tests must remain byte/semantic compatible.
+
+Do not copy the whole discovery algorithm into a second Work-only module unless a bounded probe proves reuse would materially entangle unrelated planning semantics.
+
+### 26.6 Work request v1/v2 reader
+
+work_review.request_envelope currently emits the v1 shape without set_aside_runs.
+
+Implement the frozen v2 request envelope with:
+
+- explicit request version distinction;
+- exact sorted set_aside_runs;
+- stable review_run_id + reason fields;
+- no duplicate Run ID;
+- no self-reference;
+- request digest covering the whole envelope.
+
+TaskInput record version remains unchanged unless a concrete parser constraint proves otherwise.
+
+Reader behavior:
+
+~~~
+v1
+-> existing exact semantics
+-> no implicit set-aside list
+
+v2
+-> validate exact new shape
+-> validate/sort set_aside_runs canonically
+~~~
+
+New successor Runs use v2.
+
+Do not rewrite committed v1 TaskInputs.
+
+### 26.7 Durable Class-A checkpoint
+
+Add one versioned START mutation note/record for Class-A recovery state.
+
+The exact note name is implementation-owned, but the payload must bind the frozen 11.18.3 fields.
+
+The checkpoint is written only after strict Class-A eligibility and remote-publication precondition succeed and before old G4 is recorded.
+
+Replay:
+
+- exact same state -> continue;
+- contradictory K1/Run/Receipt/stage identity -> reconcile;
+- missing immutable K1/object -> reconcile;
+- branch/lineage no longer provable -> Class C/reconcile;
+- K1 already remotely published -> historical/unauthorized-publication handling, no adoption.
+
+No checkpoint is created for Class B/C.
+
+### 26.8 Class-A classifier
+
+Do not implement Class A by catching every ReconcileRequired from prove_result.
+
+Classification is explicit and fail-closed.
+
+First establish hard safety facts independently:
+
+- exact operation-owned K1 identity;
+- raw one-parent identity;
+- complete parent->K1 delta;
+- closed operation-owned path set;
+- no unexpected entry;
+- branch/ref/raw-lineage proof;
+- old Run/R1 identity and non-consumption;
+- no incompatible durable publication/terminal stage;
+- remote-publication precondition.
+
+Only then classify:
+
+~~~
+A1
+persisted artifact/message identity differs from old Candidate
+but all actual K1 bytes/tree/message are wholly operation-owned and reconstructible
+
+A2
+persisted K1 is still the exact operation-owned result
+but current authorization Context/Policy/Evidence currency requires fresh authorization
+before any incompatible publication/terminal effect is durable
+
+B
+complete K1 delta has unexpected/non-owned content
+
+C
+ownership/ref/lineage/complete-delta/remote state cannot be positively proven
+~~~
+
+Malformed Review namespace, missing immutable records, contradictory activation, existing Consumption, unknown destination state and foreign lineage are never downgraded into A.
+
+### 26.9 Exact K1 recovery probe
+
+Bounded implementation probe P1:
+
+Determine the exact existing F3 primitive that recovers the operation-owned K1 ID when:
+
+- the result commit object/ref update exists;
+- the normal post-commit proof fails or execution is interrupted;
+- runtime resumes from the durable START mutation.
+
+Prefer the existing prepared_commit_id / commit_id / workcommit C-1 recovery facts.
+
+Do not identify K1 from:
+
+- HEAD alone;
+- commit message;
+- newest commit;
+- path similarity.
+
+If current helpers do not expose the already-proven exact K1 to F4, add the narrowest accessor/checkpoint needed without changing C-1 ownership semantics.
+
+This is an implementation probe, not a design choice.
+
+### 26.10 Remote-publication precondition probe
+
+Bounded implementation probe P2:
+
+Locate/reuse the existing positive destination-publication classifier used by current mutation/publication safety and P1 R7 semantics.
+
+Before old G4:
+
+- destination pin must still match;
+- exact K1 publication state must be positively classifiable;
+- already published -> no normal Class A;
+- divergent/unknown/unreadable -> reconcile/STOP as frozen;
+- no stale remote-tracking heuristic.
+
+Do not add a second weaker remote ancestry algorithm.
+
+### 26.11 C2 reconstruction
+
+Build C2 from committed objects.
+
+Inputs:
+
+- predecessor Candidate declaration set;
+- exact parent(K1);
+- exact K1;
+- old Candidate/Run identity;
+- current activation.
+
+For every predecessor declared artifact entry:
+
+- old identity from parent(K1);
+- new identity from K1;
+- payload from K1 object for file/symlink kinds;
+- no payload for absent/gitlink kinds.
+
+The complete parent(K1)->K1 delta must have no path outside the declaration set.
+
+Preserve inert declared entries.
+
+Bind the exact persisted K1 result message.
+
+C2 resulting-tree identity = exact K1 tree.
+
+Then recompute fresh:
+
+- Context;
+- Effective Policy;
+- Evidence;
+- reviewer descriptor/request v2.
+
+No working-tree artifact byte participates in C2 reconstruction.
+
+### 26.12 Old G4 invalidation helper
+
+Add the Work equivalent of planning _invalidate using the existing Work generation path.
+
+Expected shape:
+
+~~~
+old G3 sealed / R1
+-> old G4 open
+   + Work invalidation evidence digest
+   + Supersession(R1)
+~~~
+
+Reuse records.Supersession unchanged.
+
+Extend start_review._require_shape to accept exactly the frozen fourth-generation invalidation shape and reject generation 5.
+
+The old Run after G4 is not returned as Sealed and is never consumable.
+
+### 26.13 Successor G1-G3
+
+After old G4 commits:
+
+1. reserve/read the deterministic successor Run;
+2. create v2 request with old Run in set_aside_runs;
+3. G1 persists C2 snapshot + TaskInput + accepted descriptor;
+4. launch/settle reviewer exactly through the existing Work reviewer protocol;
+5. G2 uses the normal Work settlement/adjudication records;
+6. only an authorizing G2 proceeds;
+7. normal capability proof applies to the exact K1 resulting tree;
+8. G3 issues R2.
+
+P4 later changes blocking-review repair behavior; F4 does not repair a non-authorizing successor Review.
+
+At the F4 checkpoint, a non-authorizing replacement remains non-authorized/reconcile/STOP under the current Work policy rather than inventing the P4 Repair Loop early.
+
+### 26.14 K_adopt exact identity probe
+
+Bounded implementation probe P3:
+
+After successor G3 is persisted, obtain the exact generation-3 commit ID from positive generation persistence/history proof.
+
+The normal uninterrupted path may observe HEAD immediately after G3 under the Project lock, but recovery cannot treat HEAD alone as identity.
+
+If the generation commit ID is not already exposed durably after gen.complete, add/reuse a helper that proves the unique commit introducing the expected G3/R2 paths and exact generation delta.
+
+Bind the proven commit ID into the START Class-A proof/checkpoint before publication.
+
+Do not keep the generation runtime mutation merely to obtain the SHA if normal cleanup semantics remove it.
+
+### 26.15 Adopted-result proof
+
+Add one explicit adopted-result proof role, conceptually:
+
+~~~
+review_work_adopted_result_proof
+~~~
+
+The proof binds at least:
+
+- exact K1 artifact commit;
+- exact parent(K1);
+- exact C2 candidate hash;
+- old Run/R1;
+- old G4/Supersession;
+- successor Run/R2;
+- exact K_adopt = successor G3 commit;
+- closed raw lineage K1 -> old G4 -> successor G1 -> G2 -> G3;
+- every intermediate delta restricted to the exact Review records expected at that generation;
+- current Context/Policy/Evidence/activation;
+- no Consumption/terminal event yet;
+- approved destination identity.
+
+The proof is re-derived before publication record and again at publication apply.
+
+A durable proof note is a binding/pointer, never timeless truth.
+
+### 26.16 Publication validator
+
+Extend the Work publication validator with an explicit adopted-result role.
+
+Normal flow remains:
+
+~~~
+normal result publication
+terminal publication
+~~~
+
+Class A result-bearing flow becomes:
+
+~~~
+adopted-result publication of exact K_adopt
+terminal publication of exact K_terminal
+~~~
+
+Both remote result-bearing cases still allow exactly two pushes.
+
+The validator must never allow both normal-result and adopted-result publication roles in one completion.
+
+No-remote remains zero pushes.
+
+Empty-artifact normal flow remains unchanged.
+
+Class A applies only to an existing K1 result and therefore does not synthesize an empty-result adoption path unless a later contract explicitly proves a real need.
+
+### 26.17 Terminal after adoption
+
+Adapt the terminal path without changing Consumption semantics.
+
+For Class A:
+
+~~~
+Consumption.authorized_result_commit_sha = K1
+parent(K_terminal) = K_adopt
+~~~
+
+The terminal proof separately proves:
+
+- R2/C2/Consumption artifact binding to exact K1;
+- exact adoption lineage to K_adopt;
+- terminal delta exactly AuthorizedTransition + Consumption;
+- no domain result delta after K1.
+
+Normal F3 continues to require parent(K2)=K1.
+
+Do not globally weaken the normal terminal parent rule into "some descendant of K1".
+
+Select the Class-A parent rule only from the durable adoption checkpoint/proof role.
+
+### 26.18 Publication-effect immutability boundary
+
+Before automatic A2/G4, prove no old result-publication effect is durably recorded.
+
+If such an incompatible effect already exists:
+
+~~~
+reconcile required
+no mutation-record rewrite
+no stage deletion
+no replacement publication appended behind it
+~~~
+
+Add a focused regression that interrupts after old publication effect record but before apply, makes authorization stale, and proves automatic Class A is unavailable.
+
+This regression protects the Mutation Controller immutability assumption.
+
+### 26.19 Canonical authority activation
+
+When implementation lands, update canonical runtime text in the same candidate.
+
+skills/review must define at least:
+
+- Class A/B/C;
+- same-Run G4 invalidation;
+- successor Run/set-aside;
+- v1/v2 request compatibility;
+- old Receipt supersession/currentness;
+- adopted-result authorization/proof distinction;
+- no generation 5;
+- Review records remain non-lifecycle authority.
+
+skills/start must define at least:
+
+- where Class A is attempted;
+- strict eligibility;
+- exact K1/C2 recovery;
+- K1 -> old G4 -> successor Review -> K_adopt -> terminal topology;
+- exact publication points;
+- Consumption still binds K1;
+- incompatible durable publication/terminal effect -> reconcile;
+- interruption/resume rule.
+
+rules/git only needs additive text if the generic exact-SHA/no-force/no-rewrite rules do not already cover the new adopted-result publication role.
+
+Do not leave any of these runtime semantics only in this Completion Sprint file.
+
+### 26.20 Focused test surface
+
+Prefer one dedicated Work recovery/adoption test module plus focused extensions to existing primitive tests.
+
+Expected test surfaces:
+
+~~~
+tests/test_work_review_recovery.py              new, if one cohesive module is clearer
+tests/test_work_review_runtime.py
+tests/test_work_terminal.py
+tests/test_work_persistence.py
+tests/test_review_gate_generation.py
+tests/test_review_planning_recovery.py          regression: planning behavior unchanged
+tests/test_review_planning_generations.py       regression: planning invalidation unchanged
+~~~
+
+Do not rewrite existing P3 tests merely to fit F4.
+
+### 26.21 Required focused tests — compatibility
+
+- existing v1 Work TaskInput/request reconstructs unchanged;
+- new ordinary Work Run can use v2 with empty set_aside_runs;
+- successor v2 request names the exact predecessor and sorts canonically;
+- duplicate/self/invalid set-aside entry fails closed;
+- existing first-Run reservation key unchanged;
+- successor reservation is deterministic/idempotent;
+- conflicting successor ID fails closed;
+- legacy START does not read F4 Review recovery state.
+
+### 26.22 Required focused tests — invalidation
+
+- sealed old Work Run invalidates as exact G4 + Supersession;
+- G4 and Supersession are one generation mutation;
+- crash before effect, after one create, after commit, before generation completion all resume to one exact G4;
+- no generation 5;
+- old R1 cannot be consumed after G4;
+- planning same-Run invalidation regressions remain unchanged.
+
+### 26.23 Required focused tests — C2/Class A
+
+- A1 exact K1 committed projection becomes C2 without working-tree reads;
+- inert declared entry remains in C2;
+- file/symlink/gitlink/deletion identities reconstruct correctly;
+- extra non-owned K1 delta -> Class B/reconcile;
+- unprovable K1 ownership/raw parent/ref -> Class C/reconcile;
+- already-published K1 -> historical/unauthorized publication path, no G4/successor;
+- unknown/divergent destination -> no adoption;
+- changed/tampered Review namespace -> no Class A;
+- existing Consumption -> no Class A;
+- incompatible durable result-publication effect -> no automatic A2;
+- terminal stage already durable -> no Class A.
+
+### 26.24 Required focused tests — successor Review
+
+- crash after old G4 before successor reservation;
+- successor reserved but G1 absent;
+- G1 partly/fully persisted;
+- reviewer crash/result retry;
+- G2 persisted;
+- G3/R2 persisted;
+- every retry selects the same successor;
+- old Run is never resumed after G4;
+- no duplicate Receipt/Supersession;
+- non-authorizing successor does not invent P4 repair behavior.
+
+### 26.25 Required focused tests — adoption publication
+
+Remote case:
+
+- first Class-A push publishes exact K_adopt, never K1 alone;
+- published lineage contains K1 + old G4/Supersession + successor G1/G2/G3/R2;
+- publication validator accepts exactly one adopted-result role;
+- normal-result and adopted-result roles cannot coexist;
+- proof note missing/mismatched -> no push;
+- destination changes -> no push;
+- barrier still applies;
+- exact refspec, no force;
+- crash before/after publication record/apply resumes without duplicate push.
+
+No-remote case:
+
+- zero pushes;
+- same adoption proof/currentness still required;
+- K_adopt remains local exact lineage anchor.
+
+### 26.26 Required focused tests — terminal
+
+- Class-A Consumption binds R2 and authorized_result_commit_sha=K1;
+- parent(K_terminal)=K_adopt;
+- terminal delta has only the authorized events + Consumption;
+- no result/domain delta appears after K1;
+- normal F3 still requires parent(K2)=K1;
+- terminal proof/currentness re-evaluated;
+- terminal publication exact K_terminal;
+- crash windows create no duplicate events/Consumption;
+- recorded completion proof returns completed only after the same final conditions as F3.
+
+### 26.27 Interruption matrix
+
+At minimum inject interruption/failure at:
+
+1. K1 exists before Class-A checkpoint;
+2. checkpoint durable before old G4;
+3. old G4 effect record before apply;
+4. old G4 partial apply;
+5. old G4 commit before generation completion;
+6. successor reservation before G1;
+7. successor G1 effect/commit;
+8. reviewer launch/settlement;
+9. successor G2 effect/commit;
+10. successor G3/R2 effect/commit;
+11. K_adopt identity proven before proof note;
+12. adopted-result publication recorded before apply;
+13. adopted-result publication applied;
+14. terminal event/Consumption partial apply;
+15. K_terminal commit;
+16. terminal proof note;
+17. terminal publication record/apply;
+18. recorded-completion proof before START mutation cleanup.
+
+Every row must prove:
+
+- same durable identities on retry;
+- no new Candidate/Run/Receipt/Supersession/Consumption when one already exists;
+- no branch-tip/force/history rewrite;
+- no fallback to legacy;
+- no duplicate publication.
+
+### 26.28 Bounded implementation probes
+
+Coding agent may investigate only these unresolved implementation facts before editing:
+
+P1. Which existing C-1/workcommit field/helper is the canonical exact K1 identity after commit/interruption?
+
+P2. Which existing publication/destination-read primitive exactly implements the R7 positive already-published/divergent/unknown classification?
+
+P3. What is the narrowest positive way to recover the exact successor G3 commit SHA after its generation mutation has completed and runtime record cleanup occurred?
+
+P4. Can review/recovery.py accept Work semantics through narrow callbacks/adapters without destabilizing planning recovery? If not, show the exact coupling that requires a small shared-core extraction.
+
+P5. Which current proof helper should read the exact persisted K1 commit message/object identity for C2, without invoking porcelain semantics that can be altered by replace/graft/config?
+
+These probes may choose local function placement.
+
+They may not change the frozen recovery semantics.
+
+If a probe reveals the frozen contract is physically impossible under the existing immutable Mutation/Review model, STOP and report that exact contradiction rather than silently weakening the contract.
+
+### 26.29 Explicit non-scope
+
+RB3-C1 implementation does not include:
+
+- P4 Repair Batch/recurrence;
+- P5 durable Review history;
+- generic positive HEAD-reuse;
+- adaptive Project/Global policy;
+- Phase Integration Review;
+- RB10 Human disposition command;
+- RB1 status;
+- performance optimization;
+- self-hosting;
+- changing legacy START;
+- making review-v1 mandatory.
+
+Do not opportunistically implement those while touching shared modules.
+
+### 26.30 Regression gate
+
+Before candidate review:
+
+1. new RB3-C1 focused tests PASS;
+2. all existing Work Review/P3 tests PASS;
+3. planning Review recovery/generation suites PASS unchanged;
+4. legacy START focused tests PASS;
+5. canonical registry/Skill authority tests PASS;
+6. full canonical repository regression command PASS.
+
+At the current baseline the full command is:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+Use the then-current canonical command if it legitimately changes before execution.
+
+### 26.31 Candidate report
+
+Execution Writer returns:
+
+- starting main SHA/tree;
+- exact implementation candidate SHA/tree;
+- changed files;
+- P1-P5 bounded probe answers with code references;
+- canonical authority text updated;
+- focused test list/results;
+- planning/legacy regression results;
+- full suite result;
+- any accepted residuals;
+- any STOP/HUMAN trigger;
+- confirmation no production landing/push occurred unless separately authorized.
+
+Do not summarize a failed probe as an implementation success.
+
+### 26.32 RB3-C1 completion gate
+
+RB3-C1 becomes REVIEW_CANDIDATE only when:
+
+- Class A/B/C classification exists in production;
+- old same-Run G4 invalidation works;
+- successor Run recovery works;
+- C2 reconstructs exact K1 from committed objects;
+- request v1 compatibility/v2 set-aside works;
+- K_adopt is exact successor G3;
+- adopted-result publication is exact and independently validated;
+- terminal Consumption binds K1 while K_terminal parents K_adopt;
+- interruption matrix is covered;
+- current runtime canonical Skills carry the semantics;
+- required regressions pass.
+
+Only after independent exact-candidate review PASS and landing does RB3-C1 become LANDED and unblock P4 implementation.
