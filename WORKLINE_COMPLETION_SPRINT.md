@@ -16376,3 +16376,309 @@ RB2 is complete only when:
 - conditional bootstrap/routing meaning change reaches Human instead of being smuggled in as performance work;
 - WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md holds the final public-safe evidence;
 - BACKLOG BL-007 disposition matches the measured outcome.
+---
+
+## 37. Production execution plan
+
+Status:
+
+~~~
+EXECUTION_PLAN_FROZEN
+PRODUCTION_DISPATCH = WAITING_FINAL_INDEPENDENT_COLD_READ
+landing_authorization = HD-2W unresolved until first reviewed candidate is ready
+~~~
+
+This section converts the frozen RB contracts and implementation briefs into one dispatch / collision / landing schedule.
+
+It does not authorize production implementation before the final independent cold-read closure inherited from the 2026-10-03 sprint-preparation task.
+
+### 37.1 Gate 0 — pre-implementation closure
+
+Before any production worker edits workline-core:
+
+1. fix the exact current canonical main SHA used as the cold-read input;
+2. run one genuinely independent cold reader against the final canonical completion package without answer-key context;
+3. evaluator confirms the reader can reconstruct the completion scope, authority/dependency model, Human policies and landing safety without a contradiction;
+4. any ambiguity repair changes the canonical bytes and therefore requires the complete cold read again;
+5. only a PASS on the final bytes opens production dispatch.
+
+The old local sprint package is not current runtime/canonical authority. It remains preparation evidence until this closure confirms that no unique still-needed instruction exists outside the current canonical completion document.
+
+### 37.2 Launch wave after Gate 0 PASS
+
+Start three implementation lanes from the same then-current main baseline:
+
+~~~
+Lane A  RB3-C1
+Lane B  RB1
+Lane C  RB10 N2/N3/N6 non-colliding work
+~~~
+
+All three are implementation-capable from their frozen briefs.
+
+Lane A is the critical-path head.
+
+Lane B is independent and unlocks RB2 plus one half of RB10-N4's dependency.
+
+Lane C may implement N2/N3 and N6 work that does not touch an active Lane-A surface. In particular N6-1/review-gate work waits until Lane A releases `src/workline/review/gate.py`.
+
+No worker pushes or lands production main.
+
+### 37.3 Worker candidate rule
+
+Each worker returns a candidate package containing at least:
+
+- starting main SHA;
+- worker candidate SHA(s);
+- tree SHA;
+- exact changed paths/diff;
+- brief section implemented;
+- focused tests and required broader suite results;
+- bounded probes performed and their facts;
+- known collision/shared-file facts;
+- unresolved STOP/Human condition, if any.
+
+A worker candidate is not landing authority.
+
+### 37.4 Parallel implementation versus serialized integration
+
+Parallel worktrees/branches are implementation isolation only.
+
+They do not make reviewed candidates independently landable after main moves.
+
+Before Formal Review/landing, carry the candidate onto the current integration main or prove the frozen positive carry rule.
+
+If carrying changes candidate bytes or semantic context in a way not covered by a positive proof, freeze a new candidate and review that exact candidate.
+
+Formal Review always evaluates the exact candidate intended to land, not merely the worker's earlier branch-tip SHA.
+
+### 37.5 Landing scheduler
+
+Landing is serialized and race-gated under §20.
+
+Priority rule:
+
+~~~
+a ready critical-path candidate outranks a side-lane landing
+unless the side landing can complete without forcing the ready critical candidate
+to be regenerated or re-reviewed.
+~~~
+
+Initial landing preference:
+
+~~~
+1. RB3-C1
+2. RB1 when ready
+3. RB10 N2/N3/N6 when N6-1 is integrated and the exact candidate is reviewed
+~~~
+
+This is a preference, not a semantic dependency ordering. A side candidate may land opportunistically while a critical-path implementation is still running if the carry proof remains simple and the critical candidate has not already been frozen for review.
+
+### 37.6 Immediately after RB3-C1 lands
+
+Dispatch RB3-P4 immediately from the landed RB3-C1 baseline.
+
+Lane C may now finish N6-1 because the RB3-C1 writer has released review/gate.py.
+
+Do not wait for RB1 merely to start P4.
+
+### 37.7 Immediately after RB1 lands
+
+Two additional activities become semantically eligible:
+
+~~~
+RB2 baseline performance measurement
+RB10-N4 implementation, provided RB3-C1 is also LANDED
+~~~
+
+RB2 is a measurement lane, not a production writer. It may run beside P4.
+
+RB10-N4 shares recovery/status/review integration surfaces. Before starting its writer, compare its exact expected touched paths with the currently active P4 writer. If a shared semantic file is active, serialize the shared surface rather than relying on separate worktrees.
+
+Default conservative schedule: allow P4 to release shared Review-recovery surfaces before N4 edits them unless exact preflight proves the writers are disjoint.
+
+### 37.8 RB10 N2/N3/N6 versus RB5
+
+RB10 N2/N3/N6 and RB5 both can touch registration/Roadmap/CREATE surfaces.
+
+Prefer to finish and land RB10 N2/N3/N6 before RB5 begins production edits.
+
+If that does not happen, RB5 and RB10 must be serialized on every shared registration surface and the later candidate must be rebuilt/re-reviewed on the landed earlier one.
+
+### 37.9 Critical-path continuation
+
+After RB3-P4 lands:
+
+~~~
+RB4-P5
+~~~
+
+After RB4-P5 lands, two branches open:
+
+~~~
+critical branch: RB6-P6 -> RB7-P7
+parallel branch: RB5
+~~~
+
+RB6 has critical-path priority because RB7 and then RB8 depend on it.
+
+RB5 may implement in parallel after a touched-path collision preflight. Landing remains serialized.
+
+### 37.10 RB8 gate
+
+RB8 begins only after:
+
+~~~
+RB5 LANDED
+AND
+RB6 LANDED
+AND
+RB7 LANDED
+~~~
+
+RB8 consumes RB5 achievement evidence and RB6 shadow-authority detection and relies on RB7 root/global-policy closure.
+
+Do not begin RB8 migration acceptance or BACKLOG disposition early.
+
+### 37.11 RB2 closeout scheduling
+
+RB2 baseline may begin after RB1 lands.
+
+If Trigger A/B are both false, close as MEASURED_NO_OPT without a production optimization candidate.
+
+If a trigger is proven, freeze the optimization hypothesis and create a separate optimization candidate.
+
+Any later feature that materially changes the exact measured status/validation path before final completion requires the RB2 evidence to state the SHA/path measured and, where §36 equivalence requires it, re-run the representative measurement on the integrated baseline.
+
+### 37.12 RB10-N4 closeout scheduling
+
+N4 requires RB3-C1 + RB1 landed semantics but is not on the RB3->RB4->RB6->RB7 critical chain.
+
+Schedule it in the earliest collision-free gap after those prerequisites.
+
+N4 must be DONE before RB9 begins.
+
+Do not let N4 delay P4 merely because it became semantically eligible at the same time.
+
+### 37.13 RB9 gate
+
+RB9 starts only when:
+
+~~~
+RB1 DONE
+RB2 DONE
+RB3 DONE
+RB4 DONE
+RB5 DONE
+RB6 DONE
+RB7 DONE
+RB8 DONE
+RB10 DONE
+and no production writer remains active
+~~~
+
+RB9 then owns:
+
+- final completion-map audit;
+- BL-100 repository-surface classification/cleanup;
+- full-suite/final candidate closure;
+- fresh-session acceptance;
+- Human-selected real-Project acceptance under HD-3;
+- final repository completion judgment.
+
+RB9 is not used to finish an implementation item that should already have been closed by its own RB.
+
+### 37.14 Formal Review and landing authority
+
+DESIGN_CHECK never authorizes landing.
+
+Every production candidate requires independent exact-candidate review under its brief and §20.
+
+Immediately before the first reviewed candidate would land, resolve HD-2W with the Human:
+
+~~~
+after Control Plane review PASS, exact candidate identity, required tests and race gate,
+may the Execution Writer fast-forward main without per-landing Human confirmation?
+~~~
+
+Until HD-2W is resolved, the Execution Writer may prepare reviewed candidates but may not assume autonomous production landing authority.
+
+### 37.15 Collision preflight required before every writer starts
+
+For the new writer, list expected paths from its canonical brief and compare them with every active writer's actual/expected touched paths.
+
+Classify each overlap:
+
+~~~
+no shared path                          -> parallel implementation allowed
+shared doc/test only, independent bytes -> parallel only with explicit later carry/review
+shared production semantic file         -> serialize that writer/surface
+unknown actual scope                    -> inspect first; do not assume disjoint
+~~~
+
+Known frozen collision points include:
+
+- RB3-C1 / RB10 N6-1: review/gate.py;
+- RB3-C1/P4 / RB10-N4: Review recovery/integration surfaces may overlap;
+- RB10 N2/N3 / RB5: Roadmap/CREATE/registration surfaces;
+- RB1 / RB5/RB6/N4: later status additions are additive and must preserve RB1 base meaning;
+- RB8 / RB10 docs: README and canonical prose edits must be carried serially;
+- RB9: exclusive final surface; no production writer remains.
+
+### 37.16 Main-movement / carry rule
+
+When a parallel candidate's base is no longer current main:
+
+1. do not silently rebase/cherry-pick and call the old review valid;
+2. determine whether §20 positive carry proof fully establishes identical reviewed bytes/semantics;
+3. if yes, record the proof and freeze the carried exact candidate;
+4. otherwise rebuild on current main, re-run required tests, and independently review the new exact candidate.
+
+Never choose landing order based on avoiding review work at the cost of violating dependency/critical-path priority.
+
+### 37.17 Dispatch state table
+
+At Gate 0 PASS:
+
+~~~
+RB3-C1          DISPATCH
+RB1             DISPATCH
+RB10 N2/N3/N6   DISPATCH with N6-1 shared-file hold
+RB3-P4          WAIT RB3-C1 LAND
+RB4-P5          WAIT RB3-P4 LAND
+RB6-P6          WAIT RB4 LAND
+RB7-P7          WAIT RB6 LAND
+RB5             WAIT RB4 LAND
+RB8             WAIT RB5 + RB7 LAND
+RB10-N4         WAIT RB3-C1 + RB1 LAND and collision-free writer slot
+RB2             WAIT RB1 LAND
+RB9             WAIT all production blocks DONE
+~~~
+
+### 37.18 Work conservation
+
+Once Gate 0 passes, do not spend coding-agent runs re-designing frozen RB contracts.
+
+Execution Writers use the canonical implementation briefs as instructions and perform only:
+
+- bounded live-code binding/reconnaissance explicitly left by the brief;
+- production edits;
+- probes/tests;
+- candidate preparation;
+- measurement/acceptance where assigned.
+
+If live implementation contradicts a frozen brief, STOP with the exact contradiction. Do not let a worker silently redesign the contract.
+
+### 37.19 Pre-implementation closure state
+
+As of this plan freeze:
+
+~~~
+canonical contracts/briefs = frozen
+execution plan             = frozen
+production code dispatch   = blocked only by final independent cold-read closure
+HD-2W                      = intentionally deferred to first landing
+HD-3                       = intentionally deferred to RB9 real-Project selection
+~~~
+
+The final independent cold read is a verification gate, not a request to redesign the sprint.
