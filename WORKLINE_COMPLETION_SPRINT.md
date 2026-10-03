@@ -11524,3 +11524,1256 @@ RB6/P6 is complete only when:
 - no push/landing before independent exact-candidate review PASS.
 
 After RB6 lands, RB7/P7 becomes implementation-unblocked.
+
+---
+
+## 31. RB7-P7 implementation brief — Global Promotion / Global Policy Change
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT_AFTER_RB6_LANDS
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §16.
+
+It does not replace §16. Where wording conflicts, §16 remains the semantic contract and this section fixes the implementation allocation required to realize it in the current live code.
+
+Dependency:
+
+~~~
+RB3-C1
+-> RB3-P4
+-> RB4-P5
+-> RB6-P6
+-> RB7-P7
+~~~
+
+RB7 never turns the Workline root into a Workline Project.
+
+### 31.1 Primary responsibility split
+
+Global promotion semantics and root meta-review adapter:
+
+~~~
+src/workline/review/global_policy.py
+~~~
+
+Workline-root policy operation owner:
+
+~~~
+src/workline/global_policy.py
+~~~
+
+Single-purpose root maintenance runtime:
+
+~~~
+src/workline/root_maintenance.py
+~~~
+
+Shared Review namespace abstraction:
+
+~~~
+src/workline/review/namespace.py
+~~~
+
+Existing P6 policy loader remains in:
+
+~~~
+src/workline/review/policy.py
+~~~
+
+and is extended so the same loader interface reads either:
+
+- derived-baseline before P7 materialization;
+- materialized review-policy/global-policy.yaml after P7 lands.
+
+Do not create .workline/project.yaml in the Workline root, a root Roadmap/Phase/Work lifecycle, a root ProjectStore fiction, a second Review schema/chain implementation, or a generic second mutation framework for arbitrary root writes.
+
+### 31.2 Initial zero-semantic-change materialization
+
+The P7 implementation candidate itself adds:
+
+~~~
+review-policy/global-policy.yaml
+~~~
+
+with Global policy version 1.
+
+Its normalized semantics must exactly equal the P6 derived GlobalPolicyBaseline at the P7 implementation transition.
+
+The file stores adaptive policy data only and cannot redefine fixed meta-rules.
+
+Minimum normalized logical shape:
+
+~~~
+schema
+version
+global_policy_version
+parent_global_policy_digest
+loader_semantics_identity
+fixed_meta_rules_identity
+settings
+~~~
+
+For version 1:
+
+~~~
+global_policy_version = 1
+parent_global_policy_digest = null
+
+settings:
+  review.discovery.required_slots = 1
+  review.reverification.extra_scope_steps = 0
+~~~
+
+The P7 implementation landing also adds:
+
+~~~
+.workline-root-runtime/
+~~~
+
+to the root .gitignore.
+
+No Promotion Packet, Global change record, evaluation or patch note is fabricated for this initial materialization.
+
+### 31.3 P6 loader transition
+
+Before materialization:
+
+~~~
+source_mode = derived-baseline
+~~~
+
+After materialization:
+
+~~~
+source_mode = materialized-global-policy
+~~~
+
+The same canonical loader returns the same normalized baseline semantics at the transition.
+
+No Project Profile rewrite/backfill occurs.
+No in-progress Review changes effective_policy_hash.
+
+### 31.4 Shared Review namespace abstraction
+
+Refactor path/store validation through an explicit immutable ReviewNamespace descriptor.
+
+At minimum it owns:
+
+- canonical Review root path;
+- allowed Review subdirectories;
+- gate directory/path construction;
+- Receipt/Consumption/Supersession paths;
+- CandidateSnapshot/TaskInput paths;
+- P4 report/adjudication/repair paths after RB3-P4 lands;
+- record-path shape validation.
+
+Provide:
+
+~~~
+PROJECT_REVIEW_NAMESPACE
+ROOT_POLICY_REVIEW_NAMESPACE
+~~~
+
+where:
+
+~~~
+PROJECT_REVIEW_NAMESPACE.root = .workline/review
+ROOT_POLICY_REVIEW_NAMESPACE.root = review-policy/review
+~~~
+
+Existing paths.py public Project helpers remain source-compatible and delegate to PROJECT_REVIEW_NAMESPACE.
+
+### 31.5 ReviewStore / committed reader parameterization
+
+Refactor the common read core so both working-tree and committed-object readers use the supplied namespace.
+
+Project callers remain unchanged by default.
+
+Root policy callers use ROOT_POLICY_REVIEW_NAMESPACE.
+
+The shared core remains the one implementation of:
+
+- canonical record parsing;
+- Gate chain continuity;
+- predecessor digest validation;
+- Receipt identity;
+- Consumption uniqueness;
+- Supersession validation;
+- CandidateSnapshot/TaskInput provenance;
+- P4 record validation where applicable.
+
+CommittedReviewStore becomes namespace-aware.
+
+Do not copy Gate-chain validation into a root-specific implementation.
+
+### 31.6 Root Review namespace
+
+P7 owns:
+
+~~~
+review-policy/review/
+  gates/
+  receipts/
+  consumptions/
+  supersessions/
+  candidate-snapshots/
+  task-inputs/
+  reports/
+  adjudications/
+~~~
+
+plus other P4 immutable directories actually required by the landed P4 schemas.
+
+It does not contain Project Work-terminal activation or Project P5 history.
+
+### 31.7 Root Review write containment
+
+Root Review immutable writes reuse the same fsafe no-follow containment primitive and canonical serializer as Project Review.
+
+The namespace root differs; safety semantics do not.
+
+Indirection/reparse points are refused.
+
+Immutable root Review records are create-only.
+
+### 31.8 Root maintenance runtime
+
+Add exact ignored local runtime layout:
+
+~~~
+.workline-root-runtime/
+  global-policy.lock
+  holder.json
+  mutations/
+    <root_policy_mutation_id>.yaml
+  maintenance-authorization.yaml
+  tmp/
+  no-hooks/
+  no-config
+~~~
+
+Nothing there is policy authority, Review authority or evidence.
+
+The runtime may disappear.
+
+Loss of runtime state never authorizes adoption by guess.
+
+### 31.9 Root maintenance lock
+
+Extract/reuse the low-level OS nonblocking file-lock primitive currently used by Project oplock without changing Project lock semantics.
+
+Root policy maintenance takes:
+
+~~~
+.workline-root-runtime/global-policy.lock
+~~~
+
+before reading mutable root maintenance state.
+
+It does not take a Project execution lock.
+
+No forced unlock/stale-lock cleanup.
+
+holder.json is diagnostic only.
+
+### 31.10 Root maintenance mutation record
+
+Use one single-purpose root policy mutation schema.
+
+It is not the Project MutationController schema and cannot write arbitrary root paths.
+
+Stable ID kind:
+
+~~~
+root_policy_mutation
+~~~
+
+The record contains at least:
+
+- mutation_id;
+- operation = global-policy-change;
+- status;
+- invocation identity;
+- exact root branch/ref;
+- exact frozen base commit;
+- current Global policy digest/version;
+- reserved Review/promotion/change IDs;
+- exact owned write scope;
+- durable stage/effect facts;
+- publication destination binding when applicable.
+
+Allowed canonical effects are closed to:
+
+- immutable create under review-policy/review;
+- immutable Promotion Packet create;
+- immutable Global change record create;
+- immutable Patch Note create;
+- exact global-policy.yaml compare-and-replace;
+- immutable Global Consumption create;
+- exact root Git commit;
+- exact root Git push.
+
+No other root path is writable through this controller.
+
+### 31.11 Replay-stable root reservations
+
+Root maintenance implements the same semantic reservation rule as Mutation.reserve_id:
+
+~~~
+stable reservation key
+-> first allocation stored durably
+-> retry returns same ID
+~~~
+
+Add explicit kinds:
+
+~~~
+root_policy_mutation
+review_promotion_packet
+review_global_policy_change
+review_global_policy_evaluation
+~~~
+
+Common Review IDs remain review_run, review_task, review_receipt and review_consumption.
+
+Runtime-loss recovery may create a new root_policy_mutation ID only when the old runtime record is gone and committed root Review/policy records positively reconstruct the same operation.
+
+Recovered canonical IDs are rebound, never reallocated.
+
+### 31.12 Root maintenance authorization
+
+When the Workline root has a remote, global-policy-change cannot begin without exact Human-approved local authorization.
+
+Expose root-maintenance CLI/API owned by the Workline root implementation, for example:
+
+~~~
+run-workline.py root-policy-maintenance-status
+run-workline.py root-policy-maintenance-authorize
+~~~
+
+Authorization requires explicit caller confirmation of:
+
+- remote name;
+- exact full destination branch ref;
+- exact active push locator.
+
+Those inputs are compared to current Git configuration before the local authorization is written.
+
+The authorization record binds:
+
+- contract/version;
+- opaque local root repository identity;
+- remote;
+- exact full branch ref;
+- exact approved locator.
+
+Credential-bearing locator material is refused.
+
+The record is local/ignored and clone-specific.
+
+It is never inferred from origin.
+
+A remote-less root needs no publication authorization.
+
+### 31.13 Root repository identity
+
+Authorization is bound to the local repository instance, not merely a path string.
+
+Use an opaque local identity derived from positive local facts such as root filesystem identity, Git common-dir filesystem identity, and repository/object-format identity.
+
+Copying maintenance-authorization.yaml to another clone must not authorize that clone.
+
+No local path/repository identity is copied into canonical Promotion/Change records.
+
+### 31.14 Promotion source API
+
+P7 does not maintain a global registry of Projects and does not crawl the filesystem.
+
+A promotion attempt receives an explicit finite set of source Project roots/evidence sources from its caller.
+
+Reading those Projects is read-only.
+
+No source Project lock or mutation is opened.
+
+The root operation writes only the Workline root.
+
+### 31.15 Promotion source snapshot
+
+For each source Project, build a read-only source snapshot from validated P5/P6 canonical records.
+
+Persist only H-3-safe structured facts/digests needed for promotion, including where available:
+
+- opaque source repository/lineage fingerprint;
+- exact source Review/Finding/Repair/Relation IDs and digests;
+- P6 Policy Change/evaluation IDs and digests;
+- affected policy_surface_id;
+- Relevant Opportunity evidence;
+- generalized semantic-surface/mechanism input;
+- causal-instance/incident identity when canonically supported;
+- environment/dependency identity;
+- source policy/profile state witness.
+
+Absolute source paths and raw transcripts are not persisted into the root packet.
+
+### 31.16 Source consistency
+
+Each source snapshot uses a bounded B0/B1-style consistency proof.
+
+At minimum witness:
+
+- source HEAD;
+- every referenced canonical evidence digest;
+- Profile/evaluation state relevant to the proposal.
+
+If source evidence changes during extraction:
+
+- one bounded retry is allowed;
+- otherwise the source is unavailable for this attempt.
+
+After Promotion Packet freeze, seal/currentness checks revalidate the exact bound source evidence state needed by the packet.
+
+Unrelated source HEAD movement does not invalidate when all bound immutable evidence and relevant Profile/evaluation witnesses remain unchanged.
+
+If current evidence cannot be positively revalidated where required:
+
+~~~
+no seal / no policy publication
+~~~
+
+### 31.17 Independence classifier
+
+Use explicit structured provenance, never no-correlation-found inference.
+
+Values:
+
+~~~
+proven_independent
+known_correlated
+independence_unresolved
+~~~
+
+Known correlation requires positive shared causal facts such as same repository lineage/copy source, same concrete causal instance, same upstream incident/change, same relevant causal dependency, or duplicate observation.
+
+Proven independence requires positive distinctness including:
+
+- distinct repository/Project lineage;
+- distinct triggering incident/causal instance;
+- distinct affected implementation opportunity;
+- any materially shared dependency positively shown not to be the common cause.
+
+Anything missing/uncertain is independence_unresolved.
+
+No model guess upgrades unresolved to independent.
+
+### 31.18 Correlation clustering
+
+Known-correlated evidence belongs to one cluster.
+
+Unresolved evidence adds context but no independent cluster.
+
+Only mutually proven-independent clusters count separately.
+
+Repeated Runs/Findings/reviewers in one causal incident do not multiply eligibility.
+
+Cluster identity and pairwise relation evidence are frozen in the Promotion Packet.
+
+### 31.19 Mechanical promotion eligibility
+
+For strengthen and ordinary adjust:
+
+- more than one source Project/repository lineage;
+- at least two mutually proven-independent clusters;
+- same existing P6 policy_surface_id;
+- same generalized mechanism;
+- Relevant Opportunity support;
+- no unresolved HUMAN/requirement boundary;
+- observation/rollback capability.
+
+For lighten, the fixed v1 floor is stronger:
+
+- at least three mutually proven-independent clusters;
+- at least three source Project/repository lineages;
+- representative exercised opportunities under the stronger behavior;
+- independent holdout/replacement verification remains after change;
+- no source counted merely because a check was never exercised.
+
+This is eligibility only.
+Root meta-review may still reject the evidence.
+
+### 31.20 Exact rollback exception
+
+An exact rollback to the immediate before-setting of one previously authorized Global Policy Change may use that change's already-reviewed rollback contract when:
+
+- a canonical evaluation proves the frozen rollback threshold fired;
+- rollback target exactly equals that change's before semantics;
+- affected surface is unchanged;
+- compatibility remains total;
+- fixed meta-rules still permit the before-setting.
+
+This exact rollback does not need a fresh cross-Project trend.
+
+It still requires Global Policy Change Review and exact persisted projection proof.
+
+Any non-exact rollback follows ordinary strengthen/lighten eligibility according to its actual direction.
+
+### 31.21 Profile compatibility adapter v1
+
+P7 provides a total adapter for every supported Project Profile schema.
+
+For Project Profile v1 and the two fixed integer surfaces, compatibility preserves valid absolute local override settings under a changed Global default.
+
+The surfaces are default/adaptive, not mandatory, and P6 already separately authorizes local strengthening/lightening.
+
+For every valid Profile v1:
+
+~~~
+old Profile
++ old Global setting
++ new Global setting
+-> same normalized local override semantics
+~~~
+
+No field is dropped or renamed.
+
+Because v1 setting domains are finite, tests exhaustively cover every valid override-presence/setting combination for both surfaces.
+
+A future Profile schema requires its own total compatibility adapter before Global promotion can proceed.
+
+### 31.22 Global policy normalized schema
+
+Runtime Global policy versions obey:
+
+- global_policy_version increments exactly by one;
+- parent_global_policy_digest equals exact previous policy digest;
+- both fixed surfaces occur exactly once;
+- each setting stays inside the P6 fixed range;
+- settings sorted by policy_surface_id;
+- no unknown field/surface;
+- fixed_meta_rules_identity and loader_semantics_identity match the running contract.
+
+Rollback is a new higher version.
+
+### 31.23 Promotion Packet
+
+Reserve one review_promotion_packet ID.
+
+Persist:
+
+~~~
+review-policy/promotion-packets/<promotion_packet_id>.yaml
+~~~
+
+Strict packet contains §16.9 fields plus:
+
+- exact before Global policy digest/version;
+- proposed after Global policy record/digest;
+- global_policy_change_id;
+- affected surface;
+- before/after setting;
+- source snapshot records/digests;
+- cluster relation matrix;
+- mechanical eligibility result;
+- generalized mechanism ID;
+- H-3-safe generalized summary;
+- total Profile compatibility proof identity/digest;
+- root measurement/rollback contract;
+- environment diversity summary.
+
+The Packet is immutable evidence, never authorization.
+
+### 31.24 Global Policy Change Candidate
+
+The root CandidateSnapshot contains complete clone-safe material sufficient to reconstruct:
+
+- exact Promotion Packet;
+- exact before Global policy;
+- exact normalized proposed after Global policy;
+- compatibility proof;
+- root meta-policy identity;
+- exact expected Kp projection.
+
+Candidate reconstruction never requires runtime memory.
+
+### 31.25 Root meta-review kind
+
+Add:
+
+~~~
+review_kind = global-policy-change-v1
+target_identity = global-policy
+authorized_operation_stage = global-policy-change:persist-global-policy
+~~~
+
+Root Review uses the PRE-CHANGE Global policy plus fixed root meta-rules.
+
+It reuses common P1/P4 schemas and adjudication through ROOT_POLICY_REVIEW_NAMESPACE.
+
+There is no automatic Repair Batch for this review kind.
+
+A changed proposal requires a new Promotion Packet/Candidate.
+
+### 31.26 Root meta-review strength
+
+For strengthen / ordinary adjust / exact rollback:
+
+~~~
+required discovery slots
+= max(2, pre-change Global review.discovery.required_slots)
+~~~
+
+For lighten:
+
+~~~
+required discovery slots
+= max(3, pre-change Global review.discovery.required_slots)
+~~~
+
+All counted slots require distinct reviewer identity/version bindings.
+
+One adjudicator actor is separately bound.
+
+The proposed after-policy cannot lower the review strength authorizing itself.
+
+### 31.27 Root Review topology
+
+~~~
+G1
+  Promotion Packet
+  + CandidateSnapshot
+  + discovery TaskInputs
+  -> commit Kg1
+
+external discovery
+
+G2
+  sanitized reports / coverage
+  -> commit Kg2
+
+G3
+  adjudication TaskInput
+  -> commit Kg3
+
+external adjudication
+
+G4
+  adjudication
+  + fixed mechanical root meta-policy verification
+  -> commit Kg4
+
+authorization-ready:
+  G5 sealed + Receipt
+  -> commit Kg5
+
+blocking:
+  terminal not_authorized at G4
+  no Receipt
+
+HUMAN:
+  HUMAN_WAIT at G4
+  no Receipt
+~~~
+
+Every accepted external task is committed before launch.
+
+Root Review generation commits are never pushed independently.
+
+They become remote-visible only as ancestors of an authorized later exact policy/metadata publication.
+
+### 31.28 Root mechanical meta-verifier
+
+Before G5 seal re-check:
+
+- affected surface exists in P6 fixed registry;
+- before Global policy still matches;
+- proposed setting is in range;
+- no fixed meta-rule changed;
+- no correctness/authority surface changed;
+- source snapshots current where required;
+- independence/cluster eligibility;
+- stronger lightening floor where applicable;
+- rollback exception exactness when used;
+- total Profile compatibility;
+- observation/rollback feasibility;
+- persisted-projection adapter availability;
+- root publication readiness where required.
+
+External reviewer approval cannot bypass a failed mechanical item.
+
+### 31.29 Root Review recovery
+
+Runtime-loss recovery discovers root Runs from committed records by:
+
+- review kind;
+- target_identity;
+- stable operation identity;
+- Promotion Packet/Candidate identity;
+- validated Gate chain.
+
+No newest/timestamp selection.
+
+If exactly one committed Run matches, a new root runtime mutation may bind canonical reserved IDs and continue.
+
+If incompatible candidates/runs remain ambiguous:
+
+~~~
+STOP / reconcile
+~~~
+
+No replacement task ID is silently issued.
+
+### 31.30 Root mutation Git discipline
+
+At root-operation entry freeze:
+
+- full branch ref;
+- exact base HEAD;
+- current Global policy digest/version;
+- exact owned paths;
+- pre-existing dirty snapshot;
+- destination authorization when applicable.
+
+Unrelated dirty paths may remain only when positively disjoint from every owned path.
+
+Owned-path dirt blocks before canonical effect.
+
+Every root commit is base-exact against its immediately expected parent.
+
+Unexpected HEAD movement causes no rebase/cherry-pick/amend/reset; it requires reconcile/new candidate as applicable.
+
+Commits use the same hermetic Git principles as current Review commit primitives, with root-runtime scratch paths rather than Project runtime paths.
+
+### 31.31 Root publication destination
+
+Remote root:
+
+- authorization remote/branch/locator must still match;
+- push locator re-resolved;
+- reads_itself must be true before destination reads;
+- destination branch read explicitly;
+- required objects may be fetched without moving local refs using existing fetch_destination_branch;
+- exact fast-forward relation proven;
+- push_dry_run checked;
+- exact commit SHA:full-branch refspec only;
+- no force.
+
+Unknown/unreadable/divergent destination:
+
+~~~
+no push
+-> STOP/reconcile
+~~~
+
+Never push branch tip in place of recorded exact commit.
+
+### 31.32 Kp — Global policy commit
+
+After G5 authorization and currentness recheck, record exactly:
+
+- new global-policy.yaml bytes;
+- immutable change record;
+- deterministic Patch Note.
+
+Kp changes exactly:
+
+~~~
+review-policy/global-policy.yaml
+review-policy/changes/<global_policy_change_id>.yaml
+review-policy/patch-notes/<global_policy_change_id>.md
+~~~
+
+Promotion Packet and Review records are earlier committed ancestors, not Kp delta.
+
+### 31.33 Global change record
+
+Immutable change record binds at least:
+
+- global_policy_change_id;
+- Promotion Packet ID/digest;
+- Candidate hash;
+- Review Run/Receipt;
+- before/after Global version/digests;
+- affected surface;
+- before/after setting;
+- direction;
+- generalized mechanism identity;
+- compatibility adapter/proof digest;
+- expected effect;
+- measurement/observation contract;
+- rollback threshold/unit;
+- H-3-safe summary.
+
+It does not guess its own commit SHA.
+
+### 31.34 Patch Note
+
+Path:
+
+~~~
+review-policy/patch-notes/<global_policy_change_id>.md
+~~~
+
+Generate deterministically from already-sanitized Packet/Change fields.
+
+It explains affected surface, before/after setting, direction, generalized evidence basis, expected effect, observation contract and rollback condition.
+
+It contains no raw Project path, transcript, secret or private source detail.
+
+Patch Note is explanation only.
+
+### 31.35 C-2(Kp)
+
+Before policy publication prove from committed objects:
+
+- Kp immediate parent;
+- expected full branch;
+- Kp delta exactly the three policy/change/note paths;
+- global-policy.yaml exact reviewed bytes;
+- loader normalized projection equals Candidate after-state;
+- before/parent policy identity;
+- fixed meta-rules identity;
+- compatibility proof;
+- Receipt current/not superseded/consumed;
+- required source evidence currentness.
+
+Failure means no push and no silent adoption/rewrite.
+
+### 31.36 Kp publication
+
+When remote exists and root authorization is valid:
+
+~~~
+publish exact Kp
+~~~
+
+Root Review generation commits and Promotion Packet become remote-visible as Kp ancestors.
+
+Remote-less root has no Kp push.
+
+### 31.37 Global Policy Consumption v4
+
+Extend Consumption dispatch with a distinct Global Policy Consumption.
+
+Recommended:
+
+~~~
+version = 4
+review_kind = global-policy-change-v1
+~~~
+
+It binds:
+
+- consumption_id;
+- receipt/review identity;
+- authorized Candidate;
+- stable operation identity;
+- root_policy_mutation_id;
+- target_identity = global-policy;
+
+and:
+
+~~~
+persisted_global_policy:
+  contract
+  global_policy_change_id
+  promotion_packet_id/digest
+  before/after version/digest
+  normalized_projection_hash
+  policy_commit = Kp
+  policy_parent
+  branch
+  policy_delta_digest
+  compatibility_adapter_identity/digest
+  loader_identity
+~~~
+
+No Work terminal event.
+
+v1/v2/P6-v3 readers retain exact meaning.
+
+### 31.38 Km — root metadata commit
+
+After Kp publication/local proof:
+
+~~~
+create Global Policy Consumption
+-> Km commits exact Consumption path
+-> C-2(Km)
+-> exact Km publication when remote exists
+-> complete
+~~~
+
+Kp remains the policy commit bound by Consumption.
+
+Km is final clone-visible metadata state.
+
+### 31.39 Publication race handling
+
+Immediately before each push:
+
+- revalidate root authorization;
+- re-read destination ref;
+- prove exact fast-forward;
+- run exact push dry-run.
+
+Destination movement never causes automatic rebase/cherry-pick.
+
+After Kp publication, Km publication must be exact fast-forward from destination state containing Kp.
+
+### 31.40 Supersession/currentness
+
+If after G5 but before Kp the frozen Global policy, meta-policy identity, Packet evidence or branch basis becomes stale:
+
+- do not write/publish policy;
+- record common Review Supersession/invalidation where the common contract permits;
+- start a new Candidate/Run;
+- never mutate the old Candidate.
+
+### 31.41 Global observation/evaluation
+
+Add immutable:
+
+~~~
+review-policy/evaluations/<evaluation_id>.yaml
+~~~
+
+ID kind:
+
+~~~
+review_global_policy_evaluation
+~~~
+
+It binds:
+
+- evaluation_id;
+- global_policy_change_id;
+- evaluated Global version/digest;
+- frozen measurement contract;
+- source evidence snapshots/cluster state;
+- environment identity;
+- result: retain | adjust | rollback | inconclusive;
+- H-3-safe rationale;
+- next-action classification.
+
+retain leaves policy unchanged.
+
+adjust creates a new Promotion Packet/Candidate as required.
+
+rollback creates a new Global version/new review/new commits and may use §31.20 only when exact.
+
+inconclusive is not success.
+
+### 31.42 Root evaluation writes
+
+Evaluation-only persistence is a dedicated sub-operation of root policy maintenance.
+
+It uses the same root lock/runtime authorization/exact-scope Git discipline.
+
+It may create only one immutable evaluation record plus its exact commit/publication.
+
+It cannot directly edit global-policy.yaml.
+
+### 31.43 Evidence after publication
+
+Post-change evaluation uses the same independence/correlation model.
+
+Correlated Projects do not become many confirmations.
+
+Material environment change splits the observation window or needs positive irrelevance proof.
+
+Chronology alone is not causal evidence.
+
+### 31.44 No two-repository write
+
+Promotion reads Project repositories only.
+
+global-policy-change writes Workline root only.
+
+No Project Profile/evidence is edited, consumed or locked in the root commit transaction.
+
+Source evidence changing after Packet freeze is candidate/currentness invalidation, not cross-repository rollback.
+
+### 31.45 Project adoption boundary
+
+Projects adopt a new Global version only at the next Review Run boundary through the P6 loader.
+
+Existing Profile files are not rewritten.
+
+The compatibility adapter interprets old Profile against new Global.
+
+Open Review Runs remain on their frozen effective_policy_hash.
+
+### 31.46 Root read-only status
+
+Add read-only root maintenance diagnostics consumed by RB1 when available:
+
+- Global source_mode/version/digest;
+- latest Global change/evaluation IDs;
+- maintenance authorization present/valid/mismatch;
+- approved branch/remote without secret locator exposure;
+- pending root mutation summary;
+- next-boundary Profile compatibility adapter identity.
+
+No status call takes root lock, writes runtime, contacts remote or repairs a pending mutation.
+
+### 31.47 Canonical runtime authority activation
+
+Same P7 candidate updates at least:
+
+~~~
+registry.md
+.claude/skills/review/SKILL.md
+rules/git
+~~~
+
+No new Project-facing Skill is required.
+
+Review Skill states P7 independence/correlation, promotion floors, Global Policy Change Review, root durability, no self-hosting, pre-change meta-policy, exact rollback exception and evaluation semantics.
+
+rules/git states dedicated root maintenance lock/runtime, explicit root publication authorization, base-exact commits, exact Kp/Km publication, and no force/rebase/reset/amend recovery.
+
+registry remains fixed meta-policy authority and must not route the Workline root as a Project.
+
+### 31.48 Primary implementation files
+
+Expected new:
+
+~~~
+src/workline/review/namespace.py
+src/workline/review/global_policy.py
+src/workline/global_policy.py
+src/workline/root_maintenance.py
+~~~
+
+Expected shared Review refactor:
+
+~~~
+src/workline/review/paths.py
+src/workline/review/store.py
+src/workline/review/committed.py
+src/workline/review/validate.py
+src/workline/review/records.py
+src/workline/review/fsafe.py
+src/workline/review/policy.py
+src/workline/ids.py
+~~~
+
+Expected Git/lock/CLI integration:
+
+~~~
+src/workline/oplock.py
+src/workline/gitops.py
+src/workline/gitcmd.py
+src/workline/cli.py
+run-workline.py
+~~~
+
+Canonical root artifacts added by implementation:
+
+~~~
+review-policy/global-policy.yaml
+.gitignore
+~~~
+
+Runtime-created canonical families:
+
+~~~
+review-policy/promotion-packets/
+review-policy/changes/
+review-policy/evaluations/
+review-policy/patch-notes/
+review-policy/review/
+~~~
+
+### 31.49 Focused tests — materialization
+
+Add:
+
+~~~
+tests/test_global_policy_materialization.py
+~~~
+
+Cover derived/materialized semantic equality, source_mode-only transition, exact two settings, no Profile backfill, no fake Promotion/Change record, no open Review policy change, root not a Workline Project, and ignored root runtime.
+
+### 31.50 Focused tests — namespace/store reuse
+
+Add:
+
+~~~
+tests/test_root_review_namespace.py
+~~~
+
+Cover Project path compatibility, root path shape, same Gate-chain validator, same Receipt/Consumption/Supersession semantics, committed root reader, no root activation, malformed/indirection fail-closed, and no duplicated chain implementation.
+
+### 31.51 Focused tests — promotion/independence
+
+Add:
+
+~~~
+tests/test_global_policy_promotion.py
+~~~
+
+Cover explicit source list only, no filesystem crawl, read-only extraction, B0/B1 source change, one-Project non-eligibility, fork/template/incident correlation, unresolved independence, strengthen floor, stronger lighten floor, unexercised no-finding exclusion, generalized-mechanism validation and unknown-surface refusal.
+
+### 31.52 Focused tests — Profile compatibility
+
+Exhaustively cover Profile v1 absence, each valid single override, both overrides, every valid old/new Global setting pair, no field drop, preserved allowed local semantics, fixed ranges and unsupported Profile schema refusal.
+
+### 31.53 Focused tests — root meta-review
+
+Add:
+
+~~~
+tests/test_global_policy_review.py
+~~~
+
+Cover strengthen/lighten reviewer floors, distinct reviewer identities, G1 persistence before launch, G1-G5, P4 adjudication reuse, mechanical meta-verifier precedence, blocking/HUMAN/no Receipt, authorization/G5 Receipt, no Repair Batch and pre-change policy/meta-rule use.
+
+### 31.54 Focused tests — root maintenance authorization
+
+Add:
+
+~~~
+tests/test_root_policy_maintenance.py
+~~~
+
+Cover lock exclusivity, no Project lock/state, remote-less mode, explicit remote authorization, copied authorization rejection, locator/branch mismatch, multiple/unreadable locator, secret-bearing locator and read-only status creating nothing.
+
+### 31.55 Focused tests — Kp/Km
+
+Add:
+
+~~~
+tests/test_global_policy_change.py
+~~~
+
+Cover exact before state, disjoint dirt, owned dirt blocker, Kp exact three-path delta, semantic round-trip, no Kp push before C-2, exact Kp refspec, Consumption v4, v1/v2/v3 compatibility, Km exact Consumption delta, exact Km publication, remote-less mode and no force/rebase/reset/amend.
+
+### 31.56 Focused tests — publication race
+
+Cover remote movement/divergence/unreadable destination, locator change, reads_itself false, exact Kp SHA not branch tip, movement between Kp/Km, no fetch-to-ref/rebase, already-published Kp recovery and duplicate-push prevention.
+
+### 31.57 Focused tests — evaluation/rollback
+
+Add:
+
+~~~
+tests/test_global_policy_evaluation.py
+~~~
+
+Cover retain, adjust, exact rollback exception, non-exact rollback ordinary eligibility, new-version rollback, inconclusive, correlation reuse, environment attribution and evaluation-only no-policy-write.
+
+### 31.58 Root runtime-loss recovery matrix
+
+At minimum interrupt at:
+
+1. lock acquisition;
+2. root mutation allocation;
+3. Packet/change ID reservations;
+4. G1 effects before commit;
+5. Kg1;
+6. discovery return before G2;
+7. Kg2;
+8. G3;
+9. adjudicator return before G4;
+10. Kg4;
+11. G5 Receipt;
+12. Kg5;
+13. policy/change/note effects;
+14. partial Kp file apply;
+15. Kp commit;
+16. C-2(Kp);
+17. Kp publication record;
+18. Kp already remote-visible;
+19. Consumption;
+20. Km commit;
+21. C-2(Km);
+22. Km publication;
+23. completion.
+
+Recovery proves same canonical IDs, no duplicate Packet/Run/Task/Receipt/policy version/change/note/Consumption/publication, committed-object reconstruction, no newest selection and no branch-tip publication.
+
+### 31.59 Compatibility regression
+
+Prove Project Review behavior unchanged, Project MutationController authority unchanged, P6 semantics unchanged except source_mode, pre-P7 Runs frozen, P4/P5/P6 regressions PASS, root never gets .workline/project.yaml, no self-hosting path and no new Project-facing Skill/routing ID.
+
+### 31.60 Regression order
+
+1. materialization;
+2. namespace/store reuse;
+3. promotion/independence;
+4. Profile compatibility;
+5. root meta-review;
+6. root maintenance authorization;
+7. Kp/Km;
+8. publication race;
+9. evaluation/rollback;
+10. runtime-loss matrix;
+11. RB6/P6;
+12. RB4/P5;
+13. RB3/P4 + RB3-C1;
+14. RB1 integration if landed;
+15. legacy Project operations;
+16. canonical Skill/registry/rules;
+17. full suite.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical tooling legitimately changes.
+
+### 31.61 Explicit non-scope
+
+RB7/P7 must not implement:
+
+- Workline-root self-hosting;
+- root Roadmap/Phase/Work;
+- automatic discovery/crawl of Projects;
+- Project Profile rewrite/backfill on Global change;
+- new adaptive surfaces/meta-rules;
+- product/requirement adaptation;
+- force/rebase/reset/amend root recovery;
+- two-repository atomic transaction;
+- root policy mutation from Project MutationController;
+- publication without explicit remote authorization.
+
+### 31.62 Implementation completion gate
+
+RB7/P7 is complete only when:
+
+- P6 derived baseline materializes with zero semantic change;
+- one loader supports derived/materialized modes;
+- root Review shares namespace-parameterized schema/chain validation;
+- Workline root is not a Project;
+- dedicated ignored root runtime/lock/authorization exists;
+- source evidence is read-only/snapshotted;
+- independence/correlation is positive-evidence based;
+- strengthen/lighten mechanical floors exist;
+- total Profile v1 compatibility is proven;
+- root meta-review is pre-change/fixed-meta-policy;
+- external root Review is committed before launch;
+- Kp exact projection/proof works;
+- exact Kp publication works;
+- Global Policy Consumption v4 is canonical;
+- Km exact metadata publication works;
+- evaluation/rollback works;
+- runtime-loss recovery is committed-object based;
+- no force/history rewrite/newest selection;
+- RB1 root diagnostics integrate when available;
+- canonical runtime authority text is updated;
+- focused tests PASS;
+- RB6/RB4/RB3/legacy regressions PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
+
+After RB7 lands, RB8 becomes critical-path implementation-unblocked once RB5 is also complete.
