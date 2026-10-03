@@ -7516,3 +7516,1163 @@ RB3-C1 becomes REVIEW_CANDIDATE only when:
 - required regressions pass.
 
 Only after independent exact-candidate review PASS and landing does RB3-C1 become LANDED and unblock P4 implementation.
+
+---
+
+## 27. RB3-P4 implementation brief — current-cycle Repair Loop / BL-004
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT_AFTER_RB3_C1_LANDS
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §12.
+
+It does not replace §12. Where wording conflicts, §12 remains the semantic contract and this section fixes the implementation allocation required to realize it in the current live code.
+
+Execution is dependency-gated:
+
+~~~
+RB3-C1 implementation + exact-SHA review + landing
+-> P4 implementation
+~~~
+
+P4 must reuse the RB3-C1 successor-Run relation and Work request versioning rather than introducing a second replacement-run mechanism.
+
+### 27.1 Existing P3 insertion point
+
+The live planning and Work Review owners currently share the same high-level shape:
+
+~~~
+G1 accept discovery reviewer task
+-> external reviewer
+-> G2 settle
+-> mechanical v1 adjudication/obligations
+-> authorizes?
+   YES -> G3 seal + Receipt
+   NO  -> terminal not_authorized/refusal
+~~~
+
+The P4 insertion point is the decision after durable discovery settlement and before the current v1 seal/refusal branch.
+
+Do not insert P4 after Receipt issuance and do not make Review a lifecycle owner.
+
+For new P4-capable invocations the owner flow becomes:
+
+~~~
+G1 discovery accepted
+G2 discovery settled + canonical raw reports
+G3 adjudication accepted
+G4 adjudication settled + canonical adjudication
+
+then exactly one semantic branch:
+
+authorization-ready
+-> G5 seal + Receipt
+-> existing owner persistence / Consumption
+
+blocking repair required
+-> G5 Repair Batch + repair task accepted
+-> G6 repair settled + Repair Result + Candidate N+1 snapshot
+-> successor Review Run for Candidate N+1
+
+HUMAN_WAIT
+-> stop at G4
+-> no guessed repair
+-> later owner invocation may freeze a new Candidate/Context after the Human decision
+~~~
+
+The old P2/P3 fixed-shape v1 Runs keep their existing meaning and generation counts.
+
+### 27.2 Responsibility split
+
+P4 is implemented as common Review infrastructure plus kind-specific adapters plus existing operation owners.
+
+Common semantic core:
+
+~~~
+src/workline/review/p4.py
+~~~
+
+New common module responsibility:
+
+- P4 contract/policy identity helpers;
+- discovery/adjudication/repair role vocabulary;
+- normalized adjudication outcomes;
+- Problem / Improvement / HUMAN classification validation;
+- normalized Finding identity and canonical ordering;
+- deduplication-by-repair-identity validation;
+- Repair Batch construction;
+- candidate-generation linkage validation;
+- A_NEW / B_RECURRENCE / C_REPAIR_INDUCED validation;
+- STRATEGY_CHANGE trigger;
+- convergence calculation;
+- impact-class vocabulary;
+- Repair Coverage Check validation;
+- Evidence-reuse decision over the existing typed dependency vocabulary;
+- verification-only Integration side-effect result validation.
+
+This module is inert:
+
+- no Project lock;
+- no mutation open;
+- no filesystem write;
+- no Git finalization;
+- no lifecycle transition.
+
+Kind-specific Review material remains owned by:
+
+~~~
+src/workline/review/planning.py
+src/workline/review/work_review.py
+~~~
+
+Operation orchestration remains owned by:
+
+~~~
+src/workline/roadmap_review.py
+src/workline/start_review.py
+~~~
+
+Do not create a second P4 lifecycle controller.
+
+### 27.3 Version dispatch and v1 compatibility
+
+P4 is an explicit new Review contract/policy identity.
+
+The existing v1 selector types and stored v1 records remain valid without reinterpretation.
+
+Do not modify the meaning of:
+
+~~~
+review-v1-planning-v1
+review-v1-planning-policy-v1
+review-v1-work-policy-v1
+the current P3 Work Review contract
+~~~
+
+New P4-capable invocations use distinct durable contract/policy identities.
+
+The implementation may centralize the exact strings in the existing kind modules plus review/p4.py, but the following invariants are frozen:
+
+- planning P4 contract is distinct from planning v1;
+- Work P4 contract is distinct from Work v1/F4;
+- P4 Effective Policy identity is distinct from v1 policy;
+- discovery/adjudication/repair TaskInputs bind the exact P4 contract/policy/instruction identities;
+- dispatch reads explicit persisted identity from canonical TaskInput/request material;
+- dispatch must never infer P4 from generation count or record shape;
+- already-pending v1 Runs resume through the existing v1 path unchanged;
+- a v1 Receipt is interpreted under the exact policy/hash it already binds;
+- legacy non-Review operations are untouched.
+
+Prefer new P4 selector objects/types rather than adding ambiguous optional P4 behavior to the existing v1 selector object.
+
+A P4 selector binds separately:
+
+- required discovery actor(s);
+- one adjudicator actor;
+- one repair actor.
+
+Each actor binding has:
+
+- callable/provider;
+- durable identity;
+- durable version.
+
+A repair actor may be unused when no repair is required, but its identity/version are part of the P4 invocation contract before repair launch so resume never chooses a different executor implicitly.
+
+### 27.4 Discovery report versioning
+
+Do not reinterpret the existing v1 discovery report schema.
+
+P4 discovery reports are explicit versioned records that preserve the existing structured claim fields and add the §12.12 coverage declaration.
+
+A P4 discovery report contains at least:
+
+- task identity;
+- reviewer identity/version;
+- completed/declined status;
+- structured claims;
+- each claim's reviewer-claimed severity;
+- code;
+- public-safe statement/message;
+- assigned viewpoint/task slot;
+- surfaces actually inspected;
+- concrete behavior/questions checked;
+- Evidence identities used;
+- relevant surface not inspected / not decidable.
+
+Reviewer severity remains discovery input only.
+
+It is not authoritative P4 severity.
+
+### 27.5 Canonical P4 namespace
+
+Extend review/paths.py with exact path helpers for:
+
+~~~
+.workline/review/reports/<result_digest>.yaml
+.workline/review/adjudications/<review_run_id>.yaml
+.workline/review/repair-batches/<repair_batch_id>.yaml
+.workline/review/repair-results/<repair_batch_id>.yaml
+~~~
+
+Add those directories to the closed canonical Review namespace and checkout/path-safety validation.
+
+The raw report file stores the already-canonical kind-specific P4 discovery report record.
+
+Its filename MUST equal:
+
+~~~
+serialize.digest(report_record)
+~~~
+
+No second wrapper record is required around the raw report.
+
+Add common strict-schema records in review/records.py for:
+
+- P4 Adjudication;
+- P4 Repair Batch;
+- P4 Repair Result.
+
+Add read/list/digest helpers in review/store.py.
+
+Add whole-namespace validation in review/validate.py.
+
+All four new logical record kinds are:
+
+- immutable create-only;
+- canonical-byte round-tripped;
+- clone-safe;
+- validated when referenced;
+- also validated when orphaned;
+- Review facts, never lifecycle truth.
+
+### 27.6 Adjudication record
+
+One P4 Review Run has at most one canonical adjudication record:
+
+~~~
+adjudications/<review_run_id>.yaml
+~~~
+
+It binds at least:
+
+- review_run_id;
+- review_kind;
+- target identity;
+- operation identity;
+- candidate_hash;
+- candidate_generation;
+- review_context_hash;
+- effective_policy_hash;
+- P4 adjudication contract/instruction identity;
+- ordered canonical raw-report identities;
+- ordered adjudication entries;
+- reserved normalized Finding IDs;
+- current-cycle predecessor Finding/Repair references used;
+- final obligation summary/digest.
+
+Each adjudication entry retains its exact source claim identity and one disposition:
+
+~~~
+unsupported
+HUMAN
+Problem
+Improvement
+dismissed_non_actionable
+~~~
+
+Only Problem and Improvement create normalized Findings.
+
+A normalized Finding contains the §12.5 fields and additionally carries enough canonical repair identity material to make deduplication deterministic.
+
+The implementation must never derive a Finding from reviewer wording alone.
+
+### 27.7 Finding ordering, IDs and deduplication
+
+Finding IDs are stable owner-mutation reservations.
+
+Add a deterministic reservation-key helper in review/gate.py for normalized Findings.
+
+Reservation order must be derived from canonical normalized adjudication material, not external return order, timestamp or dictionary insertion accident.
+
+Recommended normalization order:
+
+1. semantic responsibility / semantic_surface;
+2. repair identity;
+3. normalized category;
+4. canonical ordered source claim identities.
+
+Claims merge only when one repair/disposition closes the same substantive issue under the same semantic responsibility.
+
+If repair identity is uncertain, keep separate.
+
+When merged claims carry different severities, store the strongest severity positively supported by adjudication and retain every source claim reference.
+
+No unsupported/HUMAN/dismissed entry receives a Finding ID.
+
+### 27.8 G1 — discovery acceptance
+
+For a P4 Run, G1 may accept one or more required discovery tasks.
+
+Persist in the same generation:
+
+- CandidateSnapshot;
+- every discovery TaskInput;
+- accepted descriptors;
+- open G1.
+
+Every discovery TaskInput binds:
+
+- P4 review contract;
+- candidate_generation;
+- exact Candidate/material digest;
+- Context;
+- Effective Policy;
+- actor identity/version;
+- task slot/viewpoint;
+- discovery instruction/version;
+- Evidence identities available to that discovery task.
+
+No discovery actor is launched until G1 is durably committed and reads back canonically.
+
+The Candidate snapshot is written once.
+
+### 27.9 G2 — discovery settlement and raw-report durability
+
+Run the exact accepted discovery tasks.
+
+Invalid/exceptional/unsafe external returns do not settle the task.
+
+A valid return is first canonicalized and H-3 checked.
+
+Unsanitized model output, chain-of-thought, transcript, secrets, unnecessary local paths and unnecessary private identifiers never become canonical report bytes.
+
+G2 is written only when all required discovery tasks for this Candidate have valid settlement material.
+
+G2 persists:
+
+- each content-addressed canonical raw report;
+- settled task descriptors;
+- raw-report-set digest;
+- coverage digest for discovery coverage;
+- no authoritative P4 Finding classification yet.
+
+If a crash occurs after an external return but before durable G2:
+
+- the accepted TaskInput remains authority;
+- the same task may be relaunched to the same bound actor;
+- runtime copies are not recovery authority.
+
+An orphan canonical raw-report file is valid only if its own strict schema/digest validates; it does not count as settled without the Gate settlement link.
+
+### 27.10 G3 — adjudication acceptance
+
+After G2, build one adjudication TaskInput from canonical material only.
+
+The adjudication request binds:
+
+- exact Candidate identity/material;
+- ordered canonical raw-report identities;
+- current decided requirement/desired-state material supplied by the owner;
+- Context and Effective Policy identities;
+- relevant current-cycle Finding/Repair linkage;
+- Evidence/coverage identities;
+- adjudicator identity/version;
+- P4 adjudication instruction/version.
+
+Persist G3 accepting that TaskInput before any external adjudicator launch.
+
+A crash/retry launches only the same persisted adjudication task to the same bound adjudicator identity/version.
+
+No runtime report text is adjudication recovery authority.
+
+### 27.11 G4 — adjudication settlement
+
+The adjudicator return is data, not authority until normalized and validated.
+
+Apply §12.4 in order.
+
+Validation must reject any return that:
+
+- classifies an unsupported claim as a Finding;
+- converts HUMAN uncertainty into Problem/Improvement;
+- marks a LOW Problem non-blocking while the current completion objective does not hold;
+- asserts B/C without the required positive causal linkage;
+- omits a source claim;
+- invents a source report not bound to G3;
+- produces contradictory duplicate Finding identities.
+
+G4 persists:
+
+- canonical adjudication record;
+- settled adjudication task;
+- final coverage/adjudication/obligation digests;
+- open Gate.
+
+After G4, derive one of:
+
+~~~
+AUTHORIZATION_READY
+REPAIR_REQUIRED
+HUMAN_WAIT
+~~~
+
+No Receipt exists yet.
+
+### 27.12 Authorization-ready branch
+
+Authorization-ready requires the full §12.18 convergence predicate.
+
+At minimum:
+
+- discovery coverage complete/resolved;
+- raw reports all durable;
+- adjudication complete;
+- unadjudicated claims zero;
+- unresolved Problem HIGH/MID zero;
+- LOW dispositions traceable and objective still holds;
+- Improvement dispositions traceable;
+- unresolved HUMAN zero;
+- required reverification complete;
+- latest Repair Coverage Check complete when relevant;
+- no unresolved repair-induced Problem;
+- no pending STRATEGY_CHANGE requirement;
+- Evidence used for authorization current.
+
+Then:
+
+~~~
+G5 sealed
++ Receipt
+~~~
+
+For P4 the Receipt's review_generation is 5.
+
+Existing Receipt schema may be reused if it already permits the generation value and all binding invariants remain valid.
+
+Do not weaken v1's seal-generation checks globally.
+
+Owner/validator code dispatches seal generation by explicit stored Review contract.
+
+After P4 G5 Receipt issuance, normal owner persistence/Consumption continues.
+
+### 27.13 HUMAN_WAIT branch
+
+If G4 contains an unresolved HUMAN outcome required for this Candidate:
+
+- no Repair Batch;
+- no repair task;
+- no Receipt;
+- no guessed requirement;
+- no lifecycle completion.
+
+The Run remains at canonical G4 HUMAN_WAIT.
+
+A later Human decision is supplied through the normal owning operation boundary.
+
+If that decision requires or yields a new Candidate/Context, the owner starts a new P4 Run and explicitly sets the old Run aside.
+
+P4 does not invent a separate requirement store.
+
+Long-lived Human Decision Evidence is RB4/P5 responsibility; P4 stores only the current-cycle adjudication material required to recover this wait.
+
+### 27.14 Repair Batch
+
+When G4 has decidable blocking Problem HIGH/MID Findings, build exactly one immutable Repair Batch for that Candidate generation.
+
+Reserve its ID deterministically from the owning mutation and source Run.
+
+One source Candidate generation may have at most one Repair Batch.
+
+The batch contains every currently decidable blocking Problem HIGH/MID Finding.
+
+It excludes:
+
+- Improvement;
+- HUMAN;
+- unsupported;
+- dismissed_non_actionable.
+
+A LOW Problem is included only when the adjudication/owner deliberately chooses current-cycle repair; it is never inserted merely because it exists.
+
+The batch binds the §12.8 fields plus:
+
+- candidate_generation;
+- adjudication digest;
+- exact prior repair relationship inputs;
+- strategy mode.
+
+If the common P4 recurrence calculation requires STRATEGY_CHANGE, the batch must record that requirement and an ordinary unchanged local-patch strategy is invalid.
+
+### 27.15 G5 repair branch — Repair Batch + repair task acceptance
+
+For REPAIR_REQUIRED, G5 is open, not sealed.
+
+Persist in the same generation:
+
+- one Repair Batch;
+- one Repair TaskInput;
+- accepted repair-task descriptor;
+- no Receipt.
+
+The ReviewRepairRequest is reconstructed from canonical records only:
+
+- exact source Candidate snapshot/material;
+- exact Repair Batch;
+- current decided requirement/desired state;
+- allowed repair/result surface;
+- relevant Evidence/coverage constraints;
+- required strategy-change mode where applicable;
+- repair actor identity/version;
+- repair instruction/version.
+
+Do not launch repair before G5 is durably committed and read back.
+
+An exception, invalid return or explicit repair failure does not settle a successful repair by inference.
+
+### 27.16 Repair executor boundary
+
+The repair executor does not own canonical Project mutation, lifecycle progression or Git finalization.
+
+Its output is a proposal for a complete repaired Candidate.
+
+The common P4 layer must not write repaired domain state.
+
+Kind-specific adapters validate/adopt the proposal:
+
+Planning:
+
+- reconstruct a complete planning Candidate using the planning Candidate builder/validator;
+- no Roadmap/Phase registration occurs before later authorization.
+
+Work:
+
+- reconstruct a complete Work Candidate/snapshot material including exact payload bytes/object identities;
+- the repair actor does not directly mutate the canonical working tree as Review authority;
+- candidate bytes remain Review material until the owning START path adopts the authorized repaired Candidate;
+- final canonical working-tree/result adoption remains START-owned and must use the existing ownership/overlap/resulting-tree safety machinery.
+
+If an external repair implementation mutates undeclared canonical Project state as a side effect, the repair is invalid and must not be settled as successful.
+
+### 27.17 Repair Coverage Check and impact class
+
+Every successful repair proposal carries exactly one impact class:
+
+~~~
+LOCAL
+SHARED
+CONTRACT
+FOUNDATION
+~~~
+
+The Repair Coverage Check is strict structured data, not prose-only evidence.
+
+It records at least:
+
+- semantic behavior changed;
+- semantic responsibility;
+- other sites/paths with the same responsibility;
+- whether the responsibility is shared/common;
+- whether the affected set is positively enumerable;
+- enumerated/identified affected set where available;
+- whether the proposed repair covers that set;
+- unresolved coverage gap.
+
+Unknown Repair Coverage never PASSes.
+
+If a local patch is presented for a positively shared responsibility:
+
+~~~
+reject successful settlement / require widened repair
+~~~
+
+before another Formal Review round is spent rediscovering the same omission.
+
+### 27.18 Evidence reuse across Candidate N -> N+1
+
+Do not call closure.may_reuse() to reuse an entire prior Review across a repaired Candidate.
+
+That helper intentionally binds ReviewProvenance including candidate_hash and task/request identities, so a repaired Candidate must not inherit Review authorization.
+
+P4 reuses only Evidence under §12.13.
+
+Reuse the existing typed dependency vocabulary and proof records in review/closure.py:
+
+- EvidenceDeclaration;
+- ClassCoverage;
+- MechanismProof;
+- dependency classes;
+- complete/unknown semantics.
+
+Add a narrow P4 Evidence-reuse decision in review/p4.py.
+
+Evidence reuse is YES only when all are positively proven:
+
+- prior declaration complete;
+- new declaration complete;
+- all required dependency classes positively covered;
+- all non-required classes accounted for;
+- concrete Evidence-bound identities unchanged;
+- adapter identity/version unchanged;
+- proof mechanism identity/version unchanged;
+- repair impact does not invalidate the semantic assumption proved.
+
+Anything else is:
+
+~~~
+reusable = false
+state = unknown | invalidated
+-> reacquire
+~~~
+
+A discovery report, adjudication or Receipt is never reused as authorization for Candidate N+1.
+
+### 27.19 Impact-scaled reverification
+
+The kind adapter converts the Repair Result impact class into the required verification plan.
+
+The plan is semantic, not file-count based.
+
+Minimum rules are exactly §12.14.
+
+The Repair Result stores:
+
+- impact class;
+- required reverification identities;
+- completed reverification identities/results;
+- Evidence reuse/invalidation decision;
+- Repair Coverage Check;
+- residual required verification count.
+
+G6 cannot mark a successful repair ready for a successor Run while required repair coverage is unknown.
+
+Evidence that must be reacquired may be obtained for Candidate N+1 during the successor Run; it is not silently copied from Candidate N.
+
+### 27.20 G6 — Repair Result and Candidate N+1
+
+A successful repair settles in G6.
+
+Persist atomically in the generation mutation:
+
+- settled repair task;
+- immutable Repair Result;
+- complete CandidateSnapshot N+1;
+- linkage from source candidate/run/batch to result candidate;
+- no Receipt.
+
+Repair Result binds at least the §12.10 fields plus:
+
+- source candidate_generation;
+- result candidate_generation = source + 1;
+- exact result Candidate material digest;
+- exact successor eligibility state;
+- exact coverage/reverification digests.
+
+Candidate N+1 is a complete Candidate under the existing kind Candidate schema/semantics.
+
+It is never a patch object.
+
+The old Run's candidate_hash never changes.
+
+### 27.21 Successor Run after G6
+
+Reuse/generalize the deterministic successor relation landed by RB3-C1.
+
+The successor reservation remains keyed by predecessor Review Run ID.
+
+Do not introduce another P4-specific replacement-run identity allocator.
+
+The new Run binds:
+
+- same owning operation_identity;
+- same target/review kind;
+- result candidate_hash from G6;
+- candidate_generation + 1;
+- predecessor review_run_id;
+- source repair_batch_id;
+- explicit set-aside/replacement reference to the predecessor.
+
+At most one direct successor may exist for one predecessor.
+
+Conflicting successor identities are reconcile-required.
+
+No newest/timestamp selection.
+
+### 27.22 Current-cycle recovery
+
+Extend review/recovery.py through versioned adapters, not a second recovery engine.
+
+The generic discovery core continues to own:
+
+- matching by review kind / target / operation identity;
+- committed-history discovery;
+- canonical persistence proof;
+- set-aside harvesting;
+- ambiguity refusal;
+- no newest selection.
+
+Add P4 state classification for:
+
+- G1 discovery accepted;
+- G2 discovery settled;
+- G3 adjudication accepted;
+- G4 adjudicated authorization-ready;
+- G4 HUMAN_WAIT;
+- G4 repair-required before G5;
+- G5 sealed;
+- G5 repair accepted;
+- G6 repair settled;
+- successor reserved / not yet G1;
+- successor active;
+- malformed/ambiguous linkage.
+
+Runtime report copies are never required for recovery once canonical P4 report records exist.
+
+Incomplete or contradictory candidate-generation / predecessor / batch / successor linkage is reconcile-required.
+
+### 27.23 A/B/C and STRATEGY_CHANGE
+
+A/B/C is computed/validated only from explicit current-cycle linkage.
+
+Never infer causality from "appeared after repair".
+
+Allowed:
+
+~~~
+A_NEW
+B_RECURRENCE
+C_REPAIR_INDUCED
+~~~
+
+B_RECURRENCE requires:
+
+- linked prior Finding;
+- linked prior Repair Batch/Result as applicable;
+- same substantive Problem/semantic responsibility;
+- positive support that the prior repair failed to close it.
+
+C_REPAIR_INDUCED requires:
+
+- linked causal Repair Batch/Result;
+- causal evidence digest;
+- positive support that the Problem did not exist before and was created by that repair.
+
+Unknown causality -> A_NEW.
+
+Track consecutive supported B/C failures by semantic_surface inside the current cycle.
+
+Two consecutive supported B/C failures on the same surface require the next Repair Batch to enter STRATEGY_CHANGE.
+
+Model timeout, provider rate limit, crash, invalid external return and unavailable tool are operational failures and do not increment semantic recurrence.
+
+### 27.24 LOW / Improvement dispositions
+
+P4 never creates an automatic Work from LOW or Improvement.
+
+Canonical current-cycle dispositions include at least:
+
+~~~
+repaired_current_cycle
+retained_history_only
+future_work_candidate
+no_action_after_adjudication
+~~~
+
+A future Work, if later chosen, is created through normal Workline ownership/progression.
+
+P4 stores only current-cycle disposition/provenance.
+
+RB4/P5 owns durable long-lived history/workization provenance.
+
+### 27.25 Verification-only Integration
+
+P4 common validation recognizes Integration Evidence only through a declared side-effect contract.
+
+The adapter declares:
+
+- allowed persistent Project state: none for verification-only;
+- allowed external/nested state;
+- isolation/disposal/rollback mechanism identity;
+- proof that disposable effects were actually isolated/rolled back.
+
+PASS is invalid if verification performs undeclared persistent mutation of:
+
+- Project domain state;
+- external service/state;
+- nested repository/submodule working tree.
+
+A gitlink identity does not authorize nested working-tree mutation.
+
+When Integration reveals required product/domain repair:
+
+~~~
+normal fix Work under existing progression
+-> complete normally
+-> Formal Review as required
+-> rerun Integration
+~~~
+
+P4 does not turn Integration into a hidden repair/lifecycle controller.
+
+No new generic Integration runtime is required merely to satisfy P4; this contract applies when an adapter declares Integration Evidence.
+
+### 27.26 Primary implementation files
+
+Expected common production changes:
+
+~~~
+src/workline/review/p4.py                  NEW
+src/workline/review/paths.py
+src/workline/review/records.py
+src/workline/review/store.py
+src/workline/review/validate.py
+src/workline/review/gate.py
+src/workline/review/recovery.py
+src/workline/review/closure.py
+~~~
+
+Expected kind-semantic changes:
+
+~~~
+src/workline/review/planning.py
+src/workline/review/work_review.py
+~~~
+
+Expected owner orchestration changes:
+
+~~~
+src/workline/roadmap_review.py
+src/workline/start_review.py
+~~~
+
+Other files may be changed only when an exact existing responsibility requires it.
+
+Do not add:
+
+- a second Review store;
+- a second mutation controller;
+- a second publication subsystem;
+- a P4 lifecycle state database;
+- a maintenance queue for LOW/Improvement.
+
+### 27.27 Existing primitives to reuse
+
+Reuse instead of reimplement:
+
+- records.TaskInput for accepted discovery/adjudication/repair task persistence;
+- GateGeneration accepted_tasks / settled_tasks;
+- generation mutation serialization/persistence;
+- content-addressed canonical serialization/digest;
+- ReviewStore canonical read primitives;
+- gate reservation/task key patterns;
+- RB3-C1 deterministic successor relation;
+- RB3-C1 Work set_aside request version support;
+- review/recovery.py generic discovery core;
+- review/closure.py dependency classes, EvidenceDeclaration, ClassCoverage and MechanismProof;
+- planning Candidate builders/reconstruction;
+- Work Candidate snapshot/material reconstruction;
+- Work resulting-tree / checkout capability machinery;
+- existing owner operation mutation and publication paths.
+
+Do not reuse closure.may_reuse() as whole-Review authorization across repaired Candidates.
+
+### 27.28 Canonical runtime authority activation
+
+The P4 implementation candidate must update runtime canonical text in the same candidate.
+
+At minimum inspect/update:
+
+~~~
+.claude/skills/review/SKILL.md
+.claude/skills/roadmap/SKILL.md
+.claude/skills/start/SKILL.md
+~~~
+
+Review Skill must state:
+
+- discovery != adjudication;
+- P4 raw reports are canonical current-cycle records;
+- Problem/Improvement/HUMAN rules;
+- blocking H-4 semantics;
+- one Repair Batch per Candidate generation;
+- G1-G6 P4 shape;
+- new Candidate/new Run after repair;
+- Evidence-only positive-proof reuse;
+- A/B/C and STRATEGY_CHANGE;
+- LOW/Improvement nonblocking/no automatic Work;
+- Review does not own lifecycle/Git finalization.
+
+Roadmap and START Skills must state their owner responsibilities for:
+
+- P4 opt-in/version dispatch;
+- Candidate N+1 adoption;
+- successor Run;
+- HUMAN_WAIT;
+- final Receipt consumption;
+- no v1 reinterpretation.
+
+registry routing does not change.
+
+### 27.29 Focused tests — common records/namespace
+
+Add focused coverage for:
+
+- report path digest == canonical report digest;
+- report schema strictness and H-3-safe persistence contract;
+- adjudication strict schema;
+- Repair Batch strict schema;
+- Repair Result strict schema;
+- canonical round-trip;
+- immutable/create-only behavior;
+- orphan validation;
+- namespace/path safety;
+- duplicate/conflicting IDs fail closed.
+
+Recommended:
+
+~~~
+tests/test_review_p4_records.py
+~~~
+
+### 27.30 Focused tests — adjudication
+
+Cover at least:
+
+- unsupported -> no Finding/no obligation;
+- requirement ambiguity -> HUMAN;
+- decided requirement failure -> Problem;
+- actionable better alternative without failure -> Improvement;
+- otherwise dismissed_non_actionable;
+- reviewer severity is not final authority;
+- LOW Problem nonblocking only when objective holds;
+- HIGH/MID Problem blocks;
+- Improvement any severity nonblocking;
+- duplicate claims merge only under same repair identity;
+- uncertain repair identity remains separate;
+- strongest supported severity retained on merge;
+- every source claim accounted for;
+- stable Finding ordering/ID reservation across retry.
+
+Recommended:
+
+~~~
+tests/test_review_p4_adjudication.py
+~~~
+
+### 27.31 Focused tests — generation state machine
+
+Planning and Work each cover:
+
+~~~
+G1 discovery accepted
+G2 discovery settled/raw report durable
+G3 adjudication accepted
+G4 adjudication settled
+
+authorization branch -> G5 sealed Receipt
+repair branch        -> G5 repair accepted -> G6 repair settled
+HUMAN branch         -> stays G4
+~~~
+
+Also cover:
+
+- v1 P2/P3 exact old shape still valid;
+- v1 Run never upgraded by inference;
+- explicit contract dispatch;
+- P4 G4 never mistaken for v1 invalidation G4;
+- P4 G5 seal never mistaken for repair G5;
+- Receipt generation binding;
+- no Receipt on repair branch;
+- no G7 within one Candidate-specific P4 Run.
+
+### 27.32 Focused tests — repair and successor
+
+Cover:
+
+- exactly one Repair Batch per Candidate generation;
+- all blocking HIGH/MID Findings in one batch;
+- Improvement excluded;
+- HUMAN excluded;
+- LOW excluded unless deliberately repaired;
+- repair task persisted before launch;
+- failed/invalid return does not settle success;
+- Repair Coverage unknown rejects success/readiness;
+- shared responsibility + local-only repair rejected/widened;
+- Candidate N+1 complete, not patch;
+- old candidate_hash immutable;
+- result candidate_generation = source + 1;
+- deterministic successor reservation reused from RB3-C1;
+- one predecessor -> at most one successor;
+- set-aside predecessor recorded;
+- conflicting successor reconcile;
+- runtime cleanup recovery works.
+
+Recommended:
+
+~~~
+tests/test_review_p4_repair.py
+tests/test_review_p4_recovery.py
+~~~
+
+### 27.33 Focused tests — Evidence / reverification
+
+Cover:
+
+- incomplete dependency declaration -> unknown/reacquire;
+- unknown class -> reacquire;
+- changed concrete Evidence identity -> invalidate;
+- changed proof mechanism -> invalidate;
+- changed adapter identity/version -> invalidate;
+- repair impact invalidating assumption -> invalidate;
+- complete unchanged Evidence dependencies may reuse;
+- Candidate N discovery/adjudication/Receipt never reused as N+1 authorization;
+- LOCAL/SHARED/CONTRACT/FOUNDATION reverification minimums;
+- required reverification incomplete -> no convergence.
+
+### 27.34 Focused tests — recurrence and strategy
+
+Cover:
+
+- after-repair timing alone -> A_NEW;
+- supported recurrence -> B_RECURRENCE with links;
+- supported repair-induced -> C_REPAIR_INDUCED with causal digest;
+- unknown causality -> A_NEW;
+- B->B same surface -> STRATEGY_CHANGE;
+- C->C same surface -> STRATEGY_CHANGE;
+- B->C same surface -> STRATEGY_CHANGE;
+- C->B same surface -> STRATEGY_CHANGE;
+- different semantic surface does not increment same-surface sequence;
+- operational timeout/rate-limit/crash does not increment recurrence;
+- STRATEGY_CHANGE requirement blocks ordinary unchanged repair strategy.
+
+### 27.35 Focused tests — convergence and Integration
+
+Cover:
+
+- zero Findings + unknown coverage does not converge;
+- unresolved HIGH/MID does not converge;
+- traceable LOW with objective holding may converge;
+- traceable Improvement may converge;
+- unresolved HUMAN does not converge;
+- unknown Repair Coverage does not converge;
+- stale Evidence does not converge;
+- pending STRATEGY_CHANGE does not converge;
+- verification-only Integration with undeclared Project mutation cannot PASS;
+- undeclared external mutation cannot PASS;
+- nested repository mutation cannot PASS from gitlink identity alone;
+- disposable/rollback-confirmed adapter may PASS;
+- Integration-discovered fix routes through normal Work ownership.
+
+### 27.36 Interruption/recovery matrix
+
+At minimum test interruption at:
+
+1. P4 Run reservation;
+2. G1 before effect;
+3. G1 commit;
+4. after one discovery external return before G2;
+5. raw report record creation before G2 completion;
+6. G2 commit;
+7. G3 adjudication TaskInput accepted;
+8. adjudicator external return before G4;
+9. G4 adjudication record creation;
+10. G4 commit;
+11. Repair Batch ID reservation;
+12. G5 Repair Batch/TaskInput partial apply;
+13. G5 commit;
+14. repair external return before G6;
+15. Candidate N+1 snapshot/Repair Result partial apply;
+16. G6 commit;
+17. successor reservation;
+18. successor before G1;
+19. successor discovery cycle;
+20. P4 G5 seal;
+21. existing owner persistence/Consumption.
+
+Every retry proves:
+
+- same task IDs;
+- same Finding IDs;
+- same Repair Batch ID;
+- same Candidate generation;
+- same successor Run ID;
+- no duplicate raw report;
+- no duplicate adjudication;
+- no duplicate Repair Batch/Result;
+- no duplicate Receipt;
+- no v1 fallback;
+- no newest/timestamp selection.
+
+### 27.37 Non-scope
+
+P4 implementation must not implement:
+
+- RB4/P5 long-lived Review history/indexing;
+- cross-operation recurrence history;
+- Project-local adaptive Profile/Policy (P6);
+- Global promotion (P7);
+- Phase achievement (RB5);
+- RB1 status;
+- RB2 performance optimization;
+- RB10 Human disposition;
+- automatic LOW/Improvement Work queue;
+- general self-hosting;
+- replacement lifecycle state machine.
+
+### 27.38 Regression gate
+
+Run in this order:
+
+1. new P4 common record/adjudication tests;
+2. new P4 planning owner tests;
+3. new P4 Work owner tests;
+4. P4 repair/recovery/interruption tests;
+5. recurrence/convergence/Integration tests;
+6. RB3-C1/F4 focused regression;
+7. existing P2 planning Review regression;
+8. existing P3 Work Review regression;
+9. legacy non-Review Roadmap/START regression;
+10. canonical Skill/registry tests;
+11. full repository regression.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless live canonical test tooling has legitimately changed before implementation.
+
+### 27.39 Implementation completion gate
+
+RB3-P4 is complete only when all are true:
+
+- RB3-C1 landed semantics are reused;
+- P4 common core exists without lifecycle ownership;
+- canonical report/adjudication/Repair Batch/Repair Result records implemented;
+- explicit v1/P4 dispatch implemented;
+- planning P4 G1-G6 owner flow implemented;
+- Work P4 G1-G6 owner flow implemented;
+- HUMAN_WAIT implemented without guessed repair;
+- Candidate N+1/new Run linkage implemented;
+- Evidence-only positive-proof reuse implemented;
+- Repair Coverage/impact reverification implemented;
+- A/B/C + STRATEGY_CHANGE implemented;
+- convergence is obligation/coverage/evidence based;
+- verification-only Integration contract enforced where declared;
+- canonical Skills updated;
+- focused tests PASS;
+- v1 P2/P3 regression PASS;
+- legacy operations PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing occurs before that independent review.
+
+After P4 landing, RB3 is implementation-complete and RB4/P5 becomes the next critical-path block.
