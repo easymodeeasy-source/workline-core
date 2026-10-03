@@ -14049,3 +14049,540 @@ RB5 is complete only when:
 - no push/landing before independent exact-candidate review PASS.
 
 After RB5 lands, RB8 becomes dependency-ready once RB7 is also landed.
+
+---
+
+## 33. RB8 implementation brief — BL-011 + BL-013 + BL-020
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT_AFTER_RB5_AND_RB7_LAND
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §17.
+
+It does not replace §17. Where wording conflicts, §17 remains the semantic contract and this section fixes the implementation allocation required to realize it in the current live code.
+
+Dependency:
+
+~~~
+RB5 landed
+AND
+RB6 landed
+AND
+RB7 landed
+-> RB8
+~~~
+
+RB5 supplies achievement evidence/progression semantics. RB6 supplies the read-only shadow-authority detector. RB7 is a graph dependency and also closes Global Policy/root maintenance semantics that must remain distinct from self-hosting.
+
+RB8 adds no new mutation owner, no new registry-routed Skill and no new controller.
+
+### 33.1 Responsibility split
+
+BL-011 migration procedure owner:
+
+~~~
+.claude/skills/roadmap/SKILL.md
+~~~
+
+Project establishment owner remains:
+
+~~~
+.claude/skills/project-start/SKILL.md
+src/workline/project_start.py
+~~~
+
+Shadow-authority detection remains RB6-owned.
+
+Achievement remains RB5-owned.
+
+Self-hosting refusal remains:
+
+~~~
+src/workline/self_hosting.py
+rules/git
+~~~
+
+Historical AI-decision correction boundary remains:
+
+~~~
+rules/ai-decision
+~~~
+
+BACKLOG is disposition tracking only and is not runtime authority.
+
+### 33.2 Narrow pre-Project Roadmap exception
+
+The Roadmap Skill currently says it is used only inside an established Workline Project.
+
+RB8 narrows that statement for one case only:
+
+~~~
+legacy-project migration preflight inventory
+~~~
+
+Before ProjectSTART the Roadmap Skill may:
+
+- identify the exact target Project directory/repository;
+- perform the read-only migration inventory required by §17.2;
+- classify legacy authorities A-F;
+- prepare the post-ProjectSTART migration plan.
+
+It may not before ProjectSTART:
+
+- create a Roadmap/Phase/Work;
+- mutate Git;
+- retire/delete/disable a legacy authority;
+- install/copy a canonical Skill;
+- create .workline state;
+- make a capability-changing local Skill/automation change.
+
+ProjectSTART remains the only establishment/bootstrap operation.
+
+### 33.3 Migration inventory witness
+
+The inventory is one read-only observation of one frozen target identity.
+
+At minimum capture in the working migration session:
+
+- physical Project root identity;
+- Git top-level when present;
+- current full branch ref or detached/unborn state;
+- HEAD when present;
+- Git status paths;
+- every inventoried authority path and its semantic responsibility;
+- enough exact file/content identity to detect a material authority change before cutover;
+- legacy state/task/progression authority;
+- legacy Roadmap/plan authority;
+- local CONTRACT/safety authority;
+- local Skills/automation/hooks/agents;
+- in-progress and future obligations;
+- domain-specific authority;
+- external authority references;
+- prior Workline residue.
+
+This is procedure evidence, not a new canonical persistent schema.
+
+Do not persist secrets, raw private content or unnecessary transcript/reasoning into Workline canonical history.
+
+If any materially inventoried authority changes before cutover, refresh/reconcile the inventory before continuing.
+
+### 33.4 Classification is by responsibility, never filename
+
+Each inventoried artifact receives exactly one applicable disposition class from §17.3:
+
+~~~
+A  Workline-owned responsibility
+B  project/domain authority not owned by Workline
+C  stricter project-specific safety
+D  derived/read-only view
+E  historical evidence
+F  obsolete
+~~~
+
+Rules:
+
+- filename/vocabulary never decides the class;
+- A is semantically migrated then its old normative role is retired;
+- B remains local authority for its own domain;
+- C is preserved and must never be weakened by migration;
+- D may remain only as derived/non-authoritative;
+- E may remain as history/evidence;
+- F is retired/deleted only through the normal owner and Human boundary.
+
+An artifact may contain several responsibilities; classify the responsibilities rather than forcing the whole file into one class where that would lose valid local authority.
+
+### 33.5 ProjectSTART is a cutover boundary, not a migration engine
+
+After the read-only inventory:
+
+1. run ordinary ProjectSTART;
+2. allow ProjectSTART to establish only its existing canonical Project/bootstrap structure;
+3. do not add migration behavior to project_start.py;
+4. once establishment succeeds, Workline canonical authorities become authoritative for Workline-owned responsibilities.
+
+Legacy planning/task/status artifacts do not remain a parallel controller after this point.
+
+The migration procedure must minimize the dual-authority interval and never rely on a long-lived two-controller mode.
+
+### 33.6 Migration Roadmap
+
+Immediately after ProjectSTART, use ordinary Roadmap/Phase/Work operations to create a Migration Roadmap representing the current/future desired state.
+
+Represent:
+
+- genuine current in-progress obligation;
+- genuine future obligation;
+- dependencies;
+- Related/authority links;
+- required retirement/preservation work;
+- unresolved semantic ambiguity as HUMAN when the normal Human boundary genuinely applies.
+
+Do not fabricate:
+
+- historical work_started/work_completed;
+- historical Phase/Roadmap lifecycle events;
+- historical Review Runs/Receipts;
+- historical evidence records;
+- chronology for work already finished before Workline.
+
+Already-finished legacy work need not be backfilled merely to make the new Project look historically complete.
+
+### 33.7 Local safety and domain preservation
+
+Before retiring any A authority, identify any still-applicable safety/operational rule not represented by Workline.
+
+Preserve that rule in its proper local authority.
+
+Do not retain an obsolete legacy workflow/controller merely because one valid safety sentence is embedded in it.
+
+Project/domain B and stricter-safety C authorities remain authoritative only for their own responsibility.
+
+A Workline migration must never weaken C.
+
+### 33.8 Local Skills, automation and hooks
+
+Classify project-local capability as follows:
+
+- distinct project/domain capability -> preserve;
+- canonical caller that does not duplicate Workline semantics -> preserve;
+- duplicate planning/lifecycle/review/Git authority -> retire/refactor;
+- capability-changing modification -> normal human-confirmation boundary.
+
+Do not copy canonical Workline Skills into the Project.
+
+The Project-side Workline bootstrap remains the one thin canonical entry.
+
+### 33.9 Retirement of overlapping legacy authority
+
+Every class-A legacy authority must receive an unambiguous retirement outcome.
+
+Allowed forms include:
+
+- deletion through its normal owner where safe;
+- removal/replacement of the normative claim;
+- explicit historical/non-authoritative marking;
+- disabling old automation through the applicable Human boundary;
+- redirecting operator guidance to canonical Workline authority.
+
+Do not retire by keyword match.
+
+Do not retire B/C responsibility.
+
+No migration operation silently edits a capability-changing automation merely because it looks old.
+
+### 33.10 RB6 shadow-authority check
+
+After semantic migration/retirement, run the RB6 read-only shadow-authority detector.
+
+The detector remains narrow:
+
+- positive structural/observed evidence;
+- canonical bootstrap exact path;
+- local Skill authority where structurally relevant;
+- no generic scan of README/BACKLOG/TODO/STATUS prose for matching words.
+
+Migration achievement requires:
+
+~~~
+confirmed_shadow_authority = none
+~~~
+
+A suspected diagnostic remains advisory evidence unless/until it is confirmed by the RB6 contract.
+
+RB8 does not teach the detector to migrate or retire anything.
+
+### 33.11 Fresh-session recovery acceptance
+
+The disposable acceptance flow must prove recovery in a fresh process/session with no private migration scratch.
+
+From supported bootstrap/canonical authority it must be possible to determine:
+
+- configured Workline root;
+- current Roadmap;
+- current Phase;
+- current/next Work;
+- dependencies/Related;
+- surviving domain authority;
+- surviving stricter local safety authority.
+
+No retired legacy progression authority may be needed to reconstruct the active state.
+
+### 33.12 Migration achievement uses RB5
+
+The Migration Roadmap does not invent another completion/achievement system.
+
+Achievement is eligible only after §17.10:
+
+- current/future canonical state is represented;
+- local domain/safety authority is preserved;
+- overlapping legacy authority is retired;
+- no confirmed shadow authority remains;
+- fresh-session recovery PASS;
+- canonical validation PASS;
+- no unresolved migration HUMAN remains.
+
+Then use the ordinary RB5 Phase/Roadmap achievement semantics and evidence.
+
+### 33.13 Disposable migration acceptance fixture
+
+Add a disposable representative legacy Project fixture containing at least:
+
+- legacy state/progression tracker;
+- legacy plan/Roadmap-like authority;
+- stricter local safety rule;
+- project-local Skill or automation;
+- distinct domain authority;
+- obsolete authority;
+- current/in-progress obligation;
+- future obligation.
+
+Acceptance flow:
+
+~~~
+read-only inventory
+-> A-F classification
+-> ProjectSTART
+-> Migration Roadmap
+-> semantic current/future migration
+-> preserve B/C
+-> retire A/F as applicable
+-> RB6 shadow check
+-> fresh-session recovery
+-> validation
+-> RB5 achievement
+~~~
+
+This is a fixture/acceptance proof of the documented procedure, not a new production migration controller.
+
+No existing real Project is backfilled by the test.
+
+### 33.14 BL-013 is intentionally unsupported self-hosting
+
+Freeze the product statement:
+
+~~~
+workline-core is the Workline root/runtime repository
+and is intentionally not itself a Workline Project.
+~~~
+
+This is an unsupported capability, not an incomplete mode.
+
+Preserve the existing BL-012 safety guard behavior:
+
+- Project root and Workline root must be provably different physical directories;
+- unknown equivalence fails closed;
+- ProjectSTART refuses before Git init/bootstrap write;
+- established state-changing operations refuse before lock/write;
+- read-only diagnosis remains possible;
+- validation never reports self-hosted state as PASS;
+- there is no override/auto-repair flag.
+
+### 33.15 Self-hosting rationale canonicalization
+
+Update canonical rules/project-start rationale and README mirror to state the current reason without BACKLOG dependency:
+
+- runtime/dev separation is not defined as a self-host contract;
+- no released/versioned runtime boundary exists;
+- mutation/recovery formats may evolve with the implementation;
+- break-glass recovery cannot safely depend only on the same potentially-broken runtime;
+- Workline-root context and Project context are different authorities;
+- public/private disclosure boundaries are not a self-host release model;
+- portable runtime/version identity is not defined.
+
+Change self_hosting.py wording that describes the guard as merely temporary/reconsiderable.
+
+Runtime refusal behavior does not change.
+
+### 33.16 Future self-hosting reopening gate
+
+Self-hosting may reopen only as explicit product/spec work after defining at least:
+
+- runtime/dev separation;
+- release/version identity;
+- mutation/recovery compatibility policy;
+- break-glass path independent of the broken runtime;
+- root-vs-Project routing semantics;
+- disclosure/publication rules;
+- portable root/version identity.
+
+P6/P7 policy cannot enable self-hosting.
+
+Completion of Workline does not depend on reopening it.
+
+### 33.17 BL-020 measured disposition
+
+No concrete current correction case exists that justifies inventing a generic historical correction schema.
+
+Therefore RB8 must not add one.
+
+Canonical rules/ai-decision must state the future boundary:
+
+- original historical record is immutable;
+- do not rewrite/delete it;
+- if a downstream operation proves a historical interpretation itself is wrong and needs corrected semantics, that operation stops and opens explicit product/design work;
+- any future generic correction mechanism must use a formal canonical correction record;
+- downstream readers must mechanically detect corrected/superseded/invalidated truth;
+- superseded/invalidated meaning is not treated as current truth.
+
+These are constraints, not a schema.
+
+### 33.18 BL-009 historical Related remains unchanged
+
+Terminal Related/history remains historical.
+
+BL-020 applies only if the historical record itself is proven wrong.
+
+No such real case is currently established.
+
+Do not fabricate one for acceptance.
+
+### 33.19 Retarget historical-related regression
+
+Remove the BACKLOG-specific BL-020 assertion from:
+
+~~~
+tests/test_historical_related.py
+~~~
+
+Retarget it to the canonical rules/ai-decision boundary.
+
+The test must prove:
+
+- historical Related remains immutable history;
+- no generic correction schema is claimed;
+- the future correction constraints live in canonical authority;
+- no BACKLOG item is required to understand runtime semantics.
+
+### 33.20 BACKLOG disposition at implementation completion
+
+When the RB8 implementation candidate satisfies this brief:
+
+- BL-011 -> RESOLVED with the canonical Roadmap migration procedure;
+- BL-013 -> RESOLVED as intentional unsupported self-hosting with canonical rationale;
+- BL-020 -> RESOLVED as no-current-case/no-schema, with future boundary moved to rules/ai-decision.
+
+Do not mark them RESOLVED in a docs-only implementation-brief freeze before their production/canonical-authority changes exist.
+
+BL-100 later owns backlog retirement/cleanup.
+
+### 33.21 Expected implementation surfaces
+
+Expected direct surfaces:
+
+~~~
+.claude/skills/roadmap/SKILL.md
+.claude/skills/project-start/SKILL.md
+registry.md
+README.md
+src/workline/self_hosting.py
+BACKLOG.md
+tests/test_legacy_project_migration.py
+tests/test_self_hosting_guard.py
+tests/test_historical_related.py
+~~~
+
+Expected non-surfaces:
+
+~~~
+src/workline/roadmap.py          # no migration controller
+src/workline/project_start.py    # no migration engine
+new registry Skill               # prohibited
+new migration persistence schema # prohibited
+~~~
+
+If implementation discovers that production runtime code is required solely to automate the migration procedure, stop and re-check §17 rather than silently creating a new owner.
+
+### 33.22 Focused tests
+
+Migration:
+
+- Roadmap Skill exposes only the narrow read-only pre-Project migration preflight;
+- fixture inventory covers A-F by responsibility;
+- ProjectSTART remains unchanged establishment;
+- current/in-progress/future obligations migrate without historical fabrication;
+- B/C survive;
+- A overlap retires;
+- RB6 reports no confirmed shadow;
+- fresh process reconstructs active Workline state without old controller;
+- Migration Roadmap achievement uses RB5.
+
+Self-hosting:
+
+- same physical root rejected before write;
+- unprovable identity rejected;
+- established mutation refuses before lock/write;
+- read-only status/diagnosis remains possible;
+- no override;
+- Global Policy/root maintenance never creates .workline/project.yaml in the Workline root;
+- canonical authority describes intentional unsupported status without BACKLOG dependency.
+
+Historical correction:
+
+- historical Related semantics unchanged;
+- rules/ai-decision holds future correction constraints;
+- no correction record/schema is introduced;
+- no fabricated correction fixture;
+- test no longer depends on BL-020 text.
+
+### 33.23 Regression order
+
+1. legacy migration procedure/fixture;
+2. self-hosting guard/rationale;
+3. historical Related/correction-boundary tests;
+4. RB6 shadow-authority tests;
+5. RB5 achievement/progression tests;
+6. RB7 Global Policy/root-maintenance tests;
+7. registry/Skill routing;
+8. ProjectSTART/bootstrap;
+9. full suite.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical tooling legitimately changes before implementation.
+
+### 33.24 Explicit non-scope
+
+RB8 must not implement:
+
+- automatic general legacy-project importer;
+- second ProjectSTART path;
+- historical lifecycle/Review backfill;
+- generic correction schema;
+- self-hosting;
+- runtime/version release model;
+- shadow-authority auto-repair;
+- local-domain authority absorption;
+- capability-changing automation edits without Human boundary.
+
+### 33.25 Implementation completion gate
+
+RB8 is complete only when:
+
+- the Roadmap migration procedure is canonical and executable as a bounded orchestration procedure;
+- pre-Project access is read-only and narrow;
+- disposable migration acceptance PASSes;
+- fresh-session recovery no longer depends on retired legacy progression authority;
+- B/C authority survives without weakening;
+- RB6 confirms no shadow authority for the fixture;
+- RB5 achievement closes the Migration Roadmap;
+- self-hosting is canonically intentional/unsupported with unchanged fail-closed runtime behavior;
+- future reopening conditions are explicit;
+- BL-020 no-current-case disposition is canonicalized without a fake schema;
+- historical-related test no longer depends on BACKLOG;
+- BACKLOG statuses are resolved only with the actual implementation candidate;
+- focused regressions PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
+
