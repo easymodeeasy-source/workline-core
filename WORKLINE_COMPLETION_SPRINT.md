@@ -269,8 +269,7 @@ Hard dependency:
 ~~~
 RB1 -> RB2
 
-RB3-K0
--> RB3-C1
+RB3-C1
 -> RB3 remaining / P4 / BL-004
 -> RB4
 
@@ -5812,7 +5811,7 @@ N4 is Human-invoked at runtime by design, but its existence/semantics do not req
 
 If implementation discovers that one of N3's malformed inputs can only be fixed by changing a currently supported semantic representation rather than rejecting an invalid one, stop and route that specific requirement change to HUMAN.
 
-RB10 is DESIGN_READY except for bounded execution-dependent enumeration/tests for N3(b) and the implementation-only exact N4 record shape after RB3/RB1 land.
+RB10 is DESIGN_READY. The only bounded execution-dependent design residue is N3(b)'s exact public-surface enumeration/tests. N4's canonical disposition namespace/schema and implementation brief are already frozen in §35; N4 production implementation itself waits for RB3-C1 and RB1 to land so it can bind to their actual runtime surfaces.
 
 ---
 
@@ -5833,7 +5832,7 @@ Before Stage A, prove:
 - no required runtime behavior exists only in WORKLINE_COMPLETION_SPRINT.md, BACKLOG.md or a historical REVIEW_SYSTEM_* file;
 - no unresolved blocking Problem HIGH/MID remains;
 - no Problem LOW invalidates the completion objective;
-- no required Human decision remains except HD-2W if the final landing still needs it and HD-3 for E4 Project selection;
+- no unresolved Human decision that must be settled before RB9 may start remains, except HD-2W if the applicable landing still needs it and HD-3 for E4 Project selection; Human actions intentionally created inside RB9, including the exact BL-100 removal/archive manifest approval in §19.10, may remain and are resolved at their named stage;
 - no implementation candidate/write branch is still concurrently changing the semantic surface under audit.
 
 If any runtime requirement still lives only in sprint/history text, RB9 stops and routes it to the owning canonical runtime authority before cleanup.
@@ -6086,7 +6085,7 @@ Present once:
 
 Human approval is for the exact cleanup manifest, not for reopening already-frozen runtime architecture.
 
-If the inventory reveals genuinely live development tracking that needs a replacement system, trigger H-C11 instead of inventing one.
+If the inventory reveals genuinely live development tracking that needs a replacement system, trigger the §22 conditional Human decision "BL-100 leaves genuinely live development tracking needing replacement" instead of inventing one.
 
 ### 19.11 Stage B completion gate
 
@@ -6614,6 +6613,8 @@ Runtime Improvements alone do not block completion.
 
 ## 25. Current execution priority
 
+Status note: §§25.1-25.5 are the preparation snapshot that produced the implementation briefs in §§26-36. Their "before coding-agent use" and "current milestone" wording is superseded by §37. Current production-dispatch authority is §37; this section remains rationale for the ordering decisions only.
+
 The Control Plane design pass is complete.
 
 All ten Review Blocks now have a frozen completion contract.
@@ -6715,14 +6716,10 @@ Claude Code or another coding agent can later consume the same briefs without ch
 Current control-plane milestone:
 
 ~~~
-DESIGN FREEZE COMPLETE
+SUPERSEDED BY §37 GATE 0
 ~~~
 
-Current next milestone:
-
-~~~
-RB3-C1 READY_TO_IMPLEMENT brief complete
-~~~
+All implementation briefs in §§26-36 and the Production Execution Plan in §37 are frozen. Production dispatch remains blocked until the final independent cold-read closure in §37.1 passes.
 
 Production implementation has not been declared complete merely because the design contracts are committed.
 
