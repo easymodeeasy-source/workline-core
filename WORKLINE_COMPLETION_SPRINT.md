@@ -5832,16 +5832,20 @@ Before Stage A, prove:
 - no required runtime behavior exists only in WORKLINE_COMPLETION_SPRINT.md, BACKLOG.md or a historical REVIEW_SYSTEM_* file;
 - no unresolved blocking Problem HIGH/MID remains;
 - no Problem LOW invalidates the completion objective;
-- no unresolved Human decision that must be settled before RB9 may start remains, except HD-2W if the applicable landing still needs it and HD-3 for E4 Project selection; Human actions intentionally created inside RB9, including the exact BL-100 removal/archive manifest approval in §19.10, may remain and are resolved at their named stage;
+- no unresolved Human decision that must be settled before RB9 may start remains, except HD-3 for E4 Project selection; HD-2W must already have been resolved at the first production landing under §37.14; Human actions intentionally created inside RB9, including the exact BL-100 removal/archive manifest approval in §19.10, may remain and are resolved at their named stage;
 - no implementation candidate/write branch is still concurrently changing the semantic surface under audit.
 
 If any runtime requirement still lives only in sprint/history text, RB9 stops and routes it to the owning canonical runtime authority before cleanup.
 
 ### 19.2 Stage A — completion-map disposition audit
 
-Build one completion map for every Completion Sprint item and every still-live BACKLOG item.
+Build one completion map for every pre-RB9 Completion Sprint implementation/backlog requirement that must be disposed before BL-100 cleanup, and for every still-live BACKLOG item.
 
-For each item record:
+This Stage-A final-disposition map includes RB1-RB8, RB10, their named BL/runtime-hardening requirements, and any earlier completion requirement whose authority/disposition must be known before cleanup.
+
+It does NOT require a final Stage-A disposition for RB9 itself or for RB9's later Stage B cleanup, Stage C/D/E final-candidate work, E3, E4, §19.27 final proof or §19.28 final report. Those actions are closed by their own later gates. Requiring their final disposition here would be circular.
+
+For each mapped item record:
 
 - stable ID / source;
 - current disposition;
@@ -5894,7 +5898,9 @@ Classify every operationally meaningful surface by responsibility:
 ~~~
 A CURRENT
   required by current Workline runtime, public user guidance,
-  canonical tests or supported development/runtime execution
+  canonical tests or supported development/runtime execution;
+  during RB9 only, §19.6 also permits the single active Completion Sprint
+  control artifact as a temporary A CURRENT completion-control exception
 
 B HISTORICAL_ONLY
   useful rationale/evidence, but never a current operation,
@@ -5984,17 +5990,9 @@ A future user request saying "add this to BACKLOG" therefore has no implied Work
 
 ### 19.6 Completion Sprint self-disposition
 
-WORKLINE_COMPLETION_SPRINT.md is active control authority only while the Completion Sprint is in progress.
+WORKLINE_COMPLETION_SPRINT.md is the single Completion Sprint control authority while the Completion Sprint is in progress.
 
-Once Stage A proves every runtime rule has migrated to its proper owner, the sprint document itself becomes:
-
-~~~
-B HISTORICAL_ONLY
-~~~
-
-before the final production candidate is frozen.
-
-Move it to an explicitly historical completion archive, for example:
+Once Stage A proves every runtime rule has migrated to its proper owner, BL-100 moves the exact sprint bytes out of the repository root before the final production candidate is frozen, for example to:
 
 ~~~
 docs/history/completion/WORKLINE_COMPLETION_SPRINT_2026-10-03.md
@@ -6002,15 +6000,27 @@ docs/history/completion/WORKLINE_COMPLETION_SPRINT_2026-10-03.md
 
 or an equivalently explicit archive path.
 
+That physical relocation changes only its repository-surface/runtime role. From relocation through successful §19.27 final proof and issuance of the §19.28 final report, those exact archived bytes remain the single Completion Sprint control authority and are classified as the temporary A CURRENT exception defined in §19.4.
+
+During that interval the archived sprint document is NOT Workline runtime authority, lifecycle authority, registry/Skill authority, an ordinary operational entrypoint or a development queue. E3 is not given it as an authority package; if a fresh reader discovers it, the archive boundary and the document itself must make its completion-control-only status unambiguous.
+
+After §19.27 PASS and issuance of §19.28, its completion-control role terminates automatically without another repository-byte change. At that point the same archived bytes become:
+
+~~~
+B HISTORICAL_ONLY
+~~~
+
+and remain human/audit provenance only.
+
 It must not remain at repository root with Status ACTIVE after Workline completion.
 
-The archived document is not provided as an authority package to E3; if a fresh reader discovers it, the archive boundary must make its non-authoritative status unambiguous.
+### 19.7 Historical archive is not a new runtime authority
 
-### 19.7 Historical archive is not a new authority
+The history archive is inert with respect to Workline runtime/domain operations.
 
-The history archive is inert documentation.
+The sole transitional exception is §19.6: until §19.27 PASS plus issuance of §19.28, the exact relocated Completion Sprint document retains Completion Sprint control authority only. No other archived document gains that role.
 
-It has no:
+The history archive has no:
 
 - registry routing;
 - Skill entry;
@@ -6023,7 +6033,7 @@ It has no:
 
 No current README flow routes an ordinary operation through it.
 
-Its only purpose is human/audit provenance.
+After the §19.6 transitional Completion Sprint control role terminates, its only purpose is human/audit provenance.
 
 ### 19.8 BACKLOG-dependent tests and references
 
@@ -6095,7 +6105,7 @@ BL-100 Stage B passes only when:
 - D count = 0;
 - every BACKLOG item has a Stage-A final disposition;
 - historical root Review docs are out of the root operational surface;
-- Completion Sprint is archived/non-active;
+- Completion Sprint is relocated out of the root and non-runtime/non-operational for ordinary Workline use, while retaining only the temporary completion-control role defined by §19.6 until §19.27 PASS + §19.28 issuance;
 - BACKLOG.md is absent;
 - README no longer routes to BACKLOG/legacy Vault/personal absolute root;
 - no canonical test depends on BACKLOG prose;
@@ -6190,7 +6200,7 @@ All existing landing safety applies:
 - serialized landing;
 - race gate immediately before update.
 
-If HD-2W is still unresolved, resolve it immediately before this first final implementation landing.
+HD-2W was already resolved before the first production landing under §37.14; RB9 does not reopen it.
 
 After landing, prove:
 
@@ -6431,7 +6441,8 @@ After E3 and E4 PASS, re-read live main and prove:
 - canonical runtime authority validates;
 - full suite evidence belongs to that candidate;
 - no final acceptance action changed workline-core bytes;
-- all Completion Sprint Blocks are DONE;
+- RB1-RB8 and RB10 are DONE;
+- every preceding RB9 stage required by §24 up through E3/E4 is PASS/complete;
 - BL-100 is complete;
 - no unresolved completion Human decision remains;
 - no blocking Review obligation remains;
@@ -6440,13 +6451,15 @@ After E3 and E4 PASS, re-read live main and prove:
 
 If main moved, stop completion reporting until the new main is reconciled/reviewed.
 
+§19.27 must not require RB9 itself to be DONE. Successful §19.27 proof establishes the last technical RB9 gate; issuance of the §19.28 final report then closes RB9 and may record its final disposition as DONE.
+
 ### 19.28 Final report
 
 The Completion Sprint final report records at least:
 
 1. final live main SHA;
 2. final tree SHA;
-3. RB1-RB10 final disposition;
+3. RB1-RB8 and RB10 final disposition, plus RB9 disposition recorded as DONE by issuance of this report after §19.27 PASS;
 4. capability/landing checkpoint SHAs;
 5. formal Control Plane review outcomes;
 6. Repair Batch/recurrence/STRATEGY_CHANGE outcomes;
@@ -6467,7 +6480,6 @@ Do not require the final report itself to become a new runtime authority.
 Expected Human actions are bounded:
 
 - approve the exact BL-100 destructive/archive manifest unless already explicitly approved;
-- resolve HD-2W if still unresolved at final landing;
 - choose the E4 real Project under HD-3;
 - perform/approve review-v1 activation for that Project if required;
 - answer only genuinely Human-owned product/requirement decisions discovered by acceptance.
