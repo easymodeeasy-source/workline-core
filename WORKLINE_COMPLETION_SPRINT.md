@@ -14585,4 +14585,429 @@ RB8 is complete only when:
 - full suite PASS;
 - exact candidate SHA/tree/diff frozen for independent review;
 - no push/landing before independent exact-candidate review PASS.
+---
 
+## 34. RB10 N2/N3/N6 implementation brief — runtime hardening
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT
+bounded_implementation_probe = N3(b) exact malformed-input inventory only
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §18.1-§18.4 and §18.8-§18.13.
+
+It does not replace §18. Where wording conflicts, §18 remains the semantic contract and this section fixes the implementation allocation required to realize N2, N3 and N6 in the current live code.
+
+N4 is intentionally excluded and receives its own later implementation brief after RB3-C1 set-aside semantics and RB1 status surfaces are landed.
+
+### 34.1 Writer/collision rule
+
+N2 and N3 share registration surfaces and must use one implementation writer when they touch the same files.
+
+At minimum serialize work touching:
+
+~~~
+src/workline/roadmap.py
+src/workline/create.py
+src/workline/phase_create.py
+src/workline/ops.py
+~~~
+
+N6 changes touching one of those files stay in the same writer.
+
+N6-1 touches review/gate.py and must not be implemented concurrently with a live RB3-C1/P4 writer changing that file.
+
+RB5 also touches Roadmap/CREATE registration surfaces. Separate worktrees are not proof that concurrent edits are collision-free: either land RB10 before RB5 and rebase/review RB5, or apply RB10 after RB5.
+
+### 34.2 N3 common caller-input boundary
+
+Add one legacy/runtime canonical-input validation layer for registration/planning payloads before mutation reservation/effect.
+
+Do not make roadmap_review.require_canonical_input the general owner: its error vocabulary and Review Candidate meaning remain Review-specific.
+
+The common validator may reuse the same lower-level serializer/round-trip primitives where appropriate.
+
+It must validate the actual semantic representation used by the live writer/reader pair rather than inventing an escape convention.
+
+### 34.3 Single-line identity text
+
+For canonical entity identity/name fields rendered as a Markdown H1, require that the caller value reads back as exactly one supported semantic identity.
+
+At minimum reject before reservation/effect:
+
+- CR;
+- LF;
+- CRLF;
+- any other newline/control form that splits the identity across structural lines;
+- text that causes the canonical reader to return a different entity name;
+- text that injects canonical entity/section heading structure into a field required to remain one identity value.
+
+Do not silently truncate. Do not escape only one writer and leave the reader contract unchanged.
+
+### 34.4 Markdown section round-trip
+
+Not every multiline field is invalid.
+
+Desired state/background/scope/out-of-scope and other fields whose schema intentionally carries multiline text remain allowed when the canonical writer/reader preserves their semantic value and section boundaries.
+
+Before reservation/effect prove:
+
+~~~
+input semantic value
+-> canonical render
+-> canonical read
+-> same supported semantic value
+AND surrounding canonical section structure unchanged
+~~~
+
+Reject heading injection where caller text causes a later canonical section to be split/reinterpreted.
+
+Do not implement blanket newline rejection for fields intentionally supporting multiline content.
+
+### 34.5 Registration payload coverage
+
+Apply the common boundary to every fresh caller-controlled registration surface that can reach Roadmap/Phase/Work canonical state, at minimum:
+
+- RoadmapPlan name and sections;
+- PhaseSpec name/desired_state;
+- WorkSpec name/desired_state;
+- PhaseEntryDesign normal/integration/confirmation Work text;
+- standalone CREATE WorkSpec;
+- Related caller text where it enters durable YAML/JSON or a semantic key;
+- direct/future-plan request identity text that is durably serialized.
+
+Existing valid Unicode remains supported. A field already constrained to a stable ID/enumeration keeps its stronger validator.
+
+### 34.6 N3(b) durable serialization boundary
+
+Before a fresh mutation is opened or an ID/effect is reserved, prove that every caller-derived value persisted into the mutation invocation/request can be serialized durably and read back under the mutation-record format without semantic change.
+
+The exact public surface enumeration is a bounded implementation task.
+
+Known cases include:
+
+- lone surrogate string;
+- invalid tuple/list/record shapes that cannot be represented by the durable canonical serializer;
+- nested unsupported scalar/container values if any public caller path admits them;
+- text accepted in memory but not representable as canonical UTF-8/Yamlish/JSON at the durable boundary.
+
+Convert serializer/render exceptions into a normal Workline ValidationError/STOP before mutation creation. No raw UnicodeEncodeError/YamlishError/TypeError may strand a recovery record.
+
+### 34.7 Review-v1 input preflight remains distinct
+
+Review-v1 planning keeps its existing canonical Candidate/request preflight. If a common low-level helper is factored out, preserve Review-specific error codes/messages, tuple/list exactness and admission ordering.
+
+### 34.8 N2 stable dirty snapshot
+
+Reuse only:
+
+~~~
+gitops.record_preexisting_dirty(mutation, repo)
+~~~
+
+Do not take a second dirty snapshot after any Workline write. Do not create an alternate N2 snapshot field. Resume continues from the durable note already recorded.
+
+### 34.9 N2 effect-pre separability boundary
+
+Reuse:
+
+~~~
+gitops.ensure_separable_before_effects(mutation, paths)
+~~~
+
+or one mechanically equivalent common helper.
+
+For every affected state-changing legacy registration owner:
+
+1. complete payload validation;
+2. determine/reserve stable IDs required to know exact owned paths;
+3. derive the full first-stage/all-known canonical path set that can be touched before a later separability check;
+4. call effect-pre separability using the mutation's existing snapshot;
+5. only then record/apply the first domain effect.
+
+A pre-existing dirty overlap must fail before Project domain state changes.
+
+### 34.10 N2 affected owners
+
+At minimum cover:
+
+- Roadmap creation;
+- Roadmap Phase addition;
+- Phase entry/Phase expansion;
+- direct standalone CREATE;
+- Work Related maintenance;
+- shared legacy registration helpers reached by those operations.
+
+Also audit plan-exclusion/replan registration helpers when they share the same primitive. If an owner already has a stronger earlier refusal, keep it and prove it rather than weakening it.
+
+START result/derivation paths with stronger owner-specific semantics remain unchanged unless the audit proves the same gap.
+
+### 34.11 Multi-stage registration path closure
+
+A per-stage check is insufficient when an operation can apply an earlier stage before paths of a later stage are checked.
+
+Phase entry is the required proof. Before its first effect, determine exact paths of all decided registration stages, including normal/integration/confirmation Work entity paths and roadmap/related ledgers as applicable.
+
+If current registration APIs cannot expose those paths without recording effects, refactor registration into a pure decision/planning half and a record/apply half, following decide_phases.
+
+Do not broaden scope to unrelated ledgers merely to avoid deciding the exact path set.
+
+### 34.12 Direct CREATE exact owned paths
+
+Direct CREATE currently begins with related.yaml in WriteScope while the Work entity path is allocated inside registration.
+
+N2 requires the exact new Work path before first effect. Use the mutation's stable reservation to derive it, then check only the paths actually written: the Work entity path, related.yaml when Related exists, and any other exact real output.
+
+Do not add roadmap.yaml for standalone CREATE that writes no Roadmap relation.
+
+### 34.13 Related maintenance
+
+Related maintenance owns related.yaml only unless the operation truly writes another path. The target Work body is a read dependency, not automatically a write dependency.
+
+### 34.14 N2 retry semantics
+
+A clean pre-effect dirty_overlap remains a normal STOP, not reconcile_required.
+
+Because no domain effect was recorded, after the Human commits/discards the overlapping change a fresh invocation may proceed. Unrelated dirty paths remain allowed.
+
+A resumed mutation that already recorded effects under older semantics continues under existing recovery/byte-ownership rules; do not pretend those effects never happened.
+
+### 34.15 N6-1 Review gate mutation ID diagnostic
+
+In src/workline/review/gate.py replace pending generation diagnostic lookup from record.get("id") to the canonical durable key record.get("mutation_id"), or one exact accessor.
+
+Pin both one-pending and multiple-pending diagnostics to real mutation IDs. No recovery decision changes.
+
+### 34.16 N6-2 dirty_overlap retained semantics
+
+Keep the shared dirty_overlap code and OVERLAP_MESSAGE for the one semantic condition: pre-existing Human changes overlap operation-owned paths and cannot be safely separated.
+
+Allowed cleanup is literal deduplication through the existing constant/helper while retaining owner-specific recovery detail.
+
+Do not split the error code by owner. No production change is required if the audit finds no semantically different duplicate.
+
+### 34.17 N6-3 establishment and validity are separate questions
+
+Do not weaken is_established_project() into accepting an invalid Project as valid.
+
+Introduce/read through a cause-preserving diagnostic boundary that distinguishes:
+
+~~~
+identity absent/not established
+identity present but canonical state invalid/unreadable
+identity established and valid
+~~~
+
+For bootstrap backfill, missing/non-established identity may report not_a_project. If Project identity exists but relation/event canonical state is malformed, report the underlying canonical validation reason instead.
+
+Never reinterpret established-but-invalid state as a fresh initialization opportunity. Write nothing and repair nothing automatically.
+
+### 34.18 N6-3 structural error preservation
+
+Preserve actual reader/validation failure from at least roadmap relations, related relations, events and applicable project.yaml structural content.
+
+A boolean convenience predicate may remain for callers needing only yes/no, but backfill/diagnostic entry must use the cause-preserving form.
+
+### 34.19 N6-4 deterministic commit cleanup
+
+For Workline-owned commit creation using git commit, pin cleanup semantics explicitly:
+
+~~~
+--cleanup=whitespace
+~~~
+
+This preserves #-prefixed caller content against hostile commit.cleanup=strip while retaining existing whitespace cleanup behavior more closely than verbatim.
+
+Do not reject #-prefixed messages.
+
+### 34.20 N6-4 affected primitive
+
+Change gitcmd.commit_only(...) so mutation-controller legacy/local commit paths receive deterministic cleanup.
+
+Do not change the Review-v1 planning commit-tree/-F path merely for N6-4; it already has its own hermetic persistence contract.
+
+Audit direct git commit call sites outside commit_only. Any equivalent Workline-owned caller-controlled message path must route through the pinned primitive or explicitly provide the same deterministic cleanup contract.
+
+### 34.21 N6-4 recovery/proof compatibility
+
+Update proof/comparison tests for deterministic cleanup. Commit message equality does not become commit identity; existing made-commit ID, branch/base/history/content proofs remain authoritative.
+
+A hook may still rewrite a message; N6-4 removes ambient cleanup-configuration ambiguity only.
+
+### 34.22 Canonical Skill-count correction
+
+Update ProjectSTART canonical text from stale 5 Skill wording. The current required canonical Skill set is seven:
+
+~~~
+skills/project-start
+skills/project-router
+skills/roadmap
+skills/phase-create
+skills/create
+skills/start
+skills/review
+~~~
+
+Where practical tests derive the set/count from registry.REQUIRED_SKILL_IDS rather than pinning another independent number.
+
+No routing behavior changes.
+
+### 34.23 README public hygiene
+
+Remove/make portable at least:
+
+- obsolete aiproject-vault/new-dev-os-redesign authority reference;
+- personal absolute clone path such as D:\AIproject\workline-core;
+- instructions requiring that personal path;
+- BACKLOG BL-013 as normative runtime/self-host source once RB8 canonicalizes that statement.
+
+README should describe <workline-root>, <project-root> and configured Workline root portably.
+
+Do not rewrite historical frozen contract/checkpoint files solely to scrub old machine paths.
+
+### 34.24 Expected implementation surfaces
+
+Expected direct surfaces include:
+
+~~~
+src/workline/roadmap.py
+src/workline/create.py
+src/workline/phase_create.py
+src/workline/ops.py              # only if shared registration planning helper is needed
+src/workline/gitops.py           # only helper/docs/test adjustment if needed
+src/workline/gitcmd.py
+src/workline/bootstrap.py
+src/workline/review/gate.py
+src/workline/input_validation.py # acceptable new shared pure validator if chosen
+.claude/skills/project-start/SKILL.md
+README.md
+tests/test_registration_input_validation.py
+tests/test_registration_dirty_overlap.py
+tests/test_bootstrap_invalid_established.py
+tests/test_commit_cleanup.py
+~~~
+
+Existing test files may receive focused additions where that keeps one contract together.
+
+Do not add a new controller or mutation record kind for N2/N3/N6.
+
+### 34.25 Focused N3 tests
+
+Cover at least:
+
+- Work/Phase/Roadmap newline names rejected before mutation/effect;
+- CR-only/CRLF variants;
+- entity/section heading injection;
+- valid Unicode identity;
+- intended multiline desired-state/background still round-trips;
+- multiline text cannot inject a new canonical sibling section;
+- lone surrogate rejected as Workline validation before mutation creation;
+- every malformed durable tuple/record/container shape found in bounded public-surface inventory;
+- no recovery record/reserved ID/domain write after refusal.
+
+Review-v1 planning regression remains PASS.
+
+### 34.26 Focused N2 tests
+
+For every affected owner, pre-dirty the exact path the operation would own.
+
+At minimum cover Roadmap creation, Phase addition, Phase entry, direct CREATE and Related maintenance, including entity paths and relation ledgers actually written.
+
+For each prove dirty_overlap before first canonical domain effect, Human bytes unchanged, no accidental commit/push, unrelated dirty allowed, and safe retry after Human resolution.
+
+### 34.27 N2 resume regression
+
+Prove one stable preexisting_dirty snapshot, no second snapshot adopting Workline output, durable-note resume, and preservation of existing byte-ownership/recovery semantics for already-recorded effects.
+
+### 34.28 N6-1 tests
+
+Pending Review generation fixtures with known mutation IDs must show the real ID in one-pending and all real IDs deterministically in multi-pending conflict diagnostics.
+
+### 34.29 N6-3 tests
+
+With intact Project identity/bootstrap, individually corrupt related.yaml, roadmap.yaml, events.jsonl and applicable project.yaml structural content.
+
+Backfill/diagnostic entry must preserve the underlying structural error, write nothing, begin no bootstrap/domain mutation and never reinterpret the Project as fresh. True non-Project cases retain not_a_project.
+
+### 34.30 N6-4 tests
+
+Under hostile git config commit.cleanup=strip, commit valid messages including '# only', '# heading\nbody', ordinary text and existing whitespace-cleanup cases.
+
+Assert deterministic result independent of repo/user config and keep hook/recovery/message-identity regressions PASS.
+
+### 34.31 Documentation tests
+
+ProjectSTART required Skill set/count agrees with registry.REQUIRED_SKILL_IDS and contains no stale 5 common Skills wording.
+
+README contains no personal drive-root example or obsolete Vault authority claim and mirrors RB8 canonical self-host/runtime authority where applicable.
+
+### 34.32 Regression order
+
+1. N3 common input validation + bounded malformed-surface inventory;
+2. N3 focused tests;
+3. N2 registration decision/path planning + effect-pre separability;
+4. N2 owner/resume tests;
+5. N6-1 gate diagnostic;
+6. N6-3 bootstrap classification;
+7. N6-4 deterministic commit cleanup;
+8. N6-2 audit/no-op or literal dedup only;
+9. ProjectSTART count text/tests;
+10. README hygiene;
+11. Review planning regression;
+12. Roadmap/Phase/CREATE legacy regression;
+13. mutation/Git recovery regression;
+14. bootstrap/backfill regression;
+15. full suite.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical tooling legitimately changes before implementation.
+
+### 34.33 Explicit non-scope
+
+This RB10 candidate must not implement:
+
+- N4 Human disposition;
+- new mutation/disposition record schema;
+- new Review semantics;
+- global clean-tree requirement;
+- blanket newline rejection for intentionally multiline fields;
+- escaping-based replacement of canonical writer/reader semantics;
+- different dirty_overlap codes by owner;
+- weakening established-Project validation;
+- rejection of #-prefixed commit messages;
+- Review-v1 planning persistence rewrite;
+- general cleanup unrelated to the frozen N2/N3/N6 defects.
+
+### 34.34 Implementation completion gate
+
+RB10 N2/N3/N6 is complete only when:
+
+- malformed semantic-changing caller text is rejected before reservation/effect;
+- bounded N3(b) public caller inventory is documented in tests/implementation evidence;
+- serializer failures cannot strand fresh mutations;
+- intended multiline/Unicode semantics still round-trip;
+- every affected legacy registration owner proves dirty separability before first domain effect;
+- multi-stage Phase entry cannot partially write before discovering a later owned dirty path;
+- one stable preexisting_dirty snapshot remains authoritative;
+- real mutation IDs appear in Review gate diagnostics;
+- dirty_overlap semantic identity remains unchanged;
+- established-but-invalid canonical state preserves structural error instead of becoming not_a_project;
+- commit.cleanup cannot reinterpret an accepted #-prefixed message;
+- ProjectSTART Skill count matches the registry-defined seven required Skills;
+- README public hygiene is portable/current;
+- focused tests PASS;
+- Review/Roadmap/CREATE/mutation/bootstrap regressions PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
