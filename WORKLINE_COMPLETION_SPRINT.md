@@ -303,6 +303,7 @@ One semantic surface has one writer.
 Collision-sensitive pairs:
 
 ~~~
+RB3-C1 / RB3-P4 <-> RB10 N6-1  review/gate.py
 RB3-C1 <-> RB10-N4
 RB1    <-> RB5 status
 RB1    <-> RB10-N4 status
@@ -16487,7 +16488,9 @@ This is a preference, not a semantic dependency ordering. A side candidate may l
 
 Dispatch RB3-P4 immediately from the landed RB3-C1 baseline.
 
-Lane C may now finish N6-1 because the RB3-C1 writer has released review/gate.py.
+RB10 N6-1 remains held while the active RB3-P4 writer's actual or expected scope includes `src/workline/review/gate.py`.
+
+N6-1 may resume only after RB3-P4 releases that semantic surface, or after the mandatory §37.15 collision preflight positively proves that the active RB3-P4 writer will not touch `src/workline/review/gate.py`.
 
 Do not wait for RB1 merely to start P4.
 
@@ -16627,7 +16630,7 @@ unknown actual scope                    -> inspect first; do not assume disjoint
 
 Known frozen collision points include:
 
-- RB3-C1 / RB10 N6-1: review/gate.py;
+- RB3-C1 / RB3-P4 <-> RB10 N6-1: `src/workline/review/gate.py`; N6-1 remains held while either active RB3 writer owns or expects that surface;
 - RB3-C1/P4 / RB10-N4: Review recovery/integration surfaces may overlap;
 - RB10 N2/N3 / RB5: Roadmap/CREATE/registration surfaces;
 - RB1 / RB5/RB6/N4: later status additions are additive and must preserve RB1 base meaning;
