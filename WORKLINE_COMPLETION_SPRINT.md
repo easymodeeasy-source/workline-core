@@ -1271,80 +1271,117 @@ P4, not F4, owns:
 
 ## 11.18 RB3-C1 implementation reconciliation amendment
 
-This section is a narrow forward correction discovered by reconciling the frozen F4 design with the landed F3 generation primitives.
+This section is a narrow forward correction discovered by reconciling the frozen F4 design with the landed F3 generation and Supersession validators.
 
-Where this section conflicts with 11.3 A2 or 11.7-11.9, this section wins.
+Where this section conflicts with 11.3 A2 or 11.7-11.10, this section wins.
 
-### 11.18.1 Replacement seal commit is the adoption carrier
+### 11.18.1 Reuse same-Run invalidation before the successor Run
 
-Do not create an extra metadata-only commit after the replacement Review seals.
+The current Supersession schema/validator intentionally means:
 
-The landed generation primitive already creates generation 3 and its Receipt as one exact local commit and accepts additional immutable Review records in the same generation mutation.
+~~~
+a Receipt is superseded by a later open generation
+of the SAME Review Run
+~~~
 
-Therefore the frozen Class-A topology is refined to:
+Do not broaden that schema merely for Class A.
+
+For an old sealed Work Run/R1 that must be replaced, first use the existing invalidation shape:
+
+~~~
+old Run G3 sealed / R1
+-> old Run G4 open invalidation
+   + Supersession(R1)
+~~~
+
+The G4 generation mutation creates the gate and Supersession together.
+
+Only after that exact invalidation is committed may the successor Review Run begin.
+
+This preserves the existing Review validator and makes old R1 mechanically non-consumable before R2 can exist.
+
+### 11.18.2 Replacement seal commit is the adoption carrier
+
+After old-run invalidation, the replacement topology is:
 
 ~~~
 K1
+-> old Run G4 + Supersession(R1)
 -> replacement G1
 -> replacement G2
--> replacement G3 + R2 + Supersession(old R1)
+-> replacement G3 + R2
    = K_adopt
 -> adopted-result publication of exact K_adopt
--> terminal transition/Consumption
+-> terminal transition/Consumption of R2
 -> K_terminal
 -> terminal publication
 ~~~
 
-K_adopt is the exact commit that persists replacement generation 3.
+Do not create an extra metadata-only commit after the replacement Review seals.
 
-Its complete delta is limited to the replacement Run's generation-3 gate, R2, the Supersession of old R1, and any other record explicitly required by the same generation-3 contract.
+K_adopt is the exact commit that persists replacement generation 3 and R2.
+
+Its own delta contains only the replacement Run's generation-3 gate, R2 and any other record explicitly required by that generation-3 contract.
 
 It contains no ReviewedArtifact/domain-result delta, lifecycle transition or Consumption.
 
-This retains the recursion cutoff without inventing a fourth local metadata commit.
+The lineage from K1 through K_adopt may contain only:
 
-### 11.18.2 Supersession atomicity
+- old Run's exact G4 invalidation commit;
+- replacement Run's exact G1/G2/G3 commits.
 
-The old Receipt Supersession is created in the same replacement generation-3 mutation that issues R2.
+No other commit is permitted in that adoption range.
 
-Before that generation is recorded, prove:
+### 11.18.3 Durable Class-A checkpoint before old G4
 
-- replacement generation 2 authorizes;
-- old R1 is the exact Receipt being replaced;
-- old R1 has no Consumption;
-- no existing conflicting Supersession exists;
-- K1 and its raw lineage are still the exact Class-A checkpoint;
-- no incompatible result-publication or terminal effect has been durably recorded.
-
-Generation 3 then atomically establishes the canonical authorization switch:
-
-~~~
-old R1 -> superseded
-new R2 -> sealed/current
-~~~
-
-A crash cannot leave R2 committed without the required old-R1 Supersession or vice versa.
-
-### 11.18.3 Durable Class-A checkpoint before replacement G1
-
-Before reserving/recording replacement generation 1, the owning START mutation records a durable Class-A checkpoint containing at least:
+Before recording old Run G4, the owning START mutation records a durable Class-A checkpoint containing at least:
 
 - exact K1 commit ID;
 - exact old Review Run ID;
-- exact old Receipt ID when one exists;
+- exact old Receipt ID;
 - old Candidate hash;
 - mismatch/staleness classification reason;
-- exact result stage/commit ownership binding;
-- replacement predecessor Run ID;
-- Class-A contract/version identity.
+- exact result-stage/commit ownership binding;
+- predecessor Run ID for successor reservation;
+- Class-A contract/version identity;
+- proof that no incompatible result-publication/terminal effect is already durable.
 
 The checkpoint is recovery/runtime material, not lifecycle truth and not a canonical Review record.
 
-On resume it is validated against immutable committed state before any replacement action.
+On resume it is validated against immutable committed state before any invalidation/replacement action.
 
 It is never reconstructed from a commit message, newest commit, branch tip, path similarity or the mere existence of K1.
 
-### 11.18.4 Successor Review Run reservation
+### 11.18.4 Old-run G4 invalidation
+
+Class-A replacement uses a Work-specific invalidation reason/evidence identity but the same structural generation-4 mechanics as planning.
+
+Required before G4:
+
+- old chain is exactly G1/G2/G3 sealed;
+- R1 is current and unconsumed;
+- no Supersession already exists;
+- K1 and raw lineage remain the exact Class-A checkpoint;
+- K1 is not published;
+- no incompatible publication/terminal stage is durable.
+
+G4:
+
+- generation = 4;
+- previous_generation = 3;
+- previous_digest = exact G3 digest;
+- status = open;
+- receipt_id = null;
+- authorized_operation_stage = null;
+- carries forward the immutable accepted/settled snapshot required by GateChain rules;
+- evidence_digest binds a stable Work invalidation evidence record/reason;
+- creates Supersession(R1) in the same generation mutation.
+
+After G4, old R1 is never consumable and the old Run is never resumed as current authorization.
+
+No generation 5 is permitted.
+
+### 11.18.5 Successor Review Run reservation
 
 One START mutation must be able to hold more than its initial Work Review Run.
 
@@ -1366,15 +1403,15 @@ target_identity = the same Work ID
 operation_identity = the same Work operation identity
 ~~~
 
-The reservation key is recovery mechanics only; it does not alter the Review Run's semantic target.
+The reservation key is recovery mechanics only; it does not alter semantic target identity.
 
 A predecessor may have at most one direct successor under this F4 adoption path.
 
 Conflicting successor IDs are reconcile-required.
 
-P4 may reuse/generalize the same successor relation for repaired Candidate generations rather than inventing a second replacement-run identity system.
+P4 should reuse/generalize this same successor relation for repaired Candidate generations rather than inventing another replacement-run identity system.
 
-### 11.18.5 Work request v2
+### 11.18.6 Work request v2
 
 New Work Review Runs created after F4 activation use a versioned request shape that includes sorted set_aside_runs.
 
@@ -1385,15 +1422,15 @@ The request-version change is scoped to the Work request envelope; it does not r
 The Work request reader supports:
 
 ~~~
-v1 -> no set_aside_runs field, historical/current in-flight compatibility
+v1 -> no set_aside_runs field, in-flight compatibility
 v2 -> exact validated set_aside_runs list
 ~~~
 
-New successor Runs use v2.
+New successor Runs use v2 and name the predecessor old Run with its invalidated/Class-A replacement reason.
 
 The request digest continues to cover the whole exact envelope.
 
-### 11.18.6 Automatic A2 eligibility boundary
+### 11.18.7 Automatic A2 eligibility boundary
 
 A2 reauthorization is automatic only while all are true:
 
@@ -1402,10 +1439,10 @@ A2 reauthorization is automatic only while all are true:
 - no result-publication effect for old K1 has been durably recorded;
 - no terminal lifecycle/Consumption stage has been durably recorded;
 - no terminal commit/publication stage has been durably recorded;
-- the old authorization can be made non-consumable by the replacement generation-3 switch;
+- old R1 is still exactly consumable before the planned G4 invalidation;
 - all ordinary Class-A ownership/lineage/delta proof succeeds.
 
-If an incompatible old-K1 publication effect is already durable but unapplied, F4 does not rewrite/delete that effect or append a new effect that the old one would block.
+If an incompatible old-K1 publication effect is already durable but unapplied, F4 does not rewrite/delete that effect or append a replacement publication behind an effect that can no longer be validly applied.
 
 That state is:
 
@@ -1417,17 +1454,33 @@ until an explicit later disposition contract safely retires the old pending stat
 
 Likewise, once terminal effects are durable, Class A is not a route to reinterpret them.
 
-This is fail-closed and preserves Mutation Controller immutability.
+This preserves Mutation Controller immutability.
 
-### 11.18.7 Publication identity of K_adopt
+### 11.18.8 Replacement Candidate C2
 
-After replacement G3 commits, derive K_adopt only by positive proof of the exact commit that added the expected generation-3 gate/R2/Supersession on the proven replacement lineage.
+C2 is reconstructed from committed K1 and its exact parent, never from the working tree.
+
+Use the predecessor Candidate's declared artifact path set as the closed declaration set, then read old identities from parent(K1) and new identities/material from K1.
+
+The complete parent(K1)->K1 delta must contain no path outside that operation-owned declaration set.
+
+C2 therefore preserves inert declared entries while updating every persisted identity to the exact K1 reality.
+
+The Candidate message is the exact persisted K1 message under the adopted-result contract.
+
+Current activation/Context/Policy/Evidence are recomputed fresh.
+
+C2's resulting-tree identity is the exact K1 tree.
+
+### 11.18.9 Publication identity of K_adopt
+
+After replacement G3 commits, derive K_adopt only by positive proof of the exact commit that added the expected replacement G3/R2 on the proven adoption lineage.
 
 Immediately after the seal it should be HEAD under the Project lock, but HEAD alone is not durable recovery identity.
 
-Before recording adopted-result publication, bind the exact K_adopt commit ID into the owning START mutation's proof/checkpoint material.
+Before recording adopted-result publication, bind exact K_adopt commit ID into the owning START mutation's proof/checkpoint material.
 
-Publication is then:
+Publication is:
 
 ~~~
 <exact K_adopt>:refs/heads/<declared branch>
@@ -1435,38 +1488,73 @@ Publication is then:
 
 never K1 alone and never a branch tip.
 
-The publication validator must recognize the adopted-result publication role explicitly; stage shape does not infer it.
+The publication validator recognizes adopted-result publication as an explicit role.
 
-### 11.18.8 No extra Review of K_adopt
+Stage shape does not infer the role.
 
-K_adopt needs no further Candidate/Receipt because its delta is entirely the canonical replacement Review's own generation-3 bookkeeping plus the old-Receipt Supersession that generation authorizes.
+### 11.18.10 Terminal binding after adoption
 
-Proof of exact scope and lineage is still mandatory before publication.
+R2 authorizes C2, whose persisted result artifact is exact K1.
 
-Any extra path/domain/lifecycle delta is Class B/reconcile, not another Class A loop.
+Therefore the terminal Consumption continues to bind:
 
-### 11.18.9 Implementation consequence
+~~~
+authorized_result_commit_sha = K1
+~~~
 
-The implementation should reuse the existing Work generation path rather than building a parallel Class-A record writer.
+not K_adopt.
+
+But the terminal commit's exact parent is K_adopt, because K_adopt is the latest authorized publication anchor on the branch.
+
+Class-A terminal proof must establish both independently:
+
+~~~
+artifact result binding:
+  R2/C2/Consumption -> exact K1
+
+terminal lineage:
+  K1
+  -> old G4
+  -> replacement G1
+  -> replacement G2
+  -> replacement G3 = K_adopt
+  -> K_terminal
+~~~
+
+No domain/result change is allowed between K1 and K_terminal except the terminal AuthorizedTransition/Consumption in K_terminal.
+
+### 11.18.11 No extra Review of adoption metadata
+
+Old G4 and replacement G1/G2/G3 are canonical Review-generation commits and need no Review of their own.
+
+K_adopt is replacement G3 itself, so there is no extra metadata commit requiring authorization.
+
+Any extra path/domain/lifecycle delta in the adoption range is Class B/reconcile, not another Class A loop.
+
+### 11.18.12 Implementation consequence
+
+Reuse the existing Work generation path rather than building a parallel Class-A record writer.
 
 Expected reuse includes:
 
-- gate.next_generation_scope
-- start_review._start_generation
-- roadmap_review._finish_generation dispatch for work-result-v1
-- ReviewStore immutable record readers
-- records.Supersession
-- exact Work generation commit persistence proof
-- exact-SHA publication primitive
+- gate.next_generation_scope;
+- start_review._start_generation;
+- roadmap_review._finish_generation dispatch for work-result-v1;
+- ReviewStore immutable record readers;
+- records.Supersession and current same-Run validator;
+- exact Work generation commit persistence proof;
+- exact-SHA publication primitive.
 
-The new logic is primarily:
+New logic is primarily:
 
+- durable Class-A checkpoint/classifier;
+- Work G4 invalidation helper;
 - successor Run identity/recovery;
 - Work request v2/set-aside;
-- Class-A checkpoint/classifier;
-- replacement generation-3 Supersession;
-- adopted-result proof/publication role;
-- stale/invalidation recovery selection.
+- C2 reconstruction from K1;
+- adopted-result lineage/proof/publication role;
+- Class-A terminal-parent proof;
+- stale/recovery selection.
 
 No new Human decision is introduced by this amendment.
 
