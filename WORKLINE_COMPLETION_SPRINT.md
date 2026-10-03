@@ -9495,3 +9495,888 @@ RB4/P5 is complete only when:
 - no push/landing before independent exact-candidate review PASS.
 
 After RB4 landing, RB5 and RB6 are both structurally unblocked; the critical-path next block is RB6/P6, while RB5 may proceed in parallel.
+
+---
+
+## 29. RB1 implementation brief — BL-006 read-only status/context
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §9.
+
+It does not replace §9. Where wording conflicts, §9 remains the semantic contract and this section fixes the implementation allocation required to realize it in the current live code.
+
+RB1 is independent of the RB3/RB4 execution chain. Later RB5/RB6/RB10 status fields are additive and must not redefine the v1 base fields frozen here.
+
+### 29.1 Primary implementation shape
+
+Add one inert status model/reader module:
+
+~~~
+src/workline/status.py
+~~~
+
+It owns:
+
+- B0/B1 snapshot witnesses;
+- tolerant read-only field collection;
+- the versioned StatusModel;
+- lifecycle diagnostic projection;
+- pending-mutation diagnostic projection;
+- authority diagnostics;
+- local Git/push-destination diagnostics;
+- Review diagnostics;
+- human rendering;
+- deterministic JSON rendering.
+
+It does NOT:
+
+- open a Mutation;
+- acquire the Project execution lock;
+- write canonical/runtime/cache data;
+- repair/cleanup anything;
+- launch a reviewer/external tool;
+- contact a network remote;
+- decide lifecycle state independently of existing state/selection semantics.
+
+CLI wiring is owned by:
+
+~~~
+src/workline/cli.py
+run-workline.py
+~~~
+
+Existing semantic owners remain:
+
+~~~
+src/workline/state.py
+src/workline/roadmap.py
+src/workline/start.py
+src/workline/validate.py
+src/workline/registry.py
+src/workline/review/*
+~~~
+
+Do not create a second progression model in status.py.
+
+### 29.2 Canonical CLI
+
+Add:
+
+~~~
+run-workline.py status <project-root>
+run-workline.py status <project-root> --json
+~~~
+
+The two forms render the same in-memory StatusModel.
+
+No renderer performs an additional semantic read.
+
+The command never changes cwd to the target Project.
+
+### 29.3 Launcher cross-Project exception
+
+The current launcher binds every CLI invocation to the configured Workline root of the Project containing the caller's current working directory.
+
+That is correct for every mutation-capable command, but it would prevent the §9.1 cross-Project read-only status command.
+
+Refactor the launcher narrowly:
+
+- isolated-mode check remains mandatory;
+- loaded-module origin verification against the launcher Workline root remains mandatory;
+- normal API activate() behavior remains unchanged;
+- every existing CLI command keeps the current CWD Project configured-root check;
+- only when the parsed top-level CLI command is exactly status may main() skip the CWD Project configured-root binding.
+
+The target Project's configured Workline root is then read by status as diagnostic data.
+
+A target configured-root mismatch is reported under authority; it is not used to grant mutation authority.
+
+This exception must be impossible to select for any mutation-capable command.
+
+### 29.4 CLI exit behavior
+
+status is a diagnostic command.
+
+When a StatusModel can be rendered, the command exits successfully even when:
+
+- validation failed;
+- the Project is changing during the read;
+- the configured Workline root is broken/mismatched;
+- a pending mutation requires reconcile;
+- Review records are invalid.
+
+Those conditions are stable model fields, not command-crash conditions.
+
+Argument parsing failure keeps argparse's ordinary failure behavior.
+
+A fatal implementation defect that prevents construction/rendering of any StatusModel is non-zero.
+
+Do not turn an invalid Project ledger into an early not_a_project exit when independent diagnostics can still be emitted.
+
+### 29.5 StatusModel v1
+
+The machine model always contains these top-level fields:
+
+~~~
+schema
+version
+snapshot_consistency
+snapshot_reason
+
+project
+authority
+git
+lifecycle
+pending
+validation
+review
+completion
+policy
+~~~
+
+Freeze:
+
+~~~
+schema  = workline-status
+version = 1
+~~~
+
+All lists are deterministically sorted.
+
+Stable IDs/status enums are separate from display text.
+
+Unknown and not-applicable are explicit states, never omitted-key inference.
+
+completion and policy are present from v1 even before RB5/RB6:
+
+~~~
+completion.status = not_available_by_contract
+policy.status     = not_available_by_contract
+~~~
+
+Later RBs may add fields/change those section status values, but may not redefine existing RB1 fields.
+
+### 29.6 Snapshot witnesses B0/B1
+
+One status attempt records B0:
+
+1. exact local HEAD object ID;
+2. exact full branch ref, or detached state;
+3. pending mutation identity witness set;
+4. canonical status-surface fingerprint.
+
+It then builds the model and re-reads the same four witnesses as B1.
+
+Pending mutation identity witness set is sorted and contains enough immutable observation to detect a same-ID record changing during the read:
+
+~~~
+mutation filename / mutation_id
+SHA-256 of the exact durable record bytes
+parse-state marker
+~~~
+
+A malformed mutation filename/record remains an observed witness; it is not skipped.
+
+The canonical status-surface fingerprint is SHA-256 over a deterministic no-follow inventory of the target Project's canonical .workline tree, excluding .workline/runtime/**.
+
+Each inventory entry binds:
+
+- repository-relative path;
+- entry kind: regular_file / directory / indirection / other;
+- for a regular file: SHA-256 of exact bytes;
+- for an indirection/other: a stable structural marker, never followed.
+
+This automatically includes future canonical Review/history/profile records without changing RB1 semantics.
+
+Runtime lock/holder/tmp files are excluded.
+
+Pending mutation durable records are covered separately by witness 3.
+
+No symlink/junction/reparse target is traversed merely to fingerprint status.
+
+### 29.7 Snapshot result
+
+If B0 == B1:
+
+~~~
+snapshot_consistency = stable_read
+snapshot_reason      = null
+~~~
+
+If any witness differs:
+
+~~~
+snapshot_consistency = changing
+snapshot_reason      = project_changed_during_status
+~~~
+
+One immediate rebuild/re-read retry is permitted.
+
+There is no unbounded retry/wait loop.
+
+When final result is changing:
+
+- current selected Roadmap/Phase/Work fields are null;
+- next selected fields are null;
+- those fields carry reason project_changed_during_status;
+- independently observed diagnostic facts may still be returned.
+
+status never claims atomicity it did not obtain.
+
+### 29.8 Read-only enforcement
+
+status may call only local read primitives.
+
+Allowed categories include:
+
+- ProjectStore readers;
+- ProjectView.load;
+- validate_project;
+- MutationController durable-record inspection only;
+- ReviewStore/read-only validation;
+- registry/implementation readers;
+- local git rev-parse/symbolic-ref/status/diff/config/remote-get-url reads.
+
+Explicitly forbidden from the status call graph:
+
+- MutationController.open/begin/load-for-write;
+- Mutation.reserve_id/add_effects/apply/complete/abandon;
+- project_operation;
+- any holder/lock creation;
+- durable_write_text;
+- Git add/commit/ref/config mutation;
+- fetch/pull/push/ls-remote;
+- reviewer/provider launch;
+- activation/pin/backfill/cleanup.
+
+Tests must make these boundaries mechanical, not only prose expectations.
+
+### 29.9 Project section and tolerant partial reads
+
+project contains at least:
+
+- requested/root path;
+- root readability;
+- established-project marker/readability;
+- configured Workline root when readable;
+- exact reason when unavailable.
+
+Field providers are isolated.
+
+A failure reading project.yaml does not suppress local Git diagnostics.
+
+A failure loading ProjectView does not suppress pending mutation diagnostics.
+
+A broken Review namespace does not suppress lifecycle facts that are independently readable.
+
+The target root being absent/not a directory is represented diagnostically when the model itself can still be produced.
+
+No field silently substitutes guessed data after a reader failure.
+
+### 29.10 Validation section
+
+Reuse validate_project(store).
+
+Expose:
+
+~~~
+status = pass | failed | unavailable
+problems = [{code, message}, ...]
+~~~
+
+Problems are deterministically ordered.
+
+Validation failure does not suppress other independent status sections.
+
+Do not call validation PASS merely because some ProjectView fields loaded.
+
+RB10 N6-3 later tightens bootstrap structural-cause preservation; RB1 consumes that result additively without changing this interface.
+
+### 29.11 Authority section
+
+authority contains at least:
+
+- running Workline root;
+- configured Workline root when readable;
+- running-vs-configured implementation identity result;
+- registry validation result;
+- registry content digest when readable;
+- canonical authority inventory.
+
+Add a public read-only registry authority inventory helper rather than importing registry private parsers from status.py.
+
+The inventory is deterministic and contains stable facts only:
+
+- workline stable authority ID;
+- target path as registered;
+- declared context where applicable;
+- SHA-256 of the exact target bytes when readable.
+
+Include required rules and all registry-routed canonical Skills.
+
+Do not copy Skill/rule prose into status.
+
+If registry validation fails:
+
+- report all validation problems;
+- do not invent a partial valid routing inventory;
+- registry file digest may still be reported when its bytes are readable.
+
+The running implementation identity helper may be minimally exposed from implementation.py; do not duplicate module-origin verification in status.py.
+
+### 29.12 Git section
+
+Use only local Git reads.
+
+Expose at least:
+
+- repository top-level;
+- full branch ref;
+- display branch name;
+- detached status;
+- HEAD;
+- deterministic dirty/status entries;
+- approved destination pin;
+- active local push locator;
+- local_locator_matches_pin;
+- local diagnostic problem when locator cannot be resolved safely;
+- remote_publication_state = not_checked.
+
+The active locator uses the existing destination/gitcmd local configuration resolution.
+
+Never call a remote.
+
+Credential-bearing locators are never emitted raw.
+
+Use the existing pushurl secret check/redaction behavior.
+
+approved pin values remain treated as secret-free by their canonical schema, but renderer still fails safe rather than printing credential material.
+
+### 29.13 Lifecycle section — no new progression algorithm
+
+Lifecycle status uses ProjectView and pure selection helpers shared with Roadmap/START.
+
+Do not copy the selection algorithm into status.py.
+
+Refactor only where necessary so the existing owner and status call the SAME pure calculation.
+
+Phase candidate calculation:
+
+- active Roadmap mechanics remain state.py/roadmap.py;
+- startable Phases use ProjectView.startable_phases();
+- planned_next preference uses ProjectView.planned_next_preference()/choose_startable semantics;
+- ambiguity returns the candidate set, never an invented winner.
+
+Work candidate calculation:
+
+- current in-flight Work uses the same definition as START continuation:
+  IN_PROGRESS and has_target within the effective current scope;
+- more than one is ambiguity/blocking, not a winner;
+- next startable candidates use the same return_to filtering and planned_next preference START uses;
+- factor this candidate computation into a pure helper and make START use it too, so status cannot drift.
+
+For standalone Work where no canonical implicit entry/scope exists:
+
+- report observable startable standalone candidates;
+- do not invent one implicit START entry;
+- selected next remains null unless existing semantics mechanically determine it.
+
+### 29.14 Current Roadmap/Phase/Work projection
+
+current is diagnostic, not lifecycle authority.
+
+Roadmap:
+
+- list lifecycle states for all Roadmaps;
+- current_roadmap_id only when the existing lifecycle facts leave exactly one mechanically current active Roadmap;
+- otherwise null with ambiguity/no-current reason.
+
+Phase:
+
+- only under a mechanically unique Roadmap context;
+- a currently started Phase is derived from existing Phase state;
+- exactly one -> current_phase_id;
+- several -> ambiguity;
+- none -> no current Phase, then next Phase candidates may be reported.
+
+Work:
+
+- only under a mechanically established scope;
+- exactly one START-compatible in-flight target Work -> current_work_id;
+- several -> multiple-target blocker;
+- none -> next candidate projection.
+
+No mtime/filename/newest-ID rule exists.
+
+### 29.15 Pending mutation tolerant inspection
+
+MutationController.list_records() is intentionally strict and one malformed file currently aborts enumeration.
+
+Add a read-only tolerant inspection API in mutation.py that:
+
+- enumerates mutation record files deterministically;
+- reads exact bytes without writing;
+- applies the existing ownership/parser validation to each record independently;
+- returns either the validated record or its exact structural error;
+- never constructs a writable/resumable Mutation object;
+- never opens/repairs/abandons a mutation.
+
+Existing strict list_records()/list_pending() semantics remain unchanged for operation owners.
+
+status uses only the tolerant inspection API.
+
+### 29.16 Pending mutation model
+
+For each pending/invalid record expose only diagnostic-safe structured fields:
+
+- mutation_id/filename identity;
+- owner when proven;
+- safe operation/contract/target identity subset;
+- recorded write scope;
+- durable stage/effect-count summary;
+- resume classification;
+- exact diagnostic code/reason.
+
+Do NOT dump arbitrary invocation/request payloads.
+
+Do NOT expose secret-bearing values.
+
+Resume classification vocabulary:
+
+~~~
+pending_resumable
+pending_reconcile_required
+disposed_by_human
+unknown_or_invalid
+~~~
+
+plus top-level none when no pending record exists.
+
+pending_resumable requires a positive read-only owner-specific proof.
+
+A structurally valid pending record is NOT automatically resumable.
+
+Owner-specific status probes must reuse the same durable predicates used by the operation's normal recovery path, but must not call that path if it mutates/opens/closes anything.
+
+If no positive read-only probe exists:
+
+~~~
+unknown_or_invalid
+~~~
+
+rather than optimistic resume.
+
+RB10 N4 later adds disposed_by_human classification through the same stable field.
+
+### 29.17 Pending state precedence over hypothetical next
+
+If a pending mutation affects current progression and its safe disposition is unresolved:
+
+- report it under pending/Blocked-Waiting;
+- do not claim a hypothetical new current/next action as authoritative;
+- observed candidate sets may still be shown as observations;
+- selected current/next fields are null with the pending-state reason where appropriate.
+
+Do not hide a pending record because canonical lifecycle state appears to have advanced.
+
+Do not call it completed from effects alone.
+
+### 29.18 Review diagnostic projection
+
+Use canonical Review records only.
+
+A narrow inert Review-status helper may live in:
+
+~~~
+src/workline/review/status.py
+~~~
+
+if keeping this logic out of the generic status module improves responsibility separation.
+
+It reads:
+
+- activation;
+- validated Gate chains;
+- Receipt;
+- Supersession;
+- Consumption;
+- P4 adjudication/obligation state when available;
+- RB3-C1/P4 explicit set-aside/successor linkage when available.
+
+It exposes no raw discovery/reviewer prose.
+
+Per Run expose at least:
+
+- review_run_id;
+- review_kind;
+- target_identity;
+- latest_generation;
+- state;
+- receipt status;
+- consumption status;
+- blocking-obligation count when P4 provides it;
+- exact diagnostic reason on invalidity.
+
+State is derived only when mechanically proven:
+
+~~~
+open
+sealed
+invalidated
+set_aside
+consumed
+invalid
+~~~
+
+Review state is separate from lifecycle state and never overrides ProjectView.
+
+### 29.19 Activation diagnostics
+
+Activation is:
+
+~~~
+absent
+present
+invalid
+~~~
+
+present means the canonical activation record reads under its stored contract and the applicable read-only activation validation is satisfied.
+
+A malformed/contradictory activation is invalid with its validation code/reason, never absent.
+
+status does not create, repair or recompute activation.
+
+### 29.20 completion and policy additive slots
+
+RB1 v1 always emits:
+
+~~~
+completion:
+  status: not_available_by_contract
+
+policy:
+  status: not_available_by_contract
+~~~
+
+RB5 later fills completion using its validated evidence handoff.
+
+RB6 later fills policy/Profile/observation fields.
+
+RB10 N4 may add Human disposition detail under pending.
+
+Those RBs may add new nested fields/status values only.
+
+They may not change:
+
+- schema/version;
+- snapshot semantics;
+- lifecycle base meaning;
+- pending base meaning;
+- Git base meaning;
+- authority base meaning.
+
+### 29.21 Human-readable renderer
+
+Default output renders the StatusModel in this order:
+
+~~~
+Project
+Authority
+Current
+Next
+Blocked/Waiting
+Pending mutation
+Review
+Validation
+Git / push destination
+Achievement
+Policy
+~~~
+
+Rendering is presentation only.
+
+No field is recomputed during rendering.
+
+An error section is never hidden merely to make output concise.
+
+### 29.22 JSON determinism/safety
+
+JSON output:
+
+- uses sorted deterministic arrays where order has no semantic meaning;
+- preserves semantically ordered arrays only where the model defines order;
+- contains stable IDs separately from labels/messages;
+- uses null plus explicit reason/status for unavailable selected values;
+- never requires prose parsing to recover state;
+- never emits credential-bearing URL text;
+- never emits raw reviewer output;
+- never emits mutation arbitrary request payloads.
+
+Two calls over the same stable snapshot from target cwd and an external cwd produce the same JSON bytes, aside from no field that records caller cwd/time/process identity.
+
+No current timestamp is part of the model.
+
+### 29.23 Expected production files
+
+Primary new files:
+
+~~~
+src/workline/status.py
+src/workline/review/status.py   optional narrow Review projection
+~~~
+
+Expected integration changes:
+
+~~~
+run-workline.py
+src/workline/cli.py
+src/workline/mutation.py
+src/workline/registry.py
+src/workline/implementation.py  only for narrow read-only identity helper
+src/workline/state.py           only for shared pure selection projection
+src/workline/roadmap.py         only to reuse shared pure selection
+src/workline/start.py           only to reuse shared pure selection
+~~~
+
+Review modules are changed only if a narrow read-only status projection cannot be expressed from existing public readers after RB3/P4 lands.
+
+No new persistence/store/database.
+
+### 29.24 Canonical runtime authority activation
+
+The RB1 candidate must update runtime canonical text in the same candidate.
+
+At minimum inspect/update:
+
+~~~
+registry.md
+rules/git
+.claude/skills/project-router/SKILL.md
+~~~
+
+Update other Skills only when the public status command belongs in their actual responsibility.
+
+Canonical text must state:
+
+- status is read-only and cross-Project capable;
+- no execution lock/mutation/network;
+- current/next are diagnostic projections of existing semantics;
+- changing snapshot suppresses authoritative current/next selection;
+- status does not progress Roadmap/Phase/Work;
+- status output is not lifecycle truth independent of canonical records.
+
+No new Skill/routing ID is introduced.
+
+### 29.25 Focused tests — hard read-only boundary
+
+Add:
+
+~~~
+tests/test_status_read_only.py
+~~~
+
+Mechanically prove:
+
+- canonical Project bytes unchanged;
+- .workline/runtime bytes/entries unchanged;
+- no lock/holder directory/file created;
+- MutationController.open/begin never called;
+- project_operation never called;
+- no durable writer called;
+- no Git write command called;
+- no fetch/pull/push/ls-remote called;
+- no reviewer/external callable invoked.
+
+Run against:
+
+- valid Project;
+- invalid Project;
+- pending mutation;
+- Review-enabled Project.
+
+### 29.26 Focused tests — launcher/cross-Project
+
+Cover:
+
+- status from target Project cwd;
+- status from neutral external cwd;
+- status launched while cwd is another established Workline Project;
+- all three inspect the explicit target and yield equivalent model bytes;
+- every mutation-capable command still enforces the original CWD configured-root binding;
+- API activate() behavior unchanged.
+
+### 29.27 Focused tests — snapshot consistency
+
+Cover:
+
+- stable B0/B1 -> stable_read;
+- HEAD moves -> changing;
+- branch ref changes -> changing;
+- canonical file content changes -> changing;
+- canonical entry added/removed -> changing;
+- indirection structural change -> changing;
+- same mutation ID but mutation bytes change -> changing;
+- pending mutation added/removed -> changing;
+- optional one retry can recover one transient mismatch;
+- repeated change never loops indefinitely;
+- final changing model has null authoritative current/next with reason.
+
+### 29.28 Focused tests — lifecycle selection
+
+Cover:
+
+- unique active Roadmap;
+- multiple active Roadmaps -> ambiguity;
+- unique current started Phase;
+- multiple current Phases -> ambiguity;
+- one in-flight target Work;
+- multiple target Works -> blocker;
+- startable Phase planned_next preference exactly matches Roadmap;
+- Work return_to/planned_next filtering exactly matches START;
+- no candidate diagnosis;
+- standalone candidates do not invent implicit entry;
+- pending progression mutation suppresses authoritative hypothetical next;
+- no filename/mtime ordering changes a result.
+
+### 29.29 Focused tests — pending mutations
+
+Cover:
+
+- none;
+- one positively resumable known owner;
+- owner probe says reconcile;
+- structurally valid but unsupported probe -> unknown_or_invalid;
+- malformed filename;
+- malformed record;
+- several records where one malformed does not hide the others;
+- scope/invocation diagnostic safety;
+- arbitrary invocation payload not emitted;
+- later disposed_by_human additive state.
+
+### 29.30 Focused tests — Review
+
+Cover:
+
+- Review namespace absent;
+- activation absent;
+- activation valid;
+- activation malformed/contradictory -> invalid;
+- open Run;
+- sealed Run;
+- superseded/invalidated Run;
+- consumed Run;
+- set-aside Run once explicit successor semantics are available;
+- malformed chain -> invalid reason;
+- P4 blocking obligation count when available;
+- no raw report text in model.
+
+### 29.31 Focused tests — validation/Git/authority
+
+Cover:
+
+- validate pass;
+- invalid project.yaml still emits diagnostics;
+- unreadable entity/ledger still emits independent sections;
+- detached HEAD;
+- dirty paths deterministic;
+- no remote;
+- unpinned remote;
+- pinned matching locator;
+- pinned mismatching locator;
+- multiple push locators;
+- credential-bearing locator redacted/not emitted;
+- remote_publication_state always not_checked;
+- configured Workline root missing;
+- registry invalid;
+- implementation mismatch;
+- authority inventory stable IDs/target/digests only.
+
+### 29.32 JSON/human renderer tests
+
+Cover:
+
+- schema/version exact;
+- deterministic JSON bytes;
+- stable enums/IDs do not require prose parsing;
+- target cwd vs external cwd JSON equality;
+- no caller cwd/time/pid/host field;
+- human renderer is derived only from the same StatusModel;
+- validation error remains visible in human output;
+- completion/policy base slots remain stable when later fields are injected.
+
+### 29.33 Regression gate
+
+Run:
+
+1. RB1 status read-only tests;
+2. launcher/cross-Project tests;
+3. snapshot tests;
+4. lifecycle selection equivalence tests;
+5. pending mutation tests;
+6. Review status tests;
+7. validation/Git/authority tests;
+8. JSON/human renderer tests;
+9. existing state.py/Roadmap selection regression;
+10. existing START continuation regression;
+11. existing validate-project regression;
+12. Review P1-P4 regression available at implementation time;
+13. canonical Skill/registry tests;
+14. full repository suite.
+
+Canonical full command:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical test tooling has legitimately changed before implementation.
+
+### 29.34 Explicit non-scope
+
+RB1 must not implement:
+
+- remote publication inspection;
+- networked status;
+- automatic resume;
+- automatic repair/cleanup;
+- status cache/index;
+- RB2 optimization;
+- RB5 achievement decision;
+- RB6 policy adaptation;
+- RB10 Human disposition itself;
+- lifecycle/progression redesign;
+- Review raw-history display;
+- a new Skill or routing branch.
+
+### 29.35 Implementation completion gate
+
+RB1 is complete only when:
+
+- canonical status CLI exists;
+- one StatusModel feeds human and JSON output;
+- launcher cross-Project exception is status-only;
+- zero-write/no-lock/no-network boundary is mechanically tested;
+- B0/B1 consistency works;
+- changing suppresses authoritative current/next;
+- state/Roadmap/START selection semantics are shared, not copied;
+- malformed Project/mutation/Review records remain diagnostic rather than destructive;
+- local Git/push diagnostics are offline;
+- authority identities/digests are exposed without copying prose;
+- completion/policy additive slots are frozen;
+- canonical runtime authority text updated;
+- focused tests PASS;
+- existing lifecycle/Review/validation regressions PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
+
+RB2 may begin measurement only after this RB1 implementation lands, because RB2 measures the supported status/validate recovery path rather than a hypothetical one.
