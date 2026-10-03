@@ -5857,6 +5857,13 @@ For each mapped item record:
 
 BACKLOG.md must not be deleted while any still-valid OPEN/VERIFIED/INVESTIGATE/DEFERRED requirement exists only there.
 
+Stage A also covers residual obligations embedded inside items whose top-level BACKLOG status is already RESOLVED when those obligations were explicitly deferred for later evidence. In particular, before BACKLOG.md is deleted, measure at live main or record an accepted disposition/reason for:
+
+- the plan-exclusion re-measurements promised after BL-029 in BL-032 (5), BL-033 (3), BL-035 (5), and BL-036 (4);
+- BL-054 (12)(d)'s unmeasured finalization forms.
+
+A RESOLVED top-level item does not erase one of these explicitly retained residual evidence obligations.
+
 Permitted final item dispositions are exactly:
 
 ~~~
@@ -6521,6 +6528,9 @@ Prohibited:
 - silent cherry-pick
 - reviewed-byte regeneration
 - hidden candidate identity change
+- any rehearsal or test push to the production GitHub remote, on any ref including throwaway/test branches
+
+Push-guard, landing-guard and race-gate tests use a local bare repository or another explicitly non-production remote. The production remote is never used as a test surface. Control Plane canonical-document updates separately authorized by §2.2 are not rehearsal/test pushes.
 
 If main moves after Review, carry a positive proof or rebuild/re-review on the new main.
 
