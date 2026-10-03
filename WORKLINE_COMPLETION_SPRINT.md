@@ -8676,3 +8676,822 @@ RB3-P4 is complete only when all are true:
 - no push/landing occurs before that independent review.
 
 After P4 landing, RB3 is implementation-complete and RB4/P5 becomes the next critical-path block.
+
+---
+
+## 28. RB4-P5 implementation brief — durable Review history / BL-005 front
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT_AFTER_RB3_P4_LANDS
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §13.
+
+It does not replace §13. Where wording conflicts, §13 remains the semantic contract and this section fixes the implementation allocation required to realize it in the current live code.
+
+Execution is dependency-gated:
+
+~~~
+RB3-C1 landed
+-> RB3-P4 landed
+-> RB4-P5 implementation
+~~~
+
+P5 must project/reference immutable P1-P4 facts. It must not create a second truth store, lifecycle state machine, scheduler or repair controller.
+
+### 28.1 Core responsibility split
+
+Add one inert common history module:
+
+~~~
+src/workline/review/history.py
+~~~
+
+It owns:
+
+- P5 history contract/version vocabulary;
+- strict schemas/parsers for Run/Finding/Repair/Relation/Human Decision history records;
+- canonical builders from immutable source records;
+- public-safe structured-summary validation;
+- source-reference/digest validation helpers;
+- cross-run relation status/type vocabulary;
+- no-backfill compatibility predicates;
+- history-readiness calculation for P5-capable Runs;
+- RB5 handoff reference construction.
+
+It does NOT:
+
+- open lifecycle transitions;
+- decide Project progression;
+- create Work;
+- schedule maintenance;
+- modify a Candidate;
+- perform repair;
+- finalize/publish Git.
+
+History path ownership remains in review/paths.py.
+Canonical record reading remains in review/store.py.
+Whole-namespace and source cross-validation remains in review/validate.py.
+
+History writes are performed by the existing operation/generation owner at the transition that makes the source fact durable.
+
+Do not add an autonomous P5 daemon/controller.
+
+### 28.2 Versioning and pre-P5 compatibility
+
+P5 is explicit, not inferred from file presence.
+
+Add a common durable history contract identity, for example:
+
+~~~
+review-v1-history-v1
+~~~
+
+and a distinct P5-capable Effective Policy identity for new P4-capable invocations.
+
+The exact identifier strings may follow the existing naming family, but the following are frozen:
+
+- pre-P5 v1/P3/P4 Runs remain valid without history summaries;
+- new P5-capable Runs bind an explicit history contract/policy identity;
+- missing history is blocking only for a Run whose stored contract requires it;
+- no Run becomes P5-capable because a history directory happens to exist;
+- no historical Run is upgraded by shape inference;
+- old Candidate/TaskInput/Gate/Receipt/P4 bytes are never rewritten;
+- no guessed backfill is performed.
+
+New P5-capable TaskInputs/request envelopes bind the history contract identity needed for replay-safe history obligations.
+
+### 28.3 Canonical history namespace
+
+Extend the closed Review namespace with:
+
+~~~
+.workline/review/history/
+  runs/<review_run_id>.yaml
+  findings/<finding_id>.yaml
+  repairs/<repair_batch_id>.yaml
+  relations/<relation_id>.yaml
+  human-decisions/<decision_id>.yaml
+~~~
+
+Add exact path helpers and strict path-shape validation in review/paths.py.
+
+No mutable current-state/index file is canonical.
+
+If derived caches/indexes are added later, they must be rebuildable and may not outrank immutable source/history records.
+
+### 28.4 Stable history IDs
+
+Run/Finding/Repair summary filenames reuse the stable IDs of their immutable source records:
+
+- review_run_id;
+- finding_id;
+- repair_batch_id.
+
+P5 allocates new stable IDs only for genuinely new history facts:
+
+- cross/later relation;
+- Human Decision Evidence.
+
+Add explicit Review ID kinds in ids.py rather than overloading Project-domain relation/derivation semantics.
+
+Recommended kinds:
+
+~~~
+review_relation
+review_decision
+~~~
+
+with unique prefixes that cannot be confused with review_run / Project relation IDs.
+
+Allocation uses the existing Mutation.reserve_id replay-stable semantics.
+
+No history ID is derived from timestamp, file ordering or newest-record selection.
+
+### 28.5 Run summary immutability rule
+
+A Run summary is written exactly once.
+
+Do NOT write an authorized summary immediately at Receipt issuance if the Run may still be invalidated, superseded, set aside, repaired or consumed.
+
+The immutable summary is created at the first transition where the Run's durable P5 disposition is final for that Run.
+
+Required creation boundaries:
+
+- HUMAN_WAIT -> same durable G4 transition that fixes HUMAN_WAIT;
+- repaired_to_next_candidate -> same G6 transition that persists Repair Result/Candidate N+1;
+- not_authorized -> same owner transition that makes non-authorization terminal for the Run;
+- invalidated -> same transition that persists invalidation/Supersession;
+- set_aside -> same bound replacement transition where set-aside becomes canonical, unless a stronger final disposition such as repaired_to_next_candidate already exists;
+- historical_escape -> same explicit historical-escape transition;
+- consumed -> same owner transition that creates the Consumption.
+
+A summary is never rewritten from authorized to consumed or authorized to invalidated.
+
+If a pre-consumption state is recoverable but not yet final, source Gate/Receipt records remain the authority; no summary is required yet.
+
+### 28.6 Consumption-bound Run summary
+
+For a P5-capable Run that reaches normal successful Consumption, create the Run summary in the SAME recoverable owner transition as the Consumption.
+
+The mutation record must durably bind both writes before apply.
+
+Effect ordering must make the history obligation replay-safe:
+
+~~~
+Run summary create
+-> existing owner terminal/consumption effects
+-> exact owner commit
+~~~
+
+The resulting Run summary may bind:
+
+~~~
+durable_disposition = consumed
+consumption_id = exact reserved Consumption ID
+~~~
+
+even though both records are first made canonical by the same transition.
+
+Post-commit validation proves the summary against the exact Consumption.
+
+Planning:
+
+- extend the existing review-consumption transition;
+- include Run summary + Planning Consumption in the P5-capable metadata commit;
+- update the exact planning metadata proof only for explicit P5-capable contract dispatch;
+- pre-P5 exact Consumption-only metadata semantics remain unchanged.
+
+Work:
+
+- extend the P5-capable terminal transition to include Run summary before the existing terminal events/Consumption;
+- update terminal exact-delta/proof only for explicit P5-capable contract dispatch;
+- pre-P5/P3/P4 terminal shapes remain unchanged.
+
+Do not insert an extra standalone history commit between an authorized result commit and its terminal commit when that would change frozen parent/lineage semantics.
+
+### 28.7 Run summary fields
+
+The strict Run summary contains the §13.4 fields and no Candidate/report prose.
+
+At minimum:
+
+- history contract/version;
+- review_run_id;
+- review_kind;
+- target_identity;
+- operation_identity;
+- candidate_hash;
+- candidate_generation when P4 applies;
+- review_context_hash;
+- effective_policy_hash;
+- evidence_digest;
+- coverage_digest;
+- terminal/latest gate generation + digest;
+- adjudication reference/digest when P4 applies;
+- ordered finding_ids;
+- optional repair_batch_id;
+- optional receipt_id;
+- optional consumption_id/reference;
+- durable_disposition.
+
+Its values are copied/recomputed from immutable source facts.
+
+A mismatch is validation failure.
+
+The summary is never consulted to decide lifecycle progression.
+
+### 28.8 Finding summaries
+
+For a P5-capable P4 Run, persist one Finding summary for every accepted normalized P4 Finding in the SAME G4 generation that persists the canonical P4 adjudication.
+
+Finding summary creation rules:
+
+- Problem/Improvement only;
+- unsupported/HUMAN/dismissed claims never receive Finding summaries;
+- category/severity/semantic_surface/disposition copy exactly from P4 adjudication;
+- source adjudication digest and source report digests are exact;
+- public-safe short summary comes only from the P4 canonical public-safe finding statement/summary, never raw external output;
+- optional repair_batch linkage may only name a batch already fixed by canonical P4 linkage;
+- later relations do not mutate this file.
+
+Later relationship discovery is represented by separate relation records pointing at the Finding.
+
+Do not backpatch a Finding summary to add reverse relation lists.
+
+### 28.9 Repair summaries
+
+For a successful P5-capable P4 repair, persist the Repair summary in the SAME G6 generation as:
+
+- Repair Result;
+- Candidate N+1 snapshot;
+- source/result linkage.
+
+It binds exactly:
+
+- repair_batch_id;
+- source review_run_id;
+- source/result candidate hashes;
+- finding_ids;
+- semantic surfaces;
+- selected strategy;
+- impact class;
+- Repair Coverage digest/result;
+- Evidence reuse/invalidation result;
+- repair executor identity/version;
+- durable result/disposition;
+- source Repair Batch digest;
+- source Repair Result digest.
+
+No temporal adjacency is accepted as causality.
+
+The Run summary for the repaired source Run is also created in this G6 transition with:
+
+~~~
+durable_disposition = repaired_to_next_candidate
+~~~
+
+### 28.10 Durable causal material
+
+P5 does not duplicate Candidate bytes or owned deltas when immutable P1-P4 records already carry them.
+
+History records store stable references/digests sufficient to re-open the exact source material.
+
+The Repair summary/history validation must retain/reference:
+
+- source/result Candidate hashes;
+- complete operation-owned touched delta identities;
+- impact-analysis affected surfaces;
+- Repair Coverage Check;
+- Evidence references;
+- relevant Context/Policy identities;
+- external-state fingerprints only when they are already safe/canonical.
+
+Causal status vocabulary:
+
+~~~
+supported
+unresolved
+insufficient_evidence
+~~~
+
+Only supported causality may feed confirmed C / recurrence / later P6/P7 learning.
+
+Unknown remains unknown.
+
+### 28.11 Cross-run relation records
+
+P5 relation records are append-only new facts.
+
+Minimum relation types:
+
+~~~
+cross_run_recurrence
+repair_induced
+downstream_escape
+future_work_link
+~~~
+
+Each record binds:
+
+- relation_id;
+- type;
+- source identity;
+- target identity;
+- semantic_surface where applicable;
+- status;
+- supporting evidence digests;
+- public-safe rationale summary;
+- source history/source Review digests needed to validate endpoints.
+
+For cross_run_recurrence / repair_induced:
+
+- code/message equality is insufficient;
+- semantic responsibility + evidence required;
+- supported/unresolved/insufficient_evidence remain distinct;
+- only supported counts as confirmed recurrence/causality.
+
+No relation rewrites either endpoint.
+
+### 28.12 Relation creation boundary
+
+A relation is written by the operation that has just made the relationship knowable.
+
+Preferred boundaries:
+
+- cross-run recurrence / repair-induced discovered during a later P5-capable adjudication:
+  create the relation in that current G4 transition alongside the current adjudication/history projections;
+- downstream escape:
+  create the relation in the later supported Review cycle once the cross-lifecycle link has positive evidence;
+- future_work_link:
+  create it in the normal Work-creation owner transition that creates the future Work when explicit source Finding provenance is supplied.
+
+Do NOT create an independent history commit in the middle of an active fixed Candidate flow, because moving HEAD may invalidate the Candidate.
+
+If a relation cannot safely share its owner transition, defer it until an owner-declared safe boundary; do not mutate lifecycle to force history storage.
+
+### 28.13 Future Work provenance
+
+P5 never creates the future Work.
+
+Add an explicit optional owner input for normal Work creation that carries:
+
+~~~
+source_finding_id
+~~~
+
+separately from Work semantic content.
+
+The normal CREATE/Roadmap owner:
+
+1. creates the Work under existing rules;
+2. validates the source P5 Finding summary/adjudication;
+3. reserves one review_relation ID;
+4. persists future_work_link in the SAME canonical owner commit/transition.
+
+Primary owner surfaces to inspect:
+
+~~~
+src/workline/create.py
+src/workline/roadmap.py
+src/workline/roadmap_review.py
+~~~
+
+Do not put P5 provenance into Work body semantics unless an existing canonical Work field explicitly owns it.
+
+The relation finding_id -> work_id does not:
+
+- add the Work to the originating completion set;
+- create reverse Phase/Roadmap dependency;
+- change Work selection/progression;
+- schedule maintenance.
+
+### 28.14 Human Decision Evidence
+
+A Human Decision Evidence record is created only after a concrete HUMAN adjudication and an actual Human decision.
+
+It binds the §13.11 fields.
+
+For a P5-capable cycle resumed under that decision:
+
+- the next owner invocation receives an explicit structured Human-decision evidence input;
+- reserve one review_decision ID;
+- persist Human Decision Evidence before launching the next external Review task;
+- preferably include it in the new Run's G1 generation so it is committed before any reviewer launch;
+- bind decision_id/source digest in the new request/Context linkage as required.
+
+It is evidence that a decision happened, not the canonical requirement/specification itself.
+
+The owner must separately read the actual canonical requirement/authority that the Human changed/confirmed.
+
+If the canonical authority does not reflect the decision when it should:
+
+~~~
+STOP / HUMAN authority mismatch
+~~~
+
+Do not infer the requirement from the Human Decision Evidence summary.
+
+### 28.15 H-3 sanitation implementation
+
+History schemas contain no field for:
+
+- chain-of-thought;
+- hidden reasoning;
+- raw chat/model transcript;
+- credentials/secrets;
+- arbitrary local-machine dump.
+
+Derived summaries must be built from already-canonical public-safe P4 material.
+
+Human-decision / relation rationale inputs are explicit structured public-safe summary fields, not transcript blobs.
+
+At minimum enforce:
+
+- non-empty canonical text;
+- bounded/single-line summary form where prose is allowed;
+- no control/newline injection;
+- exact schema only;
+- no arbitrary extra metadata map.
+
+Do not silently redact/transform an unsafe external return into a different semantic claim.
+
+P4 discovery-report sanitation remains the upstream authority for report content.
+
+P1-P4 exact reconstruction material is not deleted or weakened by P5 sanitation.
+
+### 28.16 ReviewStore integration
+
+Extend ReviewStore with narrow readers/listers:
+
+- run_history(review_run_id);
+- finding_history(finding_id);
+- repair_history(repair_batch_id);
+- relation_history(relation_id);
+- human_decision_history(decision_id);
+- corresponding ID enumerators.
+
+Parsers live in review/history.py.
+
+Do not create a second filesystem store abstraction.
+
+All reads use the same canonical Review path safety as existing Review records.
+
+### 28.17 Validation model
+
+Extend review/validate.py to validate the entire history namespace independently and cross-check sources.
+
+At minimum validate:
+
+- exact directory/path shape;
+- strict schema/version;
+- filename ID == record ID;
+- source record exists;
+- source digest matches;
+- Run summary source Gate/Receipt/Consumption binding;
+- Finding summary equals P4 adjudication category/severity/disposition;
+- Finding source report digests exist/match;
+- Repair summary matches Repair Batch + Repair Result;
+- source/result Candidate hashes match;
+- relation endpoints exist and have matching types;
+- supported causality has supporting evidence;
+- duplicate logical relation identity rejected;
+- Human Decision Evidence points to a real HUMAN adjudication entry;
+- future_work_link target Work exists and source Finding exists;
+- no duplicate history file for one immutable source identity.
+
+A broken history record never changes lifecycle truth.
+
+For explicit P5-capable transitions, the owner additionally calls a narrow:
+
+~~~
+require_history_ready(...)
+~~~
+
+before crossing a boundary that requires history.
+
+### 28.18 History-readiness gates
+
+Required history gating is versioned.
+
+P5-capable owner transitions refuse to advance when required history is absent/malformed.
+
+Minimum gates:
+
+- G4 cannot be considered history-complete until all normalized Finding summaries required by its adjudication are canonical;
+- repaired G6 cannot be considered history-complete until Repair summary + source Run summary are canonical;
+- HUMAN_WAIT cannot be considered history-complete until its Run summary is canonical;
+- successor launch under a Human decision cannot occur before Human Decision Evidence is canonical;
+- normal authorization Consumption cannot complete without the final Run summary in the same transition;
+- relation-dependent learning/metrics may use only validated relation records.
+
+Pre-P5 Runs skip these gates by explicit stored contract dispatch.
+
+### 28.19 Downstream escape
+
+A downstream escape relation is recorded only after a later supported Finding can be positively linked to prior Run/Finding/Repair evidence.
+
+It never:
+
+- reopens completed lifecycle;
+- rewrites prior Receipt/Consumption;
+- changes prior verdict;
+- pretends the later Finding was known during earlier authorization.
+
+The later defect follows normal current Workline operations.
+
+The relation is evidence/history only.
+
+### 28.20 No-backfill rule
+
+Do not scan old commits/chat/memory to synthesize P5 history.
+
+Existing pre-P5 Runs have:
+
+~~~
+history_status = not_required_by_contract
+~~~
+
+not missing.
+
+If old evidence is absent, it remains absent.
+
+No migration is required merely to enable P5 for future Runs.
+
+### 28.21 RB5 handoff
+
+P5 exposes validated references only.
+
+Provide a narrow history projection for RB5 containing, as applicable:
+
+- review_run_id;
+- validated Run summary identity/digest;
+- Receipt/Consumption identity;
+- relevant Finding disposition references;
+- unresolved-obligation result;
+- Evidence/coverage identity;
+- Human Decision Evidence identity.
+
+This projection does not decide achievement.
+
+RB5 owns the Phase/Roadmap achievement record/event binding.
+
+### 28.22 Learning boundary
+
+P5 may expose traceable queries/aggregates for later P6/P7, but no policy change occurs here.
+
+Every metric result must retain source IDs sufficient to reproduce it from immutable Run/Finding/Repair/Relation history.
+
+Only supported causal/recurrence relations count as confirmed.
+
+No mutable aggregate is canonical source truth.
+
+### 28.23 Primary implementation files
+
+Expected new common file:
+
+~~~
+src/workline/review/history.py
+~~~
+
+Expected canonical namespace/store/validation changes:
+
+~~~
+src/workline/review/paths.py
+src/workline/review/store.py
+src/workline/review/validate.py
+src/workline/ids.py
+~~~
+
+Expected P4 integration points after P4 lands:
+
+~~~
+src/workline/review/p4.py
+src/workline/roadmap_review.py
+src/workline/start_review.py
+~~~
+
+Expected future-Work provenance owner changes only if required by the final explicit API:
+
+~~~
+src/workline/create.py
+src/workline/roadmap.py
+~~~
+
+No separate history database, scheduler or lifecycle module.
+
+### 28.24 Canonical runtime authority activation
+
+The P5 candidate must update runtime canonical text in the same candidate.
+
+At minimum inspect/update:
+
+~~~
+.claude/skills/review/SKILL.md
+.claude/skills/roadmap/SKILL.md
+.claude/skills/start/SKILL.md
+~~~
+
+Update .claude/skills/create/SKILL.md only if explicit future_work_link provenance becomes part of CREATE's public contract.
+
+Review Skill must state:
+
+- P5 history is projection/reference, not lifecycle truth;
+- immutable history layout;
+- no backfill;
+- H-3 sanitation;
+- LOW/Improvement no automatic Work;
+- relation records do not rewrite endpoints;
+- supported/unresolved/insufficient causality;
+- Human Decision Evidence is not requirement authority;
+- required P5 history gates for P5-capable Runs.
+
+Roadmap/START must state owner responsibility for writing required Run/Finding/Repair/Human history at exact transition boundaries.
+
+registry routing does not change.
+
+### 28.25 Focused tests — records/namespace
+
+Add:
+
+~~~
+tests/test_review_history_records.py
+~~~
+
+Cover:
+
+- all five history path families;
+- strict schemas;
+- canonical round-trip;
+- filename/ID mismatch;
+- immutable create-only collision;
+- namespace/path safety;
+- orphan record validation;
+- no transcript/CoT arbitrary fields;
+- pre-P5 namespace absence valid.
+
+### 28.26 Focused tests — source projection
+
+Add:
+
+~~~
+tests/test_review_history_projection.py
+~~~
+
+Cover:
+
+- Run summary source match;
+- Gate digest mismatch fails;
+- Receipt/Consumption mismatch fails;
+- Finding summary exact adjudication category/severity/disposition;
+- unsupported/HUMAN cannot become Finding summary;
+- Repair summary exact Batch/Result linkage;
+- unresolved causality remains unresolved;
+- insufficient evidence remains insufficient;
+- supported causality requires evidence;
+- source summary disagreement never latest-wins.
+
+### 28.27 Focused tests — creation boundaries
+
+Cover interruption/retry for:
+
+1. G4 adjudication + Finding summaries;
+2. G4 HUMAN_WAIT + Run summary;
+3. G6 Repair Result + Repair summary + repaired Run summary;
+4. invalidation/Supersession + invalidated Run summary;
+5. set-aside finalization where applicable;
+6. planning Consumption + consumed Run summary;
+7. Work terminal Consumption + consumed Run summary;
+8. Human-decision evidence in successor G1;
+9. future_work_link in normal Work creation.
+
+Every retry proves:
+
+- same summary path/bytes;
+- same relation/decision ID;
+- no duplicate source summary;
+- no overwrite;
+- no inferred backfill;
+- no lifecycle effect caused by history replay.
+
+### 28.28 Focused tests — runtime cleanup / clone
+
+Cover:
+
+- deleting .workline/runtime/** does not remove required history;
+- fresh clone reconstructs/validates all P5 references;
+- no runtime report copy is required to validate history;
+- P5 history alone cannot reconstruct/replace missing P1-P4 source facts;
+- missing source -> validation failure.
+
+### 28.29 Focused tests — LOW / Improvement / future Work
+
+Cover:
+
+- LOW creates no automatic Work;
+- Improvement any severity creates no automatic Work;
+- retained_history_only/no_action remain valid;
+- future_work_candidate itself creates no Work;
+- explicit normal Work creation may add future_work_link;
+- later relation does not rewrite Finding;
+- future Work does not enter originating Phase/Roadmap completion dependency;
+- existing Work selection/progression unchanged.
+
+### 28.30 Focused tests — Human Decision Evidence
+
+Cover:
+
+- only a real HUMAN adjudication may be referenced;
+- decision evidence requires exact source identity;
+- no transcript/freeform metadata;
+- decision evidence does not replace canonical authority;
+- authority mismatch blocks resume where authority should have changed;
+- evidence persisted before successor external launch;
+- retry reuses same decision ID/bytes.
+
+### 28.31 Compatibility regression
+
+Must explicitly prove:
+
+- existing P1/P2/P3 Runs valid without P5;
+- RB3-C1/F4 regression PASS;
+- P4-only Runs valid without P5 summaries;
+- P5-capable Runs cannot step over required missing history;
+- existing Planning Consumption proof unchanged for pre-P5;
+- existing Work terminal proof unchanged for pre-P5;
+- legacy non-Review Roadmap/START/CREATE unchanged.
+
+### 28.32 Full regression order
+
+Run:
+
+1. P5 record/namespace tests;
+2. P5 source-projection tests;
+3. P5 owner-boundary/interruption tests;
+4. P5 clone/runtime-cleanup tests;
+5. LOW/Improvement/future-Work tests;
+6. Human Decision Evidence tests;
+7. P4 focused regression;
+8. RB3-C1/F4 regression;
+9. P2 planning Review regression;
+10. P3 Work Review regression;
+11. legacy Roadmap/START/CREATE regression;
+12. canonical Skill/registry tests;
+13. full repository suite.
+
+Canonical full command:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical test tooling has legitimately changed before implementation.
+
+### 28.33 Explicit non-scope
+
+RB4/P5 must not implement:
+
+- Phase/Roadmap achievement decision (RB5);
+- Project-local adaptive policy (RB6/P6);
+- Global promotion (RB7/P7);
+- automatic LOW/Improvement Work creation;
+- maintenance queue/scheduler;
+- mutable history index as authority;
+- historical rationale backfill;
+- lifecycle reopen from downstream escape;
+- self-hosting;
+- RB1 status semantics beyond later additive exposure;
+- RB10 disposition.
+
+### 28.34 Implementation completion gate
+
+RB4/P5 is complete only when:
+
+- RB3/P4 landed semantics are reused;
+- history namespace implemented;
+- Run/Finding/Repair/Relation/Human Decision records strict and immutable;
+- every summary validates against immutable P1-P4 source facts;
+- H-3 sanitation boundary enforced structurally;
+- final Run summary timing cannot require later rewrite;
+- P5-capable Consumption cannot step over required history;
+- repair/HUMAN history is replay-safe;
+- no backfill;
+- no automatic LOW/Improvement Work;
+- future_work_link is provenance only;
+- downstream escape never rewrites lifecycle;
+- RB5 handoff references are available;
+- canonical Skills updated;
+- focused tests PASS;
+- P4/RB3/P2/P3 regressions PASS;
+- legacy operations PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
+
+After RB4 landing, RB5 and RB6 are both structurally unblocked; the critical-path next block is RB6/P6, while RB5 may proceed in parallel.
