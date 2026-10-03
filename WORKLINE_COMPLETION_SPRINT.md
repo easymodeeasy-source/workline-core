@@ -6736,7 +6736,7 @@ Status:
 ~~~
 READY_TO_IMPLEMENT
 architecture exploration closed
-bounded implementation probes remain
+bounded implementation probes closed
 ~~~
 
 This brief translates RB3-C1 into a production implementation task.
@@ -7331,25 +7331,118 @@ Every row must prove:
 - no fallback to legacy;
 - no duplicate publication.
 
-### 26.28 Bounded implementation probes
+### 26.28 Bounded implementation probes — CLOSED
 
-Coding agent may investigate only these unresolved implementation facts before editing:
+All five bounded implementation probes are closed by static inspection of the live implementation.
 
-P1. Which existing C-1/workcommit field/helper is the canonical exact K1 identity after commit/interruption?
+#### P1 — exact K1 identity
 
-P2. Which existing publication/destination-read primitive exactly implements the R7 positive already-published/divergent/unknown classification?
+CLOSED.
 
-P3. What is the narrowest positive way to recover the exact successor G3 commit SHA after its generation mutation has completed and runtime record cleanup occurred?
+Use the existing C-1 Work commit effect identity:
 
-P4. Can review/recovery.py accept Work semantics through narrow callbacks/adapters without destabilizing planning recovery? If not, show the exact coupling that requires a small shared-core extraction.
+- prepared_commit_id is durable before the ref moves;
+- commit_id + applied=true records the exact commit C-1 owns after the ref move;
+- interrupted recovery re-validates the stored prepared object/ref rather than inferring from HEAD.
 
-P5. Which current proof helper should read the exact persisted K1 commit message/object identity for C2, without invoking porcelain semantics that can be altered by replace/graft/config?
+F4 may expose the already-proven exact commit ID through the narrowest helper/accessor needed.
 
-These probes may choose local function placement.
+Do not infer K1 from HEAD, commit message, newest commit or path similarity.
 
-They may not change the frozen recovery semantics.
+#### P2 — destination publication classification
 
-If a probe reveals the frozen contract is physically impossible under the existing immutable Mutation/Review model, STOP and report that exact contradiction rather than silently weakening the contract.
+CLOSED.
+
+Reuse the existing exact publication/destination primitives:
+
+- _recorded_publication;
+- push_dry_run;
+- reads_itself;
+- destination_branch;
+- fetch_destination_branch;
+- raw ancestry classification.
+
+The existing semantics already distinguish:
+
+- destination holds exact commit / descendant -> already published / matching;
+- destination holds divergent history -> reconcile;
+- destination cannot be read/proven -> STOP;
+- stale remote-tracking refs have no authority.
+
+F4 may extract the narrowest read-only precondition helper needed before old G4. Do not add a second remote ancestry algorithm.
+
+#### P3 — successor G3 exact commit SHA
+
+CLOSED.
+
+review.workcommit.require_generation_persisted already proves that one exact Work-mode git_commit effect:
+
+- is applied;
+- has one full commit_id owned by C-1;
+- is held by the recorded branch under raw ancestry;
+- contains the expected Review records as exact bytes.
+
+The narrow implementation change is to return/expose that proven commit ID when F4 needs K_adopt.
+
+Do not recover K_adopt from HEAD alone or keep a completed runtime mutation merely to remember the SHA.
+
+#### P4 — recovery shared-core shape
+
+CLOSED.
+
+review/recovery.py already has a reusable generic discovery/persistence core:
+
+- matching Run discovery by review_kind + operation_identity;
+- committed-history discovery;
+- whole-record persistence proof;
+- set_aside_runs harvesting;
+- ambiguous recoverable refusal;
+- no age/newest selection.
+
+Keep those mechanics shared.
+
+Make only the planning-specific classification/reconstruction tail adapter-driven, including:
+
+- consumed/terminal classification;
+- authorization predicate;
+- reconstruction validation;
+- currency/staleness;
+- reason constants.
+
+Planning keeps a planning adapter with unchanged semantics/tests.
+
+Work adds a Work adapter.
+
+No separate duplicated Work recovery engine and no large shared-core extraction is expected.
+
+#### P5 — exact persisted K1 commit object/message
+
+CLOSED.
+
+Reuse review.workcommit._stored_commit or promote the narrowest equivalent internal accessor.
+
+It already reads the exact stored commit object through cat-file and returns:
+
+- tree;
+- raw parents;
+- exact message bytes.
+
+It does not use HEAD, branch position, git log/show pretty output, replace-view semantics or working-tree state.
+
+C2 reconstruction therefore reads K1's persisted identity/message directly from the exact stored object.
+
+### 26.28.1 Probe closure consequence
+
+RB3-C1 now has:
+
+~~~
+architecture exploration open items = 0
+bounded implementation probes open = 0
+~~~
+
+Coding-agent reconnaissance is limited to ordinary implementation placement/details that do not alter frozen semantics.
+
+If implementation nevertheless proves a physical contradiction with the immutable Mutation/Review model, STOP and report that exact contradiction rather than weakening the contract.
 
 ### 26.29 Explicit non-scope
 
