@@ -15011,3 +15011,673 @@ RB10 N2/N3/N6 is complete only when:
 - full suite PASS;
 - exact candidate SHA/tree/diff frozen for independent review;
 - no push/landing before independent exact-candidate review PASS.
+---
+
+## 35. RB10 N4 implementation brief — explicit Human-invoked recovery disposition
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT_AFTER_RB3_C1_AND_RB1_LAND
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §18.5-§18.7.
+
+It does not replace §18. Where wording conflicts, §18 remains the semantic contract.
+
+N4 reuses RB3-C1 set-aside meaning exactly:
+
+~~~
+old state remains evidence
+AND
+automatic recovery selection must not choose it again
+~~~
+
+It does not delete, complete, repair or reinterpret the target.
+
+### 35.1 Dependency and responsibility
+
+N4 implementation waits for:
+
+~~~
+RB3-C1 runtime set-aside/successor semantics LANDED
+AND
+RB1 status/pending read-only classification LANDED
+~~~
+
+RB3-C1 supplies the one Review set-aside meaning and generalized recovery selection.
+
+RB1 supplies the stable pending classification vocabulary and read-only owner probes.
+
+The N4 canonical owner is Workline recovery authority.
+
+It is not:
+
+- lifecycle/state.py;
+- Review history;
+- START;
+- Roadmap;
+- CREATE;
+- a new registry-routed Skill.
+
+### 35.2 Canonical disposition namespace
+
+Add one canonical immutable namespace:
+
+~~~
+.workline/recovery/dispositions/
+~~~
+
+One target has at most one disposition record:
+
+~~~
+.workline/recovery/dispositions/<target_id>.yaml
+~~~
+
+target_id is exactly one existing Workline stable ID of kind:
+
+~~~
+mutation   -> mut_<...>
+review_run -> rr_<...>
+~~~
+
+No new disposition ID kind is introduced. The target stable ID is the record identity.
+
+`.workline/runtime` is not used for the disposition because runtime is non-canonical and clone-local.
+
+### 35.3 Frozen disposition record v1
+
+Schema:
+
+~~~
+schema: workline-recovery-disposition
+version: 1
+target_kind: mutation | review_run
+target_id: <exact stable ID>
+target_state_contract: pending-mutation-v1 | review-run-recovery-v1
+target_state_digest: <lowercase sha256>
+decision: set_aside
+decision_source: human
+reason: <non-empty public-safe Human reason>
+~~~
+
+Exact rules:
+
+- unknown/missing fields fail closed;
+- target_kind must match target_id kind;
+- target_state_contract must match target_kind;
+- decision is exactly set_aside;
+- decision_source is exactly human;
+- reason is trimmed, non-empty text and is stored canonically;
+- target_state_digest binds the exact state witnessed at the disposition decision.
+
+No timestamp is required. Avoiding time keeps same-target/same-reason idempotency structural rather than chronology-based.
+
+### 35.4 Human invocation boundary
+
+Expose one maintenance API/CLI, not a Skill.
+
+Recommended API:
+
+~~~
+dispose_recovery(project_root, target_id, reason, *, confirmed=False)
+~~~
+
+Recommended CLI:
+
+~~~
+workline dispose-recovery [project_root] --target <mut_...|rr_...> --reason <text> --confirm
+~~~
+
+`confirmed` must be exactly true before Project state, lock or mutation state is read.
+
+`--confirm` is explicit Human confirmation. Caller identity, AI prompt text, the existence of a broken record, or a supplied reason never substitutes for it.
+
+Reason text is committed canonical Project data. Canonical docs/CLI help must tell the Human to provide a public-safe reason and not place secrets/private raw material there.
+
+### 35.5 Target witness — pending mutation
+
+For target_kind=mutation, construct the witness from the exact runtime mutation record bytes under the Project lock.
+
+Eligibility first requires the RB1/owner-specific read-only pending classifier to prove:
+
+~~~
+pending_reconcile_required
+~~~
+
+Not eligible:
+
+~~~
+pending_resumable
+unknown_or_invalid
+completed
+abandoned
+missing
+~~~
+
+The target record must be structurally attributable to Workline and to its owner.
+
+Compute:
+
+~~~
+target_state_contract = pending-mutation-v1
+target_state_digest   = SHA-256(domain separator + exact target record bytes)
+~~~
+
+Read the exact bytes again immediately before the disposition effect is recorded. If they differ, STOP/reconcile.
+
+Do not copy arbitrary invocation/request payload into the canonical disposition record.
+
+### 35.6 Mutation target concurrency rule
+
+On first invocation for a mutation target:
+
+- the target mutation itself may be pending;
+- no other ordinary pending mutation may exist;
+- no recovery-disposition mutation for another request may exist.
+
+This is intentionally stricter than ordinary independent-scope concurrency.
+
+N4 changes recovery selection and must not surprise another in-flight operation.
+
+On resume, exactly the target pending mutation plus the one matching N4 mutation may exist.
+
+Anything else fails closed.
+
+### 35.7 N4-specific mutation opening
+
+Ordinary MutationController.open cannot be weakened globally.
+
+Add one narrow recovery-disposition opening path that:
+
+- requires the normal Project execution lock;
+- is usable only by the dedicated owner `recovery-disposition`;
+- resumes only the exact same target/reason request;
+- exempts exactly the target pending mutation from ordinary pending-overlap refusal;
+- never exempts a second pending mutation;
+- never edits/loads the target as writable;
+- opens the N4 mutation with only the disposition record as its actual owned canonical path.
+
+A pending recovery-disposition mutation is a global recovery barrier: every other top-level mutation owner refuses to begin until it is completed/resumed.
+
+Do not encode this by lying about WriteScope. Preserve the exact disposition path in scope and make the recovery-disposition-owner barrier explicit in MutationController pending admission.
+
+### 35.8 Active pending selection after disposition
+
+Add a distinction in MutationController between:
+
+~~~
+raw pending records
+active pending records
+~~~
+
+Raw inspection still sees the old target mutation.
+
+Normal automatic operation discovery uses active pending records.
+
+A mutation is removed from the active set only when a valid committed disposition:
+
+- targets that exact mutation ID;
+- carries pending-mutation-v1;
+- matches the exact target record digest when the runtime target still exists.
+
+If the target runtime record exists but its bytes no longer match the disposition, fail closed; do not resume it and do not hide it.
+
+If the runtime record is absent after runtime loss/clone, the committed disposition remains historical canonical evidence and there is no active mutation to resume.
+
+Explicit MutationController.load/resume of a validly disposed mutation must refuse as disposed_by_human.
+
+### 35.9 Target witness — Review Run
+
+For target_kind=review_run, use the post-RB3-C1 generalized Review recovery reader.
+
+The Run must be fully attributable and fingerprintable from canonical immutable Review records.
+
+Define review-run-recovery-v1 as a domain-separated digest over the sorted exact canonical record closure relevant to the Run, at least:
+
+- every Gate generation in the Run;
+- its CandidateSnapshot;
+- accepted TaskInput;
+- any Receipt;
+- any Supersession;
+- any Consumption belonging to the Run/Receipt set.
+
+Each member contributes its canonical repository-relative path and exact content digest.
+
+The witness is rebuilt immediately before recording the disposition. Any change fails closed.
+
+### 35.10 Review Run eligibility
+
+N4 may dispose a Review Run only when all are true:
+
+- the Run/record closure is structurally valid and readable;
+- its exact recovery witness is reproducible;
+- no generation mutation for the Run is pending;
+- no planning/START/recovery mutation is actively carrying a safe automatic replacement/resume;
+- no successor/replacement Run is already in progress;
+- the Run is not already named set-aside by a valid successor request;
+- it is not consumed;
+- the generalized recovery classifier does not classify it as safely recoverable;
+- the non-resumable condition is owner-supported and does not depend on ignoring malformed/unknown ownership.
+
+A malformed/ambiguous Review namespace that cannot establish an exact target witness is not made disposable merely because the Human wants to move on.
+
+### 35.11 Receipt/Supersession boundary
+
+N4 does not invent a second Receipt invalidation mechanism.
+
+If the target Review Run has a current unsuperseded sealed Receipt:
+
+~~~
+REFUSE N4 disposition
+~~~
+
+The existing Review invalidation/Supersession mechanism must resolve that authorization.
+
+N4 does not write G4 or Supersession itself.
+
+If a Receipt is already superseded or a Run is already set aside/consumed, N4 is unnecessary and returns/refuses as already resolved rather than writing duplicate meaning.
+
+This keeps physical ownership of the N4 record in recovery authority rather than Review history.
+
+### 35.12 Immutable create primitive
+
+The disposition file is immutable and create-once.
+
+Generalize the existing exclusive immutable create primitive narrowly so `create_file` can target either:
+
+- a valid canonical Review record path; or
+- a valid canonical recovery disposition path.
+
+Add an exact disposition-path validator and mechanical owner guard.
+
+Only owner `recovery-disposition` may create under `.workline/recovery/dispositions/`.
+
+Generic write_file may never update an existing disposition path.
+
+The old Review immutable-path restrictions remain unchanged.
+
+If the platform cannot prove an exclusive in-Project immutable create with the existing fail-closed physical primitive, N4 STOPs before recording the effect. Do not fall back to overwrite/replace semantics.
+
+### 35.13 Operation flow
+
+First invocation:
+
+1. require confirmed=True / --confirm before reads;
+2. normalize/validate non-empty public-safe reason;
+3. resolve established Project/context/implementation normally;
+4. take Project execution lock;
+5. read existing disposition, raw pending state and Review state as applicable;
+6. reject other in-flight operations/replacements;
+7. prove target eligibility;
+8. build exact target witness/digest;
+9. verify push destination before beginning when a push is required;
+10. open dedicated recovery-disposition mutation;
+11. re-read target witness immediately before decision record;
+12. record one immutable create_file effect;
+13. apply;
+14. commit only the disposition path;
+15. push exact commit when the Project has an approved remote;
+16. validate read-back and recovery selection;
+17. complete only the N4 mutation.
+
+Never complete, abandon, delete or rewrite the target mutation/Review state.
+
+Commit message:
+
+~~~
+chore(workline): set aside recovery <target_id>
+~~~
+
+Human reason is not copied into the commit message.
+
+### 35.14 Idempotency and conflict
+
+One target ID has one canonical disposition path.
+
+If a committed valid record already exists and target_id, target_state_digest, decision and normalized reason all match:
+
+~~~
+already_disposed
+~~~
+
+Return idempotently without a second commit.
+
+If the same target has a disposition with a different reason or different target digest:
+
+~~~
+reconcile required
+~~~
+
+Do not overwrite, append or choose one by time.
+
+If an unfinished N4 mutation exists for the same target but another reason, fail closed.
+
+### 35.15 Review recovery integration
+
+RB3-C1 generalized recovery discovery must consume explicit Human dispositions as one additional source of the SAME set-aside relation.
+
+Recovery discovery merges:
+
+- successor TaskInput set_aside_runs; and
+- valid recovery-disposition records for Review Run targets.
+
+For request-envelope propagation/reporting, use one stable reason code such as:
+
+~~~
+disposed_by_human
+~~~
+
+Do not copy free-form Human reason into successor TaskInput.
+
+The detailed reason remains in the canonical disposition record.
+
+A Human-disposed Run is never selected automatically as the recoverable Run.
+
+### 35.16 RB1 pending/status integration
+
+Keep RB1 StatusModel schema/version and base field meanings.
+
+For a live runtime mutation with an exact valid disposition:
+
+~~~
+resume_classification = disposed_by_human
+~~~
+
+Additive detail under pending may include:
+
+- target_id;
+- disposition record path;
+- target_state_digest;
+- public-safe Human reason;
+- target runtime record present/absent.
+
+After clone/runtime cleanup, the disposition remains visible as historical recovery evidence even when the target runtime mutation file is absent.
+
+Do not report disposed as completed, abandoned or silently absent.
+
+### 35.17 Review status integration
+
+A Review Run with a valid Human disposition uses the existing Review state:
+
+~~~
+set_aside
+~~~
+
+Add an additive source/detail such as:
+
+~~~
+set_aside_source = human_disposition
+~~~
+
+Do not add a second Review lifecycle meaning.
+
+Receipt/Consumption status remains independently visible.
+
+### 35.18 Validation
+
+Add recovery disposition validation to validate_project without involving state.py.
+
+Validation checks:
+
+- namespace/path shape;
+- strict v1 schema;
+- target ID/kind/contract agreement;
+- digest/reason/decision/source shape;
+- one record per target;
+- Review target exists and current immutable recovery witness matches;
+- mutation target, when runtime record is present, is the exact pending record bound by digest;
+- mutation target absence after runtime loss/clone is allowed as historical disposed evidence;
+- a present changed/completed/abandoned mutation target conflicts;
+- current unsuperseded Receipt cannot be Human-disposed;
+- no disposition may target unknown ID kind.
+
+Broken disposition authority makes validation fail and makes automatic recovery fail closed.
+
+Lifecycle derivation never reads this namespace.
+
+### 35.19 Clone/runtime-loss semantics
+
+Canonical disposition is committed Project state; runtime target records are not.
+
+Therefore:
+
+~~~
+same working copy, target runtime record present
+-> exact digest match required
+-> target is inactive/disposed
+
+fresh clone or lost runtime, target mutation record absent
+-> disposition remains historical evidence
+-> no target mutation exists to resume
+~~~
+
+A Review Run target remains canonical in both cases and must always continue to match its recovery witness.
+
+No runtime reconstruction fabricates the old mutation record.
+
+### 35.20 Git/persistence boundary
+
+The disposition operation owns only its canonical disposition file.
+
+Do not stage target mutation runtime bytes, Review records, lifecycle files, relation ledgers or entities.
+
+Use ordinary exact-owner commit/push safety.
+
+Pre-existing dirty overlap at the disposition path refuses before create.
+
+Unrelated dirty paths remain untouched.
+
+If a remote exists, normal approved-destination rules apply; no force, no remote rewrite, no special N4 publication path.
+
+### 35.21 Canonical authority activation
+
+Same implementation candidate updates at least:
+
+~~~
+registry.md rules/git
+registry.md rules/human-confirmation
+.claude/skills/review/SKILL.md
+README.md or CLI help where maintenance commands are documented
+~~~
+
+Update START/Roadmap Skills only if their runtime recovery text directly describes automatic selection of disposed state.
+
+Canonical text must state:
+
+- disposition is explicit Human-confirmed maintenance;
+- exact target stable ID and reason required;
+- set-aside means not automatically selected, never deletion/completion;
+- old evidence remains;
+- Receipt invalidation stays Supersession-owned;
+- disposed mutation records are inactive but still diagnostic;
+- no Skill/routing ID is added.
+
+### 35.22 Expected implementation surfaces
+
+Primary new module:
+
+~~~
+src/workline/recovery_disposition.py
+~~~
+
+Expected integration changes:
+
+~~~
+src/workline/mutation.py
+src/workline/validate.py
+src/workline/cli.py
+src/workline/review/recovery.py
+src/workline/review/status.py    # after RB1, if this module exists
+src/workline/status.py           # additive N4 detail only
+src/workline/review/paths.py     # only if shared immutable-path dispatch needs it
+src/workline/store.py            # constants/owner allowlist only if appropriate
+registry.md
+.claude/skills/review/SKILL.md
+README.md
+~~~
+
+No new registry Skill.
+
+No lifecycle schema/event change.
+
+No Supersession/Receipt/Consumption schema change.
+
+### 35.23 Focused tests — Human/API boundary
+
+Add a dedicated suite, e.g.:
+
+~~~
+tests/test_recovery_disposition.py
+~~~
+
+Cover:
+
+- confirmed=False refuses before Project read/lock/write;
+- missing/blank reason refuses;
+- invalid target ID refuses;
+- foreign Project context refuses normally;
+- only configured implementation may run;
+- reason is canonical/public-safe input surface;
+- no target/domain bytes change on any refusal.
+
+### 35.24 Focused tests — mutation target
+
+Cover:
+
+- exact pending_reconcile_required mutation can be disposed;
+- pending_resumable target is refused;
+- unknown_or_invalid target is refused;
+- missing/completed/abandoned target is refused;
+- target runtime bytes unchanged byte-for-byte;
+- target file remains present locally;
+- another pending mutation blocks N4;
+- matching N4 retry resumes;
+- active pending discovery excludes exact disposed target only after valid committed disposition;
+- explicit load/resume of disposed target refuses;
+- target bytes changed after disposition -> validation/recovery conflict;
+- target runtime file absent after clone -> historical disposition remains valid/visible.
+
+### 35.25 Focused tests — Review target
+
+Cover:
+
+- valid non-resumable no-Receipt Run can be Human-disposed;
+- safely recoverable Run is refused;
+- pending generation mutation blocks;
+- replacement/successor in progress blocks;
+- already successor-set-aside Run does not get duplicate N4 meaning;
+- consumed Run does not get duplicate N4 meaning;
+- current sealed unsuperseded Receipt refuses N4;
+- N4 writes no G4 and no Supersession;
+- explicit disposition makes generalized discovery skip the Run;
+- successor request uses stable disposed_by_human reason code, not free-form reason;
+- Review status remains set_aside with Human source;
+- added/changed Run record after disposition breaks witness validation.
+
+### 35.26 Idempotency tests
+
+Cover:
+
+- same target + same digest + same reason -> already_disposed;
+- same target + different reason -> conflict;
+- same target + changed state digest -> conflict;
+- no timestamp/newest selection;
+- one canonical file per target.
+
+### 35.27 Interruption/recovery matrix
+
+Mutation or Review target, as applicable:
+
+1. after Human admission before N4 mutation open;
+2. N4 mutation opened, no effect;
+3. disposition effect recorded;
+4. immutable file created before applied flag save;
+5. disposition file applied;
+6. commit stage recorded;
+7. commit made before applied flag save;
+8. push stage recorded;
+9. push made before applied flag save;
+10. everything applied before N4 mutation complete.
+
+Every retry must preserve:
+
+- one disposition record;
+- same target digest/reason;
+- no target mutation/Review rewrite;
+- no duplicate commit/publication;
+- no automatic resume of disposed target;
+- no unrelated operation begins while N4 itself is pending.
+
+### 35.28 Regression order
+
+1. recovery disposition record/path parser;
+2. Human/API boundary;
+3. mutation-target eligibility/active-pending integration;
+4. Review-target eligibility/discovery integration;
+5. RB1 status additive fields;
+6. validation;
+7. interruption matrix;
+8. RB3-C1 successor/set-aside regression;
+9. RB1 read-only status regression;
+10. mutation recovery regression;
+11. Review validation/recovery regression;
+12. canonical rules/Skill/CLI tests;
+13. full suite.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical tooling legitimately changes before implementation.
+
+### 35.29 Explicit non-scope
+
+N4 must not implement:
+
+- deleting/rewriting/completing target mutation records;
+- deleting/rewriting Review Runs;
+- a second set-aside meaning;
+- automatic Human disposition;
+- disposal of structurally unknown/unowned records;
+- disposal of a safely resumable target;
+- Receipt invalidation without Supersession;
+- lifecycle Work/Phase/Roadmap completion;
+- rollback/reset/rebase/force push;
+- generic runtime cleanup;
+- a new Skill;
+- status schema v2;
+- raw invocation/request archival.
+
+### 35.30 Implementation completion gate
+
+N4 is complete only when:
+
+- one canonical immutable disposition namespace/schema exists;
+- exact stable target ID and exact target-state digest are bound;
+- explicit Human confirmation and non-empty public-safe reason are mandatory;
+- pending_reconcile_required mutation disposal works without editing its record;
+- safely resumable/unknown targets are refused;
+- Review disposition reuses RB3-C1 set-aside semantics;
+- current Receipt authorization cannot be bypassed;
+- old Review/mutation evidence remains;
+- automatic recovery no longer selects exactly disposed targets;
+- interrupted N4 itself blocks other writers until resumed/completed;
+- same request is idempotent and conflicting second disposition fails closed;
+- RB1 reports disposed_by_human without calling it complete;
+- Review status reports set_aside with Human source;
+- validation catches dangling/conflicting disposition authority;
+- clone/runtime-loss behavior is deterministic;
+- no lifecycle/domain side effect occurs;
+- canonical rules/Skill/CLI text is updated;
+- focused tests PASS;
+- RB3-C1/RB1 regressions PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
