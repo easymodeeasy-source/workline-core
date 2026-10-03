@@ -322,79 +322,559 @@ Landing is serialized.
 
 ## 9. RB1 — BL-006 read-only status/context
 
-Goal: canonical read-only status/context interface.
+RB1 creates the canonical read-only interface for recovering and inspecting one established Workline Project without re-deriving status logic from source code.
 
-Machine- and human-readable output includes at least:
+### 9.1 Canonical interface
 
-- Project
-- Roadmap
-- Phase
-- Work
-- current
-- next
-- pending mutation
-- validation
-- authority
-- Git state
-- approved push destination
-- Review activation/status
-
-Hard constraints:
-
-- no Project mutation
-- no durable state write
-- no repository write
-- no network write
-
-Later RB5/RB6/RB10 additions are additive to the RB1 base contract.
-
----
-
-## 10. RB2 — BL-007 cold-start performance
-
-Measure first.
-
-Representative scale:
+Add one canonical CLI surface:
 
 ~~~
-~300 Works
-~3,000 events
+run-workline.py status <project-root>
+run-workline.py status <project-root> --json
 ~~~
 
-Optimization is justified only if either:
+The human-readable form and JSON form are two renderings of the same status model.
 
-1. indexing/removal of derivation can eliminate more than 50% of status/validate-project wall time; or
-2. approximately 10x input produces clear super-linear growth, operationally about >12x median wall time beyond measurement noise.
+The JSON form is versioned and machine-readable.
 
-If neither threshold is met:
+The command is allowed from outside the target Project because BL-001 permits cross-Project read-only inspection.
+
+It never grants state-changing authority.
+
+### 9.2 Hard read-only boundary
+
+status must perform no write of any kind.
+
+Prohibited:
+
+- MutationController.open
+- Project execution lock acquisition
+- lock/holder creation
+- canonical Project write
+- runtime note/cache write
+- Git index/ref/config write
+- fetch/pull/push/ls-remote or any other network access
+- reviewer/external-service launch
+- activation/backfill/pin maintenance
+- automatic repair/cleanup
+
+status may use only local read operations.
+
+It may read an existing holder.json as a diagnostic hint, but holder.json is never ownership proof and a stale holder must not be reported as an active lock fact.
+
+### 9.3 Snapshot consistency
+
+A read-only command cannot acquire the Project execution lock because taking that lock may create/update runtime lock artifacts.
+
+Therefore status does not pretend its multi-file read is atomic.
+
+It performs a bounded local consistency check:
 
 ~~~
-measurement evidence
-+ no-optimization disposition
-+ BL-007 closeout
+B0:
+  local HEAD identity
+  current branch identity
+  pending mutation identity set
+  canonical status-surface fingerprint
+
+read/derive status model
+
+B1:
+  re-read the same four identities
 ~~~
 
-Do not change bootstrap/registry authority layout for performance by default.
+If B0 == B1:
 
-Actual measurement requires an Execution Writer.
+~~~
+snapshot_consistency = stable_read
+~~~
 
----
+and current/next derived fields may be presented normally.
 
-# 11. RB3 — P3-F4 + P4 + BL-004
+If any identity changes:
 
-RB3 begins by closing P3-F4 residue before P4.
+~~~
+snapshot_consistency = changing
+~~~
 
-P3 F3 explicitly defers:
+The command still returns the facts it safely observed but must not claim one authoritative current/next selection from the mixed snapshot.
 
-- Class A/B/C mismatch handling
-- adopt_existing_local_commit
-- replacement Candidate/Receipt
-- supersession
-- remote-publication precondition
-- stale-generation mechanics
-- repair action matrix
-- interruption matrix
-- permanent set-aside/recovery disposition
+In JSON, fields whose answer depends on one stable Project snapshot are null/unknown with an explicit reason such as project_changed_during_status.
+
+No retry loop that could wait indefinitely is required. One optional immediate re-read/rebuild is permitted as a bounded convenience, still with zero writes/network.
+
+### 9.4 Canonical status model
+
+Version 1 includes at least:
+
+~~~
+schema / version
+
+project:
+  root
+  project identity/readability
+  configured Workline root
+
+authority:
+  running implementation identity
+  configured implementation identity
+  registry validation
+  canonical authority digests/identities needed to explain the active rules
+
+git:
+  repository top-level
+  branch/full ref or detached
+  HEAD
+  dirty paths/status summary
+  approved push destination pin
+  locally resolved active push locator consistency
+  no network-derived remote state
+
+lifecycle:
+  Roadmap(s) and lifecycle state
+  current active Roadmap when mechanically unique
+  active/current Phase when mechanically unique
+  current/in-flight Work when mechanically unique
+  next startable Work candidate(s)
+  ambiguity/block reason instead of an invented winner
+
+pending:
+  pending mutation IDs
+  owner
+  invocation identity safe for diagnostics
+  recorded write scope
+  whether normal automatic resume is possible / reconcile-required / disposed
+  matching Review generation mutation state where relevant
+
+validation:
+  validate-project problem list/result
+
+review:
+  Work-terminal activation state
+  active review-v1 Run summary where mechanically present
+  pending Review obligation summary
+  no raw reviewer output
+
+completion:
+  Phase/Roadmap achievement readiness/evidence summary once RB5 is active
+
+policy:
+  Project-local Profile / effective policy / observation summary once RB6 is active
+~~~
+
+Later RB5/RB6/RB10 fields are additive to this versioned model and must not redefine the meaning of existing RB1 fields.
+
+### 9.5 Current and next semantics
+
+RB1 introduces no new progression algorithm.
+
+It reuses the same canonical state/selection semantics already owned by state.py, skills/roadmap and skills/start.
+
+Rules:
+
+- do not select by filename, mtime or newest ID;
+- do not invent a current Roadmap/Phase/Work when canonical state permits several;
+- explicit in-flight/pending state is shown before a hypothetical new start;
+- unresolved dependency/HUMAN/reconcile state is a blocker, not idle;
+- deferred LOW maintenance is not reported as next while mandatory normal progression is blocked;
+- if several startable candidates remain without a canonical winner, return the full candidate set plus ambiguity.
+
+status is diagnostic. It never starts the reported next Work.
+
+### 9.6 Pending mutation status
+
+Use MutationController's durable records read-only.
+
+At minimum distinguish:
+
+~~~
+none
+pending_resumable
+pending_reconcile_required
+disposed_by_human
+unknown_or_invalid
+~~~
+
+Do not call a pending mutation completed merely because its domain effects appear applied.
+
+Do not hide a pending mutation merely because current lifecycle state has advanced.
+
+For a structurally unreadable pending record, report the exact validation/reconcile reason and do not guess its owner/intent.
+
+### 9.7 Review status
+
+RB1 reads canonical Review records only.
+
+At minimum expose:
+
+- activation absent/present/invalid;
+- Review Run ID/kind/target;
+- latest generation;
+- open/sealed/invalidated/set-aside/consumed state where mechanically derivable;
+- Receipt/Consumption presence and validity summary;
+- current blocking-obligation count once P4 is active.
+
+It does not expose chain-of-thought/raw report text.
+
+A Review record is not lifecycle truth; lifecycle and review sections remain separate.
+
+### 9.8 Git status and push destination
+
+Git reads are strictly local.
+
+Allowed examples:
+
+- rev-parse/toplevel
+- symbolic-ref/current branch
+- HEAD/object reads
+- status/diff
+- local config needed to compare configured push locator with the Project pin
+
+Do not contact a remote merely to make status more current.
+
+Report separately:
+
+~~~
+approved_destination
+active_local_push_locator
+local_locator_matches_pin
+remote_publication_state = not_checked
+~~~
+
+unless a future explicitly networked read-only command owns remote inspection.
+
+### 9.9 Validation behavior
+
+status does not fail to produce a diagnostic model merely because validate-project has Problems.
+
+Where enough structure can still be read safely, include:
+
+~~~
+validation = failed
+problems = [...]
+~~~
+
+and continue with independent diagnostic fields.
+
+A field whose source cannot be read reports unavailable with its exact reason rather than turning the entire Project into not_a_project.
+
+This aligns with RB10 N6-3.
+
+### 9.10 Authority diagnostics
+
+The command identifies the rules/implementation being used without forcing a caller to inspect source.
+
+At minimum:
+
+- configured Workline root;
+- current running implementation origin/identity result;
+- registry validation;
+- registry/canonical Skill identities relevant to Project routing;
+- Review activation contract identity when active.
+
+It does not copy canonical Skill prose into status output.
+
+### 9.11 Human-readable output
+
+The default rendering prioritizes recovery:
+
+~~~
+Project
+Authority
+Current
+Next
+Blocked/Waiting
+Pending mutation
+Review
+Validation
+Git / push destination
+Achievement
+Policy
+~~~
+
+Sections with no applicable data may be concise but must not silently erase an error state.
+
+### 9.12 JSON stability
+
+JSON:
+
+- has explicit schema/version;
+- uses stable enum-like status values;
+- keeps display strings separate from stable IDs;
+- never requires parsing human prose to recover IDs/status;
+- orders lists deterministically;
+- represents unknown/not-applicable explicitly;
+- does not include secrets or credential-bearing URLs.
+
+A push locator that contains credentials is redacted/fails safe consistently with current push-destination rules.
+
+### 9.13 RB1 tests
+
+Required tests include:
+
+- zero writes to canonical and runtime Project surfaces;
+- no lock/holder creation;
+- no network command invocation;
+- same status from Project cwd and external read-only caller;
+- stable current/next recovery on a normal Project;
+- ambiguity reported rather than guessed;
+- pending mutation reported;
+- malformed pending record reported without mutation;
+- invalid canonical ledger still yields diagnostic validation reason;
+- detached HEAD;
+- unpinned/pinned push destination;
+- activation absent/present/invalid;
+- snapshot changes during read -> changing, no authoritative current/next claim;
+- JSON deterministic and schema-valid;
+- later RB5/RB6/N4 additive fields do not change base-field meaning.
+
+### 9.14 RB1 HUMAN status
+
+No new Human decision is required.
+
+RB1 is read-only and expands neither mutation authority nor external connectivity.
+
+RB1 is DESIGN_READY. Implementation/execution tests require a coding environment.
+
+
+## 10. RB2 — BL-007 cold-start recovery performance
+
+RB2 is measurement-first.
+
+It does not assume cold-start recovery is too slow, nor that indexing/caching is automatically desirable.
+
+### 10.1 Performance path under measurement
+
+Measure the supported recovery path as separate stages:
+
+~~~
+A bootstrap/root resolution
+B implementation identity verification
+C registry parse/validation
+D project-router/Skill inventory resolution
+E canonical Project load
+F validate-project
+G RB1 status derivation
+H local Git diagnostics
+I final rendering/JSON serialization
+~~~
+
+Where A-D are outside one Python process in the real supported invocation, record both end-to-end and component timings rather than constructing an artificial single-process benchmark only.
+
+No network operation belongs to the cold-start path.
+
+### 10.2 Workloads
+
+Use generated/disposable benchmark Projects, not a private real Project as the only evidence.
+
+At minimum define three scales:
+
+~~~
+S:
+  ~30 Works
+  ~300 events
+
+M:
+  ~300 Works
+  ~3,000 events
+
+L:
+  ~3,000 Works
+  ~30,000 events
+~~~
+
+Keep representative:
+
+- Roadmaps/Phases;
+- roadmap and Related relations;
+- completed and unstarted Works;
+- some pending/review records for status/recovery readers;
+- Git history sufficient for ordinary local diagnostics.
+
+The existing originally proposed ~300 Works/~3,000 events is the primary representative M workload.
+
+L is used to expose scaling shape, not as an assumed normal Project size.
+
+### 10.3 Cold versus warm
+
+Record separately:
+
+~~~
+cold-process
+  new Python process
+  no Workline in-process caches
+
+warm-process
+  repeated call in one process where supported
+~~~
+
+Primary BL-007 decision uses cold-process performance because the problem is fresh-session recovery.
+
+OS filesystem cache is not artificially purged unless a portable, safe measurement method exists; if it is not controlled, record that limitation rather than calling the run cold disk.
+
+### 10.4 Measurement protocol
+
+For every scale:
+
+- perform enough repeated runs to expose noise;
+- report median and a tail statistic such as p95/max;
+- record Python version, Git version, OS and Workline commit SHA;
+- record exact benchmark Project generator/version/seed identity;
+- record per-stage elapsed time;
+- record local Git subprocess count by command family;
+- record canonical file/entity/event counts;
+- record bytes read where practical without instrumenting production semantics.
+
+Measurement instrumentation must not mutate the benchmark Project's canonical state.
+
+Generated temporary benchmark data may be created outside the measured status invocation.
+
+### 10.5 Optimization trigger
+
+Production optimization is justified only when at least one is shown:
+
+#### Trigger A — dominant removable derivation
+
+~~~
+a concrete indexable/cachable/repeated derivation
+accounts for >50% of representative M status or validate-project wall time
+~~~
+
+and there is a semantics-preserving design to remove/reuse it.
+
+#### Trigger B — clear super-linear scaling
+
+Approximately 10x logical input causes roughly:
+
+~~~
+>12x median wall time
+~~~
+
+for the same operation/stage beyond run-to-run noise.
+
+The 12x value is a Completion Sprint operational threshold, not a timeless Workline semantic rule.
+
+If neither trigger is met:
+
+~~~
+NO_OPTIMIZATION
+~~~
+
+is a valid and preferred BL-007 result.
+
+Close BL-007 with measurements instead of adding infrastructure without evidence.
+
+### 10.6 Allowed optimizations
+
+When a trigger is met, prefer in this order:
+
+1. remove duplicate load/validation inside one command;
+2. reuse one immutable in-process Project snapshot within the status operation;
+3. batch equivalent local Git reads;
+4. add an index/cache only if the preceding approaches cannot meet the measured need.
+
+Any cache/index must have an exact invalidation authority.
+
+Unknown/stale cache validity falls back to canonical reconstruction, never returns a guessed current state.
+
+### 10.7 Prohibited shortcuts
+
+RB2 may not improve benchmark numbers by:
+
+- skipping required validation;
+- weakening registry validation;
+- omitting pending mutation/review recovery;
+- using stale remote-tracking refs as truth;
+- keeping hidden cross-session mutable authority;
+- changing lifecycle semantics;
+- changing bootstrap/routing authority;
+- requiring Project-side copies of canonical Skills;
+- contacting a remote in status;
+- persisting private/session-specific AI state as a cache.
+
+### 10.8 Bootstrap/routing change threshold
+
+BL-007 alone does not authorize bootstrap text/registry routing changes.
+
+If measurement proves the bottleneck is the semantic bootstrap/routing shape rather than implementation duplication, trigger the frozen conditional HUMAN decision before changing that authority boundary.
+
+Ordinary implementation optimization that preserves routing meaning needs no Human decision.
+
+### 10.9 RB1 integration
+
+RB1 status is the canonical end-to-end recovery measurement target.
+
+Do not benchmark a private helper and call BL-007 complete if the supported status invocation remains slow.
+
+Also measure validate-project separately because BL-007 explicitly names repeated structure validation as a candidate cost.
+
+### 10.10 Measurement artifact
+
+Store a public-safe Completion Sprint measurement summary containing at least:
+
+- measured Workline SHA;
+- benchmark generator/workload identities;
+- environment versions;
+- per-scale medians/tails;
+- stage timing;
+- Git command counts;
+- trigger A/B evaluation;
+- optimization decision;
+- limitations.
+
+Do not commit machine-specific absolute paths or private Project names.
+
+Raw profiler/tracing output need not become permanent canonical history if the summary is sufficient to reproduce the conclusion.
+
+### 10.11 If optimization is performed
+
+Optimization is a separate candidate after the measurement result.
+
+Required:
+
+~~~
+baseline measurement
+-> frozen optimization hypothesis
+-> implementation
+-> same benchmark protocol
+-> semantic regression suite
+-> before/after report
+~~~
+
+The optimized version must produce the same RB1 JSON semantic model for the same stable Project snapshot, except for explicitly versioned additive fields unrelated to the optimization.
+
+### 10.12 RB2 closeout
+
+RB2 DONE requires either:
+
+~~~
+MEASURED_NO_OPT
+  measurement complete
+  Trigger A false
+  Trigger B false
+  no production optimization
+
+or
+
+MEASURED_OPTIMIZED
+  trigger positively shown
+  optimization landed
+  semantic equivalence/regression PASS
+  repeated measurement shows the intended improvement
+~~~
+
+A vague seems-faster result is insufficient.
+
+### 10.13 RB2 HUMAN status
+
+No Human decision is required for measurement or semantics-preserving optimization.
+
+A bootstrap/routing meaning change triggers the conditional Human boundary.
+
+RB2 is DESIGN_READY.
+
+Actual measurement and any optimization require an execution-capable coding environment.
+
 
 ## 11.1 RB3-C1 — inherited invariants
 
