@@ -15681,3 +15681,698 @@ N4 is complete only when:
 - full suite PASS;
 - exact candidate SHA/tree/diff frozen for independent review;
 - no push/landing before independent exact-candidate review PASS.
+---
+
+## 36. RB2 implementation brief — BL-007 cold-start recovery performance
+
+Status:
+
+~~~
+DESIGN_FROZEN
+MEASUREMENT_BRIEF_FROZEN
+READY_TO_EXECUTE_AFTER_RB1_LANDS
+bounded_binding_probe = exact landed RB1 CLI/API symbol binding only
+production_optimization = conditional_on_Trigger_A_or_Trigger_B
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §10.
+
+It does not replace §10. Where wording conflicts, §10 remains the semantic contract.
+
+RB2 is measurement-first. The baseline measurement package is an implementation deliverable even when the correct production result is NO_OPTIMIZATION.
+
+### 36.1 Dependency and ownership
+
+Execution dependency:
+
+~~~
+RB1 status implementation LANDED
+-> RB2 baseline measurement
+-> Trigger A/B decision
+-> optional separate optimization candidate
+~~~
+
+RB2 has no new runtime operation owner and no new Skill.
+
+The measurement harness is Completion Sprint tooling/evidence, not Project runtime authority.
+
+RB1 remains owner of status semantics. validate-project remains owner of validation semantics. registry/launcher/bootstrap owners remain unchanged.
+
+The only bounded post-RB1 binding task is to bind the harness to the exact landed supported status CLI/API names. That binding may not alter the measurement protocol or status semantics.
+
+### 36.2 Exact measurement targets
+
+Primary target:
+
+~~~
+the exact supported RB1 status JSON invocation
+run through the configured Workline root launcher
+from a fresh Python process
+~~~
+
+Secondary target:
+
+~~~
+the exact supported validate-project launcher invocation
+~~~
+
+Also measure the local mechanical bootstrap/root/registry/Skill-resolution work required by the supported recovery procedure.
+
+Do not substitute a private ProjectView/status helper for the supported end-to-end command.
+
+No network request belongs to any measured path.
+
+### 36.3 What the benchmark does not claim
+
+RB2 measures deterministic/local Workline recovery mechanics.
+
+It does not attempt to benchmark:
+
+- LLM reasoning latency;
+- token generation or model context loading;
+- human reading time;
+- editor/IDE startup;
+- network latency.
+
+The measurement summary must state this explicitly so `cold-start recovery` is not misreported as total agent wall-clock experience.
+
+### 36.4 Benchmark package
+
+Add a reproducible, non-production package:
+
+~~~
+benchmarks/rb2/generate.py
+benchmarks/rb2/run.py
+benchmarks/rb2/README.md
+~~~
+
+Generated benchmark Projects live only in disposable temporary directories and are not committed.
+
+Store the public-safe result/evidence in:
+
+~~~
+WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md
+~~~
+
+That file is Completion Sprint evidence only. Runtime code, status, validation and routing never read it.
+
+Raw profiler/Git trace files remain temporary and are not canonical evidence.
+
+### 36.5 Deterministic fixture identity
+
+The generator uses one explicit generator contract/version and seed, recorded in the summary.
+
+IDs are deterministic valid Workline IDs derived by the benchmark generator from the fixed seed; do not use wall-clock/random `new_id()` output as fixture identity.
+
+Every generated Project records exact actual counts and a content/tree digest so another run can prove it measured the same logical fixture.
+
+Fixture generation may use direct canonical render/build helpers because it is benchmark setup, not a production Workline mutation path.
+
+Direct generation is allowed only when:
+
+- the same canonical parser/renderer/schema is used;
+- no unsupported field is invented;
+- the generated Project passes the landed validate-project before measurement;
+- generated Review records use canonical Review record constructors/readers rather than hand-shaped YAML;
+- generated runtime recovery records use the landed mutation schema rather than arbitrary text.
+
+Fixture setup time is never included in status/validate measurement.
+
+### 36.6 Scale topology
+
+Create S/M/L disposable Projects targeting §10.2:
+
+~~~
+S: about   30 Works /    300 Events
+M: about  300 Works /  3,000 Events
+L: about 3000 Works / 30,000 Events
+~~~
+
+Approximate means the generator may remain within about +/-20% of the event target when preserving a natural valid lifecycle is preferable to fabricating meaningless transitions.
+
+Work count is exact unless the landed schema makes that impossible.
+
+All actual counts are reported.
+
+Each scale includes:
+
+- Roadmap/Phase hierarchy;
+- roadmap relations and Related records;
+- completed Works;
+- unstarted Works;
+- one mechanically unique current progression context where possible;
+- bounded representative Review records;
+- bounded representative pending/recovery state;
+- a local Git history sufficient for ordinary status diagnostics.
+
+The bounded Review/pending additions are kept O(1) across S/M/L so the scale axis remains entity/event growth rather than growing a second independent workload.
+
+### 36.7 Representative lifecycle generation
+
+Do not inflate Events with invalid post-terminal entries.
+
+Completed Work histories may use supported pre-terminal held/resumed/target transitions to reach the intended event scale.
+
+Unstarted Works remain genuinely unstarted.
+
+At least one Phase remains active/current and at least some historical/completed structure exists so status performs real selection rather than only listing empty state.
+
+Every fixture must pass structural validation before it is admitted to a measured run.
+
+### 36.8 Review/pending fixture rule
+
+The benchmark must not fake a `pending_resumable` or Review state by setting a label.
+
+After RB1 lands, create the smallest valid state that its read-only classifiers actually classify.
+
+Preferred mixed profile:
+
+- one structurally valid pending mutation exercising pending inspection/classification;
+- one valid bounded Review Run/record closure exercising Review status.
+
+If no stable owner-specific positive resumability fixture can be generated without coupling the benchmark to an unrelated operation, a structurally valid pending record classified by RB1 as `unknown_or_invalid` is acceptable for performance coverage. The summary records the exact classification.
+
+Malformed-record stress is a separate diagnostic test, not part of the primary performance fixture.
+
+### 36.9 Benchmark Project Git shape
+
+Benchmark Projects are local repositories with no remote.
+
+After fixture generation:
+
+1. commit canonical fixture files once;
+2. leave only the intentional runtime pending record uncommitted;
+3. record HEAD/tree/status identity;
+4. run validate-project PASS;
+5. begin measurement.
+
+No push/fetch/pull/ls-remote occurs.
+
+Before and after every measurement batch, prove canonical Project bytes/tree and intended runtime fixture bytes are unchanged.
+
+### 36.10 Cold-process protocol
+
+Primary BL-007 numbers are uninstrumented cold-process wall times.
+
+For each scale, run at least 15 fresh-process invocations of status JSON and at least 15 fresh-process validate-project invocations.
+
+Each invocation:
+
+- starts a new supported Python process;
+- uses the configured Workline root launcher with -I/-B as required by rules/git;
+- uses the same explicit target Project;
+- performs no in-process cache reuse from a previous sample;
+- captures exit status and output.
+
+Run scales round-robin across repetitions rather than all S then all M then all L, reducing simple time/order bias.
+
+Report:
+
+- first observed run;
+- median;
+- max;
+- p95 when sample count makes it meaningful;
+- raw sample count.
+
+OS filesystem/page cache is not artificially purged. Record that these are cold-process, not guaranteed cold-disk, measurements.
+
+### 36.11 Warm-process protocol
+
+Warm-process measurement is diagnostic only.
+
+Using the exact landed public/read-only RB1 status API after canonical launcher activation, call it repeatedly in one process without cross-session persistent cache.
+
+Run at least 30 calls per scale and report median/p95/max.
+
+Warm results do not decide BL-007 when they disagree with cold-process behavior.
+
+### 36.12 Mechanical recovery end-to-end
+
+Measure a separate local mechanical recovery sequence covering §10.1 A-I:
+
+~~~
+A bootstrap/root resolution
+B implementation identity verification
+C registry parse/validation
+D router/Skill authority inventory resolution
+E canonical Project load
+F validate-project
+G RB1 status derivation
+H local Git diagnostics
+I final JSON/render serialization
+~~~
+
+The sequence follows the landed canonical files/functions and supported launcher entry rather than copying their semantics into the benchmark.
+
+Where A-D occur outside the status builder in normal use, record them separately and also report the total mechanical sequence.
+
+Do not include model interpretation of Skill prose in stage D; stage D is only local authority resolution/read/validation work.
+
+### 36.13 Component timing instrumentation
+
+Do not add permanent production timing/profiling state for RB2.
+
+Cold-process headline samples are uninstrumented.
+
+Component timing uses a separate benchmark-only child process that wraps the exact landed function boundaries at runtime and records `perf_counter_ns` spans.
+
+Requirements:
+
+- no canonical Project write;
+- no environment-dependent semantic branch;
+- no status field added for timing;
+- same target/inputs as the uninstrumented run;
+- instrumented status JSON must be byte-identical to an uninstrumented status JSON over the same stable fixture;
+- spans record inclusive and exclusive time where nesting exists;
+- unassigned/overlap time is reported instead of forcing every nanosecond into a stage.
+
+If an exact A-I boundary cannot be instrumented without production semantic changes, report that boundary as unavailable and use profiler attribution as supporting evidence. Do not change runtime architecture merely to obtain prettier timing.
+
+### 36.14 Git subprocess counting
+
+Git command counts are collected in a separate non-headline run.
+
+Preferred method:
+
+~~~
+GIT_TRACE2_EVENT -> temporary trace outside the benchmark Project
+~~~
+
+Parse only process start/argv facts needed to aggregate command families, then discard the raw trace.
+
+Do not persist locators, environment values or raw trace payload.
+
+If the installed Git cannot provide usable Trace2 output, a benchmark-only wrapper around the central gitcmd.run_git boundary may count commands in the component run. Record that limitation.
+
+Report at least counts by top-level family such as:
+
+~~~
+rev-parse
+symbolic-ref
+status
+diff
+ls-files
+ls-tree
+remote/config
+other
+~~~
+
+Missing Git-count instrumentation never justifies changing production Git behavior.
+
+### 36.15 Bytes/count observations
+
+Record per scale:
+
+- Work/Phase/Roadmap counts;
+- relation counts;
+- Event count and event-log byte size;
+- Review record count/bytes;
+- pending mutation record count/bytes;
+- canonical entity bytes where practical;
+- local Git subprocess counts.
+
+Byte accounting is observational. Do not insert read counters into production readers unless the exact same data is available through benchmark-only wrapping.
+
+### 36.16 Environment record
+
+Every measurement summary records:
+
+- exact Workline commit SHA;
+- exact benchmark harness commit SHA;
+- generator contract/version/seed;
+- Python version;
+- Git version;
+- OS/platform;
+- CPU logical count and other easily portable machine facts if available;
+- scale actual counts/digests;
+- exact command lines in portable `<workline-root>` / `<project-root>` form.
+
+Do not store username, hostname, private repository name or machine-specific absolute path.
+
+### 36.17 Trigger A calculation
+
+Trigger A is true only when a concrete removable derivation/repeated operation can be attributed to more than 50% of representative M median wall time for status or validate-project.
+
+Use the uninstrumented M median as the denominator.
+
+The numerator must be supported by the component/profiler run and deduplicated for nested spans.
+
+Name the exact derivation/function/command family and why it is removable/reusable without semantic change.
+
+`validation is slow` or `Git is slow` is not a sufficient hypothesis.
+
+If attribution is too ambiguous to support the >50% claim, Trigger A is false/not-proven, not guessed true.
+
+### 36.18 Trigger B calculation
+
+Evaluate S->M and M->L separately for the same operation/stage.
+
+Because the intended logical size is approximately 10x at each step:
+
+~~~
+median ratio > 12x
+AND
+the excess is outside observed run-to-run noise
+~~~
+
+is the frozen Trigger B condition.
+
+Use actual Work/Event counts to explain any fixture deviation from exact 10x.
+
+Do not infer super-linearity from one slow outlier or from L/S alone.
+
+### 36.19 Baseline decision checkpoint
+
+After baseline measurement, write the result to WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md and freeze one of:
+
+~~~
+MEASURED_NO_OPT
+
+MEASURED_TRIGGER_A
+MEASURED_TRIGGER_B
+MEASURED_TRIGGER_A_AND_B
+~~~
+
+The baseline checkpoint contains:
+
+- raw summary statistics;
+- A-I stage observations;
+- Git command counts;
+- Trigger A proof/evaluation;
+- Trigger B proof/evaluation;
+- limitations;
+- exact optimization decision.
+
+Do not edit production runtime in the same candidate that establishes the baseline trigger decision.
+
+### 36.20 MEASURED_NO_OPT path
+
+If Trigger A and Trigger B are both false:
+
+- make no production optimization;
+- set BL-007 to RESOLVED with the measurement-summary reference;
+- retain the benchmark harness for reproducibility;
+- no registry/Skill/bootstrap/runtime authority text changes are required.
+
+`NO_OPTIMIZATION` is the preferred result when evidence does not justify complexity.
+
+### 36.21 Triggered optimization hypothesis checkpoint
+
+If either trigger is true, freeze a narrow optimization hypothesis before coding.
+
+The hypothesis must name:
+
+- exact measured bottleneck;
+- baseline metric/stage;
+- expected mechanism of improvement;
+- exact code surfaces;
+- semantic invariants that must remain identical;
+- expected new/removed Git calls or loads;
+- rollback condition if the benchmark does not improve.
+
+Commit that hypothesis into the measurement summary before the production optimization candidate.
+
+Do not let the coding agent choose a different architecture merely because it appears faster.
+
+### 36.22 Allowed optimization decision tree
+
+Apply §10.6 in order:
+
+1. remove duplicate load/validation within one command;
+2. reuse one immutable in-process Project snapshot within one status invocation;
+3. batch equivalent local Git reads without changing the questions asked;
+4. only then consider an index/cache.
+
+An in-memory derived structure is still an index if it changes lookup complexity; justify it after the earlier simpler removals are measured insufficient.
+
+No cache/index is canonical truth.
+
+Persistent cache is not introduced unless the trigger remains after simpler optimization and an exact invalidation authority is separately demonstrated.
+
+Unknown/stale validity always falls back to canonical reconstruction.
+
+### 36.23 Known hypotheses are not pre-authorized conclusions
+
+Static inspection currently shows plausible cost centers, including:
+
+- repeated ProjectView loads;
+- repeated full Event scans behind per-entity state derivation;
+- repeated relation scans;
+- multiple local Git subprocesses for related facts.
+
+These are measurement hypotheses only.
+
+RB2 must not optimize them merely because they look asymptotically expensive.
+
+### 36.24 Optimization candidate equivalence gate
+
+Any production optimization is a separate candidate based on the frozen baseline/hypothesis.
+
+For identical stable S/M/L fixtures, before/after must prove:
+
+- status JSON semantic output identical; preferably byte-identical under the same RB1 schema;
+- validate-project problem set/order identical;
+- current/next selection identical;
+- pending/Review diagnostics identical;
+- snapshot-changing behavior unchanged;
+- zero-write/no-lock/no-network status boundary unchanged;
+- registry/implementation identity checks unchanged;
+- no new cross-session mutable authority.
+
+If a concurrent feature adds an unrelated versioned additive status field, compare after rebasing both baseline and optimized candidate onto the same feature baseline.
+
+### 36.25 Optimization remeasurement
+
+Run the same cold/warm/component/Git-count protocol after optimization.
+
+MEASURED_OPTIMIZED requires:
+
+- the intended measured bottleneck falls materially;
+- cold-process representative M improves in the intended direction beyond measurement noise;
+- Trigger B scaling shape improves when Trigger B caused the work;
+- no required stage is merely skipped;
+- semantic/full regression gates PASS.
+
+If the optimization does not produce the intended measured benefit, do not land it for BL-007.
+
+### 36.26 Bootstrap/routing Human boundary
+
+RB2 may not change bootstrap/registry/router/Skill authority meaning merely to reduce timings.
+
+If measurement shows the dominant cost is the semantic authority/routing shape itself and improvement requires changing that meaning:
+
+~~~
+STOP
+-> rules/human-confirmation
+-> explicit new design decision
+~~~
+
+This is the one conditional Human path already frozen by §10.8.
+
+Implementation deduplication that preserves exact routing meaning needs no Human decision.
+
+### 36.27 Runtime canonical text
+
+MEASURED_NO_OPT requires no new runtime canonical text.
+
+A semantics-preserving implementation optimization normally requires no Skill/rule update because runtime meaning is unchanged.
+
+Update canonical runtime text only if the optimization introduces a user-visible operational requirement that is already allowed by §10. If it would change authority/routing semantics, use §36.26 instead.
+
+### 36.28 Expected baseline surfaces
+
+Expected new evidence/tooling surfaces:
+
+~~~
+benchmarks/rb2/generate.py
+benchmarks/rb2/run.py
+benchmarks/rb2/README.md
+WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md
+BACKLOG.md                         # only when closeout state is justified
+~~~
+
+Expected landed-RB1 bindings, read-only only:
+
+~~~
+run-workline.py
+src/workline/cli.py
+src/workline/status.py
+src/workline/validate.py
+src/workline/state.py
+src/workline/gitcmd.py
+src/workline/registry.py
+src/workline/implementation.py
+~~~
+
+The baseline measurement candidate should not modify those production files merely to instrument them.
+
+Optimization surfaces are determined only by the frozen trigger hypothesis.
+
+### 36.29 Focused benchmark-package tests
+
+Add focused tests for the harness itself, e.g.:
+
+~~~
+tests/test_rb2_benchmark.py
+~~~
+
+Cover:
+
+- deterministic generator output for a fixed seed/scale;
+- generated S fixture validates;
+- a reduced test-scale fixture validates quickly in ordinary CI;
+- generator never writes outside its disposable target;
+- benchmark runner rejects a fixture that fails validate-project;
+- runner uses supported launcher/status command;
+- instrumented/uninstrumented stable status JSON equality;
+- measurement run leaves canonical tree/runtime fixture unchanged;
+- no network Git command is accepted by the harness;
+- summary renderer omits absolute paths/private machine names;
+- trigger A arithmetic around 50%;
+- trigger B arithmetic around 12x;
+- no-opt/trigger decision deterministic.
+
+Do not run full M/L performance loops as ordinary unit tests.
+
+### 36.30 Candidate report format — baseline
+
+Baseline candidate report must include:
+
+~~~
+Reviewed/Measured Workline SHA:
+Benchmark harness SHA:
+RB1 status command/API binding:
+Generator contract/seed:
+Environment:
+S/M/L actual counts + fixture digests:
+Cold status median/tail:
+Cold validate median/tail:
+Warm status median/tail:
+A-I stage table:
+Git command-count table:
+Trigger A: true|false + proof
+Trigger B: true|false + proof
+Decision: MEASURED_NO_OPT | MEASURED_TRIGGER_*
+Measurement summary path/SHA:
+Canonical Project mutation during measurement: none
+Limitations:
+~~~
+
+### 36.31 Candidate report format — optimization
+
+When an optimization exists, additionally report:
+
+~~~
+Baseline measurement summary SHA:
+Frozen optimization-hypothesis SHA:
+Exact changed production surfaces:
+Before/after cold M:
+Before/after scaling:
+Before/after Git/load counts:
+Status semantic equivalence:
+Validate semantic equivalence:
+Focused regressions:
+Full suite:
+Exact candidate SHA/tree/diff:
+~~~
+
+### 36.32 Stop conditions
+
+STOP rather than claiming a result when:
+
+- landed RB1 supported status surface cannot be identified exactly;
+- benchmark fixture does not validate;
+- measured invocation performs network I/O;
+- measurement mutates canonical Project state;
+- instrumented and uninstrumented status semantics differ;
+- environment noise makes Trigger A/B threshold conclusion non-robust;
+- a proposed speedup requires skipping validation/pending/Review/Git facts;
+- a proposed persistent cache has no exact invalidation authority;
+- optimization would change bootstrap/routing meaning without Human decision.
+
+### 36.33 Regression order
+
+Baseline package:
+
+1. reduced deterministic generator tests;
+2. harness safety/no-network/no-mutation tests;
+3. status command binding tests;
+4. summary/trigger arithmetic tests;
+5. RB1 focused status regression;
+6. validate-project regression;
+7. full suite once before accepting the measurement harness candidate;
+8. execute S/M/L measurement outside normal CI;
+9. freeze public-safe measurement summary.
+
+Optimization candidate, only if triggered:
+
+1. exact bottleneck-focused tests;
+2. status semantic-equivalence tests;
+3. validate semantic-equivalence tests;
+4. RB1 read-only/snapshot/pending/Review regressions;
+5. relevant state/Git/registry regressions;
+6. full canonical suite;
+7. same S/M/L remeasurement.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical test tooling legitimately changes before execution.
+
+### 36.34 Explicit non-scope
+
+RB2 must not implement:
+
+- a status semantic redesign;
+- networked status/recovery;
+- background daemon/index maintenance;
+- Project-side copies of Skills;
+- hidden cross-session mutable state;
+- persistent AI/session cache;
+- stale remote-tracking authority;
+- skipped/partial validation for speed;
+- automatic routing/bootstrap meaning change;
+- optimization before baseline trigger evidence;
+- full M/L benchmark loops in normal CI;
+- private real Project data as required benchmark evidence.
+
+### 36.35 BL-007 closeout
+
+BL-007 becomes RESOLVED only as:
+
+~~~
+MEASURED_NO_OPT
+or
+MEASURED_OPTIMIZED
+~~~
+
+For MEASURED_NO_OPT, the measurement summary itself is the completion evidence.
+
+For MEASURED_OPTIMIZED, baseline + frozen hypothesis + landed optimization + repeated measurement + semantic/full regression evidence are all required.
+
+Until the baseline runs against landed RB1, BL-007 remains INVESTIGATE.
+
+### 36.36 Implementation completion gate
+
+RB2 is complete only when:
+
+- supported landed RB1 status is the primary cold-process target;
+- validate-project is measured separately;
+- S/M/L deterministic disposable fixtures exist and validate;
+- cold and warm measurements are separated;
+- uninstrumented wall time is the headline metric;
+- A-I component timing is independently instrumented without changing semantics;
+- Git command counts are recorded or their instrumentation limitation is explicit;
+- environment/fixture identity is reproducible and public-safe;
+- Trigger A/B are mechanically evaluated;
+- no optimization lands when neither trigger is proven;
+- any triggered optimization has a frozen hypothesis and separate candidate;
+- before/after semantic equivalence and full regressions PASS for an optimization;
+- conditional bootstrap/routing meaning change reaches Human instead of being smuggled in as performance work;
+- WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md holds the final public-safe evidence;
+- BACKLOG BL-007 disposition matches the measured outcome.
