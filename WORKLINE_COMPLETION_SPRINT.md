@@ -6322,17 +6322,116 @@ Runtime Improvements alone do not block completion.
 
 ---
 
-## 25. Immediate design priority
+## 25. Current execution priority
 
-Before spending coding-agent capacity, close in the Control Plane:
+The Control Plane design pass is complete.
 
-1. P4 / BL-004
-2. RB4 durable-history contract
-3. RB6/P6 policy contract
-4. RB7 promotion contract
-5. RB5 Phase Review/achievement contract
-6. RB8 dispositions
-7. RB10 static-hardening classification
-8. per-block implementation briefs and test matrices
+All ten Review Blocks now have a frozen completion contract.
 
-RB2 measurement and production implementation remain execution-environment work.
+The remaining work is implementation planning and execution, not open-ended architecture exploration.
+
+### 25.1 Control Plane tasks before coding-agent use
+
+Prepare implementation briefs in dependency order:
+
+1. RB3-C1 implementation brief and focused recovery/adoption test matrix;
+2. RB3/P4 implementation brief and convergence test matrix;
+3. RB4/P5 durable-history implementation brief;
+4. RB1 status implementation brief;
+5. RB6/P6 and RB7/P7 implementation briefs;
+6. RB5 Phase Review/achievement implementation brief;
+7. RB8 migration/deferred-item implementation brief;
+8. RB10 N2/N3/N6 implementation brief;
+9. RB10 N4 brief after RB3-C1/RB1 runtime surfaces exist;
+10. RB2 measurement package after RB1 status exists;
+11. RB9 audit/cleanup/acceptance runbook only after all production blocks land.
+
+Each implementation brief must name:
+
+- exact frozen contract section;
+- existing canonical owner;
+- known affected code/doc/test surfaces from static inspection;
+- required new runtime canonical text;
+- explicit non-scope;
+- focused tests;
+- required broader regression gate;
+- candidate report format;
+- stop/Human conditions.
+
+Do not ask a coding agent to rediscover the architecture.
+
+### 25.2 First execution target
+
+The first coding execution target is RB3-C1.
+
+Reason:
+
+~~~
+RB3-C1
+-> unlocks P4
+-> unlocks RB4
+-> unlocks RB6 -> RB7
+-> supplies N4 set-aside semantics
+~~~
+
+It is the structural critical-path head and has the highest value per scarce coding-agent run.
+
+Before dispatch, the Control Plane should reduce RB3-C1's remaining implementation-only questions to a bounded file/function/test checklist.
+
+### 25.3 Parallel-safe preparation
+
+While RB3-C1 implementation is unavailable/running, the Control Plane may continue static preparation of later briefs.
+
+This preparation must not create competing production writers.
+
+In particular:
+
+- RB1 can be implemented independently of RB3 semantics but its later N4/achievement/policy fields are additive;
+- RB10 N2/N3/N6 may be prepared independently, but N2/N3/N6 sharing registration modules use one writer;
+- RB2 waits for an implemented RB1 status surface before measurement;
+- RB4 waits for P4 record/causality semantics;
+- RB6 waits for RB4 durable-history semantics where its observation/history representation depends on them;
+- RB7 waits for RB6;
+- RB5 waits for RB4;
+- RB8 waits for RB5+RB7;
+- RB9 waits for all production blocks.
+
+### 25.4 Work conservation
+
+Work is treated as scarce.
+
+Do not spend its next substantial run on:
+
+- reading historical contracts already reconciled here;
+- choosing Review Block topology;
+- deciding H-1 through H-4;
+- designing Class A/B/C semantics;
+- designing P4/P5/P6/P7/RB5/RB8/RB10/RB1/RB2/RB9 from scratch;
+- rewriting this Completion Sprint contract.
+
+Use Work only for tasks requiring its executable/local environment, such as:
+
+- bounded live-code implementation reconnaissance that GitHub static reads cannot answer;
+- production edits;
+- tests/probes;
+- performance measurement;
+- local-only artifact/worktree inspection;
+- candidate commit preparation.
+
+Claude Code or another coding agent can later consume the same briefs without changing the frozen architecture.
+
+### 25.5 Current milestone
+
+Current control-plane milestone:
+
+~~~
+DESIGN FREEZE COMPLETE
+~~~
+
+Current next milestone:
+
+~~~
+RB3-C1 READY_TO_IMPLEMENT brief complete
+~~~
+
+Production implementation has not been declared complete merely because the design contracts are committed.
