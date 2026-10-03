@@ -1115,20 +1115,32 @@ def terminal_commit_effect(mutation: Mutation, message: str, *, attr_basis: str)
     return commit_effect(plan, attr_basis=attr_basis)
 
 
-def require_generation_persisted(mutation: Mutation, expected: dict[str, bytes]) -> None:
+def generation_commit_of(mutation: Mutation) -> tuple[str, str]:
+    """``(commit, full ref)`` of the one Work-mode commit a Work Review generation mutation made, as C-1 owns it.
+
+    Exactly one applied Work-mode ``git_commit`` with the full id of the commit
+    this mutation made, read from its own record - never HEAD, a message or the
+    branch tip (F4 §26.28 P3). Anything else is the STOP it always was.
+    """
+    commits = [effect for effect in mutation.effects if is_work_commit(effect)]
+    if len(commits) != 1 or commits[0].get("applied") is not True or not gitcmd.full_commit_id(commits[0].get(_MADE_COMMIT)):
+        raise _defect("the generation mutation does not hold exactly one Work-mode commit that C-1 owns")
+    return str(commits[0][_MADE_COMMIT]), str(commits[0]["payload"]["branch"])
+
+
+def require_generation_persisted(mutation: Mutation, expected: dict[str, bytes]) -> str:
     """``R3`` §10 for a Work Review generation: the commit C-1 owns holds every record's exact bytes, on its branch.
 
     Read from the owned commit's own tree, through class B, and then the live
     persistence gate over the working tree and index, which is what a later
-    external launch relies on.
+    external launch relies on. Returns that proven commit (F4 §26.28 P3: the
+    replacement Run's generation 3 commit is K_adopt); a caller that only asks
+    whether the generation is persisted ignores it.
     """
     from . import gate
 
     git = hermetic_module.enter(mutation.store)
-    commits = [effect for effect in mutation.effects if is_work_commit(effect)]
-    if len(commits) != 1 or commits[0].get("applied") is not True or not gitcmd.full_commit_id(commits[0].get(_MADE_COMMIT)):
-        raise _defect("the generation mutation does not hold exactly one Work-mode commit that C-1 owns")
-    commit, ref = commits[0][_MADE_COMMIT], commits[0]["payload"]["branch"]
+    commit, ref = generation_commit_of(mutation)
     tip = ref_value(git, ref)
     if tip is None or ancestry.raw_descends_from(git, tip, commit) is not True:
         raise _defect(f"{ref} does not hold {commit}, the generation commit this mutation made")
@@ -1142,3 +1154,4 @@ def require_generation_persisted(mutation: Mutation, expected: dict[str, bytes])
                 code="review_not_persisted",
             )
     gate.require_persisted(mutation.store, sorted(expected))
+    return commit

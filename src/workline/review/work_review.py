@@ -32,9 +32,11 @@ import base64
 import binascii
 from dataclasses import dataclass
 import hashlib
+import re
 from typing import Any, Callable, Mapping, Sequence
 
 from ..errors import ReconcileRequired, StopError, ValidationError
+from ..ids import is_valid_id
 from . import closure, records, serialize
 from . import work_context
 
@@ -72,9 +74,28 @@ SCHEMA_REPORT_SET = "review-work-report-set"
 SCHEMA_EVIDENCE = "review-work-evidence"
 SCHEMA_EVIDENCE_PAYLOAD = "review-work-evidence-payload"
 SCHEMA_VERIFICATION = "review-work-isolated-verification"
+SCHEMA_INVALIDATION_EVIDENCE = "review-work-invalidation-evidence"
 
 RECORD_VERSION = 1
 OPERATION = "start"
+
+#: The Work request envelope is the one record F4 versions (RB3-C1 §11.18.6). Version 1 has no
+#: ``set_aside_runs`` and keeps its exact meaning for every committed TaskInput; version 2 carries the
+#: exact, sorted list of the older matching Runs this Run intentionally does not resume. Candidate,
+#: TaskInput, Receipt and the other Review records keep their versions.
+REQUEST_VERSION_V1 = 1
+REQUEST_VERSION_V2 = 2
+REQUEST_FIELDS_V1 = (
+    serialize.SCHEMA_KEY, serialize.VERSION_KEY, "review_kind", "policy_id", "instruction", "candidate", "context", "work",
+)
+REQUEST_FIELDS_V2 = REQUEST_FIELDS_V1 + ("set_aside_runs",)
+
+#: The one invalidation a Work Run has (F4 §11.18.4): the same-Run generation 4 that supersedes its
+#: sealed Receipt so that a Class-A replacement Run can begin. The stable reason identity the
+#: Supersession, the generation-4 invalidation evidence and the successor's ``set_aside_runs`` carry.
+INVALIDATION_CLASS_A = "work_class_a_replacement"
+#: A set-aside reason is a machine identity: lowercase, no blank, no line break.
+_REASON = re.compile(r"[a-z0-9][a-z0-9_.:-]*\Z")
 
 #: The two artifact kinds (F2 §6.1, §7.2 as amended by A-3). There is no third.
 ARTIFACT_RESULT = "result_commit"
@@ -223,6 +244,22 @@ def request_identity_record(work_id: str) -> dict[str, Any]:
 def operation_identity(work_id: str) -> str:
     """``"start:" + SHA-256`` of the request identity record; the START mode is deliberately not in it."""
     return f"{OPERATION}:{serialize.digest(request_identity_record(work_id))}"
+
+
+def invalidation_evidence_record(superseded_receipt_id: str, reason: str) -> dict[str, Any]:
+    """The Work invalidation evidence a generation 4 binds by digest (F4 §11.18.4).
+
+    The same structural role planning's invalidation evidence has, under the
+    Work kind's own schema, so a planning change never redefines it: which
+    Receipt the invalidation supersedes, and the stable reason identity.
+    """
+    if not is_valid_id(str(superseded_receipt_id), "review_receipt") or not _REASON.match(str(reason)):
+        raise ValidationError("the Work invalidation evidence names no Receipt or no stable reason",
+                              code="review_record_invalid")
+    return {
+        serialize.SCHEMA_KEY: SCHEMA_INVALIDATION_EVIDENCE, serialize.VERSION_KEY: RECORD_VERSION,
+        "superseded_receipt_id": superseded_receipt_id, "reason": reason,
+    }
 
 
 # --------------------------------------------------------------------------- Candidate entries (F2 §6.3)
@@ -622,12 +659,56 @@ def policy_named(policy_id: object) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------- request envelope, task input, descriptor (F2 §12)
 
 
-def request_envelope(candidate: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """The request, carrying the Candidate and the Context WHOLE; ``work`` copies ``declared_base.work``."""
+def _request_invalid(message: str) -> ValidationError:
+    return ValidationError(f"the Work review request is not valid: {message}", code="review_record_invalid")
+
+
+def set_aside_runs(items: object, *, review_run_id: str | None = None) -> list[dict[str, str]]:
+    """A version 2 request's ``set_aside_runs``, validated and in canonical order (F4 §11.6, §11.18.6).
+
+    The list is semantic input the request digest covers, so its shape is
+    closed: each item is exactly ``review_run_id`` (a review_run id) and
+    ``reason`` (a stable reason identity), no Run is named twice, and a Run
+    never sets itself aside. Duplicates and self-references are refused, never
+    normalized away. The canonical order is by ``review_run_id``, independent
+    of the order the caller gave.
+    """
+    if not isinstance(items, list):
+        raise _request_invalid("set_aside_runs is not a list")
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, Mapping) or set(item) != {"review_run_id", "reason"}:
+            raise _request_invalid(f"set_aside_runs[{index}] is not exactly review_run_id and reason")
+        run_id, reason = item["review_run_id"], item["reason"]
+        if not isinstance(run_id, str) or not is_valid_id(run_id, "review_run"):
+            raise _request_invalid(f"set_aside_runs[{index}] names no review_run id")
+        if review_run_id is not None and run_id == review_run_id:
+            raise _request_invalid(f"set_aside_runs[{index}] names the request's own Review Run {run_id}")
+        if run_id in seen:
+            raise _request_invalid(f"set_aside_runs names Review Run {run_id} twice")
+        if not isinstance(reason, str) or not _REASON.match(reason):
+            raise _request_invalid(f"set_aside_runs[{index}] has no stable reason identity")
+        seen.add(run_id)
+        found.append({"review_run_id": run_id, "reason": reason})
+    return sorted(found, key=lambda item: item["review_run_id"])
+
+
+def request_envelope(
+    candidate: dict[str, Any], context: dict[str, Any], set_aside: Sequence[Mapping[str, str]] | None = None,
+    *, review_run_id: str | None = None,
+) -> dict[str, Any]:
+    """The request, carrying the Candidate and the Context WHOLE; ``work`` copies ``declared_base.work``.
+
+    ``set_aside`` None builds the version 1 envelope exactly as before F4; a
+    list - empty for an ordinary new Run - builds version 2 with that list
+    validated and sorted (:func:`set_aside_runs`). Either way the request
+    digest is over the whole envelope.
+    """
     work = candidate["declared_base"]["work"]
-    envelope = serialize.canonical_data({
+    body: dict[str, Any] = {
         serialize.SCHEMA_KEY: SCHEMA_REQUEST,
-        serialize.VERSION_KEY: RECORD_VERSION,
+        serialize.VERSION_KEY: REQUEST_VERSION_V1 if set_aside is None else REQUEST_VERSION_V2,
         "review_kind": REVIEW_KIND,
         "policy_id": POLICY_ID,
         "instruction": INSTRUCTION,
@@ -637,9 +718,43 @@ def request_envelope(candidate: dict[str, Any], context: dict[str, Any]) -> dict
             "work_id": work["work_id"], "display": work["display"], "name": work["name"],
             "desired_state": work["desired_state"],
         },
-    })
+    }
+    if set_aside is not None:
+        body["set_aside_runs"] = set_aside_runs(list(set_aside), review_run_id=review_run_id)
+    envelope = serialize.canonical_data(body)
     _require_representable(envelope, "the Work review request")
     return envelope
+
+
+def request_set_aside(envelope: object, *, review_run_id: str | None = None) -> list[dict[str, str]]:
+    """The Runs a stored Work request sets aside: version 1 -> none, version 2 -> its exact validated list.
+
+    The one reader of the request version (F4 §11.18.6), and fail-closed:
+
+    ```text
+    version 1   the existing semantics, read without mutation; no implicit set-aside list,
+                and a version 1 envelope carrying set_aside_runs is refused
+    version 2   exactly the version 1 fields plus set_aside_runs, which must already be
+                in canonical order (an unsorted list is refused, never re-sorted)
+    other       refused
+    ```
+    """
+    if not isinstance(envelope, Mapping) or envelope.get(serialize.SCHEMA_KEY) != SCHEMA_REQUEST:
+        raise _request_invalid("it is not a review-work-request record")
+    version = envelope.get(serialize.VERSION_KEY)
+    if version == REQUEST_VERSION_V1:
+        if "set_aside_runs" in envelope:
+            raise _request_invalid("a version 1 request carries set_aside_runs")
+        return []
+    if version != REQUEST_VERSION_V2:
+        raise _request_invalid(f"version {version!r} is not a Work request version")
+    if set(envelope) != set(REQUEST_FIELDS_V2):
+        raise _request_invalid(f"a version 2 request carries exactly {sorted(REQUEST_FIELDS_V2)}, not {sorted(envelope)}")
+    listed = envelope["set_aside_runs"]
+    canonical = set_aside_runs(listed, review_run_id=review_run_id)
+    if listed != canonical:
+        raise _request_invalid("set_aside_runs is not in its canonical order")
+    return canonical
 
 
 def task_input_for(
@@ -704,11 +819,20 @@ def task_from_input(task_input: records.TaskInput) -> WorkReviewTask:
 
 def task_input_problems(
     task_input: records.TaskInput, material: Mapping[str, Any], run_candidate_hash: str, run_context_hash: str,
-    run_policy_hash: str,
+    run_policy_hash: str, *, review_run_id: str | None = None,
 ) -> list[str]:
-    """What the P1 provenance comparison does not cover, and every Work launch and reconstruction checks."""
+    """What the P1 provenance comparison does not cover, and every Work launch and reconstruction checks.
+
+    The request is read by its version (:func:`request_set_aside`): a version 1
+    request exactly as before, a version 2 one only in its exact shape, naming
+    no Run twice and never the Run ``review_run_id`` it belongs to.
+    """
     problems: list[str] = []
     envelope = task_input.request_envelope
+    try:
+        request_set_aside(envelope, review_run_id=review_run_id)
+    except ValidationError as exc:
+        problems.append(str(exc))
     if task_input.task_slot != TASK_SLOT or task_input.task_kind != TASK_KIND:
         problems.append("the task input is not a Work review task")
     if serialize.digest(envelope) != task_input.request_digest:

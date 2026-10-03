@@ -926,22 +926,25 @@ class _Session:
         self._lifecycle(work, ["work_target_removed", "work_completed"])
         return self._finalize_completion(work)
 
-    def finish_review(self, run: Any) -> StartResult:
-        """Continue the Work Review Run this review-v1 START already began, from its records (F3 §5.4).
+    def finish_review(self, selected: Any) -> StartResult:
+        """Continue what this review-v1 START already began, from its records (F3 §5.4, F4 §26.4).
 
         Nothing of the completion is decided again: the executor is not asked,
         the Candidate is not frozen again, and the Run resumes at its earliest
-        unfinished generation.
+        unfinished generation. ``selected`` is the one recovery selector's answer
+        (:func:`workline.start_review.select_in_flight`): the first Run, or a
+        Class-A replacement continued from its durable checkpoint.
         """
         from . import start_review
 
-        return self._terminal_reviewed(start_review.continue_run(self, run))
+        return self._terminal_reviewed(start_review.continue_selected(self, selected))
 
     def _terminal_reviewed(self, sealed: Any) -> StartResult:
         """F3 §5.1 steps 17 ... 37 for a sealed Work Review Run: proof, publication and the terminal stage.
 
         Every step reads what is already durable first, so a resume continues at
-        the earliest unsatisfied checkpoint and never decides anything again.
+        the earliest unsatisfied checkpoint and never decides anything again. A
+        Class-A replacement (F4) continues there on its own topology.
         """
         from . import start_review
 
@@ -3301,9 +3304,9 @@ def _start_locked(
             raise SpecViolation(f"Work {work_id} is {state.state}")
 
         session = _Session(store, mutation, destination, mode, executor, derivations, review=review, activation=activation)
-        # review-v1: a Work Review Run this START already began is continued from its records,
-        # and never frozen again (F3 §5.4).
-        reviewing = start_review.run_in_flight(mutation) if review is not None and mutation.resumed else None
+        # review-v1: what this START already began - its Work Review Run, or a Class-A replacement of it - is
+        # continued from its records through the one recovery selector, and never frozen again (F3 §5.4, F4 §26.4).
+        reviewing = start_review.select_in_flight(mutation) if review is not None and mutation.resumed else None
         phase_id = work.phase_id
         current: Entity | None = work
         result: StartResult

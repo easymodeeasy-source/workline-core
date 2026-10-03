@@ -30,6 +30,7 @@ from typing import Any
 
 from .. import gitcmd
 from ..errors import StopError, ValidationError
+from ..ids import is_valid_id
 from ..store import ProjectStore
 from . import paths, records
 from .store import ReviewStore
@@ -42,6 +43,30 @@ def review_run_key(review_kind: str, target_identity: str) -> str:
     _require_key_part(review_kind, "review_kind")
     _require_key_part(target_identity, "target_identity")
     return f"review-run:{review_kind}:{target_identity}"
+
+
+#: The prefix of the one F4 successor reservation (RB3-C1 §11.18.5). Recovery mechanics only: it never
+#: names a semantic target, which stays the Work ID the successor Run's generation 1 records.
+SUCCESSOR_RUN_KEY_PREFIX = "review-successor-run:"
+
+
+def review_successor_run_key(predecessor_review_run_id: str) -> str:
+    """``review-successor-run:<predecessor_review_run_id>`` - the deterministic direct successor of one Run.
+
+    Kept apart from :func:`review_run_key`, which stays exactly as it is: every
+    START mutation already pending holds its first Run under that key, and
+    changing it would make those records unreadable. Keyed by the exact
+    predecessor, a replay of the same replacement reserves the same successor,
+    and a predecessor has at most one direct successor - a second key for it
+    cannot exist in one mutation's reservations.
+    """
+    _require_key_part(predecessor_review_run_id, "predecessor_review_run_id")
+    if not is_valid_id(predecessor_review_run_id, "review_run"):
+        raise ValidationError(
+            f"a successor reservation is keyed by a review_run id, not {predecessor_review_run_id!r}",
+            code="review_record_invalid",
+        )
+    return f"{SUCCESSOR_RUN_KEY_PREFIX}{predecessor_review_run_id}"
 
 
 def review_receipt_key(review_run_id: str, generation: int) -> str:

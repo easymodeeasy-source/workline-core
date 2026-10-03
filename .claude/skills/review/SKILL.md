@@ -247,7 +247,7 @@ containmentを示せないwrite先
 
 automatic reset / rebase / amend / force push / clean recoveryは行わない。別主体が作ったcommitを、このoperationが作ったcommitとして推測で採用しない。
 
-Reviewが関わる回復も従来どおりreconcile requiredで止まり、人が判断する。
+Reviewが関わる回復も従来どおりreconcile requiredで止まり、人が判断する。例外は、このoperation自身が作ったexact K1を新しい許可のもとで採用する、下記のWork post-commit recovery（F4）のClass Aだけで、それもhistoryを書き換えず、厳格な適格性を示せない時はreconcile requiredで止まる。
 
 ## Planning kinds and identities（P2）
 
@@ -504,7 +504,7 @@ LOWのfindingはblockせず、obligationにならない。LOWは、settleしたr
 
 **seal**: resulting treeがReview namespaceについてcanonicalなcheckout capability（form L、上記のCheckout capabilityの4層）を保つことを、その木について機械的に示せない限りsealしない。reviewerの判断に委ねない。
 
-**proof**: `review-v1-work-proof-v1` のC-2は、immutableな入力に対する再実行可能な証明であり、保存されたverdictではない。C-2(K1)はW1〜W12を、C-2(K2)はT1〜T12を、committed objectだけから証明する（K1 / K2がこのmutation自身のcommitであること、親とRAW lineage、K1のdeltaがCandidateの変化するentryちょうどであること、K2のdeltaがevent logとConsumptionちょうどであること、event logがちょうど2件（`work_target_removed`、`work_completed`）を加えること、Consumptionの内容と束縛、ReceiptとConsumptionの一意性とtotality、許可がまだcurrentであること、結果の束縛（`result_commit` はK1、`empty` は結果deltaなし）など）。3つのprojectionの物理的な置き場所は、ReviewedArtifactProjectionの変化がK1だけ、AuthorizedTransitionProjectionとConsumptionがK2だけである。通常のK2はmetadataだけを加えるcommitで、それ自身をReviewしない（再帰の打ち切り。Class AのK2とは区別し、Class Aはここで扱わない）。proof noteはrecoveryのためのpointerで、証明の結果ではない。完了したC-2はdurableなcheckpointであって永久の正しさではなく、各境界で現在の正しさを導き直し、後のcanonicalな事実は通った証明をstaleにする。
+**proof**: `review-v1-work-proof-v1` のC-2は、immutableな入力に対する再実行可能な証明であり、保存されたverdictではない。C-2(K1)はW1〜W12を、C-2(K2)はT1〜T12を、committed objectだけから証明する（K1 / K2がこのmutation自身のcommitであること、親とRAW lineage、K1のdeltaがCandidateの変化するentryちょうどであること、K2のdeltaがevent logとConsumptionちょうどであること、event logがちょうど2件（`work_target_removed`、`work_completed`）を加えること、Consumptionの内容と束縛、ReceiptとConsumptionの一意性とtotality、許可がまだcurrentであること、結果の束縛（`result_commit` はK1、`empty` は結果deltaなし）など）。3つのprojectionの物理的な置き場所は、ReviewedArtifactProjectionの変化がK1だけ、AuthorizedTransitionProjectionとConsumptionがK2だけである。通常のK2はmetadataだけを加えるcommitで、それ自身をReviewしない（再帰の打ち切り。Class Aの形は下記のWork post-commit recovery（F4））。proof noteはrecoveryのためのpointerで、証明の結果ではない。完了したC-2はdurableなcheckpointであって永久の正しさではなく、各境界で現在の正しさを導き直し、後のcanonicalな事実は通った証明をstaleにする。
 
 **F2を前方修正するF3のstatement**（F2だけを読む人のために）。F3はF2の7つの文を名指しで置き換え、F2のfileは編集しない:
 
@@ -519,3 +519,38 @@ A-7  F2 §10.3         git_persistence の値は review-v1-work-local-v2
 ```
 
 F2を修正しないF3だけの訂正が2つある。C3-1: Work Review Runのgeneration commitは、durableな `review_kind` が `work-result-v1` の時だけWorkのpersistence identityで作り、planningのRunは何も変わらない。C3-2: Workの完了より前のcommitは、attribute sourceを自分の記録した親にpinする（`declared_base` はまだ無い）。どちらも `rules/git` の規定である。
+
+## Work post-commit recovery（F4）
+
+STARTが作った結果commit K1が存在し、そのC-2(K1)が通らなくなった時の回復の意味を、ここが所有する（流れ・順序・再開は `skills/start`、Gitの安全性は `rules/git`）。K1がまだ無い時に分かった不一致（pre-commit drift）は、その不一致をcommitしない（新しいCandidateが要る）。Class A / B / Cはcommitの後の回復であり、通常の流れの戦略ではない。unknownは証明ではない。
+
+**分類**（明示的でfail-closed。まず安全の事実をそれぞれ示し、その後にだけ分類する）:
+
+```text
+Class A   このmutationのS-c1が作った（C-1）exact K1。raw parentがちょうど1つ、完全なdeltaが分かり、そのpathが
+          旧Candidateの宣言したowned setの中だけにあり、宣言したbranchがちょうどK1を持ち、旧RunがG1 / G2 / G3で
+          sealされ、R1がcurrentで未supersede・未消費、Review namespaceがcanonical、C2をcommitted objectだけから
+          凍結でき、K1のpublication effectもterminal effectもdurableでなく、承認先がK1を持たない
+  A1      K1のdelta・containment・messageが旧Candidateと違う（operation-ownedな永続化の変換）が、すべてoperation-owned
+  A2      K1は旧Candidateそのもので、Context / Effective Policy / Evidenceが今は再導出できない（公開・terminalより前）
+Class B   完全なdeltaに宣言したowned setの外のpathがある     reconcile。修復・revert・所有の主張・push・terminalizeをしない
+Class C   ownership・ref・lineage・完全なdelta・remote stateを示せない   reconcile。採用・push・terminalizeをしない
+```
+
+malformedなnamespace、欠けたimmutable record、矛盾するactivation、既存のConsumption、不明な承認先、foreign lineageは、どれもAに格下げしない。置き換えの許可より前に承認先が既にK1を持つことは、unauthorized / historical publication escapeであり、history rewrite・遡及の許可・通常のClass Aの公開をせず、reconcileする。承認先は固定したpinと、承認先そのものを読むことで判断し、古いremote-tracking refは公開の証拠にしない。
+
+**same-Run invalidation**: 置き換えるRunの封印済みReceipt R1は、同じRunのgeneration 4とSupersession(R1)を1つのgeneration mutationで作って、消費できなくする。generation 4はopenで、Receiptもauthorized stageも持たず、generation 3のacceptedとsettledをそのまま運び、`previous_digest` はgeneration 3のdigest、`evidence_digest` はWorkのinvalidation evidence（`review-work-invalidation-evidence`。`superseded_receipt_id` とreason）のdigestである。reasonは安定したidentity `work_class_a_replacement` で、Supersessionも同じreasonと `superseding_generation` 4を持つ。Supersessionのschemaとvalidatorは変えない（同じRunの後のopen generationによる無効化だけを意味する）。generation 4はWork Runの最後のgenerationで、generation 5は無い。generation 4の後、R1は消費されず、旧Runはcurrentな許可として再開しない。
+
+**successor Run**: 旧Runのgeneration 4がcommitされた後にだけ、置き換えのReview Runを1つ始める。予約keyは `review-successor-run:<predecessor_review_run_id>` で、最初のRunの予約key（`review-run:<review_kind>:<target_identity>`）は変えない。同じ置き換えのreplayは同じsuccessorを予約する。1つのpredecessorにsuccessorはたかだか1つで、successorのsuccessor（再帰的なClass A）は無く、矛盾する予約は `reconcile required` である。successorのreview kind（`work-result-v1`）・target identity（同じWork ID）・operation identityは最初のRunと同じで、予約keyは回復の仕組みであって意味のidentityを変えない。
+
+**request v1 / v2**: versionを持つのはWorkのrequest envelope（`review-work-request`）だけで、Candidate・TaskInput・Receiptのversionは変えない。version 1は `set_aside_runs` を持たず、commit済みのversion 1のTaskInputは書き換えずにそのまま読み、暗黙のset-asideを持たない（version 1が `set_aside_runs` を持てば不正）。F4の後に作る新しいRunはversion 2で、`set_aside_runs`（`review_run_id` と `reason` だけからなる項目を `review_run_id` の順に並べた正確なlist。重複・自分自身・不正な項目・canonicalでない順はfail closed）を持ち、request digestはenvelope全体を覆う。普通の最初のRunは空のlistを持ち、successorは置き換えた旧Runを `work_class_a_replacement` で名指す。set-asideは古いRunを削除も編集もせず、そのRunを自動回復の選択から外すだけであり、年齢やIDの順から推測しない。置き換えRunを作らない人の明示の処分は、F4ではなく後の専用operationが所有する。
+
+**C2**: 置き換えCandidateは、commitされたK1とその親だけから作り、working treeを一切読まない。旧Candidateが宣言したpathの集合が閉じた宣言集合で、各entryのold identityはparent(K1)から、new identity（file / symlinkはbytesも。gitlinkと削除はpayloadなし）はK1から読み、変化しないentryも残す。parent(K1)からK1への完全なdeltaはその集合の外のpathを持たない。messageはK1に永続されたmessageそのもの、`declared_base` はparent(K1)、resulting treeはK1の木そのものである。Context・Effective Policy・Evidence・activationは今のものを新しく計算し、C2は新しいReviewを受ける。古い許可は再利用しない。
+
+**K_adoptとadopted-result**: K_adoptは、successorのgeneration 3とR2を永続するcommitそのものであり、Reviewのsealの後に別のmetadata commitを作らない（再帰の打ち切り。K_adopt自身も、旧generation 4とsuccessorのgeneration commitも、Reviewを受けない）。K1からK_adoptまでの範囲は、旧Runのgeneration 4のcommitとsuccessorのgeneration 1・2・3のcommitだけで、domain・成果・lifecycleの変化を含まない。それ以外のpath・domain・lifecycleのdeltaはClass B / reconcileであり、もう一度のClass Aにはならない。adopted-result proof（`review-v1-work-adopted-result-proof-v1`）は、committed objectだけから、exact K1の所有、範囲の各commitがちょうど一つ前のcommitの上にありそのgenerationのrecordだけを加えること、旧Runのgeneration 4とSupersession、successorがsealされR2を出していること、C2がexact K1を縛ること、R2・Context・Policy・Evidence・activation・declared baseがcurrentであること、ConsumptionもterminalもまだRunに無いこと、承認先のidentityを示す。その公開の役割（adopted-result）は通常のresultの役割と別であり、1つの完了がその両方を持つことはない。
+
+**terminal**: Consumptionは従来どおり、R2を消費し `authorized_result_commit_sha = K1` を縛る（R2が許可したC2の永続した成果がK1だから）。K_terminalの親はK_adoptである。terminal proofは、R2 / C2 / ConsumptionがexactなK1を縛ることと、K1 → 旧generation 4 → successor generation 1 → 2 → 3 = K_adopt → K_terminal の系譜とを別々に証明し、K1の後に成果のdeltaが無いことを示す。通常のF3は従来どおり parent(K2) = K1 であり、どちらの親の規則を使うかはdurableなClass-A checkpointだけが決め、親の形からは決めない。
+
+**回復の選択**: 1つのWork Review invocationについて、同じreview kindとoperation identityを持つすべてのRunを、canonical recovery discoveryで consumed / invalidated（supersede済み）/ set_aside / not_authorized / 回復可能 / stale / incomplete のどれかと示す。回復可能がちょうど1つならそれを続け、0なら通常の前提が許す時に新しいRunを始めてよく、複数またはincomplete・矛盾したRunがあれば `reconcile required`。consumed・invalidated・set asideのRunは再開しない。新しさで選ばない。
+
+Class-A checkpointとadopted-result proof noteはSTART mutationのruntime materialであり、canonical Review recordでもlifecycleの正本でもない。generation 4・Supersession・successorのRunを含め、Review recordはlifecycleの権威にならない。

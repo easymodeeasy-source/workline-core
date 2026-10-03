@@ -20,6 +20,15 @@ review-v1 planning mutation, and acts on the answer (``skills/roadmap``).
 A Run that cannot be shown whole, or that holds a registration commit the
 committed planning proof does not prove, is never excluded quietly and never
 replaced by a new Run: the call stops.
+
+The mechanics above - matching, committed-history discovery, whole-record
+persistence, set-aside harvesting, no selection by age and the refusal of
+several recoverable Runs - are Review-wide. What a Run's chain may look like,
+how its request names Runs set aside, and the classification and
+reconstruction tail are kind policy (F4 §26.5, §26.28 P4): planning keeps its
+adapter exactly as it was, and the Work kind (``work-result-v1``) has its own
+(:func:`discover_work`), which START runs over the Runs of a Class-A
+replacement (``skills/start``).
 """
 
 from __future__ import annotations
@@ -32,7 +41,7 @@ from .. import gitcmd
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
-from . import checkout, committed, gate, paths, planning, records, serialize
+from . import checkout, committed, gate, paths, planning, records, serialize, work_review
 from .records import GateGeneration
 from .store import GateChain, ReviewStore
 
@@ -60,6 +69,20 @@ class Discovery:
     set_aside: tuple[dict[str, str], ...]
 
 
+@dataclass(frozen=True)
+class RecoveryAdapter:
+    """The kind policy around the shared discovery core (F4 §26.5, §26.28 P4).
+
+    ``shape``     the chain shapes a Run of this kind has (a problem, or None)
+    ``named``     the Run ids a matching Run's stored request sets aside
+    ``classify``  rows a-g: the set-aside reason of a matching Run, or None for a recoverable one
+    """
+
+    shape: Callable[[GateChain], "str | None"]
+    named: Callable[[ReviewStore, MatchingRun], "list[str]"]
+    classify: Callable[..., "str | None"]
+
+
 def discover(
     store: ProjectStore,
     review_kind: str,
@@ -73,26 +96,47 @@ def discover(
     currency on HEAD, in the Roadmap-owned order; it answers ``current``,
     ``stale`` (with the reason) or ``mismatch``.
     """
+    return _discover(store, review_kind, operation_identity, currency, PLANNING)
+
+
+def discover_work(
+    store: ProjectStore,
+    operation_identity: str,
+    *,
+    currency: Callable[[MatchingRun], Any],
+) -> Discovery:
+    """The same canonical discovery over the Work kind's Runs of one operation identity (F4 §11.12).
+
+    Every matching Run is proven whole and classified - ``invalidated`` (its
+    generation 4), ``consumed``, ``not_authorized``, ``set_aside`` (named by a
+    version 2 request), recoverable, stale (``currency``), or incomplete - and
+    never chosen by age: one recoverable is the one to continue, several are
+    ``review_recovery_ambiguous``, an incomplete one stops the call.
+    """
+    return _discover(store, work_review.REVIEW_KIND, operation_identity, currency, WORK)
+
+
+def _discover(
+    store: ProjectStore,
+    review_kind: str,
+    operation_identity: str,
+    currency: Callable[[MatchingRun], Any],
+    adapter: RecoveryAdapter,
+) -> Discovery:
     checkout.require_namespace_readable(store)
     review = ReviewStore(store)
     head = gitcmd.head_commit(store.root)
     matching = _matching_runs(store, review, head, review_kind, operation_identity)
     runs: dict[str, MatchingRun] = {}
     for review_run_id in sorted(matching):
-        runs[review_run_id] = _clean_run(store, review, head, review_run_id)
+        runs[review_run_id] = _clean_run(store, review, head, review_run_id, adapter.shape)
     named_aside: set[str] = set()
     for found in runs.values():
-        try:
-            envelope = review.read_task_input(found.task_id).request_envelope
-        except ValidationError as exc:
-            raise _incomplete(f"the task input of Review Run {found.review_run_id} does not read: {exc}") from exc
-        for item in envelope.get("set_aside_runs") or []:
-            if isinstance(item, dict) and isinstance(item.get("review_run_id"), str):
-                named_aside.add(item["review_run_id"])
+        named_aside.update(adapter.named(review, found))
     recoverable: list[MatchingRun] = []
     set_aside: list[dict[str, str]] = []
     for review_run_id, found in runs.items():
-        reason = _classify(store, review, head, found, named_aside, currency)
+        reason = adapter.classify(store, review, head, found, named_aside, currency)
         if reason is None:
             recoverable.append(found)
         else:
@@ -179,7 +223,10 @@ def _consumption_paths_of(store: ProjectStore, review: ReviewStore, head: str | 
     return sorted(found)
 
 
-def _clean_run(store: ProjectStore, review: ReviewStore, head: str | None, review_run_id: str) -> MatchingRun:
+def _clean_run(
+    store: ProjectStore, review: ReviewStore, head: str | None, review_run_id: str,
+    shape_of: Callable[[GateChain], "str | None"],
+) -> MatchingRun:
     """The matching Run, proven cleanly persisted; ``review_recovery_incomplete`` otherwise."""
     repo = store.root
     try:
@@ -190,7 +237,7 @@ def _clean_run(store: ProjectStore, review: ReviewStore, head: str | None, revie
         raise _incomplete(f"Review Run {review_run_id} has no generation in the working tree")
     if head is None:
         raise _incomplete(f"Review Run {review_run_id} is not committed: HEAD names no commit")
-    shape = _shape_problem(chain)
+    shape = shape_of(chain)
     if shape:
         raise _incomplete(f"Review Run {review_run_id} {shape}")
     receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
@@ -351,3 +398,124 @@ def _reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str | No
     ):
         return "the running implementation does not provide the adapter the Context names"
     return None
+
+
+def _planning_named(review: ReviewStore, found: MatchingRun) -> list[str]:
+    try:
+        envelope = review.read_task_input(found.task_id).request_envelope
+    except ValidationError as exc:
+        raise _incomplete(f"the task input of Review Run {found.review_run_id} does not read: {exc}") from exc
+    return [
+        item["review_run_id"] for item in envelope.get("set_aside_runs") or []
+        if isinstance(item, dict) and isinstance(item.get("review_run_id"), str)
+    ]
+
+
+#: Planning's policy, exactly as it was before the core was shared.
+PLANNING = RecoveryAdapter(shape=_shape_problem, named=_planning_named, classify=_classify)
+
+
+# --------------------------------------------------------------------------- the Work adapter (F4 §11.12, §26.5)
+
+
+def _work_shape_problem(chain: GateChain) -> str | None:
+    """The shapes a Work Run has: accepted, settled, sealed - and the one same-Run invalidation, its last generation."""
+    problem = _shape_problem(chain)
+    if problem:
+        return problem
+    generations = chain.generations
+    if len(generations) >= 3 and generations[2].authorized_operation_stage != work_review.AUTHORIZED_OPERATION_STAGE:
+        return "is not sealed for start:work-terminal at generation 3"
+    if len(generations) == 4 and (
+        generations[3].receipt_id is not None or generations[3].authorized_operation_stage is not None
+        or generations[3].settled_tasks != generations[2].settled_tasks
+    ):
+        return "does not invalidate its seal at generation 4"
+    return None
+
+
+def _work_named(review: ReviewStore, found: MatchingRun) -> list[str]:
+    """The Runs a version 2 Work request sets aside; a version 1 request names none (F4 §11.18.6)."""
+    try:
+        envelope = review.read_task_input(found.task_id).request_envelope
+        named = work_review.request_set_aside(envelope, review_run_id=found.review_run_id)
+    except ValidationError as exc:
+        raise _incomplete(f"the task input of Review Run {found.review_run_id} does not read: {exc}") from exc
+    return [item["review_run_id"] for item in named]
+
+
+def _classify_work(
+    store: ProjectStore,
+    review: ReviewStore,
+    head: str | None,
+    found: MatchingRun,
+    named_aside: set[str],
+    currency: Callable[[MatchingRun], Any],
+) -> str | None:
+    """Rows a-g for a Work Run: the set-aside reason, or None for the recoverable one.
+
+    ```text
+    a  generation 4 (the same-Run invalidation)       invalidated   never resumed
+    b  a Consumption of one of its Receipts exists     consumed      never resumed
+    c  generation 2 does not authorize                 not_authorized
+    d  named by another matching Run's request         set_aside
+    e  does not reconstruct                            review_recovery_incomplete
+    f  generation 1, or an authorizing generation 2    currency: current -> recoverable, stale -> its reason
+    g  sealed at generation 3, unconsumed              recoverable
+    ```
+    """
+    chain = found.chain
+    latest = chain.latest.generation
+    if latest == planning.INVALIDATION_GENERATION:
+        return planning.SET_ASIDE_INVALIDATED
+    receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
+    if receipt_ids and _consumption_paths_of(store, review, head, {str(item) for item in receipt_ids}):
+        return planning.SET_ASIDE_CONSUMED
+    if latest == 2 and not work_review.authorizes(chain.latest):
+        return planning.SET_ASIDE_NOT_AUTHORIZED
+    if found.review_run_id in named_aside:
+        return planning.SET_ASIDE_SET_ASIDE
+    problem = _work_reconstruction_problem(review, found)
+    if problem:
+        raise _incomplete(f"Work Review Run {found.review_run_id} does not reconstruct: {problem}")
+    if latest in (1, 2):
+        outcome = currency(found)
+        if outcome.current:
+            return None
+        if outcome.stale:
+            return outcome.detail
+        raise _incomplete(f"Work Review Run {found.review_run_id}'s Candidate is indeterminate: {outcome.detail}")
+    return None
+
+
+def _work_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str | None:
+    first = found.chain.generations[0]
+    descriptor = first.accepted_tasks[0]
+    problems = review.provenance_problems(descriptor, records.FIRST_GENERATION)
+    if problems:
+        return "; ".join(message for _, message in problems)
+    try:
+        task_input = review.read_task_input(found.task_id)
+        snapshot = review.read_candidate_snapshot(first.candidate_hash)
+        candidate = (snapshot.material or {}).get("candidate") or {}
+        width = len(str((candidate.get("declared_base") or {}).get("base_commit", "")))
+        reconstruction = work_review.read_material(snapshot, first.candidate_hash, width)
+    except (ValidationError, ReconcileRequired) as exc:
+        return str(exc)
+    envelope_problems = work_review.task_input_problems(
+        task_input, found.material, first.candidate_hash, first.review_context_hash, first.effective_policy_hash,
+        review_run_id=found.review_run_id,
+    )
+    if envelope_problems:
+        return "; ".join(envelope_problems)
+    work_id = reconstruction.candidate["declared_base"]["work"]["work_id"]
+    if (
+        first.review_kind != work_review.REVIEW_KIND or first.target_identity != work_id
+        or first.operation_identity != work_review.operation_identity(work_id)
+    ):
+        return "the Run's kind, target or operation identity is not the Candidate's Work"
+    return None
+
+
+#: The Work kind's policy over the same core.
+WORK = RecoveryAdapter(shape=_work_shape_problem, named=_work_named, classify=_classify_work)

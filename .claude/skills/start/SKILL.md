@@ -480,7 +480,7 @@ Projectのactivation（`skills/review` のWork-terminal activation）はreview-v
 - STARTは `skills/review` のEvidenceの検査を実行し、凍結したCandidateそのものをisolated verificationで検証し、その結果のdigestをgateへ渡す。
 - 許可された遷移を適用するのはReviewではなくSTARTであり、AuthorizedTransitionProjectionが名指す遷移（`work_target_removed`、`work_completed`）だけを適用する。
 
-**stage**: review-v1 Workのcommitとpushは同じstageにしない。1つのreview-v1 Work mutationが持つpushはたかだか2つで、どちらもpublication stage（K1、K2）である。それ以外のWork cycleのGit stageはすべてcommitだけで、2つのpushのどちらかが公開する証明済みの履歴としてだけ承認先へ届く。commitの作り方、pushの規定、attribute sourceのpinは `rules/git` に従う。1つのreview-v1 Work mutationは1つの完了だけを持つので、outerでもreview-v1の完了の後は次のWorkを選ばずに返る。
+**stage**: review-v1 Workのcommitとpushは同じstageにしない。1つのreview-v1 Work mutationが持つpushはたかだか2つで、どちらもpublication stage（K1、K2。Class Aでは下記のK_adopt、K_terminal）である。それ以外のWork cycleのGit stageはすべてcommitだけで、2つのpushのどちらかが公開する証明済みの履歴としてだけ承認先へ届く。commitの作り方、pushの規定、attribute sourceのpinは `rules/git` に従う。1つのreview-v1 Work mutationは1つの完了だけを持つので、outerでもreview-v1の完了の後は次のWorkを選ばずに返る。
 
 **terminal stage**: 1つのlifecycle stageに、予約したIDでの `work_target_removed`、operation-contract metadata（`operation_contract: review-v1`、`review_receipt_id`、`review_run_id`、`review_generation`）を持つ `work_completed`、そのRunのConsumptionのimmutable createの3つを、この順にdurableに記録してから適用する。eventのIDは `<stage>:event:0` / `<stage>:event:1`、Consumption IDは `review-consumption:<receipt_id>` のkeyで予約する。この形でないstageはreview-v1の完了ではなく、legacyの完了としても読まない。
 
@@ -488,7 +488,30 @@ Projectのactivation（`skills/review` のWork-terminal activation）はreview-v
 
 **remoteなし**: pushは無く、すべての証明はそのまま行う。legacyのcommitとpushを1つにした形には戻らない。
 
-**resume**: 中断の後の再実行は、そのmutationのrecordとcanonicalなReview recordから導き直し、決め直さない。既に始めたWork Review Runはrecordから続け、Candidateを凍結し直さない。Contextはgeneration 1のacceptより前に不変になる。pendingのreview-v1 mutationはlegacyへ降格しない。
+**resume**: 中断の後の再実行は、そのmutationのrecordとcanonicalなReview recordから導き直し、決め直さない。既に始めたWork Review Runはrecordから続け、Candidateを凍結し直さない。Contextはgeneration 1のacceptより前に不変になる。pendingのreview-v1 mutationはlegacyへ降格しない。何を続けるかは1つのrecovery selectorが、mutation自身の予約・Class-A checkpoint・canonicalなchainから決める（最初のRun、checkpoint済みで旧generation 4がまだ、旧Runが無効化済み、successorを予約済み、successorのreview中、successorがseal済み）。新しさ・HEAD・commit messageでは決めない。
+
+**post-commit recovery（F4 Class A）**: K1を作った後に、そのC-2(K1)が通らなくなった時だけ、STARTはClass Aを試みる（例: K1を作った後の中断から再実行までの間にimplementationが変わり、縛ったContextが再計算できない）。Class A / B / C・same-Run invalidation・successor Run・request v1 / v2・C2・adopted-resultの意味は `skills/review` のWork post-commit recoveryが所有する。K1より前に分かった不一致は、K1としてcommitしない。
+
+- 試みる場所: step 20のC-2(K1)が `reconcile required` で通らなかった時だけである。C-2(K1)の失敗をそのままClass Aとして扱わず、明示的な分類（`skills/review`）がA1かA2を示した時だけ続ける。
+- 厳格な適格性: exact K1がこのmutationのS-c1が作ったcommit（C-1）で、宣言したbranchがちょうどK1を持ち、K1のpublication effect（push stage）も、terminal lifecycle・Consumption・terminal commitのstageもまだdurableでなく、旧RunのR1がcurrentで消費できる状態で、承認先がK1を持たないこと。承認先がK1を既に持てば `reconcile required`（reason `review_result_already_published`）、別の履歴なら `review_destination_divergent`、読めない・示せない時はSTOP（`review_destination_unknown`）で、どれも採用しない。publication effectやterminal effectが既にdurableな時は、それを書き換えず・削除せず・その後ろに置き換えの公開を足さず `reconcile required`（`review_class_a_ineligible`）。Class Bは `review_class_b_unowned_content`、Class Cは `review_class_c_unprovable`（またはC-2(K1)自身のreason）で止まる。
+- exact K1とC2: K1は、S-c1のdurableな `prepared_commit_id` とC-1の `commit_id` / applied（`rules/git`）から読み、HEAD・commit message・最新commit・pathの類似からは決めない。C2は、commitされたK1とその親だけから作る（`skills/review`）。
+- checkpoint: 旧Runのgeneration 4を記録する前に、START mutationへdurableなClass-A checkpoint（`review_work_class_a_checkpoint`。exact K1とその親、branch、旧Run・旧Receipt・旧Candidate hash、分類と理由、S-c1のstageとseq、predecessor Run、契約version、publication / terminal effectがまだ無いこと）を書く。Class B / Cではcheckpointを作らない。再開の時は何かをする前にcheckpointをimmutableなcommitted stateに対して検証し、矛盾すれば `reconcile required` で止まる。commit message・最新commit・branch tip・pathの類似・K1の存在からcheckpointを再構成しない。
+- topology:
+
+```text
+checkpoint -> 旧Run generation 4 + Supersession(R1)（1つのgeneration mutation）
+-> successorの予約 -> 回復の選択（旧Runはinvalidated、回復可能はsuccessorだけ）
+-> successor generation 1（C2、version 2 request）-> reviewer -> generation 2 -> checkout capability（K1の木）
+-> generation 3 + R2 = K_adopt -> adopted-result proof note（review_work_adopted_result_proof）
+-> remoteがあれば exact K_adopt のpush（<W>:adopted-publication）
+-> terminal stage（R2を消費し、Consumptionの結果commitはK1）-> K_terminal（親はK_adopt）-> terminal proof
+-> remoteがあれば exact K_terminal のpush（<W>:finalize-publication）-> recorded-completion proof -> completed
+```
+
+- 公開点: remoteのある成果ありのClass Aも、pushはちょうど2つ（K_adopt、K_terminal）である。最初のpushはK1・旧generation 4・successorのgeneration 1〜3・R2を1つのfast-forwardの系譜で運び、K1単独もbranch tipも公開しない。adopted-result proofは記録の前と適用の直前に評価し直す。remoteなしではpushは無く、同じproofとcurrentnessを行い、K_adoptがlocalの系譜の錨になる。
+- 許可は、結果publicationの記録の前、その直前、terminal stageの記録の前、terminal commitの前、terminal publicationの記録の前とその直前、`completed` を返す前のそれぞれで導き直す。以前の証明を時を超えた正しさとして扱わない。
+- successorのReviewが許可しない場合は、最初のRunと同じくterminalizeせず `reconcile required` で止まる（修復のloopは持たない）。
+- 再開: どの中断の後も、同じWork・同じmodeのreview-v1 STARTの再実行が、recordとcanonical recordから同じ予約ID・同じsuccessor・同じK1 / K_adoptを導き直して続ける。Candidate・Run・Receipt・Supersession・Consumption・terminal event・publicationを重複させず、force・reset・rebase・amend・branch tipの置き換えをせず、legacy STARTへ落ちない。
 
 **予約namespace**: review-v1を選ぶことは、executorが走る前に、invocation contractとして次の2つの予約namespaceを縛る。
 
@@ -499,7 +522,7 @@ Projectのactivation（`skills/review` のWork-terminal activation）はreview-v
 
 executorはこれらを結果pathとしても削除pathとしてもownできない。規則は静的で選択した時から有効であり、具体的な結果pathのlistを知る必要はない。判定はownershipの宣言（`declare_own_content`）より前に3層で行い、文字列のprefixでは決めない: 正規のspelling（書き直さずに拒否する）、予約namespaceの分類（ASCIIだけのcase foldは前段のfilterで、権威はno-followで開いた祖先、またはpathの最後の要素自身のfilesystem object identity）、Project containment。containmentの検査は結合したownership witnessを作り、宣言はpathを解決し直さずにそのwitnessを永続化する。祖先が無くなっている削除は正当な結果（無いことの証明）であり、拒否しない。予約namespaceの宣言は所有できない状態であり、`reconcile required`（reason `review_reserved_namespace`）で停止する。対応しない結果の形ではなく、`review_candidate_unavailable`（projectability）でもなく、legacyへ落とすこともない。identityを確定できない時はfail closedである。
 
-**STOP codeとreason**: review-v1 WorkのSTOPはcode（`StopError` / `ValidationError`）であり、`reconcile required` は `code == "reconcile_required"` のまま意味を `reason` に持つ。lockより前: `review_contract_invalid`、`review_create_unsupported`、`review_git_unsupported`、`review_git_transform`、hermeticなGit環境に入れない（`review_identity_unavailable`、`review_repository_grafted`、`review_repository_shallow` 等）。lockの後・mutationより前: `review_not_activated`。完了の流れ: `review_base_uncommitted`、`review_candidate_unavailable`、`review_context_unavailable`、`review_namespace_unreadable`、`review_resulting_tree_unavailable`、reviewer（`review_reviewer_failed`、`review_report_invalid`、`review_reviewer_mismatch`。意味は `skills/review`）、sealしないcheckout capability（`review_checkout_unsafe` / `review_checkout_unknown`）、commit（`review_commit_plan_invalid`、`review_index_lock_reconciliation`、`review_local_cleanup_checkpoint`）。reasonは `review_marker_mismatch`、`review_reserved_namespace`、`review_registration_base_moved`、`review_commit_unowned`、`review_publication_invalid`。liveのcode（`detached_head`、`dirty_overlap`、`related_target_missing` 等）は意味を変えない。
+**STOP codeとreason**: review-v1 WorkのSTOPはcode（`StopError` / `ValidationError`）であり、`reconcile required` は `code == "reconcile_required"` のまま意味を `reason` に持つ。lockより前: `review_contract_invalid`、`review_create_unsupported`、`review_git_unsupported`、`review_git_transform`、hermeticなGit環境に入れない（`review_identity_unavailable`、`review_repository_grafted`、`review_repository_shallow` 等）。lockの後・mutationより前: `review_not_activated`。完了の流れ: `review_base_uncommitted`、`review_candidate_unavailable`、`review_context_unavailable`、`review_namespace_unreadable`、`review_resulting_tree_unavailable`、reviewer（`review_reviewer_failed`、`review_report_invalid`、`review_reviewer_mismatch`。意味は `skills/review`）、sealしないcheckout capability（`review_checkout_unsafe` / `review_checkout_unknown`）、commit（`review_commit_plan_invalid`、`review_index_lock_reconciliation`、`review_local_cleanup_checkpoint`）。reasonは `review_marker_mismatch`、`review_reserved_namespace`、`review_registration_base_moved`、`review_commit_unowned`、`review_publication_invalid`。post-commit recovery（F4）: STOP code `review_destination_unknown`、reason `review_class_a_ineligible`、`review_class_b_unowned_content`、`review_class_c_unprovable`、`review_result_already_published`、`review_destination_divergent`、`review_recovery_ambiguous`、`review_recovery_incomplete`、`review_chain_invalid`。liveのcode（`detached_head`、`dirty_overlap`、`related_target_missing` 等）は意味を変えない。
 
 ## outer continuation
 

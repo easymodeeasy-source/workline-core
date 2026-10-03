@@ -39,7 +39,7 @@ with its C-2 re-evaluated before it is recorded and again before it is applied (
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -88,10 +88,43 @@ EVENT_LOG = workcommit.EVENT_LOG
 STAGE_GENERATION = "review-generation"
 STAGE_GENERATION_COMMIT = "review-generation-commit"
 OPERATION_GENERATION = "review-generation"
-TRANSITIONS = {1: "accept", 2: "settle", 3: "seal"}
+#: Generation 4 is the one same-Run invalidation of a sealed Work Run (F4 §11.18.1, §11.18.4); there is no 5.
+TRANSITIONS = {1: "accept", 2: "settle", 3: "seal", 4: "invalidate"}
+INVALIDATION_GENERATION = 4
 
 #: The mutation runtime metadata a refused authorization is carried in (F3 §7.9.5): never a Review record.
 NOTE_SEAL_REFUSAL = "review_seal_refusal"
+
+# --------------------------------------------------------------------------- F4 (RB3-C1): post-commit recovery
+#
+# Class A replaces the authorization of an exact operation-owned K1 whose normal C-2(K1) no longer holds:
+#
+#   K1 -> old Run G4 + Supersession(R1) -> successor G1 -> G2 -> G3 + R2 (= K_adopt)
+#      -> exact K_adopt published -> terminal stage consuming R2 (result commit K1) -> K_terminal -> published
+#
+# Class B (unexpected / non-owned content) and Class C (ownership, ref, lineage, complete delta or remote state
+# unprovable) are reconcile required. The checkpoint and the adopted-result proof are START mutation runtime
+# material: never a canonical Review record, never lifecycle truth (F4 §11.18.3).
+
+#: The durable Class-A checkpoint, recorded before old G4 and validated against committed state on every resume.
+NOTE_CLASS_A = "review_work_class_a_checkpoint"
+CLASS_A_CONTRACT = "review-v1-work-class-a-checkpoint-v1"
+CLASS_A_VERSION = 1
+#: The adopted-result proof note: names exact K_adopt, the commit the adopted-result publication publishes.
+NOTE_ADOPTED_PROOF = "review_work_adopted_result_proof"
+ADOPTED_PROOF_CONTRACT = "review-v1-work-adopted-result-proof-v1"
+#: The two Class-A entry causes (F4 §11.3) and the two classes that are always reconcile.
+CLASS_A1, CLASS_A2, CLASS_B, CLASS_C = "A1", "A2", "B", "C"
+#: What is not Class A for a reason of its own: an incompatible durable effect, an already published K1.
+NOT_ELIGIBLE, ESCAPED = "not-eligible", "historical-escape"
+#: The reconcile reasons of a post-commit refusal.
+REASON_CLASS_A_INELIGIBLE = "review_class_a_ineligible"
+REASON_CLASS_B = "review_class_b_unowned_content"
+REASON_CLASS_C = "review_class_c_unprovable"
+REASON_ALREADY_PUBLISHED = "review_result_already_published"
+REASON_DESTINATION_DIVERGENT = "review_destination_divergent"
+#: The Supersession / invalidation-evidence / set-aside reason of a Class-A replacement.
+CLASS_A_REASON = work_review.INVALIDATION_CLASS_A
 
 
 # --------------------------------------------------------------------------- small readers
@@ -315,6 +348,10 @@ class WorkRun:
     receipt_id: str
     #: The freeze's material, present only between a new Run's freeze and its generation 1.
     frozen: dict[str, Any] | None = None
+    #: The Run it replaces, for the one F4 Class-A successor (F4 §11.18.5); None for a first Run.
+    predecessor_review_run_id: str | None = None
+    #: generation -> the exact commit its generation mutation made, as C-1 owned it (this process only).
+    generation_commits: dict[int, str] = field(default_factory=dict)
 
 
 def run_key(work_id: str) -> str:
@@ -328,16 +365,86 @@ def reserve_run(mutation: Mutation, work_id: str) -> WorkRun:
     return WorkRun(work_id, run_id, task_id, receipt_id)
 
 
-def run_in_flight(mutation: Mutation) -> WorkRun | None:
-    """The Run this START already began, once anything of it is durable; None before generation 1 exists.
+def reserve_successor(mutation: Mutation, predecessor: WorkRun) -> WorkRun:
+    """The one direct successor of ``predecessor`` (F4 §11.18.5): reserved once, read back by every replay.
 
-    Read from the mutation's own reservations and the canonical chain: a Run
-    whose generation 1 is committed (or whose generation mutation is pending)
-    is continued from its records and never frozen again. A mutation holds at
-    most one Work Run - one completion per review-v1 mutation (F3 §4.5, §11.3.1).
+    Keyed by the exact predecessor Run (:func:`workline.review.gate.review_successor_run_key`); the
+    successor's task and Receipt use the ordinary per-Run keys, so a replay that stopped half way reserves
+    exactly the identifiers that are missing and changes none that exist. The first-Run key is untouched.
     """
+    run_id = mutation.reserve_id(gate.review_successor_run_key(predecessor.review_run_id), "review_run")
+    if run_id == predecessor.review_run_id:
+        raise _reconcile(f"START mutation {mutation.id} holds Work Review Run {run_id} as its own successor")
+    task_id = mutation.reserve_id(gate.review_task_key(run_id, work_review.TASK_SLOT), "review_task")
+    receipt_id = mutation.reserve_id(gate.review_receipt_key(run_id, work_review.SEAL_GENERATION), "review_receipt")
+    return WorkRun(predecessor.work_id, run_id, task_id, receipt_id,
+                   predecessor_review_run_id=predecessor.review_run_id)
+
+
+#: The states the recovery selector tells apart (F4 §26.4).
+STATE_INITIAL = "initial"                      # the first Run, no Class-A checkpoint
+STATE_CHECKPOINTED = "class_a_checkpointed"    # checkpoint durable; old G4 not yet committed
+STATE_OLD_INVALIDATED = "old_invalidated"      # old G4 + Supersession committed; no successor reserved
+STATE_SUCCESSOR_RESERVED = "successor_reserved"  # successor reserved, its generation 1 not yet begun
+STATE_SUCCESSOR_REVIEWING = "successor_reviewing"  # successor generation 1 or 2 (or one pending)
+STATE_SUCCESSOR_SEALED = "successor_sealed"    # successor generation 3 + R2: ready for adopted-result publication
+
+
+@dataclass(frozen=True)
+class InFlight:
+    """What a resumed review-v1 START continues, read from its own reservations, notes and the canonical chains."""
+
+    state: str
+    initial: WorkRun
+    successor_review_run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Adoption:
+    """A Class-A replacement in progress, continued from its durable checkpoint (F4).
+
+    Deliberately not a :class:`Sealed`: once the checkpoint exists, the first
+    Run's Receipt is on its way to supersession and is never offered as a
+    current authorization again.
+    """
+
+    initial: WorkRun
+
+
+def _reserved_run(mutation: Mutation, work_id: str, run_id: str) -> WorkRun:
+    task_id = mutation.reserved(gate.review_task_key(run_id, work_review.TASK_SLOT))
+    receipt_id = mutation.reserved(gate.review_receipt_key(run_id, work_review.SEAL_GENERATION))
+    if not isinstance(task_id, str) or not isinstance(receipt_id, str):
+        raise _reconcile(f"START mutation {mutation.id} holds Work Review Run {run_id} without its task or Receipt id")
+    return WorkRun(work_id, run_id, task_id, receipt_id)
+
+
+def _successor_keys(reserved: dict[str, Any]) -> list[str]:
+    return sorted(str(key) for key in reserved if str(key).startswith(gate.SUCCESSOR_RUN_KEY_PREFIX))
+
+
+def select_in_flight(mutation: Mutation) -> InFlight | None:
+    """The one recovery selector of a resumed review-v1 START (F4 §26.4); None before generation 1 exists.
+
+    Read from the mutation's own reservations, its Class-A checkpoint and the
+    canonical chains - never from recency, HEAD or a commit message:
+
+    ```text
+    no checkpoint, no successor          the first Run, as F3 continues it (initial)
+    checkpoint, first Run sealed / G4    class_a_checkpointed (G4 not committed) | old_invalidated
+    pending
+    checkpoint + the one successor       successor_reserved | successor_reviewing | successor_sealed
+    reserved
+    ```
+
+    A successor without the checkpoint that alone selects one, a successor
+    keyed by another Run, a successor of the successor (no recursive Class A),
+    a successor reserved before the first Run's generation 4 is committed, or a
+    successor chain past generation 3, is reconcile required.
+    """
+    reserved = mutation.record.get("reserved_ids") or {}
     prefix = f"review-run:{work_review.REVIEW_KIND}:"
-    keys = [key for key in (mutation.record.get("reserved_ids") or {}) if str(key).startswith(prefix)]
+    keys = [key for key in reserved if str(key).startswith(prefix)]
     if not keys:
         return None
     if len(keys) > 1:
@@ -346,14 +453,70 @@ def run_in_flight(mutation: Mutation) -> WorkRun | None:
     run_id = mutation.reserved(keys[0])
     if not isinstance(run_id, str):
         return None
-    begun = gate.pending_generation_mutations(mutation.store, run_id) or ReviewStore(mutation.store).next_generation(run_id) > 1
-    if not begun:
-        return None
-    task_id = mutation.reserved(gate.review_task_key(run_id, work_review.TASK_SLOT))
-    receipt_id = mutation.reserved(gate.review_receipt_key(run_id, work_review.SEAL_GENERATION))
-    if not isinstance(task_id, str) or not isinstance(receipt_id, str):
-        raise _reconcile(f"START mutation {mutation.id} holds Work Review Run {run_id} without its task or Receipt id")
-    return WorkRun(work_id, run_id, task_id, receipt_id)
+    checkpoint = mutation.note(NOTE_CLASS_A)
+    successors = _successor_keys(reserved)
+    store = mutation.store
+    if checkpoint is None:
+        if successors:
+            raise _reconcile(f"START mutation {mutation.id} reserves a successor Work Review Run ({successors}) without "
+                             "the Class-A checkpoint that alone selects one")
+        begun = gate.pending_generation_mutations(store, run_id) or ReviewStore(store).next_generation(run_id) > 1
+        if not begun:
+            return None
+        return InFlight(STATE_INITIAL, _reserved_run(mutation, work_id, run_id))
+    initial = _reserved_run(mutation, work_id, run_id)
+    if not isinstance(checkpoint, dict) or checkpoint.get("old_review_run_id") != run_id:
+        raise _reconcile(f"START mutation {mutation.id}'s Class-A checkpoint does not name its first Work Review Run "
+                         f"{run_id}")
+    old_chain = _chain(store, initial)
+    old_pending = gate.pending_generation_mutations(store, run_id)
+    if old_chain is None or old_chain.latest.generation not in (work_review.SEAL_GENERATION, INVALIDATION_GENERATION):
+        raise _reconcile(f"Work Review Run {run_id} is neither sealed nor invalidated under a Class-A checkpoint")
+    if not successors:
+        if old_chain.latest.generation == INVALIDATION_GENERATION and not old_pending:
+            return InFlight(STATE_OLD_INVALIDATED, initial)
+        return InFlight(STATE_CHECKPOINTED, initial)
+    if successors != [gate.review_successor_run_key(run_id)]:
+        raise _reconcile(f"START mutation {mutation.id} reserves {successors}, not exactly the one successor of "
+                         f"{run_id}; a predecessor has at most one successor and a successor has none",
+                         REASON_CLASS_A_INELIGIBLE)
+    successor_id = mutation.reserved(successors[0])
+    if not isinstance(successor_id, str) or successor_id == run_id:
+        raise _reconcile(f"START mutation {mutation.id} holds no usable successor of {run_id}")
+    if old_chain.latest.generation != INVALIDATION_GENERATION or old_pending:
+        raise _reconcile(f"successor {successor_id} is reserved while {run_id}'s generation 4 is not committed")
+    successor_chain = _chain(store, WorkRun(work_id, successor_id, "", ""))
+    if gate.pending_generation_mutations(store, successor_id):
+        return InFlight(STATE_SUCCESSOR_REVIEWING, initial, successor_id)
+    if successor_chain is None:
+        return InFlight(STATE_SUCCESSOR_RESERVED, initial, successor_id)
+    latest = successor_chain.latest.generation
+    if latest in (1, 2):
+        return InFlight(STATE_SUCCESSOR_REVIEWING, initial, successor_id)
+    if latest == work_review.SEAL_GENERATION:
+        return InFlight(STATE_SUCCESSOR_SEALED, initial, successor_id)
+    raise _reconcile(f"successor Work Review Run {successor_id} has generation {latest}; a successor is never invalidated "
+                     "or replaced again (no recursive Class A)", REASON_CLASS_A_INELIGIBLE)
+
+
+def run_in_flight(mutation: Mutation) -> WorkRun | None:
+    """The first Run this START already began, when that is what it continues (F3 §5.4); None otherwise.
+
+    The F3 reading, kept for readers that only ask about the first Run: a Run
+    whose generation 1 is committed (or whose generation mutation is pending)
+    is continued from its records and never frozen again. Which state a
+    resumed START is in - including every F4 Class-A state - is
+    :func:`select_in_flight`'s.
+    """
+    selected = select_in_flight(mutation)
+    return None if selected is None or selected.state != STATE_INITIAL else selected.initial
+
+
+def continue_selected(session: "_Session", selected: InFlight) -> "Sealed | Adoption":
+    """Continue what :func:`select_in_flight` selected: the first Run as F3 does, or the Class-A replacement."""
+    if selected.state == STATE_INITIAL:
+        return _continue(session, selected.initial)
+    return Adoption(selected.initial)
 
 
 # --------------------------------------------------------------------------- generation mutations (R3, C3-1)
@@ -379,17 +542,23 @@ def _generation_invocation(mutation: Mutation, run: WorkRun, generation: int, ga
     }
 
 
-def _finish_generation(store: ProjectStore, gen: Mutation) -> None:
-    """The one generation dispatch (``F3`` §7.1.7, C3-1): its durable ``review_kind`` selects the Work primitive."""
+def _finish_generation(store: ProjectStore, gen: Mutation) -> str:
+    """The one generation dispatch (``F3`` §7.1.7, C3-1): its durable ``review_kind`` selects the Work primitive.
+
+    Returns the exact commit the generation mutation made, as C-1 owns it - the
+    commit :func:`workline.review.workcommit.require_generation_persisted` has
+    just proven (F4 §26.28 P3) - read from the mutation's own record.
+    """
     from .roadmap_review import _finish_generation as finish
 
     finish(store, gen)
+    return workcommit.generation_commit_of(gen)[0]
 
 
 def _start_generation(
     session: "_Session", run: WorkRun, generation: int, gate_record: records.GateGeneration,
     extra: list[tuple[str, dict[str, Any]]], base: dict[str, Any], *, receipt_id: str | None = None,
-) -> None:
+) -> str:
     """Open, record, commit and prove persisted the generation mutation writing ``gate_record`` (and ``extra``)."""
     store, mutation = session.store, session.mutation
     scope = gate.next_generation_scope(store, run.review_run_id)
@@ -415,7 +584,9 @@ def _start_generation(
             gen.add_effects(STAGE_GENERATION, [
                 Effect.create_file(path, serialize.canonical_text(record)) for path, record in writes
             ])
-    _finish_generation(store, gen)
+    commit = _finish_generation(store, gen)
+    run.generation_commits[generation] = commit
+    return commit
 
 
 def resolve_pending_generation(session: "_Session", run: WorkRun) -> None:
@@ -463,7 +634,7 @@ def resolve_pending_generation(session: "_Session", run: WorkRun) -> None:
             f"Work Review Run {run.review_run_id}, which is not the chain's next transition",
             "review_chain_invalid",
         )
-    _finish_generation(store, gen)
+    run.generation_commits[int(generation)] = _finish_generation(store, gen)
 
 
 def _chain(store: ProjectStore, run: WorkRun):
@@ -474,11 +645,17 @@ def _chain(store: ProjectStore, run: WorkRun):
 
 
 def _require_shape(run: WorkRun, chain: Any) -> None:
-    """The chain is one of the three shapes a Work Run has before its terminal: accepted, settled, sealed."""
+    """The chain is one of the shapes a Work Run has: accepted, settled, sealed - or invalidated at generation 4.
+
+    Generation 4 is exactly the F4 same-Run invalidation of the seal (open, no
+    Receipt, no authorized stage, every accepted and settled task carried
+    forward); it is the last generation a Work Run ever has, so a fifth one is
+    refused (F4 §11.18.4, §26.12).
+    """
     generations = chain.generations
     problems: list[str] = []
-    if len(generations) > work_review.SEAL_GENERATION:
-        problems.append("more than three generations")
+    if len(generations) > INVALIDATION_GENERATION:
+        problems.append("more than four generations (a Work Run has no generation 5)")
     first = generations[0]
     if first.review_kind != work_review.REVIEW_KIND or first.target_identity != run.work_id:
         problems.append("generation 1 is not a Work Review of this Work")
@@ -491,6 +668,12 @@ def _require_shape(run: WorkRun, chain: Any) -> None:
     if len(generations) >= 3 and (not generations[2].sealed or generations[2].receipt_id != run.receipt_id
                                   or generations[2].authorized_operation_stage != work_review.AUTHORIZED_OPERATION_STAGE):
         problems.append("generation 3 is not the seal issuing the reserved Receipt for start:work-terminal")
+    if len(generations) >= 4:
+        third, fourth = generations[2], generations[3]
+        if (fourth.status != records.GATE_STATUS_OPEN or fourth.receipt_id is not None
+                or fourth.authorized_operation_stage is not None or fourth.accepted_tasks != third.accepted_tasks
+                or fourth.settled_tasks != third.settled_tasks):
+            problems.append("generation 4 is not the open invalidation of the seal")
     if problems:
         raise _reconcile(f"Work Review Run {run.review_run_id}: " + "; ".join(problems), "review_chain_invalid")
 
@@ -536,7 +719,8 @@ def run_material(store: ProjectStore, run: WorkRun, chain: Any) -> RunMaterial:
         raise _reconcile("the stored Candidate names no declared base of a known object width")
     reconstruction = work_review.read_material(snapshot, first.candidate_hash, width)
     envelope_problems = work_review.task_input_problems(
-        task_input, material, first.candidate_hash, first.review_context_hash, first.effective_policy_hash
+        task_input, material, first.candidate_hash, first.review_context_hash, first.effective_policy_hash,
+        review_run_id=run.review_run_id,
     )
     if envelope_problems:
         raise _reconcile("the accepted task's request: " + "; ".join(envelope_problems), "review_task_invalid")
@@ -630,7 +814,8 @@ def freeze_and_review(session: "_Session", view: ProjectView, work: Entity, outc
     verified = work_verify.verify(store, git, reconstruction, resulting_tree_id=resulting)
     context_hash = work_context.context_hash(context)
     policy_hash = work_review.policy_hash()
-    envelope = work_review.request_envelope(candidate, context)
+    # F4 §11.18.6: a new Run's request is version 2; an ordinary first Run sets nothing aside
+    envelope = work_review.request_envelope(candidate, context, [], review_run_id=run.review_run_id)
     task_input = work_review.task_input_for(
         task_id=run.task_id, reviewer_identity=session.review.reviewer_identity,
         reviewer_version=session.review.reviewer_version, envelope=envelope, snapshot=snapshot,
@@ -732,8 +917,14 @@ def _continue(session: "_Session", run: WorkRun) -> Sealed:
         if chain is None:
             raise _reconcile(f"Work Review Run {run.review_run_id} has no chain to continue", "review_chain_invalid")
         _require_shape(run, chain)
-        material = run_material(store, run, chain)
         latest = chain.latest.generation
+        if latest == INVALIDATION_GENERATION:
+            raise _reconcile(
+                f"Work Review Run {run.review_run_id} is invalidated at generation 4 and its Receipt is superseded; an "
+                "invalidated Run is never continued as a current authorization (F4 §11.18.4)",
+                "review_chain_invalid",
+            )
+        material = run_material(store, run, chain)
         if latest == 1:
             _launch_and_settle(session, run, chain, material)
             continue
@@ -846,7 +1037,7 @@ def _seal(session: "_Session", run: WorkRun, chain: Any, base: dict[str, Any]) -
     if session.mutation.note(NOTE_SEAL_REFUSAL) is not None:
         session.mutation.set_note(NOTE_SEAL_REFUSAL, None)  # a retry that passes leaves no stale refusal behind
     _start_generation(session, run, 3, gate_three, [(review_paths.receipt_rel(run.receipt_id), receipt.to_record())], base,
-                      receipt_id=run.receipt_id)
+                      receipt_id=run.receipt_id)  # a Class-A successor's generation 3 commit is K_adopt (F4 §11.18.2)
 
 
 # --------------------------------------------------------------------------- 17 ... 37: proof, publication, terminal
@@ -876,7 +1067,7 @@ PUBLICATION_VALIDATOR = "review-v1-work-publication-v1"
 NOTE_RESULT_PROOF = "review_work_result_proof"
 NOTE_TERMINAL_PROOF = "review_work_terminal_proof"
 TERMINAL_EVENTS = ("work_target_removed", "work_completed")
-ROLE_RESULT, ROLE_TERMINAL = "result", "terminal"
+ROLE_RESULT, ROLE_ADOPTED, ROLE_TERMINAL = "result", "adopted-result", "terminal"
 #: The operation-contract metadata the work_completed event carries (F1 Gate 1, R4 §5).
 OPERATION_CONTRACT = work_context.OPERATION_CONTRACT
 
@@ -945,17 +1136,28 @@ class CommittedRecords(CommittedReviewStore):
 
 @dataclass(frozen=True)
 class WorkRecord:
-    """A review-v1 Work START mutation as its durable record names it: the Work, the Run, the effects."""
+    """A review-v1 Work START mutation as its durable record names it: the Work, the Run, the effects.
+
+    ``run`` is the Run whose Receipt the completion consumes: the first Run,
+    or - once the Class-A checkpoint and the one successor reservation are both
+    durable - that successor, with the first Run as ``initial`` (F4).
+    """
 
     mutation_id: str
     run: WorkRun
     effects: list[dict[str, Any]]
     notes: dict[str, Any]
     reserved: dict[str, Any]
+    initial: WorkRun | None = None
 
     @property
     def work_id(self) -> str:
         return self.run.work_id
+
+    @property
+    def adopted(self) -> bool:
+        """Whether this completion is a Class-A adoption: its authorizing Run is the successor."""
+        return self.initial is not None
 
     def stages(self) -> list[str]:
         found: list[str] = []
@@ -978,7 +1180,14 @@ class WorkRecord:
 
 
 def work_record(record: dict[str, Any]) -> WorkRecord:
-    """The durable record of a review-v1 Work START mutation, with the one Work Review Run it reserved."""
+    """The durable record of a review-v1 Work START mutation, with the Work Review Run that authorizes it.
+
+    The first Run is reserved under the unchanged first-Run key. A Class-A
+    successor is the authorizing Run only when the record holds both the
+    Class-A checkpoint naming the first Run and exactly the one successor
+    reservation keyed by it (F4 §11.18.5): a reservation alone never changes
+    which Receipt a completion consumes, and anything else is reconcile.
+    """
     if not work_invocation.is_work(record.get("invocation")):
         raise _reconcile(f"mutation {record.get('mutation_id')} is not a review-v1 Work START by its durable invocation")
     reserved = dict(record.get("reserved_ids") or {})
@@ -993,8 +1202,24 @@ def work_record(record: dict[str, Any]) -> WorkRecord:
         raise _reconcile(f"START mutation {record.get('mutation_id')} holds Run {run_id} without its task or Receipt id")
     effects = record.get("effects") if isinstance(record.get("effects"), list) else []
     notes = record.get("notes") if isinstance(record.get("notes"), dict) else {}
-    return WorkRecord(str(record.get("mutation_id")), WorkRun(keys[0][len(prefix):], run_id, task_id, receipt_id),
-                      effects, notes, reserved)
+    work_id = keys[0][len(prefix):]
+    first = WorkRun(work_id, run_id, task_id, receipt_id)
+    successors = _successor_keys(reserved)
+    if not successors:
+        return WorkRecord(str(record.get("mutation_id")), first, effects, notes, reserved)
+    checkpoint = notes.get(NOTE_CLASS_A)
+    if successors != [gate.review_successor_run_key(run_id)] or not isinstance(checkpoint, dict) \
+            or checkpoint.get("old_review_run_id") != run_id:
+        raise _reconcile(f"START mutation {record.get('mutation_id')} reserves {successors} without exactly the "
+                         f"Class-A checkpoint and the one successor of {run_id}")
+    successor_id = str(reserved[successors[0]])
+    successor_task = reserved.get(gate.review_task_key(successor_id, work_review.TASK_SLOT))
+    successor_receipt = reserved.get(gate.review_receipt_key(successor_id, work_review.SEAL_GENERATION))
+    if successor_id == run_id or not isinstance(successor_task, str) or not isinstance(successor_receipt, str):
+        raise _reconcile(f"START mutation {record.get('mutation_id')} holds successor Run {successor_id} without its "
+                         "task or Receipt id")
+    successor = WorkRun(work_id, successor_id, successor_task, successor_receipt, predecessor_review_run_id=run_id)
+    return WorkRecord(str(record.get("mutation_id")), successor, effects, notes, reserved, initial=first)
 
 
 def _commit_effect(record: WorkRecord, stage: str | None) -> dict[str, Any] | None:
@@ -1239,7 +1464,7 @@ def _material_at(at: "CommittedRecords", record: WorkRecord, item: str) -> Proof
         task_input = at.read_task_input(run.task_id)
         problems = work_review.task_input_problems(
             task_input, snapshot.material or {}, first.candidate_hash, first.review_context_hash,
-            first.effective_policy_hash,
+            first.effective_policy_hash, review_run_id=run.review_run_id,
         )
         if problems:
             raise _proof_failed(item, "; ".join(problems))
@@ -1511,10 +1736,17 @@ def prove_terminal(store: ProjectStore, git: HermeticGit, mutation_record: dict[
             or payload.get("attr_basis") != base["base_commit"]):
         raise _proof_failed("T2", "S-c2 is not a review-v1-work-local-v2 terminal commit pinned to the declared base")
     attributes.require_pinned_path_evaluation(store, git, base["base_commit"], list(payload["paths"]))
-    # T3 - lineage: parent(K2) is K1 exactly, or the own-Review lineage with no K1
+    # T3 - lineage: parent(K2) is K1 exactly, or the own-Review lineage with no K1. A Class-A completion -
+    # selected only by its durable checkpoint and the successor it reserved, never by the parent's shape - has
+    # parent(K_terminal) = K_adopt exactly, over the proven adoption range K1 -> old G4 -> G1 -> G2 -> G3 (F4 §11.18.10)
     if parent != payload.get("base_head") or payload.get("branch") != base["branch"]:
         raise _proof_failed("T3", f"parent({k2}) is not the recorded base_head on the declared branch")
-    if result:
+    adopted: str | None = None
+    if result and record.adopted:
+        adopted = _adopted_parent(store, git, record, k1, parent, "T3")
+        if parent != adopted:
+            raise _proof_failed("T3", f"parent({k2}) is not K_adopt exactly")
+    elif result:
         if not isinstance(k1, str) or parent != k1:
             raise _proof_failed("T3", f"parent({k2}) is not K1 exactly")
     else:
@@ -1603,12 +1835,15 @@ def prove_terminal(store: ProjectStore, git: HermeticGit, mutation_record: dict[
         declared = set(paths)
         if any(item.path in declared for item in _delta(git, base["base_commit"], k2)):
             raise _proof_failed("T12", "the delta from the declared base to K2 holds a declared path")
-    return {
+    proven = {
         "contract": PROOF_CONTRACT, "candidate_hash": material.chain.generations[0].candidate_hash,
         "receipt_id": run.receipt_id, "artifact_kind": material.content["artifact_kind"],
         "result_commit": k1 if result else None, "terminal_commit": k2, "terminal_event_ids": list(reserved),
         "consumption_id": consumption_id, "base_commit": parent, "branch": base["branch"],
     }
+    if adopted is not None:
+        proven["adopted_commit"] = adopted  # a Class-A terminal names its K_adopt; a normal one is unchanged
+    return proven
 
 
 def require_artifact_kind_agreement(candidate: dict[str, Any], consumption: Any, k1: str | None, item: str) -> None:
@@ -1641,31 +1876,51 @@ def work_publication(store: ProjectStore, effects: list[dict[str, Any]], positio
     if not gitcmd.full_commit_id(commit):
         raise _reconcile("V-2: the Work push does not name a full commit id", "review_publication_invalid")
     record = work_record({**mutation_record, "effects": effects})
-    # V-3: exactly one proof note names K, and that says which publication this is
+    # V-3: exactly one proof note names K, and that says which publication this is. The adopted-result role
+    # (F4 §11.18.9) is its own role, recognized only from its own note: never inferred from the stage's shape
     roles = []
-    for key, field, role in ((NOTE_RESULT_PROOF, "result_commit", ROLE_RESULT),
-                             (NOTE_TERMINAL_PROOF, "terminal_commit", ROLE_TERMINAL)):
+    for key, named, role, contract in ((NOTE_RESULT_PROOF, "result_commit", ROLE_RESULT, PROOF_CONTRACT),
+                                       (NOTE_ADOPTED_PROOF, "k_adopt", ROLE_ADOPTED, ADOPTED_PROOF_CONTRACT),
+                                       (NOTE_TERMINAL_PROOF, "terminal_commit", ROLE_TERMINAL, PROOF_CONTRACT)):
         note = record.notes.get(key)
-        if isinstance(note, dict) and note.get("contract") == PROOF_CONTRACT and note.get(field) == commit:
+        if isinstance(note, dict) and note.get("contract") == contract and note.get(named) == commit:
             roles.append(role)
     if len(roles) != 1:
         raise _reconcile(f"V-3: {len(roles)} proof notes name {commit}, not exactly one", "review_publication_invalid")
     role = roles[0]
-    # V-4: the one commit effect that made K
+    # the normal-result and the adopted-result roles never both belong to one completion
+    class_a = record.adopted or record.notes.get(NOTE_CLASS_A) is not None
+    if (role == ROLE_RESULT and class_a) or (role == ROLE_ADOPTED and not record.adopted):
+        raise _reconcile(f"V-3: a {'Class-A' if class_a else 'normal'} completion does not publish {commit} as "
+                         f"its {role}", "review_publication_invalid")
+    git = hermetic_module.enter(store)
     makers = [index for index, effect in enumerate(effects)
               if effect.get("kind") == "git_commit" and effect.get("applied") is True and effect.get("commit_id") == commit]
-    maker = effects[makers[0]] if len(makers) == 1 else {}
-    stage_members = [index for index, effect in enumerate(effects) if effect.get("stage") == maker.get("stage")]
-    ref = (maker.get("payload") or {}).get("branch")
-    if (len(makers) != 1 or stage_members != makers or makers[0] >= position
-            or (maker.get("payload") or {}).get("mode") != workcommit.CONTRACT
-            or ref != f"refs/heads/{payload.get('branch')}"):
-        raise _reconcile("V-4: the commit the push names is not exactly one applied Work commit of its own stage, "
-                         "recorded earlier on the pushed branch", "review_publication_invalid")
-    # V-5: Git agrees - one parent, the recorded base_head, and the branch still holds K
-    git = hermetic_module.enter(store)
-    if _parents(git, commit) != (maker["payload"]["base_head"],):
-        raise _reconcile(f"V-5: {commit} is not one commit on its recorded base_head", "review_publication_invalid")
+    if role == ROLE_ADOPTED:
+        # V-4 / V-5: K_adopt is the successor's generation 3 commit - made by its generation mutation, never by
+        # this START mutation - on the branch its proof binds, one commit on the successor's generation 2
+        adopted = record.notes[NOTE_ADOPTED_PROOF]
+        ref = adopted.get("branch")
+        successors = adopted.get("successor_generation_commits")
+        if makers or ref != f"refs/heads/{payload.get('branch')}" or not isinstance(successors, list) \
+                or len(successors) != 3 or successors[-1] != commit:
+            raise _reconcile("V-4: the adopted-result push does not name the successor's exact generation 3 commit on "
+                             "the branch its proof binds", "review_publication_invalid")
+        if _parents(git, commit) != (successors[1],):
+            raise _reconcile(f"V-5: {commit} is not one commit on the successor's generation 2", "review_publication_invalid")
+    else:
+        # V-4: the one commit effect that made K
+        maker = effects[makers[0]] if len(makers) == 1 else {}
+        stage_members = [index for index, effect in enumerate(effects) if effect.get("stage") == maker.get("stage")]
+        ref = (maker.get("payload") or {}).get("branch")
+        if (len(makers) != 1 or stage_members != makers or makers[0] >= position
+                or (maker.get("payload") or {}).get("mode") != workcommit.CONTRACT
+                or ref != f"refs/heads/{payload.get('branch')}"):
+            raise _reconcile("V-4: the commit the push names is not exactly one applied Work commit of its own stage, "
+                             "recorded earlier on the pushed branch", "review_publication_invalid")
+        # V-5: Git agrees - one parent, the recorded base_head, and the branch still holds K
+        if _parents(git, commit) != (maker["payload"]["base_head"],):
+            raise _reconcile(f"V-5: {commit} is not one commit on its recorded base_head", "review_publication_invalid")
     tip = workcommit.ref_value(git, str(ref))
     if tip is None or ancestry.raw_descends_from(git, tip, commit) is not True:
         raise _reconcile(f"V-5: {ref} does not hold {commit}", "review_publication_invalid")
@@ -1686,6 +1941,13 @@ def work_publication(store: ProjectStore, effects: list[dict[str, Any]], positio
         if kind != work_review.ARTIFACT_RESULT or pushes[0] != position:
             raise _reconcile("V-6: a result publication in an operation that has no K1, or not the first push",
                              "review_publication_invalid")
+    elif role == ROLE_ADOPTED:
+        # the first of the two pushes a result-bearing Class A has; never K1 alone, never beside a result push
+        k1 = record.notes[NOTE_ADOPTED_PROOF].get("k1")
+        if (kind != work_review.ARTIFACT_RESULT or pushes[0] != position
+                or any((effects[index].get("payload") or {}).get("commit") == k1 for index in pushes)):
+            raise _reconcile("V-6: an adopted-result publication that is not the first push of a result-bearing "
+                             "Class A, or one beside a push of K1", "review_publication_invalid")
     else:
         if len(pushes) != allowed or pushes[-1] != position:
             raise _reconcile("V-6a: the terminal publication is not the last of exactly the pushes this case allows",
@@ -1698,9 +1960,13 @@ def work_publication(store: ProjectStore, effects: list[dict[str, Any]], positio
     # applied") is false by construction once the terminal stage exists, so it is never asked again then.
     if push.get("applied") is not True:
         whole = {**mutation_record, "effects": effects}
-        proven = (prove_result if role == ROLE_RESULT else prove_terminal)(store, git, whole, commit)
-        note = record.notes[NOTE_RESULT_PROOF if role == ROLE_RESULT else NOTE_TERMINAL_PROOF]
-        if note != proven:
+        prover, key = {
+            ROLE_RESULT: (prove_result, NOTE_RESULT_PROOF),
+            ROLE_ADOPTED: (prove_adopted_result, NOTE_ADOPTED_PROOF),
+            ROLE_TERMINAL: (prove_terminal, NOTE_TERMINAL_PROOF),
+        }[role]
+        proven = prover(store, git, whole, commit)
+        if record.notes[key] != proven:
             raise _reconcile("V-7: the proof re-evaluated now is not the one its note names", "review_publication_invalid")
     return commit, str(ref)
 
@@ -1741,10 +2007,19 @@ def _stage_commit(mutation: Mutation, stage: str | None) -> str:
     return str(effect["commit_id"])
 
 
-def terminalize(session: "_Session", sealed: Sealed) -> Any:
-    """F3 §5.1 steps 17 ... 37 for a sealed Work Review Run; the ``completed`` StartResult, or a STOP."""
+def terminalize(session: "_Session", sealed: "Sealed | Adoption") -> Any:
+    """F3 §5.1 steps 17 ... 37 for a sealed Work Review Run; the ``completed`` StartResult, or a STOP.
+
+    A Class-A replacement in progress - an :class:`Adoption`, or any record
+    that already holds the durable Class-A checkpoint - continues on the F4
+    topology from that checkpoint (:func:`_adopt`) and never on the normal one.
+    """
     from .start import StartResult
 
+    if isinstance(sealed, Adoption):
+        return _adopt(session, sealed.initial)
+    if session.mutation.note(NOTE_CLASS_A) is not None:
+        return _adopt(session, sealed.run)
     store, mutation = session.store, session.mutation
     run, material = sealed.run, sealed.material
     candidate, base = material.candidate, material.base
@@ -1776,7 +2051,13 @@ def terminalize(session: "_Session", sealed: Sealed) -> Any:
             # 20, 21: C-2(K1) re-evaluated until the terminal stage exists. From then on its W12 ("the
             # consumption has not happened") is false by construction, and the stage was recorded only
             # once this proof was complete and its note durable (§13.4) - so it is never asked again.
-            _write_note(mutation, NOTE_RESULT_PROOF, prove_result(store, git, mutation.record, k1))
+            try:
+                proven = prove_result(store, git, mutation.record, k1)
+            except ReconcileRequired as failure:
+                # F4: K1 exists and its normal proof no longer holds. Only an explicit, fail-closed post-commit
+                # classification decides whether this is Class A; B, C and everything unproven stay reconcile.
+                return _post_commit(session, sealed, git, k1, failure)
+            _write_note(mutation, NOTE_RESULT_PROOF, proven)
         elif not isinstance(mutation.note(NOTE_RESULT_PROOF), dict):
             raise _reconcile("the terminal stage is recorded without the result proof note it requires")
         if remote:
@@ -1821,8 +2102,13 @@ def _result_commit(session: "_Session", sealed: Sealed, git: HermeticGit, chain:
 
 
 def _terminal(session: "_Session", sealed: Sealed, git: HermeticGit, chain: Any, consumption_id: str,
-              k1: str | None) -> str:
-    """Steps 25 - 30: the terminal stage (two events, then the Consumption), applied; then S-c2 and K2."""
+              k1: str | None, *, k_adopt: str | None = None) -> str:
+    """Steps 25 - 30: the terminal stage (two events, then the Consumption), applied; then S-c2 and K2.
+
+    With ``k_adopt`` (a Class-A adoption, F4 §11.18.10) the Consumption still
+    binds K1, the stage follows the adopted-result proof instead of C-2(K1), and
+    the terminal commit's exact parent is K_adopt instead of K1.
+    """
     from .ops import new_event
 
     store, mutation = session.store, session.mutation
@@ -1832,7 +2118,13 @@ def _terminal(session: "_Session", sealed: Sealed, git: HermeticGit, chain: Any,
     if _terminal_stage(work_record(mutation.record)) is None:
         # §13.4 - before the stage is recorded
         gate.require_committable(store, [consumption_path])
-        if material.content["artifact_kind"] == work_review.ARTIFACT_RESULT:
+        if material.content["artifact_kind"] == work_review.ARTIFACT_RESULT and k_adopt is not None:
+            note = mutation.note(NOTE_ADOPTED_PROOF)
+            if (not isinstance(note, dict) or note.get("contract") != ADOPTED_PROOF_CONTRACT or note.get("k1") != k1
+                    or note.get("k_adopt") != k_adopt):
+                raise _reconcile("the Class-A terminal stage is recorded only after the adopted-result proof of exact "
+                                 "K_adopt and its note")
+        elif material.content["artifact_kind"] == work_review.ARTIFACT_RESULT:
             note = mutation.note(NOTE_RESULT_PROOF)
             if not isinstance(note, dict) or note.get("result_commit") != k1:
                 raise _reconcile("the terminal stage is recorded only after C-2(K1) and its note")
@@ -1866,7 +2158,10 @@ def _terminal(session: "_Session", sealed: Sealed, git: HermeticGit, chain: Any,
     prefix = f"{work_id}:finalize"
     if work_record(mutation.record).one_stage(prefix) is None:
         branch, tip = _head(git)
-        if k1 is not None and tip != k1:
+        if k_adopt is not None and tip != k_adopt:
+            raise _reconcile(f"{branch} is {tip}, not K_adopt {k_adopt}; parent(K_terminal) is K_adopt exactly "
+                             "(F4 §11.18.10)", "review_registration_base_moved")
+        if k_adopt is None and k1 is not None and tip != k1:
             raise _reconcile(f"{branch} is {tip}, not K1 {k1}; parent(K2) is K1 exactly (§15.1)",
                              "review_registration_base_moved")
         if k1 is None:
@@ -1893,11 +2188,15 @@ def require_recorded_completion(session: "_Session", sealed: Sealed, git: Hermet
         raise _reconcile("P-1: the terminal stage is not recorded and applied")
     # P-2 - C-2(K2), re-evaluated here
     prove_terminal(store, git, mutation.record, k2)
-    # P-3 - with a remote, the exact K2 published
+    # P-3 - with a remote, the exact K2 published (and, for a Class-A adoption, the exact K_adopt before it)
     if session.destination is not None:
         stage = record.one_stage(f"{run.work_id}:finalize-publication")
         if stage is None or any(effect.get("applied") is not True for effect in record.stage_effects(stage)):
             raise _reconcile("P-3: K2 is not published")
+        if record.adopted:
+            adopted = record.one_stage(f"{run.work_id}:adopted-publication")
+            if adopted is None or any(effect.get("applied") is not True for effect in record.stage_effects(adopted)):
+                raise _reconcile("P-3: K_adopt is not published")
     # P-4 - the live lifecycle postcheck, reading no Review record
     if ProjectView.load(store).work_state(run.work_id).state != "completed":
         raise StopError(f"{run.work_id} is not completed after its terminal stage", code="postcheck_failed")
@@ -1907,3 +2206,916 @@ def require_recorded_completion(session: "_Session", sealed: Sealed, git: Hermet
     left = gitcmd.changed_against_head(store.root, owned)
     if left:
         raise _reconcile(f"P-6: {', '.join(sorted(left))} is not committed as this operation left it")
+
+
+# =========================================================================== F4 (RB3-C1): post-commit recovery
+#
+# Where Class A is attempted: only once K1 - the result commit this mutation's own S-c1 made (C-1) - exists,
+# its normal C-2(K1) fails, and no publication, terminal lifecycle, Consumption or terminal commit stage is
+# durable yet. Pre-commit drift never reaches here: a mismatch known before K1 exists is not committed (F4
+# §11.2). The classification is explicit and fail-closed - the hard safety facts are established on their own,
+# and only then is the failure classified as A1 or A2; everything else is B, C, not eligible, or an escape.
+
+
+@dataclass(frozen=True)
+class PostCommit:
+    """The explicit post-commit classification of an exact K1 whose normal proof failed (F4 §11.3, §26.8).
+
+    ``kind``    A1 | A2 (adoptable), B, C, not-eligible, historical-escape (each reconcile)
+    ``reason``  for an adoptable K1 its classification reason ("a1:<surfaces>" / "a2:<surfaces>"); for a
+                refusal the reconcile reason it stops with
+    """
+
+    kind: str
+    reason: str
+    detail: str
+    parent: str | None = None
+    destination: str | None = None
+
+    @property
+    def adoptable(self) -> bool:
+        return self.kind in (CLASS_A1, CLASS_A2)
+
+
+def _stripped(failure: ReconcileRequired) -> str:
+    text = str(failure)
+    return text[: -len(": reconcile required")] if text.endswith(": reconcile required") else text
+
+
+def _destination_state(session: "_Session", commit: str, branch: str) -> str:
+    """Where the approved destination's ``branch`` stands to ``commit``; read-only (F4 §11.4, §26.28 P2).
+
+    ```text
+    no-remote   a remote-less Project: nothing is published, ever
+    absent      the destination has no such branch
+    holds       its branch is ``commit`` or a descendant of it: ``commit`` is published
+    behind      its branch is an ancestor of ``commit``: ``commit`` is not published
+    divergent   another history
+    ```
+
+    The existing exact-publication primitives, in their existing roles: the
+    recorded destination confirmed against the Project pin before anything is
+    contacted, only a locator Git reads as itself is read, the destination's own
+    branch (never a remote-tracking ref), its history fetched as objects only,
+    and the RAW ancestry reader. What cannot be read or shown is a STOP, never
+    "not published".
+    """
+    destination = session.destination
+    if destination is None:
+        return "no-remote"
+    from .destination import verify_recorded_destination
+
+    store = session.store
+    verify_recorded_destination(store, destination.remote, destination.locator)
+    readable = gitcmd.reads_itself(store.root, destination.locator)
+    if readable is False:
+        raise _reconcile(f"whether the approved destination holds {commit} could only be read through the URL Git "
+                         f"rewrites {destination.locator} to - another repository - so it is not read")
+    if readable is None:
+        raise StopError(f"cannot tell what a read of {destination.locator} would reach: STOP",
+                        code="review_destination_unknown")
+    tip = gitcmd.destination_branch(store.root, destination.locator, branch)
+    if tip is None:
+        return "absent"
+    if tip == commit:
+        return "holds"
+    git = hermetic_module.enter(store)
+    held = ancestry.raw_descends_from(git, tip, commit)
+    if held is ancestry.UNKNOWN:
+        gitcmd.fetch_destination_branch(store.root, destination.locator, branch)
+        held = ancestry.raw_descends_from(git, tip, commit)
+    if held is True:
+        return "holds"
+    if held is not False:
+        raise StopError(f"cannot show whether {branch} at {destination.locator} holds {commit}: STOP",
+                        code="review_destination_unknown")
+    behind = ancestry.raw_descends_from(git, commit, tip)
+    if behind is True:
+        return "behind"
+    if behind is False:
+        return "divergent"
+    raise StopError(f"cannot show how {branch} at {destination.locator} stands to {commit}: STOP",
+                    code="review_destination_unknown")
+
+
+def _currency_surfaces(store: ProjectStore, git: HermeticGit, material: Any, activation: Activation) -> list[str]:
+    """Which bound authorization surfaces no longer re-derive now: Context, Effective Policy, Evidence (A2)."""
+    from .implementation import package_directory
+
+    first = material.chain.generations[0]
+    capability = material.context["review_checkout_capability"]
+    recomputed = work_context.context_record(
+        store.workline_root(), package_directory(store.workline_root()), activation.binding(),
+        capability["base_tree"], capability["resulting_tree"],
+    )
+    stale: list[str] = []
+    if work_context.context_hash(recomputed) != first.review_context_hash:
+        stale.append("review_context_changed")
+    if work_review.policy_hash() != first.effective_policy_hash:
+        stale.append("review_policy_changed")
+    entries = work_review.entries_of(material.candidate)
+    verified = work_verify.Verified(material.base["base_commit"], capability["resulting_tree"], len(entries))
+    evidence = _evidence(git, material.candidate, material.snapshot, material.task_input, material.context,
+                         first.review_context_hash, first.effective_policy_hash, activation, verified,
+                         declared=bool(entries))
+    if serialize.digest(evidence) != first.evidence_digest:
+        stale.append("review_evidence_changed")
+    return stale
+
+
+def _artifact_differences(git: HermeticGit, material: Any, parent: str, k1: str, stored: Any) -> list[str]:
+    """Where the persisted K1 is not the Candidate's artifact: its complete delta, its containment, its message."""
+    differences: list[str] = []
+    entries = work_review.entries_of(material.candidate)
+    expected = {entry["path"]: (entry["old_mode"], entry["new_mode"], entry["old_oid"], entry["new_oid"], entry["status"])
+                for entry in entries if work_review.changing(entry)}
+    found: dict[str, tuple[str, ...]] = {}
+    for item in _delta(git, parent, k1):
+        found[item.path] = (item.old_mode, item.new_mode, item.old_blob, item.new_blob, _STATUS.get(item.status, "?"))
+    if found != expected:
+        differences.append("entries")
+    try:
+        _require_contained(git, k1, entries, "A1")
+    except ReconcileRequired:
+        if "entries" not in differences:
+            differences.append("entries")
+    if stored.message != material.content["message"].encode("utf-8"):
+        differences.append("message")
+    return differences
+
+
+@dataclass(frozen=True)
+class Replacement:
+    """The replacement Candidate C2, frozen from committed objects alone (F4 §11.18.8, §26.11)."""
+
+    candidate: dict[str, Any]
+    payloads: dict[str, bytes]
+    snapshot: records.CandidateSnapshot
+    context: dict[str, Any]
+    parent: str
+    tree: str
+
+
+def _replacement(store: ProjectStore, git: HermeticGit, predecessor: dict[str, Any], k1: str,
+                 activation: Activation) -> Replacement:
+    """C2: the predecessor's declared path set read at parent(K1) (old side) and at exact K1 (new side).
+
+    The predecessor Candidate's declared artifact paths are the closed
+    declaration set; the complete parent(K1) -> K1 delta holds no path outside
+    it (else Class B). Every declared entry is rebuilt - inert ones included -
+    with its old identity from parent(K1) and its new identity (and, for a file
+    or a symlink, its bytes) from the stored K1; a gitlink and an absence carry
+    no payload. The message is K1's persisted message, and the resulting tree is
+    exactly K1's tree. No working-tree byte is read. The Context, Policy and
+    activation are the current ones.
+    """
+    from .implementation import package_directory
+
+    stored = workcommit._stored_commit(git, k1)
+    if stored is None or len(stored.parents) != 1:
+        raise _reconcile(f"{k1} is not a readable stored commit with exactly one parent", REASON_CLASS_C)
+    parent = stored.parents[0]
+    declared = [entry["path"] for entry in work_review.entries_of(predecessor)]
+    foreign = sorted({item.path for item in _delta(git, parent, k1)} - set(declared))
+    if foreign:
+        raise _reconcile(f"Class B: K1 {k1} changes {foreign}, outside the operation-owned declaration", REASON_CLASS_B)
+    width = len(k1)
+    try:
+        before = workcommit._tree_entries(git, parent, declared)
+        after = workcommit._tree_entries(git, k1, declared)
+    except StopError as exc:
+        raise _reconcile(f"the trees of {parent} and {k1} cannot be read: {exc}", REASON_CLASS_C) from exc
+    kinds = {"100644": ("file", "blob"), "100755": ("file", "blob"), "120000": ("symlink", "blob"),
+             "160000": ("gitlink", "commit")}
+    entries: list[dict[str, Any]] = []
+    payloads: dict[str, bytes] = {}
+    for path in declared:
+        old, new = before.get(path), after.get(path)
+        if new is None:
+            kind, mode, oid, data = "absent", "000000", None, None
+        else:
+            if new.mode not in kinds or kinds[new.mode][1] != new.type:
+                raise _reconcile(f"{k1} holds {path} as {new.type} {new.mode}, which no Candidate kind names",
+                                 REASON_CLASS_C)
+            kind, mode, oid = kinds[new.mode][0], new.mode, new.oid
+            data = workcommit._read_blob(git, new.oid) if kind in work_review.BYTE_KINDS else None
+            if data is not None:
+                payloads[path] = data
+        entries.append(work_review.candidate_entry(path, None if old is None else (old.mode, old.oid), kind, mode, oid,
+                                                   data, width))
+    try:
+        message = stored.message.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _reconcile(f"K1 {k1}'s persisted message is not UTF-8 text a Candidate can bind", REASON_CLASS_C) from exc
+    content = work_review.content_for(
+        entries, message=message, base_commit=parent,
+        declared_result=[entry["path"] for entry in entries if entry["new_kind"] != "absent"],
+        declared_deleted=[entry["path"] for entry in entries if entry["new_kind"] == "absent"],
+    )
+    if content["artifact_kind"] != work_review.ARTIFACT_RESULT:
+        raise _reconcile(f"K1 {k1} carries no changing declared entry; Class A never synthesizes an empty adoption",
+                         REASON_CLASS_C)
+    base = declared_base(store, git, parent, predecessor["declared_base"]["branch"],
+                         predecessor["declared_base"]["work"]["work_id"])
+    candidate = work_review.candidate_record(content, base, activation.binding())
+    snapshot = work_review.snapshot_for(work_review.snapshot_material(candidate, payloads))
+    resulting = resulting_tree.resulting_tree_id(
+        store, git, parent, resulting_tree.entries_from_records(work_review.entries_of(candidate)), payloads
+    )
+    if resulting != stored.tree:
+        raise _reconcile(f"C2 composes {resulting}, not K1's exact tree {stored.tree}", REASON_CLASS_C)
+    context = work_context.context_record(
+        store.workline_root(), package_directory(store.workline_root()), activation.binding(),
+        resulting_tree.root_tree_id(git, parent), stored.tree,
+    )
+    return Replacement(candidate, payloads, snapshot, context, parent, stored.tree)
+
+
+def _incompatible_effect(record: WorkRecord) -> str | None:
+    """A durable effect automatic Class A never reinterprets (F4 §11.18.7, §26.18), or None."""
+    if any(effect.get("kind") == "git_push" for effect in record.effects):
+        return "a publication effect is already durable"
+    if (_terminal_stage(record) is not None or record.one_stage(f"{record.work_id}:finalize") is not None
+            or record.notes.get(NOTE_TERMINAL_PROOF) is not None):
+        return "a terminal lifecycle, Consumption or terminal commit stage is already durable"
+    for effect in record.effects:
+        event = (effect.get("payload") or {}).get("record") if effect.get("kind") == "append_event" else None
+        if isinstance(event, dict) and event.get("type") in WORK_TERMINAL_EVENTS:
+            return "a Work terminal event is already durable"
+    return None
+
+
+def classify_post_commit(session: "_Session", sealed: Sealed, git: HermeticGit, k1: str,
+                         failure: ReconcileRequired | None = None) -> PostCommit:
+    """Class A1 / A2 / B / C of an exact K1 whose normal C-2(K1) failed (F4 §11.3, §26.8); it writes nothing.
+
+    The hard safety facts first, each on its own: the exact operation-owned K1
+    (C-1 of this mutation's S-c1), no incompatible durable publication or
+    terminal effect, its one raw parent, the declared branch holding exactly K1,
+    the complete delta closed over the operation-owned declaration (else B), the
+    first Run sealed and its Receipt current, unsuperseded and unconsumed, the
+    Review namespace canonical and the Run's records unchanged at parent(K1) and
+    K1, the RAW lineage, the activation, the declared base, and C2 reconstructible
+    from committed objects. Only then:
+
+    ```text
+    A1  K1's delta, containment or message is not the Candidate's - every byte still operation-owned
+    A2  K1 is exactly the Candidate, and its Context, Effective Policy or Evidence no longer re-derives
+    ```
+
+    and only an A whose approved destination does not already hold K1 is
+    adoptable. A malformed namespace, missing records, a contradictory
+    activation, an existing Consumption, unknown destination state or foreign
+    lineage is never downgraded into A.
+    """
+    store, mutation = session.store, session.mutation
+    defaults = {CLASS_B: REASON_CLASS_B, NOT_ELIGIBLE: REASON_CLASS_A_INELIGIBLE, ESCAPED: REASON_ALREADY_PUBLISHED}
+
+    def refuse(kind: str, detail: str, reason: str | None = None) -> PostCommit:
+        fallback = failure.reason if failure is not None and failure.reason else REASON_CLASS_C
+        return PostCommit(kind, reason or defaults.get(kind) or fallback, detail)
+
+    try:
+        record = work_record(mutation.record)
+    except ReconcileRequired as exc:
+        return refuse(CLASS_C, f"the START record does not read as one Work completion ({_stripped(exc)})")
+    run, base = record.run, sealed.material.base
+    work_id, branch = run.work_id, base["branch"]
+    if record.adopted or record.notes.get(NOTE_CLASS_A) is not None or run.review_run_id != sealed.run.review_run_id:
+        return refuse(CLASS_C, "the record already holds a Class-A replacement, or names another Run")
+    # the exact operation-owned K1 (C-1)
+    try:
+        effect = _commit_effect(record, record.one_stage(f"{work_id}:results"))
+    except ReconcileRequired as exc:
+        return refuse(CLASS_C, _stripped(exc))
+    payload = (effect or {}).get("payload") or {}
+    if (effect is None or effect.get("applied") is not True or effect.get("commit_id") != k1
+            or effect.get(workcommit.PREPARED_COMMIT) != k1 or payload.get("mode") != workcommit.CONTRACT
+            or payload.get("plan_class") != workcommit.CLASS_RESULT or payload.get("branch") != branch):
+        return refuse(CLASS_C, f"{k1} is not shown to be the result commit this mutation's own S-c1 made (C-1)")
+    # no incompatible durable effect: automatic Class A is unavailable behind one
+    incompatible = _incompatible_effect(record)
+    if incompatible is not None:
+        return refuse(NOT_ELIGIBLE, f"{incompatible}; it is never rewritten, deleted or followed by a replacement")
+    # the stored K1, exactly one raw parent, the one S-c1 recorded and prepared on
+    stored = workcommit._stored_commit(git, k1)
+    if (stored is None or len(stored.parents) != 1 or stored.parents[0] != payload.get("base_head")
+            or stored.parents[0] != effect.get(workcommit.PREPARED_PARENT)):
+        return refuse(CLASS_C, f"{k1} is not one stored commit on the parent its S-c1 recorded")
+    parent = stored.parents[0]
+    # the expected branch holds exactly K1: the adoption range begins at K1
+    try:
+        head_ref, tip = workcommit._head_ref(git), workcommit.ref_value(git, branch)
+    except ReconcileRequired as exc:
+        return refuse(CLASS_C, _stripped(exc))
+    if head_ref != branch or tip != k1:
+        return refuse(CLASS_C, f"HEAD is on {head_ref} and {branch} is {tip}, not exactly K1 {k1}")
+    # the complete delta, closed over the operation-owned declaration
+    try:
+        delta = _delta(git, parent, k1)
+    except ReconcileRequired as exc:
+        return refuse(CLASS_C, _stripped(exc))
+    changed = [item.path for item in delta]
+    if any(item.status not in _STATUS for item in delta) or len(set(changed)) != len(changed):
+        return refuse(CLASS_C, "K1's complete delta holds an entry no Candidate status names")
+    declared = {entry["path"] for entry in work_review.entries_of(sealed.material.candidate)}
+    foreign = sorted(set(changed) - declared)
+    if foreign:
+        return refuse(CLASS_B, f"K1 changes {foreign}, outside the operation-owned declaration")
+    if sorted(changed, key=workcommit._utf8) != list(payload.get("paths") or []):
+        return refuse(CLASS_C, "K1's complete delta is not the path set its S-c1 recorded")
+    # the first Run, its Receipt, the Review namespace and the committed state at parent(K1) and K1
+    try:
+        chain = _chain(store, run)
+        if chain is None:
+            raise _reconcile(f"Work Review Run {run.review_run_id} has no chain")
+        _require_shape(run, chain)
+        if len(chain.generations) != work_review.SEAL_GENERATION:
+            raise _reconcile(f"Work Review Run {run.review_run_id} is not exactly accepted, settled and sealed")
+        checkout.require_namespace_readable(store)
+        review = ReviewStore(store)
+        if review.supersession_exists(run.receipt_id) or review.read_bytes(review_paths.gate_rel(run.review_run_id, 4)):
+            raise _reconcile(f"Receipt {run.receipt_id} is already superseded or its Run invalidated")
+        if run.receipt_id in review.consumption_by_receipt():
+            raise _reconcile(f"Receipt {run.receipt_id} is already consumed")
+        at_parent, at_k1 = CommittedRecords(store, git, parent), CommittedRecords(store, git, k1)
+        material = _material_at(at_k1, record, "A")
+        _material_at(at_parent, record, "A")
+        paths = run_record_paths(run, material.chain)
+        if _record_bytes(at_parent, paths) != _record_bytes(at_k1, paths):
+            raise _reconcile("the Run's records are not held unchanged at parent(K1) and K1")
+        _namespace_clean(at_parent, run, "A")
+        _namespace_clean(at_k1, run, "A")
+        if any(consumption.receipt_id == run.receipt_id for consumption in at_k1.consumptions()):
+            raise _reconcile(f"K1 holds a Consumption of Receipt {run.receipt_id}")
+        _require_receipt_current(material, record, "A")
+        require_lineage(git, run, material.chain, base, parent)
+        activation = _activation_at(store, git, at_parent, material, "A")
+        if session.activation is None or session.activation.binding() != activation.binding():
+            raise _reconcile("the activation proven at entry is not the one the Run binds")
+        if declared_base(store, git, base["base_commit"], branch, work_id) != base:
+            raise _reconcile("declared_base does not re-derive at declared_base.base_commit")
+        if {**declared_base(store, git, parent, branch, work_id), "base_commit": base["base_commit"]} != base:
+            raise _reconcile(f"declared_base does not re-derive identically at {parent}")
+        state = committed_view_at(store, git, k1).work_state(work_id)
+        if state.state != "in_progress" or not state.has_target:
+            raise _reconcile(f"{work_id} does not hold its target in progress at {k1}")
+    except StopError as exc:
+        return refuse(CLASS_C, _stripped(exc) if isinstance(exc, ReconcileRequired) else str(exc))
+    # C2 can be frozen exactly from committed objects
+    try:
+        _replacement(store, git, sealed.material.candidate, k1, activation)
+        differences = _artifact_differences(git, material, parent, k1, stored)
+        surfaces = _currency_surfaces(store, git, material, activation)
+    except ReconcileRequired as exc:
+        return refuse(CLASS_B if exc.reason == REASON_CLASS_B else CLASS_C, _stripped(exc))
+    except StopError as exc:
+        return refuse(CLASS_C, f"the replacement Candidate cannot be frozen from K1: {exc}")
+    if differences:
+        kind, reason = CLASS_A1, "a1:" + ",".join(differences)
+    elif surfaces:
+        kind, reason = CLASS_A2, "a2:" + ",".join(surfaces)
+    else:
+        return refuse(CLASS_C, "K1 is exactly the reviewed artifact and its authorization re-derives, so the normal "
+                               "proof failed for a reason Class A never covers")
+    # the remote-publication precondition: never adopt a K1 the approved destination already holds
+    where = _destination_state(session, k1, branch)
+    if where == "holds":
+        return refuse(ESCAPED, f"the approved destination already holds K1 {k1}: an unauthorized / historical "
+                               "publication escape - no history rewrite, no retroactive authorization, no adoption")
+    if where == "divergent":
+        return refuse(CLASS_C, f"the approved destination's {branch} holds another history than K1 {k1}",
+                      REASON_DESTINATION_DIVERGENT)
+    return PostCommit(kind, reason, f"{kind}: {reason}", parent, where)
+
+
+CHECKPOINT_FIELDS = (
+    "contract", "version", "classification", "reason", "k1", "parent_k1", "branch", "old_review_run_id",
+    "old_receipt_id", "old_candidate_hash", "predecessor_review_run_id", "result_stage", "result_effect_seq",
+    "durable_effects", "publication_effects", "terminal_effects", "destination",
+)
+
+
+def _post_commit(session: "_Session", sealed: Sealed, git: HermeticGit, k1: str, failure: ReconcileRequired) -> Any:
+    """K1 exists and C-2(K1) failed: classify; reconcile anything not adoptable; else checkpoint and adopt."""
+    found = classify_post_commit(session, sealed, git, k1, failure)
+    if not found.adoptable:
+        raise ReconcileRequired(
+            f"{_stripped(failure)}; the post-commit classification is {found.kind}: {found.detail}: reconcile required",
+            reason=found.reason,
+        )
+    mutation, run = session.mutation, sealed.run
+    record = work_record(mutation.record)
+    stage = record.one_stage(f"{run.work_id}:results")
+    effect = _commit_effect(record, stage) or {}
+    # F4 §11.18.3: the durable checkpoint, after strict eligibility and the remote precondition, before old G4
+    _write_note(mutation, NOTE_CLASS_A, {
+        "contract": CLASS_A_CONTRACT, "version": CLASS_A_VERSION,
+        "classification": found.kind, "reason": found.reason,
+        "k1": k1, "parent_k1": found.parent, "branch": sealed.material.base["branch"],
+        "old_review_run_id": run.review_run_id, "old_receipt_id": run.receipt_id,
+        "old_candidate_hash": sealed.chain.generations[0].candidate_hash,
+        "predecessor_review_run_id": run.review_run_id,
+        "result_stage": stage, "result_effect_seq": effect.get("seq"),
+        "durable_effects": len(mutation.effects), "publication_effects": 0, "terminal_effects": 0,
+        "destination": found.destination,
+    })
+    return _adopt(session, run)
+
+
+def _checkpoint_facts(record: WorkRecord, notes: dict[str, Any]) -> dict[str, Any]:
+    """The Class-A checkpoint, held against the durable record it names; reconcile on any contradiction."""
+    note = notes.get(NOTE_CLASS_A)
+    initial = record.initial or record.run
+    if (not isinstance(note, dict) or set(note) != set(CHECKPOINT_FIELDS) or note["contract"] != CLASS_A_CONTRACT
+            or note["version"] != CLASS_A_VERSION or note["classification"] not in (CLASS_A1, CLASS_A2)):
+        raise _reconcile(f"START mutation {record.mutation_id}'s Class-A checkpoint is not of the "
+                         f"{CLASS_A_CONTRACT} shape", REASON_CLASS_C)
+    if (note["old_review_run_id"] != initial.review_run_id or note["predecessor_review_run_id"] != initial.review_run_id
+            or note["old_receipt_id"] != initial.receipt_id):
+        raise _reconcile("the Class-A checkpoint names another first Run or Receipt than the record holds",
+                         REASON_CLASS_C)
+    found = [effect for effect in record.effects if effect.get("stage") == note["result_stage"]]
+    if (len(found) != 1 or found[0].get("kind") != "git_commit" or found[0].get("seq") != note["result_effect_seq"]
+            or found[0].get("applied") is not True or found[0].get("commit_id") != note["k1"]
+            or found[0].get(workcommit.PREPARED_COMMIT) != note["k1"]
+            or (found[0].get("payload") or {}).get("base_head") != note["parent_k1"]
+            or (found[0].get("payload") or {}).get("branch") != note["branch"]
+            or (found[0].get("payload") or {}).get("plan_class") != workcommit.CLASS_RESULT):
+        raise _reconcile("the Class-A checkpoint's K1 is not the result commit the record's S-c1 made",
+                         REASON_CLASS_C)
+    earlier = record.effects[: int(note["durable_effects"]) if isinstance(note["durable_effects"], int) else 0]
+    if any(effect.get("kind") == "git_push" for effect in earlier) or note["publication_effects"] != 0 \
+            or note["terminal_effects"] != 0:
+        raise _reconcile("the Class-A checkpoint was not recorded before every publication and terminal effect",
+                         REASON_CLASS_C)
+    return note
+
+
+def _require_checkpoint(mutation: Mutation, initial: WorkRun, chain: Any, material: RunMaterial,
+                        git: HermeticGit) -> dict[str, Any]:
+    """The checkpoint, validated against immutable committed state before any invalidation or replacement.
+
+    Read against the first Run alone, so a successor reservation an interruption
+    left half made (its task or Receipt id not yet reserved) never keeps the
+    replacement from being continued.
+    """
+    notes = dict(mutation.record.get("notes") or {})
+    record = WorkRecord(mutation.id, initial, mutation.effects, notes, dict(mutation.record.get("reserved_ids") or {}))
+    note = _checkpoint_facts(record, notes)
+    if chain.generations[0].candidate_hash != note["old_candidate_hash"] or material.base["branch"] != note["branch"]:
+        raise _reconcile("the Class-A checkpoint names another Candidate or branch than the first Run binds",
+                         REASON_CLASS_C)
+    stored = workcommit._stored_commit(git, note["k1"])
+    if stored is None or stored.parents != (note["parent_k1"],):
+        raise _reconcile(f"the immutable K1 {note['k1']} the checkpoint names is missing or not on its parent",
+                         REASON_CLASS_C)
+    return note
+
+
+def _expected_invalidation(run: WorkRun, chain: Any) -> tuple[records.GateGeneration, records.Supersession]:
+    """The exact generation 4 and Supersession(R1) a Class-A replacement writes (F4 §11.18.4)."""
+    third = chain.generation(work_review.SEAL_GENERATION)
+    if not third.sealed or third.receipt_id != run.receipt_id:
+        raise _reconcile(f"Work Review Run {run.review_run_id} is not sealed issuing Receipt {run.receipt_id}",
+                         "review_chain_invalid")
+    gate_four = replace(
+        third, generation=INVALIDATION_GENERATION, previous_generation=work_review.SEAL_GENERATION,
+        previous_digest=chain.digests[work_review.SEAL_GENERATION - 1],
+        evidence_digest=serialize.digest(work_review.invalidation_evidence_record(run.receipt_id, CLASS_A_REASON)),
+        status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
+    )
+    return gate_four, records.Supersession(run.receipt_id, run.review_run_id, INVALIDATION_GENERATION, CLASS_A_REASON)
+
+
+def _invalidate_predecessor(session: "_Session", run: WorkRun, material: RunMaterial, checkpoint: dict[str, Any],
+                            git: HermeticGit) -> None:
+    """Old G4 + Supersession(R1), one generation mutation, exactly once (F4 §11.18.1, §11.18.4, §26.12).
+
+    A pending G4 generation mutation is finished first. A committed G4 must be
+    exactly the one this replacement writes. Before it is written, every
+    precondition is derived again now: the old chain exactly sealed, R1 current
+    and unsuperseded and unconsumed, no incompatible durable effect, the branch
+    still exactly K1, and K1 not published.
+    """
+    store, mutation = session.store, session.mutation
+    resolve_pending_generation(session, run)
+    chain = _chain(store, run)
+    if chain is None:
+        raise _reconcile(f"Work Review Run {run.review_run_id} has no chain", "review_chain_invalid")
+    _require_shape(run, chain)
+    gate_four, supersession = _expected_invalidation(run, chain)
+    review = ReviewStore(store)
+    if chain.latest.generation == INVALIDATION_GENERATION:
+        try:
+            held = review.read_supersession(run.receipt_id)
+        except ValidationError as exc:
+            raise _reconcile(f"generation 4 of {run.review_run_id} has no Supersession that reads: {exc}") from exc
+        if chain.latest.to_record() != gate_four.to_record() or held.to_record() != supersession.to_record():
+            raise _reconcile(f"Work Review Run {run.review_run_id}'s generation 4 or Supersession is not the Class-A "
+                             "invalidation this replacement writes", "review_chain_invalid")
+        return
+    if chain.latest.generation != work_review.SEAL_GENERATION:
+        raise _reconcile(f"Work Review Run {run.review_run_id} is not sealed under its Class-A checkpoint",
+                         "review_chain_invalid")
+    incompatible = _incompatible_effect(work_record(mutation.record))
+    if incompatible is not None:
+        raise _reconcile(f"{incompatible}; old G4 is not written behind it", REASON_CLASS_A_INELIGIBLE)
+    if review.supersession_exists(run.receipt_id) or run.receipt_id in review.consumption_by_receipt():
+        raise _reconcile(f"Receipt {run.receipt_id} is already superseded or consumed", REASON_CLASS_C)
+    k1, branch = checkpoint["k1"], checkpoint["branch"]
+    if workcommit._head_ref(git) != branch or workcommit.ref_value(git, branch) != k1:
+        raise _reconcile(f"{branch} no longer holds exactly K1 {k1}, the Class-A checkpoint's lineage", REASON_CLASS_C)
+    where = _destination_state(session, k1, branch)
+    if where == "holds":
+        raise _reconcile(f"the approved destination already holds K1 {k1}: an unauthorized / historical publication "
+                         "escape; nothing is invalidated or adopted", REASON_ALREADY_PUBLISHED)
+    if where == "divergent":
+        raise _reconcile(f"the approved destination's {branch} holds another history than K1 {k1}",
+                         REASON_DESTINATION_DIVERGENT)
+    _start_generation(session, run, INVALIDATION_GENERATION, gate_four,
+                      [(review_paths.supersession_rel(run.receipt_id), supersession.to_record())], material.base,
+                      receipt_id=run.receipt_id)
+
+
+@dataclass(frozen=True)
+class AdoptionLineage:
+    """The adoption range above K1: the generation commits matched in order, and what follows them."""
+
+    commits: tuple[str, ...]  # old G4, then the successor's G1, G2, G3 (= K_adopt), as far as they exist
+    rest: tuple[str, ...]
+
+
+def _is_generation_commit(store: ProjectStore, git: HermeticGit, parent: str, commit: str, run: WorkRun,
+                          generation: int) -> bool:
+    """Whether ``commit`` is exactly ``run``'s generation ``generation`` commit, one commit on ``parent``.
+
+    Its complete delta must be exactly the Review records that generation adds
+    - all added, mode 100644 - as the generation's own committed chain names
+    them, and nothing else (F4 §11.18.2, §26.15).
+    """
+    if _parents(git, commit) != (parent,):
+        return False
+    try:
+        chain = CommittedRecords(store, git, commit).gate_chain(run.review_run_id)
+    except ValidationError:
+        return False
+    if chain is None or chain.latest.generation != generation:
+        return False
+    latest = chain.latest
+    wanted = {review_paths.gate_rel(run.review_run_id, generation)}
+    if generation == records.FIRST_GENERATION:
+        tasks = [str(task["task_id"]) for task in latest.accepted_tasks]
+        if tasks != [run.task_id]:
+            return False
+        wanted |= {review_paths.candidate_snapshot_rel(latest.candidate_hash), review_paths.task_input_rel(run.task_id)}
+    if generation == work_review.SEAL_GENERATION:
+        if latest.receipt_id != run.receipt_id:
+            return False
+        wanted.add(review_paths.receipt_rel(run.receipt_id))
+    if generation == INVALIDATION_GENERATION:
+        wanted.add(review_paths.supersession_rel(run.receipt_id))
+    try:
+        delta = _delta(git, parent, commit)
+    except ReconcileRequired:
+        return False
+    return (sorted(item.path for item in delta) == sorted(wanted)
+            and all(item.status == "A" and item.new_mode == "100644" for item in delta))
+
+
+def _adoption_lineage(store: ProjectStore, git: HermeticGit, record: WorkRecord, k1: str, head: str) -> AdoptionLineage:
+    """The RAW single-parent range (K1, head], matched against K1 -> old G4 -> successor G1 -> G2 -> G3.
+
+    Identity is positive proof from the stored objects - each commit exactly one
+    commit on the one before, each delta exactly its generation's records - and
+    never HEAD, a message, recency or path similarity (F4 §11.18.9, §26.14).
+    """
+    walked = ancestry.raw_range(git, k1, head)
+    if isinstance(walked, ancestry.Answer):
+        raise _reconcile(f"the range ({k1}, {head}] is {walked.value}", REASON_CLASS_C)
+    ordered = list(reversed(walked))
+    initial = record.initial or record.run
+    expected = [(initial, INVALIDATION_GENERATION)]
+    if record.adopted:
+        expected += [(record.run, generation) for generation in (1, 2, work_review.SEAL_GENERATION)]
+    matched: list[str] = []
+    previous = k1
+    for commit in ordered:
+        if len(matched) == len(expected):
+            break
+        run, generation = expected[len(matched)]
+        if not _is_generation_commit(store, git, previous, commit, run, generation):
+            break
+        matched.append(commit)
+        previous = commit
+    return AdoptionLineage(tuple(matched), tuple(ordered[len(matched):]))
+
+
+def _adopted_parent(store: ProjectStore, git: HermeticGit, record: WorkRecord, k1: str | None, parent: str,
+                    item: str) -> str:
+    """K_adopt, proven again for a Class-A terminal: exactly K1 -> old G4 -> G1 -> G2 -> G3 up to ``parent``."""
+    adopted = record.notes.get(NOTE_ADOPTED_PROOF)
+    try:
+        checkpoint = _checkpoint_facts(record, record.notes)
+    except ReconcileRequired as exc:
+        raise _proof_failed(item, _stripped(exc)) from exc
+    if (not isinstance(k1, str) or checkpoint["k1"] != k1 or not isinstance(adopted, dict)
+            or adopted.get("contract") != ADOPTED_PROOF_CONTRACT or adopted.get("k1") != k1):
+        raise _proof_failed(item, "the Class-A checkpoint and the adopted-result proof do not both name exact K1")
+    lineage = _adoption_lineage(store, git, record, k1, parent)
+    if len(lineage.commits) != 4 or lineage.rest:
+        raise _proof_failed(item, f"the range (K1, {parent}] is not exactly old G4 and the successor's G1, G2 and G3")
+    if adopted.get("k_adopt") != lineage.commits[-1]:
+        raise _proof_failed(item, "the adopted-result proof names another K_adopt than the adoption range proves")
+    return lineage.commits[-1]
+
+
+def prove_adopted_result(store: ProjectStore, git: HermeticGit, mutation_record: dict[str, Any],
+                         k_adopt: str) -> dict[str, Any]:
+    """``review_work_adopted_result_proof``: the adopted-result proof of exact ``k_adopt`` (F4 §26.15).
+
+    Re-executed from the durable record and the committed objects alone, so it
+    runs again before the publication is recorded and immediately before it is
+    applied; its note is a binding, never timeless truth. It proves:
+
+    ```text
+    AP-1  the Class-A checkpoint and the exact operation-owned K1 (C-1 of the record's S-c1), one parent
+    AP-2  the RAW range (K1, K_adopt] is exactly old G4, successor G1, G2, G3; the branch holds K_adopt
+    AP-3  the successor at K_adopt: sealed, R2 for start:work-terminal, its v2 request setting aside the
+          first Run with the Class-A reason
+    AP-4  the first Run invalidated at K_adopt by exactly its generation 4 and Supersession(R1)
+    AP-5  C2 binds exact K1: base parent(K1), delta / containment / message exactly K1's, resulting tree K1's
+    AP-6  R2 current for C2: Receipt, settlement, activation, Context, Policy, Evidence, declared base
+    AP-7  the namespace canonical, no Consumption of R1 or R2, no terminal stage, the Work still in progress
+    AP-8  the approved destination identity
+    ```
+    """
+    from .destination import ensure_push_destination
+
+    record = work_record(mutation_record)
+    if not record.adopted or record.initial is None:
+        raise _proof_failed("AP-1", "the record holds no Class-A successor")
+    try:
+        checkpoint = _checkpoint_facts(record, record.notes)
+    except ReconcileRequired as exc:
+        raise _proof_failed("AP-1", _stripped(exc)) from exc
+    k1, branch, work_id, old = checkpoint["k1"], checkpoint["branch"], record.work_id, record.initial
+    stored = workcommit._stored_commit(git, k1)
+    if stored is None or stored.parents != (checkpoint["parent_k1"],):
+        raise _proof_failed("AP-1", f"K1 {k1} is not the stored commit on the parent the checkpoint names")
+    parent = stored.parents[0]
+    # AP-2
+    lineage = _adoption_lineage(store, git, record, k1, k_adopt)
+    if len(lineage.commits) != 4 or lineage.rest or lineage.commits[-1] != k_adopt:
+        raise _proof_failed("AP-2", f"(K1, {k_adopt}] is not exactly old G4 and the successor's G1, G2 and G3")
+    if workcommit._head_ref(git) != branch:
+        raise _proof_failed("AP-2", f"HEAD is not on {branch}")
+    tip = workcommit.ref_value(git, branch)
+    if tip is None or ancestry.raw_descends_from(git, tip, k_adopt) is not True:
+        raise _proof_failed("AP-2", f"{branch} does not hold {k_adopt}")
+    # AP-3
+    at = CommittedRecords(store, git, k_adopt)
+    material = _material_at(at, record, "AP-3")
+    try:
+        set_aside = work_review.request_set_aside(material.task_input.request_envelope,
+                                                  review_run_id=record.run.review_run_id)
+    except ValidationError as exc:
+        raise _proof_failed("AP-3", str(exc)) from exc
+    if set_aside != [{"review_run_id": old.review_run_id, "reason": CLASS_A_REASON}]:
+        raise _proof_failed("AP-3", "the successor's request does not set aside exactly the first Run")
+    # AP-4
+    try:
+        old_chain = at.gate_chain(old.review_run_id)
+        held = at.read_supersession(old.receipt_id)
+    except ValidationError as exc:
+        raise _proof_failed("AP-4", f"the first Run's records at {k_adopt} do not read: {exc}") from exc
+    if old_chain is None or len(old_chain.generations) != INVALIDATION_GENERATION:
+        raise _proof_failed("AP-4", f"{k_adopt} does not hold the first Run invalidated at generation 4")
+    gate_four, supersession = _expected_invalidation(old, old_chain)
+    if old_chain.latest.to_record() != gate_four.to_record() or held.to_record() != supersession.to_record():
+        raise _proof_failed("AP-4", "the first Run's generation 4 or Supersession is not the Class-A invalidation")
+    # AP-5
+    base = material.base
+    if (material.content["artifact_kind"] != work_review.ARTIFACT_RESULT or base["base_commit"] != parent
+            or base["branch"] != branch or base["work"]["work_id"] != work_id):
+        raise _proof_failed("AP-5", "C2 is not a result-bearing Candidate declared on parent(K1)")
+    capability = material.context["review_checkout_capability"]
+    if capability["resulting_tree"] != stored.tree or capability["base_tree"] != resulting_tree.root_tree_id(git, parent):
+        raise _proof_failed("AP-5", "C2's Context does not bind K1's exact tree over parent(K1)'s")
+    differences = _artifact_differences(git, material, parent, k1, stored)
+    if differences:
+        raise _proof_failed("AP-5", f"C2 is not exactly K1 ({', '.join(differences)})")
+    # AP-6
+    _require_receipt_current(material, record, "AP-6")
+    activation = _activation_at(store, git, at, material, "AP-6")
+    _require_identities(store, git, material, activation, "AP-6")
+    if declared_base(store, git, parent, branch, work_id) != base:
+        raise _proof_failed("AP-6", f"declared_base does not re-derive at {parent}")
+    # AP-7
+    _namespace_clean(at, record.run, "AP-7")
+    receipts = {old.receipt_id, record.run.receipt_id}
+    if any(consumption.receipt_id in receipts for consumption in (*at.consumptions(), *ReviewStore(store).consumptions())):
+        raise _proof_failed("AP-7", "a Consumption of the first or the successor Receipt already exists")
+    if _terminal_stage(record) is not None:
+        raise _proof_failed("AP-7", "a terminal stage is recorded before the adopted-result publication")
+    state = committed_view_at(store, git, k_adopt).work_state(work_id)
+    if state.state != "in_progress" or not state.has_target:
+        raise _proof_failed("AP-7", f"{work_id} does not hold its target in progress at {k_adopt}")
+    # AP-8
+    destination = ensure_push_destination(store)
+    first = material.chain.generations[0]
+    return {
+        "contract": ADOPTED_PROOF_CONTRACT, "candidate_hash": first.candidate_hash,
+        "k1": k1, "parent_k1": parent, "branch": branch,
+        "old_review_run_id": old.review_run_id, "old_receipt_id": old.receipt_id,
+        "old_generation_4_commit": lineage.commits[0],
+        "successor_review_run_id": record.run.review_run_id, "successor_receipt_id": record.run.receipt_id,
+        "successor_generation_commits": list(lineage.commits[1:]),
+        "k_adopt": k_adopt,
+        "review_context_hash": first.review_context_hash, "effective_policy_hash": first.effective_policy_hash,
+        "evidence_digest": first.evidence_digest, "activation": activation.binding(),
+        "destination": None if destination is None else {"remote": destination.remote, "locator": destination.locator},
+    }
+
+
+@dataclass(frozen=True)
+class _Currency:
+    current: bool
+    stale: bool
+    detail: str
+
+
+def _recovery_currency(store: ProjectStore):
+    """The Work currency a generation-1 / authorizing generation-2 Run is classified by: Context and Policy now."""
+    from .implementation import package_directory
+
+    def currency(found: Any) -> _Currency:
+        first = found.chain.generations[0]
+        try:
+            context = ReviewStore(store).read_task_input(found.task_id).request_envelope["context"]
+            capability = context["review_checkout_capability"]
+            recomputed = work_context.context_record(
+                store.workline_root(), package_directory(store.workline_root()), context["activation"],
+                capability["base_tree"], capability["resulting_tree"],
+            )
+        except (StopError, KeyError, TypeError) as exc:
+            return _Currency(False, False, f"the Context cannot be recomputed ({exc})")
+        if work_context.context_hash(recomputed) != first.review_context_hash:
+            return _Currency(False, True, "review_context_changed")
+        if work_review.policy_hash() != first.effective_policy_hash:
+            return _Currency(False, True, "review_policy_changed")
+        return _Currency(True, False, "current")
+
+    return currency
+
+
+def _require_recovery_selection(session: "_Session", initial: WorkRun, successor: WorkRun) -> None:
+    """Canonical recovery selection over every matching Work Run (F4 §11.12): exactly the successor, or none yet.
+
+    The first Run must classify as invalidated; the successor, once it has a
+    generation, as the one recoverable Run; and no other matching Run may be
+    recoverable. Nothing is chosen by recency.
+    """
+    from .review import planning, recovery
+
+    store = session.store
+    found = recovery.discover_work(store, work_review.operation_identity(initial.work_id),
+                                   currency=_recovery_currency(store))
+    aside = {item["review_run_id"]: item["reason"] for item in found.set_aside}
+    if aside.get(initial.review_run_id) != planning.SET_ASIDE_INVALIDATED:
+        raise _reconcile(f"recovery selection does not classify {initial.review_run_id} invalidated "
+                         f"({aside.get(initial.review_run_id)})", "review_recovery_ambiguous")
+    expected = successor.review_run_id if _chain(store, successor) is not None else None
+    selected = None if found.recoverable is None else found.recoverable.review_run_id
+    if expected is not None and selected is None and successor.review_run_id in aside:
+        raise _reconcile(
+            f"the successor Work Review Run {successor.review_run_id} is {aside[successor.review_run_id]}; START does not "
+            "terminalize an unauthorized completion and begins no further replacement (no repair loop)",
+            "review_chain_invalid",
+        )
+    if selected != expected:
+        raise _reconcile(f"recovery selection finds {selected} recoverable, and this START continues "
+                         f"{expected or 'a successor not yet begun'}", "review_recovery_ambiguous")
+
+
+def _freeze_replacement(session: "_Session", initial: WorkRun, material: RunMaterial, successor: WorkRun,
+                        k1: str, git: HermeticGit) -> None:
+    """Successor generation 1: C2 from K1, the v2 request naming the first Run, Evidence, accept (F4 §26.13)."""
+    store = session.store
+    activation = session.activation
+    if activation is None:
+        raise _reconcile("a review-v1 START session holds no activation proven at its entry")
+    replacement = _replacement(store, git, material.candidate, k1, activation)
+    checkout.require_namespace_readable(store)
+    candidate_hash = work_review.candidate_hash(replacement.candidate)
+    reconstruction = work_review.read_material(replacement.snapshot, candidate_hash, len(k1))
+    verified = work_verify.verify(store, git, reconstruction, resulting_tree_id=replacement.tree)
+    context_hash = work_context.context_hash(replacement.context)
+    policy_hash = work_review.policy_hash()
+    envelope = work_review.request_envelope(
+        replacement.candidate, replacement.context,
+        [{"review_run_id": initial.review_run_id, "reason": CLASS_A_REASON}], review_run_id=successor.review_run_id,
+    )
+    task_input = work_review.task_input_for(
+        task_id=successor.task_id, reviewer_identity=session.review.reviewer_identity,
+        reviewer_version=session.review.reviewer_version, envelope=envelope, snapshot=replacement.snapshot,
+        review_context_hash=context_hash, effective_policy_hash=policy_hash,
+    )
+    evidence = _evidence(git, replacement.candidate, replacement.snapshot, task_input, replacement.context,
+                         context_hash, policy_hash, activation, verified, declared=True)
+    successor.frozen = {"snapshot": replacement.snapshot, "task_input": task_input, "evidence": evidence,
+                        "context": replacement.context}
+    _accept(session, successor, replacement.candidate["declared_base"])
+
+
+def _adopt(session: "_Session", initial: WorkRun) -> Any:
+    """The F4 Class-A topology from the durable checkpoint to ``completed`` (F4 §11.18, §26.12 - §26.17).
+
+    ```text
+    checkpoint (validated)  -> old G4 + Supersession(R1)   -> successor reserved
+    -> recovery selection   -> successor G1 (C2) / reviewer / G2 / capability / G3 + R2 (= K_adopt)
+    -> adopted-result proof note -> (remote) exact K_adopt published
+    -> terminal stage consuming R2 (result commit K1) -> K_terminal on K_adopt -> terminal proof
+    -> (remote) exact K_terminal published -> recorded-completion proof -> completed
+    ```
+
+    Every step reads what is already durable first, so a resume continues at
+    the earliest unsatisfied checkpoint and never decides anything again. A
+    non-authorizing successor stops, exactly as a first Run does (no P4 repair).
+    """
+    from .start import StartResult
+
+    store, mutation = session.store, session.mutation
+    git = hermetic_module.enter(store)
+    remote = session.destination is not None
+    old_chain = _chain(store, initial)
+    if old_chain is None:
+        raise _reconcile(f"Work Review Run {initial.review_run_id} has no chain", "review_chain_invalid")
+    old_material = run_material(store, initial, old_chain)
+    checkpoint = _require_checkpoint(mutation, initial, old_chain, old_material, git)
+    k1, branch, work_id = checkpoint["k1"], checkpoint["branch"], initial.work_id
+    _invalidate_predecessor(session, initial, old_material, checkpoint, git)
+    successor = reserve_successor(mutation, initial)
+    record = work_record(mutation.record)
+    if not record.adopted or record.run.review_run_id != successor.review_run_id:
+        raise _reconcile("the START record does not select the reserved successor", REASON_CLASS_C)
+    terminal_recorded = _terminal_stage(record) is not None
+    if not terminal_recorded:
+        resolve_pending_generation(session, successor)
+        _require_recovery_selection(session, initial, successor)
+        # the adoption range so far is exactly K1 -> old G4 [-> the successor's generations], up to the tip
+        reached = _chain(store, successor)
+        tip = workcommit.ref_value(git, branch)
+        so_far = _adoption_lineage(store, git, record, k1, tip) if tip is not None else None
+        expected = 1 + (0 if reached is None else reached.latest.generation)
+        if so_far is None or len(so_far.commits) != expected or (so_far.rest and expected < 4):
+            raise _reconcile(f"{branch} is not exactly the adoption range K1 -> old G4 -> successor generations so far",
+                             REASON_CLASS_C)
+        if reached is None:
+            _freeze_replacement(session, initial, old_material, successor, k1, git)
+    sealed = _continue(session, successor)
+    tip = workcommit.ref_value(git, branch)
+    if tip is None:
+        raise _reconcile(f"{branch} names no commit", REASON_CLASS_C)
+    lineage = _adoption_lineage(store, git, record, k1, tip)
+    if len(lineage.commits) != 4:
+        raise _reconcile(f"{branch} does not hold K1 -> old G4 -> successor G1 -> G2 -> G3 exactly", REASON_CLASS_C)
+    k_adopt = lineage.commits[-1]
+    made = successor.generation_commits.get(work_review.SEAL_GENERATION)
+    if made is not None and made != k_adopt:
+        raise _reconcile(f"the successor's generation 3 commit {made} is not the K_adopt the lineage proves {k_adopt}",
+                         REASON_CLASS_C)
+    if not terminal_recorded:
+        prefix = f"{work_id}:adopted-publication"
+        if work_record(mutation.record).one_stage(prefix) is None and lineage.rest:
+            raise _reconcile(f"{branch} moved past K_adopt {k_adopt} before its publication", REASON_CLASS_C)
+        # the adopted-result proof, re-derived until the terminal stage exists; its note binds exact K_adopt
+        _write_note(mutation, NOTE_ADOPTED_PROOF, prove_adopted_result(store, git, mutation.record, k_adopt))
+        if remote:
+            if work_record(mutation.record).one_stage(prefix) is None and \
+                    _destination_state(session, k_adopt, branch) != "holds":
+                where = _destination_state(session, k1, branch)
+                if where == "holds":
+                    raise _reconcile(f"the approved destination holds K1 {k1} without its replacement authorization: an "
+                                     "unauthorized / historical publication escape", REASON_ALREADY_PUBLISHED)
+                if where == "divergent":
+                    raise _reconcile(f"the approved destination's {branch} holds another history than K1 {k1}",
+                                     REASON_DESTINATION_DIVERGENT)
+            _publish_stage(session, prefix, k_adopt, branch)  # exact K_adopt, never K1 alone, never the tip
+    else:
+        note = mutation.note(NOTE_ADOPTED_PROOF)
+        if not isinstance(note, dict) or note.get("k_adopt") != k_adopt:
+            raise _reconcile("the terminal stage is recorded without the adopted-result proof note of exact K_adopt")
+    consumption_id = mutation.reserve_id(gate.review_consumption_key(successor.receipt_id), "review_consumption")
+    consumption_path = review_paths.consumption_rel(consumption_id)
+    if consumption_path not in mutation.scope.files:
+        mutation.extend_scope(files=[consumption_path])
+    k_terminal = _terminal(session, sealed, git, sealed.chain, consumption_id, k1, k_adopt=k_adopt)
+    _write_note(mutation, NOTE_TERMINAL_PROOF, prove_terminal(store, git, mutation.record, k_terminal))
+    if remote:
+        _publish_stage(session, f"{work_id}:finalize-publication", k_terminal, branch)
+    require_recorded_completion(session, sealed, git, k_terminal, consumption_path)
+    session.completed.append(work_id)
+    view = ProjectView.load(store)
+    return StartResult("completed", work_id, mutation.id, tuple(session.completed), view.works[work_id].phase_id,
+                       head=k_terminal)
