@@ -10380,3 +10380,1147 @@ RB1 is complete only when:
 - no push/landing before independent exact-candidate review PASS.
 
 RB2 may begin measurement only after this RB1 implementation lands, because RB2 measures the supported status/validate recovery path rather than a hypothetical one.
+
+---
+
+## 30. RB6-P6 implementation brief — Project-local Adaptive Policy + BL-055
+
+Status:
+
+~~~
+DESIGN_FROZEN
+IMPLEMENTATION_BRIEF_FROZEN
+READY_TO_IMPLEMENT_AFTER_RB4_LANDS
+open_architecture_items = 0
+new_HUMAN_policy_decisions = 0
+~~~
+
+This section is the canonical implementation-control brief for §15.
+
+It does not replace §15. Where wording conflicts, §15 remains the semantic contract and this section fixes the implementation allocation required to realize it in the current live code.
+
+Dependency:
+
+~~~
+RB3-C1
+-> RB3-P4
+-> RB4-P5
+-> RB6-P6
+~~~
+
+RB1 is not a semantic prerequisite for P6. If RB1 has already landed when P6 is implemented, the additive status integration below is part of the same P6 candidate.
+
+### 30.1 Responsibility split
+
+Authority hygiene:
+
+~~~
+src/workline/shadow_authority.py
+~~~
+
+Project-local adaptive policy semantics:
+
+~~~
+src/workline/review/policy.py
+~~~
+
+Project policy mutation/recovery owner:
+
+~~~
+src/workline/project_policy.py
+~~~
+
+Existing owners remain authoritative for:
+
+- bootstrap/routing: bootstrap.py + canonical project-router Skill;
+- Review records/gates: review/*;
+- lifecycle/progression: state.py / roadmap.py / start.py;
+- mutation/Git safety: mutation.py / gitops.py / rules/git;
+- P4 repair: review/p4.py + existing planning/START owners;
+- P5 evidence/history: review/history.py.
+
+Do not create a second lifecycle controller, Review store, background policy daemon, or adaptive authority outside canonical Workline.
+
+### 30.2 Initial fixed adaptive surface registry
+
+P6 v1 exposes exactly two Project-adaptable Review execution surfaces.
+
+No learned process may add another surface.
+
+Surface A:
+
+~~~
+policy_surface_id = review.discovery.required_slots
+strength_class    = default
+global setting    = 1
+allowed range     = integer 1..4
+strength order    = higher integer is stronger
+~~~
+
+Meaning:
+
+- applies to P4-capable Formal Review discovery;
+- setting N requires N durably accepted discovery task slots;
+- all required slots settle before adjudication;
+- actor identity/version is invocation binding, not Profile data;
+- slots beyond one must bind distinct reviewer identity/version pairs to count as stronger verification;
+- one reviewer remains the absolute floor.
+
+Surface B:
+
+~~~
+policy_surface_id = review.reverification.extra_scope_steps
+strength_class    = adaptive
+global setting    = 0
+allowed range     = integer 0..3
+strength order    = higher integer is stronger
+~~~
+
+P4 impact order:
+
+~~~
+LOCAL < SHARED < CONTRACT < FOUNDATION
+~~~
+
+P4 minimum reverification remains mandatory.
+This surface only widens that minimum by N semantic levels, capped at FOUNDATION.
+
+No Profile can verify less than P4's frozen minimum.
+
+### 30.3 Absolute non-adaptive surface
+
+Everything in §15.11 stays outside the adaptive surface registry.
+
+Mechanically reject any override attempting to alter:
+
+- lifecycle/completion semantics;
+- H-1 through H-4;
+- Problem/Improvement meaning;
+- severity/blocking semantics;
+- HUMAN boundary;
+- product/user requirement meaning;
+- routing/authority;
+- Mutation/Git/security invariants;
+- Authorization/Consumption correctness;
+- local capability approval rules.
+
+Unknown policy_surface_id is rejected.
+
+Adding a new surface is ordinary Workline-root design/implementation work, not learned adaptation.
+
+### 30.4 GlobalPolicyBaseline loader
+
+Add one canonical read-only loader in review/policy.py.
+
+Before RB7 materialization it returns a normalized derived baseline containing at least:
+
+- source_mode = derived-baseline;
+- contract/version;
+- global policy identity/digest;
+- root authority digests;
+- fixed meta-rule identity;
+- the two surface definitions/defaults/ranges;
+- loader semantics identity;
+- source planning/Work/P4 policy identities.
+
+The derived baseline binds at least:
+
+- registry.md;
+- canonical skills/review;
+- canonical skills/roadmap;
+- canonical skills/start;
+- P4 policy/meta-rule implementation identity;
+- existing planning/Work Review policy identities needed to prove the semantic starting point.
+
+The loader never mutates Workline root.
+
+RB7 keeps this loader interface when it materializes Global policy.
+
+### 30.5 Canonical Project Profile
+
+Canonical current state:
+
+~~~
+.workline/review/policy/project-profile.yaml
+~~~
+
+Absence is valid and means no local override.
+
+Strict schema:
+
+~~~
+schema
+version
+profile_version
+parent_profile_digest
+global_baseline_digest
+global_baseline_version
+loader_semantics_identity
+overrides
+active_experiment_refs
+~~~
+
+Rules:
+
+- first Profile version = 1;
+- first parent_profile_digest = null;
+- later version = previous + 1;
+- later parent_profile_digest = exact prior Profile digest;
+- overrides sorted by policy_surface_id;
+- at most one override per surface;
+- active_experiment_refs sorted and unique;
+- no unknown fields;
+- no free-form policy script;
+- no actor/provider credential;
+- no unnecessary absolute path.
+
+Each override binds:
+
+~~~
+policy_surface_id
+strength_class
+setting
+direction/effect
+supporting_policy_change_id
+~~~
+
+Rollback creates a new higher Profile version.
+
+### 30.6 Effective Policy
+
+At each new P6-capable Review Run:
+
+~~~
+GlobalPolicyBaseline
++ Profile or explicit absence
++ closed pre-G1 Review context
+-> normalized Effective Policy
+-> freeze effective_policy_hash
+~~~
+
+The Effective Policy binds:
+
+- Global baseline digest;
+- Profile digest or null;
+- normalized setting for both adaptive surfaces;
+- fixed meta-rules digest;
+- active experiment/holdout plan where applicable;
+- loader semantics identity.
+
+An open Run never changes policy halfway through.
+
+Pre-P6 Review contracts keep their existing static policy records unchanged.
+
+### 30.7 Profile/baseline compatibility
+
+A Profile is applied only when compatibility with the current Global baseline is positively proven.
+
+Before RB7, normal compatibility is exact derived-baseline compatibility.
+
+After RB7, the versioned total compatibility adapter from RB7 is used.
+
+If compatibility cannot be proven:
+
+~~~
+no guess
+no dropped override
+no new Run under that Profile
+-> policy maintenance / reconcile
+~~~
+
+Existing open Runs keep their frozen effective_policy_hash.
+
+### 30.8 Policy Change Candidate
+
+A normalized PolicyChangeCandidate binds at least:
+
+- policy_change_id;
+- target_identity = project-policy;
+- before Profile version/digest or absence;
+- before Effective Policy digest;
+- Global baseline digest;
+- complete proposed after Profile;
+- affected surface;
+- before/after setting;
+- strength class;
+- direction;
+- P5 source evidence IDs/digests;
+- Relevant Opportunity definition/set;
+- expected effect;
+- validation plan;
+- measurement contract;
+- observation window;
+- success criteria;
+- rollback threshold;
+- environment/dependency identity;
+- overlap classification;
+- rollback unit;
+- holdout plan where required.
+
+The Project itself is implicit in the repository containing these canonical records.
+Do not add/backfill a Project ID just for P6.
+
+The Candidate is normalized data, never an imperative patch script.
+
+### 30.9 Single-event floor
+
+Permanent strengthen/lighten/adjust requires at least:
+
+- two distinct relevant P5 opportunity references;
+- frozen Relevant Opportunity definition;
+- exact source Run/Finding/Repair/Relation identities;
+- duplicate-source rejection.
+
+This is an eligibility floor, not a claim that two events prove truth.
+
+Policy Change Review still evaluates evidence quality, trend and causality.
+
+A temporary_guard may originate from one serious supported escape only when it is strengthening, inside the allowed range, changes no correctness/authority meaning, and has reevaluation/expiry criteria.
+
+### 30.10 Strengthening and lightening
+
+Strengthening moves a setting upward in the fixed strength order.
+
+Lightening moves it downward but never below fixed minimum/range.
+
+Lightening freezes the pre-change stronger behavior as independent holdout measurement.
+
+Initial examples:
+
+~~~
+required_slots 3 -> 2:
+  the removed third discovery slot remains holdout during relevant opportunities
+
+extra_scope_steps 2 -> 1:
+  the removed broader reverification level remains holdout when that repair opportunity occurs
+~~~
+
+The change cannot disable or weaken the channel used to measure itself.
+
+### 30.11 Holdout execution
+
+Holdout is measurement, not authority.
+
+For v1, relevant opportunities selected by the experiment use all_relevant selection; no random sampler is required.
+
+Discovery holdout is durably accepted with discovery.
+
+Reverification holdout is accepted when the repair result makes its exact semantic scope knowable, before successor authorization.
+
+Once accepted, a holdout task/check settles before the corresponding authorization is consumed.
+
+Pre-terminal supported result:
+
+- Problem HIGH/MID -> current blocking obligation;
+- Problem LOW -> H-1/H-4 disposition;
+- Improvement -> H-4 nonblocking disposition;
+- requirement ambiguity -> HUMAN;
+- no Finding -> measurement evidence only.
+
+A result first known after durable terminal completion becomes P5 downstream/historical evidence and never rewrites old lifecycle.
+
+### 30.12 Policy Change Review kind
+
+Add a dedicated Review kind:
+
+~~~
+review_kind = project-policy-change-v1
+target_identity = project-policy
+authorized_operation_stage = project-policy-change:persist-profile
+~~~
+
+Its semantic adapter lives in review/policy.py.
+
+It reuses:
+
+- P1 Gate/TaskInput/CandidateSnapshot/Receipt primitives;
+- P4 sanitized discovery report and adjudication helpers;
+- P5 Finding/Run history;
+- normal generation persistence/recovery.
+
+It does not use the P4 automatic Repair Batch loop.
+
+A failed policy review produces no authorization. A changed proposal is a later new PolicyChangeCandidate.
+
+### 30.13 Policy Review selector and pre-change rule
+
+A Policy Review invocation binds:
+
+- discovery actors sufficient for the PRE-CHANGE Effective Policy required_slots setting;
+- one adjudicator actor;
+- every actor identity/version;
+- fixed Policy Review contract/version.
+
+The proposed after-state cannot select fewer reviewers/checks for the review authorizing itself.
+
+The Policy Review effective_policy_hash comes from exact BEFORE Profile/baseline state plus fixed meta-rules.
+
+### 30.14 Policy Review topology
+
+~~~
+G1
+  CandidateSnapshot
+  + required discovery TaskInputs
+
+G2
+  sanitized discovery reports
+  + settlement/coverage
+
+G3
+  adjudication TaskInput
+
+G4
+  adjudication
+  + fixed mechanical meta-policy verification
+  + P5 Finding summaries
+
+authorization-ready:
+  G5 sealed + Receipt
+
+blocking Problem:
+  terminal at G4, no Receipt
+
+HUMAN:
+  HUMAN_WAIT at G4, no Receipt
+~~~
+
+There is no policy Repair Batch branch.
+
+The fixed mechanical verifier checks §15.19 even if external reviewers missed a violation.
+
+### 30.15 project-policy-change owner
+
+Add:
+
+~~~
+src/workline/project_policy.py
+OWNER = project-policy-change
+~~~
+
+No Project-facing domain Skill is added.
+
+The canonical review Skill coordinates this internal operation.
+
+The owner reuses:
+
+- project_operation lock;
+- MutationController;
+- exact request identity/resume;
+- Review gate primitives;
+- destination/publication pin rules;
+- P5 history;
+- PersistedProjectionAdapter.
+
+It owns physical Profile mutation and policy evidence only, never Project lifecycle.
+
+### 30.16 Stable P6 IDs
+
+Add explicit Review ID kinds:
+
+~~~
+review_policy_change
+review_policy_evaluation
+~~~
+
+Use unique prefixes and Mutation.reserve_id.
+
+Do not overload Project relation/derivation IDs.
+
+policy_change_id is reserved before Candidate hashing because the proposed Profile binds it.
+
+### 30.17 Policy storage
+
+Extend Review namespace:
+
+~~~
+.workline/review/policy/
+  project-profile.yaml
+  changes/<policy_change_id>.yaml
+  evaluations/<evaluation_id>.yaml
+~~~
+
+project-profile.yaml is mutable canonical policy state.
+
+changes/* and evaluations/* are immutable create-only evidence records.
+
+All are H-3 public-safe and reference P5 source IDs/digests rather than copying raw history.
+
+### 30.18 Exact Profile CAS effect
+
+Do not relax generic write_file for all Review paths.
+
+Add one dedicated Mutation effect for exactly:
+
+~~~
+.workline/review/policy/project-profile.yaml
+~~~
+
+and only owner project-policy-change.
+
+Conceptually:
+
+~~~
+replace_review_profile
+~~~
+
+It binds:
+
+- expected prior state: exact absence or exact prior canonical bytes/digest;
+- exact new canonical bytes.
+
+Classification:
+
+~~~
+target == expected prior -> UNAPPLIED
+target == exact new      -> MATCHING replay
+anything else            -> MISMATCH / reconcile
+~~~
+
+Application uses a narrow fsafe compare-and-replace primitive with the same containment capability standard as canonical Review writes.
+
+No symlink/junction/reparse following.
+
+Unsupported containment capability refuses before write.
+
+No other Review record becomes mutable.
+
+### 30.19 Immutable change record
+
+Each applied Policy Change creates:
+
+~~~
+policy/changes/<policy_change_id>.yaml
+~~~
+
+binding at least:
+
+- policy_change_id;
+- Candidate hash;
+- Review Run/Receipt;
+- before/after Profile version/digests;
+- baseline digest;
+- affected surface;
+- direction;
+- before/after setting;
+- P5 evidence refs;
+- measurement/observation contract;
+- rollback threshold/unit;
+- environment identity;
+- overlap state;
+- H-3-safe expected-effect summary.
+
+The later Consumption binds the exact policy commit SHA.
+
+### 30.20 Persisted Profile topology
+
+After G5 Receipt:
+
+~~~
+record immutable change record
++ exact Profile CAS
+-> Kp commits exactly those policy-state paths
+-> C-2(Kp):
+     exact parent/branch/delta
+     exact reviewed after Profile bytes
+     canonical loader semantic round-trip
+     baseline/Profile compatibility
+     Receipt still current
+~~~
+
+If remote exists and rules/git permits:
+
+~~~
+publish exact Kp
+~~~
+
+Then:
+
+~~~
+Policy Consumption
++ P5 consumed Run summary
+-> Km metadata commit
+-> C-2(Km)
+-> publish exact Km when remote exists
+-> complete
+~~~
+
+No push before proof.
+No force/history rewrite.
+Remote-less Projects keep the same local proof/commit boundaries without push.
+
+### 30.21 Policy Consumption v3
+
+Extend common Consumption version dispatch with a Policy Consumption distinct from v1 generic/Work and v2 Planning.
+
+Recommended:
+
+~~~
+version = 3
+review_kind = project-policy-change-v1
+~~~
+
+It binds common authorization identity plus:
+
+~~~
+persisted_policy:
+  contract
+  policy_change_id
+  before_profile_version/digest or null
+  after_profile_version/digest
+  global_baseline_digest
+  normalized_projection_hash
+  policy_commit
+  policy_parent
+  branch
+  policy_delta_digest
+  adapter_identity
+  loader_identity
+~~~
+
+No Work terminal event is invented.
+
+One Receipt still has at most one Consumption.
+
+v1/v2 semantics remain unchanged.
+
+### 30.22 PersistedProjectionAdapter
+
+Success requires:
+
+~~~
+normalize(reviewed proposed after Profile)
+==
+normalize(canonical_load(Kp:project-profile.yaml))
+~~~
+
+and exact proof of:
+
+- recorded bytes;
+- Kp parent/branch;
+- Kp exact delta;
+- loader identity;
+- Global baseline identity;
+- authorized surface interpretation.
+
+No alternate byte shape is silently adopted.
+Mismatch means no push and reconcile/recovery according to contract.
+
+### 30.23 Evaluations
+
+Observation evaluation is evidence, not direct Profile mutation.
+
+Each immutable evaluation record binds:
+
+- evaluation_id;
+- policy_change_id;
+- evaluated Profile version/digest;
+- frozen measurement contract;
+- relevant P5 evidence refs;
+- environment identity;
+- result: retain | adjust | rollback | inconclusive;
+- H-3-safe rationale summary;
+- next-action classification.
+
+retain:
+- evaluation only, no Profile rewrite.
+
+adjust / rollback:
+- evaluation only;
+- require a new reviewed PolicyChangeCandidate before Profile changes.
+
+inconclusive:
+- not success;
+- continued observation only if frozen contract permits it safely.
+
+Evaluation-only writes use the same internal owner, immutable Review create and ordinary exact Git finalization.
+
+### 30.24 active_experiment_refs
+
+Profile refs identify policy changes whose experiment contract may still govern holdout.
+
+A terminal evaluation may settle a ref without rewriting the Profile merely to remove its string.
+
+Effective active set:
+
+~~~
+Profile active_experiment_refs
+minus refs ended by terminal evaluation
+~~~
+
+A later adjust/rollback Profile version writes its own normalized ref set.
+
+### 30.25 Experiment overlap and environment
+
+Overlap values:
+
+~~~
+proven_disjoint
+known_overlap
+overlap_unresolved
+~~~
+
+Only proven_disjoint may observe concurrently.
+
+Known/unresolved overlap must serialize, be explicitly superseded, or become one compound Candidate/rollback unit.
+
+overlap_unresolved is not HUMAN by itself.
+
+Observation binds material environment identity including, where applicable:
+
+- Global baseline digest;
+- Profile version/digest;
+- reviewer/model identity/version;
+- Review/check adapter identity/version;
+- toolchain/runtime identity;
+- measurement-contract version;
+- dependency identity.
+
+Material environment change requires window split, positive irrelevance proof, or inconclusive result.
+
+Chronology alone is not causality.
+
+### 30.26 Shadow authority detector
+
+Add read-only:
+
+~~~
+src/workline/shadow_authority.py
+~~~
+
+Built-in v1 evidence sources are deliberately narrow:
+
+1. exact Project bootstrap path;
+2. Project-local executable Skill surface under .claude/skills/**/SKILL.md;
+3. structured observed evidence supplied by canonical router/owner code when available.
+
+Do not scan README/BACKLOG/TODO/STATUS or the whole repository merely for Workline words.
+
+### 30.27 Shadow classification
+
+Output:
+
+~~~
+none
+suspected
+confirmed
+~~~
+
+Bootstrap rules:
+
+- absent -> no evidence;
+- exact ordinary canonical bootstrap -> none;
+- differing ordinary file -> suspected;
+- symlink/junction/reparse/noncanonical indirection replacing canonical bootstrap -> confirmed.
+
+Local Skill static text:
+
+- filename alone -> none;
+- Workline words alone cannot confirm;
+- possible duplicate lifecycle/progression authority claim may be suspected;
+- a Skill that only calls canonical router/owner and keeps no parallel Workline state is allowed.
+
+Confirmed requires positive structural/observed evidence such as canonical bootstrap redirection, observed noncanonical owner delegation, or observed noncanonical write used to decide Workline progression.
+
+Model/semantic guess alone never promotes suspected to confirmed.
+
+### 30.28 Advisory-only BL-055 behavior
+
+Shadow diagnostic does NOT by itself:
+
+- fail validate-project;
+- block ordinary canonical operations;
+- delete/edit/migrate artifacts;
+- rerun BL-011 migration;
+- mutate bootstrap;
+- create Work.
+
+Canonical operations ignore shadow sources as authority.
+
+Existing routing/write guards still refuse actual unauthorized canonical mutations.
+
+A design that would invalidate ordinary Projects merely due to shadow presence triggers the frozen conditional HUMAN boundary.
+
+### 30.29 Router semantics
+
+Canonical project-router text must resolve noncanonical wording by meaning:
+
+~~~
+unique canonical Workline responsibility
+-> canonical owner
+
+plain domain/document edit
+-> ordinary artifact authority
+
+ambiguous Workline state/progression intent
+-> rules/human-confirmation
+
+claimed non-existent Workline operation/owner
+-> no fallback/invention
+-> STOP/report
+~~~
+
+BACKLOG/TODO/STATUS names do not become Workline operations.
+
+Do not maintain a forbidden-filename list.
+
+### 30.30 Validation and RB1 status
+
+Profile/change/evaluation validity is normative Review validation.
+
+Profile absence is valid.
+
+Malformed/incompatible canonical Profile is a validation Problem.
+
+Shadow authority is advisory and must not become a validate_project Problem.
+
+validate-project CLI may display advisory shadow diagnostics without changing PASS/FAIL when those are the only diagnostics.
+
+When RB1 exists, fill its existing policy section additively with:
+
+- Global baseline source_mode/version/digest;
+- Profile absent or version/digest;
+- current inspected Effective Policy hash;
+- effective values for both adaptive surfaces;
+- active experiment IDs/status;
+- policy maintenance/reconcile need;
+- shadow authority status + concise structured evidence.
+
+RB1 schema/version/base semantics do not change.
+
+### 30.31 P5 evidence integration
+
+Policy Candidate/evaluation reads only validated P5 references:
+
+- Run history;
+- Finding/Repair summaries;
+- recurrence/downstream relations;
+- zero-Finding Run summary when the surface was positively exercised;
+- Human Decision Evidence where relevant.
+
+Raw Review count is never sufficient.
+Only supported causality counts as confirmed.
+
+No high-volume history copy is stored in policy records.
+
+### 30.32 Primary implementation files
+
+Expected new:
+
+~~~
+src/workline/review/policy.py
+src/workline/project_policy.py
+src/workline/shadow_authority.py
+~~~
+
+Expected Review/schema changes:
+
+~~~
+src/workline/review/paths.py
+src/workline/review/store.py
+src/workline/review/validate.py
+src/workline/review/records.py
+src/workline/review/gate.py
+src/workline/review/fsafe.py
+src/workline/ids.py
+~~~
+
+Expected P4/P5 integration:
+
+~~~
+src/workline/review/p4.py
+src/workline/review/history.py
+src/workline/roadmap_review.py
+src/workline/start_review.py
+~~~
+
+Expected generic integration only as required:
+
+~~~
+src/workline/mutation.py
+src/workline/validate.py
+src/workline/status.py   if RB1 landed
+~~~
+
+No ProjectSTART/Profile backfill change.
+
+### 30.33 Canonical runtime authority activation
+
+Same candidate updates at least:
+
+~~~
+.claude/skills/review/SKILL.md
+.claude/skills/project-router/SKILL.md
+~~~
+
+Update rules/git only for the new exact Profile CAS / publication contract.
+
+Update roadmap/start Skills where Effective Policy/holdout directly affects their Review flow.
+
+Do not create a second approval rule; existing rules/human-confirmation remains the capability boundary.
+
+No new registry-routed Skill.
+
+### 30.34 Focused tests — adaptive surfaces
+
+Add:
+
+~~~
+tests/test_review_policy_surfaces.py
+~~~
+
+Cover:
+
+- exactly two v1 surfaces;
+- unknown surface rejected;
+- required_slots baseline/range;
+- extra_scope_steps baseline/range;
+- strength ordering;
+- P4 floor cannot weaken;
+- non-adaptive proposal rejected;
+- Profile cannot reclassify a surface;
+- Profile cannot invent a surface.
+
+### 30.35 Focused tests — baseline/Profile/Effective Policy
+
+Add:
+
+~~~
+tests/test_review_policy_profile.py
+~~~
+
+Cover:
+
+- absent Profile = baseline;
+- no ProjectSTART/backfill;
+- version/parent digest chain;
+- strict fields/ranges;
+- incompatible baseline fail closed;
+- Effective Policy frozen;
+- later Profile change does not alter open Run;
+- pre-P6 policies remain valid;
+- RB7 loader seam/source_mode.
+
+### 30.36 Focused tests — Policy Review
+
+Add:
+
+~~~
+tests/test_project_policy_review.py
+~~~
+
+Cover:
+
+- pre-change required_slots controls reviewer count;
+- proposed lightening cannot reduce own review;
+- G1-G5;
+- P4 adjudication helpers reused;
+- fixed meta-verifier catches forbidden change;
+- blocking -> no Receipt;
+- HUMAN -> no Receipt;
+- authorization -> G5 Receipt;
+- no Repair Batch branch;
+- P5 history boundaries.
+
+### 30.37 Focused tests — persistence/Consumption
+
+Add:
+
+~~~
+tests/test_project_policy_change.py
+~~~
+
+Cover:
+
+- owner exact;
+- before Profile conflict;
+- change record immutable;
+- dedicated Profile CAS exact path only;
+- generic Review write remains immutable-only;
+- indirection refused;
+- Kp exact delta;
+- semantic projection proof;
+- no publication before proof;
+- Policy Consumption v3;
+- v1/v2 compatibility;
+- Km exact metadata delta;
+- exact Kp/Km publication;
+- remote-less operation;
+- rollback = new higher Profile version.
+
+### 30.38 Focused tests — learning/holdout/evaluation
+
+Add:
+
+~~~
+tests/test_review_policy_learning.py
+~~~
+
+Cover:
+
+- one opportunity cannot make permanent adaptation;
+- duplicate evidence not two opportunities;
+- temporary_guard strengthening-only;
+- Relevant Opportunity denominator;
+- no-finding only when exercised;
+- both lightening surfaces retain old behavior as holdout;
+- accepted holdout settles before Consumption;
+- pre-terminal HIGH/MID blocks;
+- post-terminal result becomes downstream escape;
+- retain/adjust/rollback/inconclusive;
+- adjust/rollback require new Candidate;
+- only proven_disjoint concurrent;
+- environment change attribution rules;
+- settled experiment ref leaves effective active set.
+
+### 30.39 Focused tests — shadow authority
+
+Add:
+
+~~~
+tests/test_shadow_authority.py
+~~~
+
+Cover:
+
+- README/BACKLOG/TODO/STATUS filename alone -> none;
+- domain spec/CONTRACT -> none;
+- canonical bootstrap -> none;
+- bootstrap absent -> none;
+- differing regular bootstrap -> suspected;
+- bootstrap indirection -> confirmed;
+- local Skill calling canonical owner -> allowed;
+- Workline words alone cannot confirm;
+- parallel-state claim without positive execution evidence <= suspected;
+- structured observed noncanonical route/write -> confirmed;
+- shadow advisory does not fail validation;
+- no auto edit/delete/migration;
+- no ProjectSTART change.
+
+### 30.40 Interruption/recovery matrix
+
+Policy Review:
+
+1. policy_change_id reservation;
+2. Candidate snapshot;
+3. G1;
+4. discovery return before G2;
+5. G2;
+6. G3;
+7. adjudicator return before G4;
+8. G4;
+9. G5 Receipt.
+
+Policy persistence:
+
+10. change record effect;
+11. Profile CAS effect;
+12. partial application of either policy-state effect;
+13. Kp commit;
+14. C-2(Kp);
+15. Kp publication;
+16. Consumption;
+17. P5 Run summary;
+18. Km commit;
+19. C-2(Km);
+20. Km publication;
+21. completion.
+
+Retry invariants:
+
+- same policy_change_id/Candidate/Review IDs;
+- no duplicate change record;
+- no Profile version skip;
+- no overwrite on before mismatch;
+- no duplicate Consumption/publication;
+- no force/history rewrite;
+- no authorization under after-state strength.
+
+Evaluation retry keeps the same evaluation_id and never changes Profile for retain/inconclusive.
+
+### 30.41 Compatibility regression
+
+Prove:
+
+- Profile absence valid;
+- existing Projects need no backfill;
+- old Runs keep frozen policies;
+- P4/P5 semantics unchanged except explicit P6-capable resolution;
+- canonical bootstrap layout unchanged;
+- dynamic registry routing unchanged;
+- capability approval boundary unchanged;
+- shadow advisory alone never blocks;
+- no auto cleanup/migration;
+- no new Skill/routing ID.
+
+### 30.42 Regression order
+
+1. surface tests;
+2. Profile/Effective Policy tests;
+3. Policy Review tests;
+4. persistence/Consumption tests;
+5. learning/holdout/evaluation tests;
+6. shadow authority tests;
+7. RB4/P5 regression;
+8. RB3/P4 regression;
+9. RB3-C1 regression;
+10. RB1 integration if present;
+11. legacy planning/START/CREATE;
+12. canonical Skill/registry tests;
+13. full suite.
+
+Canonical full command remains:
+
+~~~
+py -3 -B -m pytest tests -q
+~~~
+
+unless canonical test tooling legitimately changes before implementation.
+
+### 30.43 Explicit non-scope
+
+RB6/P6 must not implement:
+
+- Global promotion/mutation (RB7);
+- new adaptive surfaces beyond the two v1 surfaces;
+- lifecycle/progression adaptation;
+- requirement adaptation;
+- automatic local Skill approval;
+- automatic shadow artifact retirement;
+- BL-011 migration;
+- ProjectSTART Profile initialization/backfill;
+- self-hosting;
+- maintenance queue;
+- raw AI transcript/memory persistence;
+- direct Profile edit outside project-policy-change.
+
+### 30.44 Implementation completion gate
+
+RB6/P6 is complete only when:
+
+- RB4/P5 evidence is reused;
+- fixed two-surface registry exists;
+- Global baseline loader is canonical/read-only;
+- Profile absence remains valid;
+- Profile lineage is strict;
+- Effective Policy freezes per Run;
+- pre-change Policy Review exists;
+- fixed meta-verifier blocks correctness/authority adaptation;
+- permanent single-event adaptation is impossible;
+- temporary guard is strengthening-only;
+- lightening requires holdout;
+- project-policy-change is the only Profile mutation owner;
+- mutable Profile support does not weaken immutable Review records;
+- persisted Profile projection is exactly proven;
+- Policy Consumption v3 does not reinterpret v1/v2;
+- evaluation/overlap/environment attribution works;
+- shadow detection is evidence/responsibility based and advisory;
+- no automatic cleanup/backfill/migration;
+- RB1 policy diagnostics integrate when RB1 exists;
+- canonical runtime authority text is updated;
+- focused tests PASS;
+- RB4/RB3/legacy regressions PASS;
+- full suite PASS;
+- exact candidate SHA/tree/diff frozen for independent review;
+- no push/landing before independent exact-candidate review PASS.
+
+After RB6 lands, RB7/P7 becomes implementation-unblocked.
