@@ -1585,6 +1585,8 @@ class _Refused:
 
 #: The durable invocation markers of a review-v1 planning mutation (``rules/git`` Push destination).
 _REVIEW_CONTRACT = "review-v1-planning-v1"
+#: The P4 planning review contract (G-6 Option M): the same planning publication rule, a distinct durable identity.
+_P4_REVIEW_CONTRACT = "review-v1-planning-p4-v1"
 _PLANNING_PUBLICATION_CONTRACT = "review-v1-planning-publication-v1"
 _PLANNING_OPERATIONS = ("roadmap-create", "phase-entry")
 _GENERATION_OPERATION = "review-generation"
@@ -1612,7 +1614,7 @@ def _publication_contract(invocation: object) -> str:
     if "review_contract" not in invocation and "publication_contract" not in invocation:
         return "current-combined"
     if (
-        invocation.get("review_contract") == _REVIEW_CONTRACT
+        invocation.get("review_contract") in (_REVIEW_CONTRACT, _P4_REVIEW_CONTRACT)
         and invocation.get("publication_contract") == _PLANNING_PUBLICATION_CONTRACT
         and invocation.get("operation") in _PLANNING_OPERATIONS
     ):
