@@ -123,6 +123,9 @@ REASON_CLASS_B = "review_class_b_unowned_content"
 REASON_CLASS_C = "review_class_c_unprovable"
 REASON_ALREADY_PUBLISHED = "review_result_already_published"
 REASON_DESTINATION_DIVERGENT = "review_destination_divergent"
+#: A recoverable matching Work Run no pending START mutation of this Work holds (a lost START's Run): no canonical
+#: mechanism binds it into a new START mutation, so a fresh START stops rather than beginning a second Run (§11.12).
+REASON_RECOVERY_UNBOUND = "review_recovery_unbound_run"
 #: The Supersession / invalidation-evidence / set-aside reason of a Class-A replacement.
 CLASS_A_REASON = work_review.INVALIDATION_CLASS_A
 
@@ -519,6 +522,87 @@ def continue_selected(session: "_Session", selected: InFlight) -> "Sealed | Adop
     return Adoption(selected.initial)
 
 
+# --------------------------------------------------------------------------- §11.12: every invocation, every matching Run
+
+
+def own_run_ids(reserved: dict[str, Any]) -> set[str]:
+    """The Work Review Runs one START record reserved: its first Run and its Class-A successor."""
+    prefix = f"review-run:{work_review.REVIEW_KIND}:"
+    return {
+        str(value) for key, value in reserved.items()
+        if value and (str(key).startswith(prefix) or str(key).startswith(gate.SUCCESSOR_RUN_KEY_PREFIX))
+    }
+
+
+def recovery_discovery(store: ProjectStore, work_id: str, held: set[str]) -> Any:
+    """Canonical recovery discovery for one review-v1 Work Review invocation (F4 §11.12); it writes nothing.
+
+    Every Run with this Work's review kind and operation identity - which has
+    no mutation id, time or mode in it, so a Run another START of the same Work
+    began is one of them - is proven and classified, never chosen by recency.
+    ``held`` are the Runs this invocation's own START mutation reserved: they
+    are its recovery selector's (:func:`select_in_flight`) and are not
+    classified here. Every OTHER matching Run must be one this invocation does
+    not resume - consumed, invalidated, not_authorized, set_aside or stale:
+
+    ```text
+    another Run recoverable, no own Run begun   review_recovery_unbound_run (a lost START's Run: no
+                                                canonical mechanism binds it into this START; nothing
+                                                is begun beside it)
+    another Run recoverable, an own Run begun   review_recovery_ambiguous
+    several recoverable                         review_recovery_ambiguous
+    another Run incomplete / contradictory      review_recovery_incomplete
+    ```
+
+    The Discovery returned names, in ``set_aside``, every other matching Run
+    and the reason it is not resumed - what a new Run's request names (§11.6).
+    """
+    from .review import recovery
+
+    found = recovery.discover_work(store, work_review.operation_identity(work_id), currency=_recovery_currency(store),
+                                   held=held)
+    if found.recoverable is None:
+        return found
+    other = found.recoverable.review_run_id
+    review = ReviewStore(store)
+    begun = any(gate.pending_generation_mutations(store, run_id)
+                or review.read_bytes(review_paths.gate_rel(run_id, records.FIRST_GENERATION)) is not None
+                for run_id in sorted(held))
+    if not begun:
+        raise _reconcile(
+            f"Work Review Run {other} of {work_id} is recoverable and no pending START mutation of this Work holds it; "
+            "nothing binds a Run another START began into a new one, and a new Run is begun only when no matching Run "
+            "is recoverable, so nothing is begun", REASON_RECOVERY_UNBOUND,
+        )
+    raise _reconcile(
+        f"this START's own Work Review Run and {other} are both recoverable for {work_id}; no Run is chosen by age, ID "
+        "or position", "review_recovery_ambiguous",
+    )
+
+
+def entry_recovery(store: ProjectStore, work_id: str) -> None:
+    """§11.12 at a review-v1 START's entry: after activation, before the mutation is opened, writing nothing.
+
+    The Runs held by pending START mutations of this Work (the one this
+    invocation resumes, or one that conflicts with it, which opening reports)
+    are excluded; every other matching Run is classified by
+    :func:`recovery_discovery`, so a refusing invocation reserves, records and
+    writes nothing and never runs the executor. An unreadable recovery area is
+    reported where it always was, when the mutation is opened.
+    """
+    try:
+        pending = MutationController(store).list_pending()
+    except ReconcileRequired:
+        return
+    held: set[str] = set()
+    for record in pending:
+        found = record.get("invocation")
+        if (record.get("owner") == OWNER and isinstance(found, dict) and found.get("operation") == "start"
+                and found.get("work_id") == work_id):
+            held |= own_run_ids(record.get("reserved_ids") or {})
+    recovery_discovery(store, work_id, held)
+
+
 # --------------------------------------------------------------------------- generation mutations (R3, C3-1)
 
 
@@ -744,6 +828,10 @@ def freeze_and_review(session: "_Session", view: ProjectView, work: Entity, outc
     from .start import _result_message, completion_precheck
 
     store, mutation = session.store, session.mutation
+    # F4 §11.12 / §11.6: every other matching Run classified (it is never resumed here), read before anything of this
+    # Run is durable; the new Run's request names each one with the reason it is set aside - none, in the ordinary case
+    recovered = recovery_discovery(store, work.id, own_run_ids(mutation.record.get("reserved_ids") or {}))
+    set_aside = [dict(item) for item in recovered.set_aside]
     result_paths = tuple(p.replace("\\", "/") for p in outcome.result_paths)  # 5a, unchanged
     deleted_paths = tuple(p.replace("\\", "/") for p in outcome.deleted_paths)
     git = hermetic_module.enter(store)
@@ -814,8 +902,8 @@ def freeze_and_review(session: "_Session", view: ProjectView, work: Entity, outc
     verified = work_verify.verify(store, git, reconstruction, resulting_tree_id=resulting)
     context_hash = work_context.context_hash(context)
     policy_hash = work_review.policy_hash()
-    # F4 §11.18.6: a new Run's request is version 2; an ordinary first Run sets nothing aside
-    envelope = work_review.request_envelope(candidate, context, [], review_run_id=run.review_run_id)
+    # F4 §11.18.6: a new Run's request is version 2, naming the older matching Runs it does not resume ([] when none)
+    envelope = work_review.request_envelope(candidate, context, set_aside, review_run_id=run.review_run_id)
     task_input = work_review.task_input_for(
         task_id=run.task_id, reviewer_identity=session.review.reviewer_identity,
         reviewer_version=session.review.reviewer_version, envelope=envelope, snapshot=snapshot,
@@ -2881,8 +2969,25 @@ def prove_adopted_result(store: ProjectStore, git: HermeticGit, mutation_record:
                                                   review_run_id=record.run.review_run_id)
     except ValidationError as exc:
         raise _proof_failed("AP-3", str(exc)) from exc
-    if set_aside != [{"review_run_id": old.review_run_id, "reason": CLASS_A_REASON}]:
-        raise _proof_failed("AP-3", "the successor's request does not set aside exactly the first Run")
+    if [item for item in set_aside if item["review_run_id"] == old.review_run_id] != [
+            {"review_run_id": old.review_run_id, "reason": CLASS_A_REASON}]:
+        raise _proof_failed("AP-3", "the successor's request does not set aside the first Run, exactly once, as its "
+                                    "Class-A replacement")
+    own = own_run_ids(record.reserved)
+    for item in set_aside:
+        if item["review_run_id"] == old.review_run_id:
+            continue
+        # any other entry names another matching Run of this Work - never this START's own Run or the successor;
+        # the reason it was set aside is recovery's classification and is not derived again here
+        try:
+            other = at.read_gate(item["review_run_id"], records.FIRST_GENERATION)
+        except ValidationError as exc:
+            raise _proof_failed("AP-3", f"the successor sets aside {item['review_run_id']}, which {k_adopt} does not "
+                                        f"hold as a Review Run: {exc}") from exc
+        if (item["review_run_id"] in own or other.review_kind != work_review.REVIEW_KIND
+                or other.operation_identity != work_review.operation_identity(work_id)):
+            raise _proof_failed("AP-3", f"the successor sets aside {item['review_run_id']}, which is not another "
+                                        "matching Run of this Work")
     # AP-4
     try:
         old_chain = at.gate_chain(old.review_run_id)
@@ -2969,12 +3074,14 @@ def _recovery_currency(store: ProjectStore):
     return currency
 
 
-def _require_recovery_selection(session: "_Session", initial: WorkRun, successor: WorkRun) -> None:
+def _require_recovery_selection(session: "_Session", initial: WorkRun, successor: WorkRun) -> Any:
     """Canonical recovery selection over every matching Work Run (F4 §11.12): exactly the successor, or none yet.
 
     The first Run must classify as invalidated; the successor, once it has a
     generation, as the one recoverable Run; and no other matching Run may be
-    recoverable. Nothing is chosen by recency.
+    recoverable. Nothing is chosen by recency. The Discovery is returned: the
+    successor's request names, besides its predecessor, every other matching
+    Run it sets aside (§11.6).
     """
     from .review import planning, recovery
 
@@ -2996,11 +3103,16 @@ def _require_recovery_selection(session: "_Session", initial: WorkRun, successor
     if selected != expected:
         raise _reconcile(f"recovery selection finds {selected} recoverable, and this START continues "
                          f"{expected or 'a successor not yet begun'}", "review_recovery_ambiguous")
+    return found
 
 
 def _freeze_replacement(session: "_Session", initial: WorkRun, material: RunMaterial, successor: WorkRun,
-                        k1: str, git: HermeticGit) -> None:
-    """Successor generation 1: C2 from K1, the v2 request naming the first Run, Evidence, accept (F4 §26.13)."""
+                        k1: str, git: HermeticGit, recovered: Any) -> None:
+    """Successor generation 1: C2 from K1, the v2 request naming the first Run, Evidence, accept (F4 §26.13).
+
+    The request names the predecessor with the Class-A reason, and every other
+    matching Run recovery selection set aside with its own reason (§11.6).
+    """
     store = session.store
     activation = session.activation
     if activation is None:
@@ -3014,7 +3126,10 @@ def _freeze_replacement(session: "_Session", initial: WorkRun, material: RunMate
     policy_hash = work_review.policy_hash()
     envelope = work_review.request_envelope(
         replacement.candidate, replacement.context,
-        [{"review_run_id": initial.review_run_id, "reason": CLASS_A_REASON}], review_run_id=successor.review_run_id,
+        [{"review_run_id": initial.review_run_id, "reason": CLASS_A_REASON}]
+        + [dict(item) for item in recovered.set_aside
+           if item["review_run_id"] not in (initial.review_run_id, successor.review_run_id)],
+        review_run_id=successor.review_run_id,
     )
     task_input = work_review.task_input_for(
         task_id=successor.task_id, reviewer_identity=session.review.reviewer_identity,
@@ -3062,7 +3177,7 @@ def _adopt(session: "_Session", initial: WorkRun) -> Any:
     terminal_recorded = _terminal_stage(record) is not None
     if not terminal_recorded:
         resolve_pending_generation(session, successor)
-        _require_recovery_selection(session, initial, successor)
+        recovered = _require_recovery_selection(session, initial, successor)
         # the adoption range so far is exactly K1 -> old G4 [-> the successor's generations], up to the tip
         reached = _chain(store, successor)
         tip = workcommit.ref_value(git, branch)
@@ -3072,7 +3187,7 @@ def _adopt(session: "_Session", initial: WorkRun) -> Any:
             raise _reconcile(f"{branch} is not exactly the adoption range K1 -> old G4 -> successor generations so far",
                              REASON_CLASS_C)
         if reached is None:
-            _freeze_replacement(session, initial, old_material, successor, k1, git)
+            _freeze_replacement(session, initial, old_material, successor, k1, git, recovered)
     sealed = _continue(session, successor)
     tip = workcommit.ref_value(git, branch)
     if tip is None:

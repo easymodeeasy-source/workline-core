@@ -104,6 +104,7 @@ def discover_work(
     operation_identity: str,
     *,
     currency: Callable[[MatchingRun], Any],
+    held: "frozenset[str] | set[str] | tuple[str, ...]" = (),
 ) -> Discovery:
     """The same canonical discovery over the Work kind's Runs of one operation identity (F4 §11.12).
 
@@ -112,8 +113,15 @@ def discover_work(
     version 2 request), recoverable, stale (``currency``), or incomplete - and
     never chosen by age: one recoverable is the one to continue, several are
     ``review_recovery_ambiguous``, an incomplete one stops the call.
+
+    ``held`` are the Runs the calling START mutation itself reserved: they are
+    its own recovery selector's (``start_review.select_in_flight``), so they are
+    neither proven nor classified here - an own Run with a pending generation
+    mutation is the selector's to resume, never "incomplete" - and the Runs
+    their requests set aside stay set aside. Every OTHER matching Run is
+    classified exactly as above.
     """
-    return _discover(store, work_review.REVIEW_KIND, operation_identity, currency, WORK)
+    return _discover(store, work_review.REVIEW_KIND, operation_identity, currency, WORK, frozenset(held))
 
 
 def _discover(
@@ -122,17 +130,20 @@ def _discover(
     operation_identity: str,
     currency: Callable[[MatchingRun], Any],
     adapter: RecoveryAdapter,
+    held: frozenset[str] = frozenset(),
 ) -> Discovery:
     checkout.require_namespace_readable(store)
     review = ReviewStore(store)
     head = gitcmd.head_commit(store.root)
     matching = _matching_runs(store, review, head, review_kind, operation_identity)
     runs: dict[str, MatchingRun] = {}
-    for review_run_id in sorted(matching):
+    for review_run_id in sorted(matching - held):
         runs[review_run_id] = _clean_run(store, review, head, review_run_id, adapter.shape)
     named_aside: set[str] = set()
     for found in runs.values():
         named_aside.update(adapter.named(review, found))
+    for review_run_id in sorted(matching & held):
+        named_aside.update(_held_named(review, review_run_id, adapter))
     recoverable: list[MatchingRun] = []
     set_aside: list[dict[str, str]] = []
     for review_run_id, found in runs.items():
@@ -149,6 +160,26 @@ def _discover(
             reason="review_recovery_ambiguous",
         )
     return Discovery(recoverable[0] if recoverable else None, tuple(sorted(set_aside, key=lambda item: item["review_run_id"])))
+
+
+def _held_named(review: ReviewStore, review_run_id: str, adapter: RecoveryAdapter) -> list[str]:
+    """The Runs a held (own) Run's request sets aside, when its request reads; the held Run itself is not judged.
+
+    Whether the caller's own Run is whole and valid is its own selector's to
+    show, from its own record, so a held Run that does not read yet names
+    nothing here rather than being reported as an incomplete matching Run.
+    """
+    try:
+        chain = review.gate_chain(review_run_id)
+    except ValidationError:
+        return []
+    if chain is None or not chain.generations[0].accepted_tasks:
+        return []
+    task_id = str(chain.generations[0].accepted_tasks[0]["task_id"])
+    try:
+        return adapter.named(review, MatchingRun(review_run_id, chain, {}, task_id))
+    except ReconcileRequired:
+        return []
 
 
 # --------------------------------------------------------------------------- matching Runs

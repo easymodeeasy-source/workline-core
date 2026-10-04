@@ -3273,6 +3273,10 @@ def _start_locked(
     destination = gitops.ensure_push_destination(store)
     # review-v1: activation is verified under the lock, before any intent record exists (F1 §6.4).
     activation = start_review.require_activation(store) if review is not None else None
+    if review is not None:
+        # review-v1, F4 §11.12: every matching Work Review Run that no pending START of this Work holds is classified,
+        # still before the mutation is opened, so a refusal reserves, records and writes nothing and runs no executor.
+        start_review.entry_recovery(store, work_id)
 
     controller = MutationController(store)
     # invocation identity = the required START inputs (stable Work ID and mode);

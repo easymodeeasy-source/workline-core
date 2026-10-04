@@ -108,8 +108,11 @@ class AdoptionCase(TerminalCase):
             found["r2"] = reserved.get(f"review-receipt:{successor}:3")
         return found
 
-    def assert_adopted(self, record: dict, *, remote: bool = True) -> dict:
-        """The whole Class-A topology the completed record and the repository hold, and nothing twice."""
+    def assert_adopted(self, record: dict, *, remote: bool = True, older: tuple = ()) -> dict:
+        """The whole Class-A topology the completed record and the repository hold, and nothing twice.
+
+        ``older``: the set-aside items of other, older matching Runs (another START's) the successor also names.
+        """
         ids = self.adoption_ids(record)
         notes = record["notes"]
         checkpoint, adopted, terminal = (notes[start_review.NOTE_CLASS_A], notes[start_review.NOTE_ADOPTED_PROOF],
@@ -149,8 +152,9 @@ class AdoptionCase(TerminalCase):
         # the successor reviewed C2 under a version 2 request setting the first Run aside
         task = review.read_task_input(str(new_chain.generations[0].accepted_tasks[0]["task_id"]))
         self.assertEqual(task.request_envelope["version"], 2)
-        self.assertEqual(task.request_envelope["set_aside_runs"],
-                         [{"review_run_id": ids["initial"], "reason": "work_class_a_replacement"}])
+        self.assertEqual(task.request_envelope["set_aside_runs"], sorted(
+            [{"review_run_id": ids["initial"], "reason": "work_class_a_replacement"}, *older],
+            key=lambda item: item["review_run_id"]))
         c2 = review.read_candidate_snapshot(new_chain.generations[0].candidate_hash).material["candidate"]
         self.assertEqual(c2["declared_base"]["base_commit"], checkpoint["parent_k1"])
         self.assertEqual(task.request_envelope["context"]["review_checkout_capability"]["resulting_tree"],
@@ -158,7 +162,8 @@ class AdoptionCase(TerminalCase):
         # exactly one of each: Supersession, Receipts (R1, R2), Consumption (of R2), terminal event
         self.assertEqual(sorted(review.superseded_receipt_ids()), [ids["r1"]])
         self.assertEqual(sorted(review.receipt_ids()), sorted([ids["r1"], ids["r2"]]))
-        self.assertEqual(sorted(review.run_ids()), sorted([ids["initial"], ids["successor"]]))
+        self.assertEqual(sorted(review.run_ids()),
+                         sorted([ids["initial"], ids["successor"], *(item["review_run_id"] for item in older)]))
         (consumption,) = review.consumptions()
         self.assertEqual((consumption.receipt_id, consumption.authorized_result_commit_sha, consumption.artifact_kind),
                          (ids["r2"], k1, "result_commit"))
