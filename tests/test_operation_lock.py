@@ -513,7 +513,7 @@ class UnwritableDescriptionTests(ExecutionLockTestCase):
         work_id = "w_01ARZ3NDEKTSV4RRFFQ69G5FAV" + self.LONE
         for label, call, code in (
             ("START", lambda: st.start(store, work_id, "single-work", completing_executor(store)), "entity_unresolvable"),
-            ("standalone plan exclusion", lambda: st.plan_exclude_standalone_work(store, work_id), "validation_failed"),
+            ("standalone plan exclusion", lambda: st.plan_exclude_standalone_work(store, work_id), "input_unrepresentable"),
             ("pin maintenance", lambda: pin_push_destination(store.root, ["C:/repos/bare.git"], remote="origin" + self.LONE),
              "push_destination_remote_missing"),
         ):
