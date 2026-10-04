@@ -33,11 +33,15 @@ PREFIXES = {
     "review_receipt": "rcp",
     "review_consumption": "rcs",
     "review_task": "rtk",
+    # P4 (§12.5 / §12.8): a normalized Finding and a Repair Batch are stable
+    # owner-mutation reservations too, so a replay reserves the same identity.
+    "review_finding": "rfd",
+    "review_repair_batch": "rrb",
 }
 
-# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_`` are read as
-# themselves rather than as the Roadmap prefix ``r`` followed by text.
-_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
+# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_`` are
+# read as themselves rather than as the Roadmap prefix ``r`` followed by text.
+_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
 
 
 def new_ulid(now_ms: int | None = None) -> str:

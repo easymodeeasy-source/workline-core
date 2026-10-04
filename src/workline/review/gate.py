@@ -95,6 +95,54 @@ def review_task_key(review_run_id: str, task_slot: str) -> str:
     return f"review-task:{review_run_id}:{task_slot}"
 
 
+#: The prefix of a P4 normalized Finding reservation (§12.5 / §27.7). One key per Finding of one
+#: Candidate-specific Review Run.
+FINDING_KEY_PREFIX = "review-finding:"
+
+#: The prefix of a P4 Repair Batch reservation (§12.8 / §27.14). One key per source Review Run.
+REPAIR_BATCH_KEY_PREFIX = "review-repair-batch:"
+
+
+def review_finding_key(review_run_id: str, ordinal: int) -> str:
+    """``review-finding:<review_run_id>:<ordinal>`` - one normalized P4 Finding of one Review Run.
+
+    The ordinal is the Finding's 1-based position in the canonical normalized
+    adjudication order (semantic surface, repair identity, category, ordered
+    source claims), never the external return order. A replay of the same
+    adjudication therefore reserves the same Finding IDs, and the Run is bound
+    to exactly one Candidate, so the key needs no Candidate part.
+    """
+    _require_key_part(review_run_id, "review_run_id")
+    if not is_valid_id(review_run_id, "review_run"):
+        raise ValidationError(
+            f"a Finding reservation is keyed by a review_run id, not {review_run_id!r}",
+            code="review_record_invalid",
+        )
+    if type(ordinal) is not int or ordinal < 1:
+        raise ValidationError(
+            f"a Finding reservation ordinal is a positive integer, not {ordinal!r}",
+            code="review_record_invalid",
+        )
+    return f"{FINDING_KEY_PREFIX}{review_run_id}:{ordinal}"
+
+
+def review_repair_batch_key(source_review_run_id: str) -> str:
+    """``review-repair-batch:<source_review_run_id>`` - the one Repair Batch of one Candidate generation.
+
+    Keyed by the source Review Run alone: a Run is bound to exactly one
+    Candidate, so "one Candidate generation, at most one Repair Batch" holds by
+    construction on replay - a second attempt reserves the identity that
+    already exists.
+    """
+    _require_key_part(source_review_run_id, "source_review_run_id")
+    if not is_valid_id(source_review_run_id, "review_run"):
+        raise ValidationError(
+            f"a Repair Batch reservation is keyed by a review_run id, not {source_review_run_id!r}",
+            code="review_record_invalid",
+        )
+    return f"{REPAIR_BATCH_KEY_PREFIX}{source_review_run_id}"
+
+
 def _require_key_part(value: object, described: str) -> None:
     if not isinstance(value, str) or not value or ":" in value or value != value.strip():
         raise ValidationError(
