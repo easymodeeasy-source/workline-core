@@ -323,7 +323,7 @@ planningのgate chainは次の4つのtransitionだけを持ち、各transition�
 4 invalidate  gate 4（open）+ Supersession（sealの後・登録開始前のstale）
 ```
 
-各generation mutationの初期write scopeは、そのtransitionが作るfileと、Runの `.generation-serialization` tokenちょうどであり、後から広げない。generation 5は無く、登録stageを記録した後にgeneration 4は開始しない。
+各generation mutationの初期write scopeは、そのtransitionが作るfileと、Runの `.generation-serialization` tokenちょうどであり、後から広げない。v1 planning Runにgeneration 5は無く（P4 Runの形は `## P4 Repair Loop` が定める）、登録stageを記録した後にgeneration 4は開始しない。
 
 ## Planning Consumption v2（P2）
 
@@ -554,3 +554,166 @@ malformedなnamespace、欠けたimmutable record、矛盾するactivation、既
 **回復の選択**: 1つのWork Review invocationについて、同じreview kindとoperation identityを持つすべてのRunを、canonical recovery discoveryで consumed / invalidated（supersede済み）/ set_aside / not_authorized / 回復可能 / stale / incomplete のどれかと示す。回復可能がちょうど1つならそれを続け、0なら通常の前提が許す時に新しいRunを始めてよく、複数またはincomplete・矛盾したRunがあれば `reconcile required`。consumed・invalidated・set asideのRunは再開しない。新しさで選ばない。operation identityはmutation id・時刻・modeを含まないので、同じWorkの別のSTART（失われたSTARTを含む）が始めたRunも一致するRunであり、これはreview-v1 Work STARTのすべての呼び出し（新しいSTART、最初のRunだけを続ける再開、Class Aの再開）に適用する。Work Review Runは、それを予約したSTART mutationのrecordとcanonicalなReview recordからだけ続けられる（`skills/start` のresume）。残りのstageが使うもの（予約したRun・task・Receipt・ConsumptionのID、generation mutationの所有者、Candidateを凍結した時のownership witnessとpre-existing dirtyのsnapshot、S-c0 / S-c1のcommit（C-1）、terminal stage）はそのrecordだけにあってReview recordには無く、別のmutationはそれを持てない（新しいIDを予約し、回復した予約を結び付けるのはrecovery planning mutationだけで、失われたSTARTのexecutorが書いたbytesは開始前からの変更としてsnapshotし、自分が作っていないcommitを自分のものとして採用しない）。そのため回復可能な形のRun（currencyがcurrentなgeneration 1か許可するgeneration 2、またはseal済み）が回復可能なのは、このWorkのpendingのSTART mutationがそれを予約している時だけであり、どのpendingのSTART mutationも持たないものはincomplete（`review_recovery_incomplete`）である。このWorkのpendingのSTART mutationが予約したRunはそのmutationの回復selectorのものであり、ここでは分類しない（そのRunのrequestがset asideしたRunはset asideのまま）。呼び出しと同じinvocationのmutationは開かれて再開し、そのselectorが自分のRunを続ける（ちょうど1つの回復可能なRunの再開）。別のmode等、別のSTART mutationが持つRunがある時は、mutationを開く時に従来のwrite scopeの衝突として `reconcile required` で止まり、何も予約せず、その横に新しいRunを始めない。それ以外の一致するRunは、どれも再開しないもの（consumed・invalidated・not_authorized・set_aside・stale）でなければならず、incompleteなRunがあれば、mutationを開く前に `reconcile required`（`review_recovery_incomplete`）で止まり、何も予約・記録・書き込みせず、executorを実行しない。
 
 Class-A checkpointとadopted-result proof noteはSTART mutationのruntime materialであり、canonical Review recordでもlifecycleの正本でもない。generation 4・Supersession・successorのRunを含め、Review recordはlifecycleの権威にならない。
+
+## P4 Repair Loop（current-cycle Repair / BL-004）
+
+P4はreview-v1 planning kindとreview-v1 Work kindに共通の、明示opt-inの新しいReview contractである。v1（P2 / P3 / F4）のRun、Receipt、TaskInput、Policyの意味は一切変えない。共通の意味は `workline.review.p4`（inert: lock・mutation・file書き込み・Git finalization・lifecycle遷移を持たない）、kind固有のCandidateは `review/planning.py` と `review/work_review.py`、operationの所有はRoadmap（`skills/roadmap`）とSTART（`skills/start`）が持つ。Reviewはlifecycle・top-level Project mutation・Git finalizationを所有しない。
+
+識別子: planning P4 contract `review-v1-planning-p4-v1`、Work P4 contract `review-v1-work-p4-v1`、P4 Effective Policy `review-v1-p4-policy-v1`、discovery instruction `review-v1-p4-discovery-instruction-v1`、adjudication instruction `review-v1-p4-adjudication-instruction-v1`（adjudication contract `review-v1-p4-adjudication-v1`）、repair instruction `review-v1-p4-repair-instruction-v1`。task kind: `p4-discovery-v1`（slot `p4-discovery.<viewpoint>`）、`p4-adjudication-v1`（slot `p4-adjudicator`）、`p4-repair-v1`（slot `p4-repair`）。ID kind: Finding `rfd`、Repair Batch `rrb`。予約key: `review-finding:<run>:<正規順の序数>`、`review-repair-batch:<source run>`、後継Runは既存の `review-successor-run:<predecessor>`。
+
+### discovery != adjudication
+
+discoveryはfreshである。discovery actorは固定されたCandidate、現在のrequirement / desired state、Context / Policyと必要なEvidenceを受け、過去のFinding / Repair historyを受けない。discoveryはclaimを報告するだけで、Problem / Improvement / HUMANを決めず、Candidateを修理しない。adjudicationはhistory-awareで、凍結されたraw report、Candidate、requirement、Context / Policy、同じcycleの過去Finding / Repair関係を受ける。adjudicatorもCandidateを変更しない。
+
+### canonicalなraw report
+
+P4のdiscovery reportはcurrent-cycleの正本recordである: `.workline/review/reports/<result_digest>.yaml`（ファイル名 == canonical report recordのdigest == settleした `result_digest`）。rawは「未adjudication」の意味であり、未sanitizeではない。永続化の前にH-3を満たす（chain-of-thought・transcript・secret・不要な絶対/local path・不要なprivate識別子を持たない）。H-3を満たせない戻り値は永続化もsettleもせず、同じtaskを同じactorへ再launchする。raw reportは不変で、後のadjudicationを反映して書き換えない。reviewerのseverityはadjudicationの入力であり、権威ではない。
+
+### Problem / Improvement / HUMAN（§12.4の順）
+
+各claimを次の順で一つの結果へ: 1 支持されない → `unsupported`（Findingなし）、2 requirementの意味を決める必要がある → `HUMAN`（推測で定義しない）、3 決定済みrequirementを満たさない → `Problem`、4 実行可能なより良い代替がある → `Improvement`、5 それ以外 → `dismissed_non_actionable`。内容categoryは `Problem` と `Improvement` だけで、Findingを作るのもこの2つだけである。重複は修理identityでだけ統合し（同じ問題・同じ意味責任・一つの修理で全source claimが閉じる時だけ）、不確かなら別のまま、統合したseverityは支持される最も強いもので全source参照を保つ。順序の飛ばし、支持されないclaimのFinding化、HUMANの不確かさのProblem化、目標が成り立たない時のLOW非blocking、因果linkなしのB/C、claimの欠落、G3が束ねていないreport、矛盾する重複Finding identityは `review_p4_adjudication_invalid` で何もsettleしない。
+
+### blocking（H-4）
+
+Problem HIGH / MIDはblockingなcurrent-cycle義務である。Problem LOWは現在の完了目標が成り立つ間だけ非blocking。ImprovementはHIGH / MID / LOWのどれでも非blocking。`C_REPAIR_INDUCED` のProblemは未解決のまま収束させない。LOW・Improvementは自動でWorkを作らない（disposition: `repaired_current_cycle`、`retained_history_only`、`future_work_candidate`、`no_action_after_adjudication`）。
+
+### P4 Runの形（G1-G6、G7は無い）
+
+```text
+1 accept      discovery task(s) + CandidateSnapshot + 開いたgate
+2 settle      全discovery taskのsettle + canonical raw report
+3 accept      canonical materialだけから作ったadjudication TaskInput
+4 settle      canonical adjudication record + obligation digest
+5 seal        AUTHORIZATION_READY: gate 5（sealed_authorized）+ Receipt（review_generation 5）
+5 accept      REPAIR_REQUIRED: Repair Batch + repair TaskInput（Receiptなし）
+6 settle      Repair Result + CandidateSnapshot N+1（Receiptなし）
+6 invalidate  stale化した G5 Receipt: 開いたgate 6 + Supersession（G-3）
+```
+
+generation 5と6がどちらの形かは、正本record（accepted descriptorのtask kind、seal、settlement、Supersession）から読み、generation番号だけでは決めない。P4のG4をv1のinvalidationと、P4のG5 sealをrepairと読まない。外部actor（discovery・adjudicator・repair）は、そのTaskInputとaccepted descriptorがcommit済みgenerationに永続し読み戻せるまでlaunchしない。runtime喪失後も同じtaskを同じactor identity / versionにだけ再launchする。HUMANが残るRunはG4でHUMAN_WAITのまま止まり、修理を推測しない。
+
+A stale P4 authorization Receipt is invalidated by a P4 G6 invalidate transition that atomically Supersedes the G5 Receipt. Repair G6 and invalidation G6 are distinct transition shapes. No G7 exists. P4 Work does not reuse F4 Class A for a G5-sealed P4 Run.
+
+A HUMAN_WAIT Run remains non-authorizing at G4. A later Human decision is supplied through the owning operation boundary as an explicit decision identity and disposition. The decision does not create a separate requirement store. A requirement change must already be reflected in its normal authority; a confirmation may leave requirement bytes unchanged. The owner binds the decision, sets the prior HUMAN_WAIT Run aside as `human_decision`, freezes a new Candidate/Context as needed, and starts a new P4 Run.
+
+### one Repair Batch per Candidate generation
+
+REPAIR_REQUIRED のadjudicationは、そのCandidate世代につき一つだけの不変Repair Batch（`.workline/review/repair-batches/<repair_batch_id>.yaml`）を作る。batchは決定可能なblocking Problem HIGH / MIDを全部持ち、Improvement・HUMAN・unsupported・dismissedを持たず、LOW Problemは意図して修理すると決めた時だけ持つ。ReviewRepairRequestは正本recordだけから組み立てる。repair actorは完全なrepaired Candidate proposalを返すだけで、Review権威として作業treeを書き換えない。例外・不正な戻り値はsettleせず（`review_p4_repair_invalid`）、明示のfailed / declinedは旧Candidateを決して認可せず成功修理にもしない（`review_p4_repair_failed`）。Repair Coverage Checkは構造化dataで、unknown（未解決gap、列挙不能、未coverage）はPASSしない（`review_p4_repair_coverage_unknown`）。共有責任に対する局所patchは、次のFormal Reviewを使う前に広げる（`review_p4_repair_widen_required`）。各修理は一つのimpact class（LOCAL / SHARED / CONTRACT / FOUNDATION）を記録し、最低再検証はファイル数でなく意味的影響で決まる。必要な再検証が残る修理は後継Runへ進めない（`review_p4_reverification_incomplete`）。
+
+### new Candidate / new Run after repair
+
+成功した修理はG6で不変のRepair Result（`.workline/review/repair-results/<repair_batch_id>.yaml`）と完全なCandidateSnapshot N+1を持つ。Candidate N+1はpatchでなく完全な新Candidateで、結果候補世代 = source + 1。どのReview Runもcandidate_hashをその場で変えない。後継Runは同じoperation identity・同じtarget / review kindで、RB3-C1の決定的な後継予約（`review-successor-run:<predecessor>`、一つの前任につき後継はたかだか一つ、衝突はreconcile）を使い、request（succession）が前任Run・Repair Batch・Repair Result digest・candidate_generationを明示し、前任を `p4_repaired` としてset asideする。世代は file順・時刻・最新IDから導かない。
+
+P4 planning Candidate N+1 currency is proven from its immutable Repair Result, complete stored CandidateSnapshot, successor linkage, current declared base, Context, Policy and decided requirement/desired-state authority. A repaired Candidate is never reconstructed from the original Candidate-N caller request merely to test equality.
+
+The Work repair actor returns a complete repaired Candidate proposal/material and never directly mutates the canonical working tree as Review authority. After G6, the owning START alone adopts the exact proposal onto the allowed result surface using the existing ownership, overlap, witness, resulting-tree and verification machinery. The adopted Candidate must equal the persisted Candidate N+1 exactly before successor Review or Git persistence.
+
+### Evidence-only positive-proof reuse
+
+Candidate NのreportもadjudicationもReceiptも、N+1の認可として再利用しない。N+1のformal discoveryは新しいCandidateに対して行う。Evidenceだけが、`closure` の依存class語彙の下で正に証明された時（両方の宣言がcomplete、必須classがcover、非必須classが説明済み、具体identity・adapter identity / version・proof mechanismが不変、修理impactが証明した前提を壊さない）だけ再利用できる。それ以外は `unknown` / `invalidated` で取り直す。全体Reviewの再利用に `closure.may_reuse` を使わない。planning EvidenceはP4ではfresh-use-onlyである。
+
+### A/B/C と STRATEGY_CHANGE
+
+修理後のFindingの関係は `A_NEW`・`B_RECURRENCE`（前のFinding / Repairを名指し、同じ問題・意味責任、前の修理が閉じなかった正の根拠）・`C_REPAIR_INDUCED`（原因のRepair Batchと因果Evidence digest）。時刻だけで因果を決めず、不明はA_NEW。同じsemantic surfaceで連続する二つの支持されたB/C（BB・CC・BC・CB）の後の修理は `STRATEGY_CHANGE` でなければならず、変えない通常戦略は受け付けない（`review_p4_strategy_change_required`）。timeout・rate limit・crash・不正な戻り値などの運用失敗は再発に数えない。semantic round上限は無い。
+
+### convergence
+
+認可できるのは、未解決のblocking Review義務が0で、必要なcoverage・Evidenceが現在の時だけである（全discoveryのsettle、coverageの充足または明示解決、raw reportの永続、adjudication完了、未adjudication claim 0、Problem HIGH / MID 0、LOWとImprovementの追跡可能なdisposition、未解決HUMAN 0、修理後再検証の完了、最新Repair Coverage Checkの完了、未解決の修理起因Problem 0、未実施STRATEGY_CHANGE 0、認可に使うEvidenceが現在）。「新しいfinding = 0」は必要条件でも十分条件でもない。verification-onlyのIntegration Evidenceは、宣言されないProject / 外部 / nested状態の永続変更があればPASSしない（gitlink identityはnested作業treeの変更を認可しない）。Integrationが要求する修理は通常のfix Workとして既存のprogressionで扱う。
+
+### namespace と version dispatch
+
+P4は閉じたReview namespaceへ `reports/`、`adjudications/`、`repair-batches/`、`repair-results/` を加える。4種のrecordはすべてimmutable create-only・strict schema・canonical bytes・clone-safeで、参照されていても孤立していても検証し、checkout capability / path安全性の証明に含まれ、lifecycle truthではない。どのcontractかは永続したTaskInput / requestが明示するP4 contractだけで決め、generation数やrecordの形から推測しない。pendingのv1 Runはv1のままでだけ再開し、v1 RunをP4へ黙って昇格しない。v1 Receiptは束ねたpolicyのままで解釈する。
+
+P4のSTOP code: `review_p4_human_wait`、`review_p4_adjudication_invalid`、`review_p4_adjudicator_failed`、`review_p4_repair_failed`、`review_p4_repair_invalid`、`review_p4_repair_coverage_unknown`、`review_p4_repair_widen_required`、`review_p4_reverification_incomplete`、`review_p4_strategy_change_required`、`review_p4_human_decision_invalid`、`review_p4_receipt_invalidated`。P4のreconcile reason: `review_p4_contract_mismatch`、`review_p4_linkage_invalid`、`review_p4_successor_conflict`、`review_p4_adoption_mismatch`、`review_p4_chain_invalid`。
+
+## P4 Review Policy
+
+P4のEffective Policyは次の静的recordそのものである（Workline実装の定数 `workline.review.p4.POLICY_RECORD` と一致しなければならない）。
+
+```yaml
+adjudication:
+  contract: review-v1-p4-adjudication-v1
+  instruction: review-v1-p4-adjudication-instruction-v1
+  merge_rule: "same substantive issue, same semantic responsibility, one repair closes all; uncertain stays separate"
+  order:
+    - unsupported
+    - HUMAN
+    - Problem
+    - Improvement
+    - dismissed_non_actionable
+  severity_rule: "the strongest severity the adjudication supports; the reviewer's severity is input only"
+  slot: p4-adjudicator
+  task_kind: p4-adjudication-v1
+blocking_rule: "Problem HIGH or MID, and every C_REPAIR_INDUCED Problem, is a blocking current-cycle obligation"
+categories:
+  - Problem
+  - Improvement
+convergence_rule: "unresolved blocking review obligations = 0 and required coverage and Evidence are current"
+discovery:
+  history: "fresh: no prior Finding or Repair history"
+  instruction: review-v1-p4-discovery-instruction-v1
+  report_rule: H-3 public-safe structured claims plus an explicit coverage declaration
+  slot_rule: "one required task per viewpoint the P4 selector binds; at least one"
+  task_kind: p4-discovery-v1
+dispositions:
+  - repair_required
+  - repaired_current_cycle
+  - retained_history_only
+  - future_work_candidate
+  - no_action_after_adjudication
+evidence_reuse_rule: "positive proof under the dependency vocabulary only; a report, adjudication or Receipt is never reused"
+human_rule: "a required requirement decision is HUMAN_WAIT at generation 4; no repair guesses it"
+impact_classes:
+  - LOCAL
+  - SHARED
+  - CONTRACT
+  - FOUNDATION
+improvement_rule: Improvement of any severity is non-blocking
+last_generation: 6
+low_rule: Problem LOW is non-blocking only while the current completion objective still holds
+outcomes:
+  - unsupported
+  - HUMAN
+  - Problem
+  - Improvement
+  - dismissed_non_actionable
+policy_id: review-v1-p4-policy-v1
+relations:
+  - A_NEW
+  - B_RECURRENCE
+  - C_REPAIR_INDUCED
+repair:
+  batch_rule: one Repair Batch per Candidate generation holding every decidable blocking Problem
+  instruction: review-v1-p4-repair-instruction-v1
+  proposal_rule: "a complete repaired Candidate proposal; the owner alone adopts it"
+  slot: p4-repair
+  task_kind: p4-repair-v1
+reverification_minimums:
+  CONTRACT:
+    - adjacent_eligibility
+    - contract_roundtrip
+    - failure_interruption_resume
+    - writers_readers
+  FOUNDATION:
+    - broad_integration
+    - full_suite
+  LOCAL:
+    - direct_consumers
+    - focused_tests
+  SHARED:
+    - focused_tests
+    - integration_checks
+    - representative_callers
+review_contracts:
+  - review-v1-planning-p4-v1
+  - review-v1-work-p4-v1
+schema: review-p4-policy
+seal_generation: 5
+severities:
+  - HIGH
+  - MID
+  - LOW
+strategy_rule: two consecutive supported B/C failures on one semantic surface require STRATEGY_CHANGE
+version: 1
+work_creation_rule: LOW and Improvement never create Work automatically
+```
