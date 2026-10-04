@@ -132,6 +132,8 @@ class InterruptionRows12To21(InterruptionCase):
 
 
 for _row, _target, _name, _after, _call in ROWS:
-    holder = InterruptionRows01To11 if _row <= 11 else InterruptionRows12To21
+    _holder = InterruptionRows01To11 if _row <= 11 else InterruptionRows12To21
     _test = _make(_row, _target, _name, _after, _call)
-    setattr(holder, _test.__name__, _test)
+    setattr(_holder, _test.__name__, _test)
+# A module-level name left bound to a TestCase class is collected again under that name: unbind every loop name.
+del _holder, _test, _row, _target, _name, _after, _call
