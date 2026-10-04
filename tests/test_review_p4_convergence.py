@@ -108,3 +108,41 @@ class IntegrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConvergenceFromRecordsTests(unittest.TestCase):
+    """§27.12: the owner's pre-seal predicate, read through a reader of canonical records only."""
+
+    def reader(self, found, *, durable: bool = True):
+        class Reader:
+            def read_adjudication(self, run_id):
+                return found
+
+            def read_repair_result(self, batch_id):  # pragma: no cover - generation 1 has no prior
+                raise AssertionError("no Repair Result for a first-generation Run")
+
+            def report_exists(self, digest):
+                return durable
+
+        return Reader()
+
+    def test_a_ready_first_generation_run_converges_only_with_durable_reports_and_current_evidence(self) -> None:
+        from test_review_p4_dispatch import G1, G2, G3, G4, Chain
+
+        reports = bound(report(TASK_A, "correctness", [("LOW", "x", "minor")]))
+        found = adjudicate(reports, returned(disposition(
+            TASK_A, 0, p4.OUTCOME_PROBLEM, severity="LOW", disposition=p4.DISPOSITION_RETAINED_HISTORY_ONLY,
+        )))
+        chain = Chain((G1, G2, G3, G4))
+        chain = type("C", (), {"generations": chain.generations, "latest": G4,
+                               "generation": lambda self, n: chain.generations[n - 1]})()
+        self.assertEqual([], p4.convergence_from_records(self.reader(found), "rr_x", chain, {"succession": None},
+                                                         evidence_current=True))
+        self.assertTrue(p4.convergence_from_records(self.reader(found, durable=False), "rr_x", chain,
+                                                    {"succession": None}, evidence_current=True))
+        self.assertTrue(p4.convergence_from_records(self.reader(found), "rr_x", chain, {"succession": None},
+                                                    evidence_current=False))
+        blocking = adjudicate(bound(report(TASK_A, "correctness", [("HIGH", "x", "broken")])),
+                              returned(disposition(TASK_A, 0, p4.OUTCOME_PROBLEM, severity="HIGH")))
+        self.assertTrue(p4.convergence_from_records(self.reader(blocking), "rr_x", chain, {"succession": None},
+                                                    evidence_current=True))

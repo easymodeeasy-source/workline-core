@@ -3515,6 +3515,7 @@ def _p4_freeze_material(
             review_contract=work_review.P4_CONTRACT, review_kind=work_review.REVIEW_KIND, viewpoint=binding.viewpoint,
             candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
             succession=succession, set_aside_runs=set_aside, human_decision=decision,
+            evidence_ids=[f"work-isolated-verification:{verified.resulting_tree}"],
         )
         task_inputs.append(p4.task_input(
             task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
@@ -3885,7 +3886,12 @@ def _p4_adjudicate(session: "_Session", run: WorkRun, chain: Any) -> None:
 
 
 def _p4_seal(session: "_Session", run: WorkRun, chain: Any) -> None:
-    """G5 seal: the Receipt at generation 5 (§27.12), reached only on ``capable``."""
+    """G5 seal: the Receipt at generation 5 (§27.12), reached only on ``capable`` and the convergence predicate."""
+    unmet = p4.convergence_from_records(ReviewStore(session.store), run.review_run_id, chain,
+                                        _p4_envelope(session.store, chain), evidence_current=True)
+    if unmet:
+        raise p4.reconcile(f"Work Review Run {run.review_run_id} is not converged: " + "; ".join(unmet),
+                           p4.REASON_CHAIN_INVALID)
     fourth = chain.latest
     receipt_id = session.mutation.reserve_id(gate.review_receipt_key(run.review_run_id, p4.SEAL_GENERATION),
                                              "review_receipt")

@@ -3235,7 +3235,7 @@ def _p4_bind_decision(op: _Op, mutation: Mutation) -> p4.HumanDecision | None:
 def _p4_task_inputs(
     op: _Op, run_id: str, task_ids: list[str], candidate: dict[str, Any], snapshot: records.CandidateSnapshot,
     context: dict[str, Any], requirement: dict[str, Any], generation: int, succession: dict[str, Any] | None,
-    set_aside: list[dict[str, Any]], decision: p4.HumanDecision | None,
+    set_aside: list[dict[str, Any]], decision: p4.HumanDecision | None, evidence: dict[str, Any],
 ) -> list[records.TaskInput]:
     found = []
     for task_id, binding in zip(task_ids, _p4_discovery_bindings(op)):
@@ -3243,6 +3243,7 @@ def _p4_task_inputs(
             review_contract=planning.P4_CONTRACT, review_kind=op.kind.review_kind, viewpoint=binding.viewpoint,
             candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
             succession=succession, set_aside_runs=set_aside, human_decision=decision,
+            evidence_ids=[f"planning-evidence:{serialize.digest(evidence)}"],
         )
         found.append(p4.task_input(
             task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
@@ -3301,7 +3302,7 @@ def _setup_new_run_p4(op: _Op, mutation: Mutation, destination: Any, discovery: 
         publication.require_barrier_clear(store.root, head)
     _note_binding(store, mutation)
     task_inputs = _p4_task_inputs(op, run_id, task_ids, candidate, snapshot, context, requirement, 1, None, set_aside,
-                                  decision)
+                                  decision, evidence)
     return _Run(run_id, task_ids[0], receipt_id, consumption_id, frozen={
         "candidate": candidate, "snapshot": snapshot, "task_inputs": task_inputs, "evidence": evidence,
         "context": context, "target": target, "write_snapshot": True,
@@ -3768,7 +3769,12 @@ def _p4_adjudicate(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> Review
 
 
 def _p4_seal(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> None:
-    """G5 seal: the Receipt at generation 5 (§27.12)."""
+    """G5 seal: the Receipt at generation 5 (§27.12), only on the full convergence predicate."""
+    unmet = p4.convergence_from_records(ReviewStore(op.store), run.review_run_id, chain,
+                                        _p4_envelope(op.store, chain), evidence_current=True)
+    if unmet:
+        raise p4.reconcile(f"Review Run {run.review_run_id} is not converged: " + "; ".join(unmet),
+                           p4.REASON_CHAIN_INVALID)
     fourth = chain.latest
     receipt_id = mutation.reserve_id(gate.review_receipt_key(run.review_run_id, p4.SEAL_GENERATION), "review_receipt")
     run.receipt_id = receipt_id
@@ -4028,7 +4034,7 @@ def _p4_begin_successor(op: _Op, mutation: Mutation, destination: Any, run: _Run
     task_ids = [str(mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot)))
                 for binding in _p4_discovery_bindings(op)]
     task_inputs = _p4_task_inputs(op, run.review_run_id, task_ids, candidate, snapshot, context, requirement,
-                                  generation, succession, set_aside, decision)
+                                  generation, succession, set_aside, decision, evidence)
     # G-1: Candidate N+1 is current only by positive proof, before its Run begins.
     first = predecessor.generations[0]
     problems = _p4_linkage_problems(op, task_inputs[0].request_envelope, snapshot.candidate_hash,

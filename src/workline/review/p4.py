@@ -642,12 +642,13 @@ def discovery_request(
     succession: dict[str, Any] | None,
     set_aside_runs: Iterable[Mapping[str, Any]],
     human_decision: HumanDecision | None,
-    kind_material: dict[str, Any] | None = None,
+    evidence_ids: Sequence[str] = (),
 ) -> dict[str, Any]:
     """The P4 discovery request: what one discovery actor is asked, with the P4 contract bound explicitly.
 
     Discovery is fresh: it carries the successor linkage identities a recovery
-    needs, never prior Finding or Repair content (§12.2).
+    needs, never prior Finding or Repair content (§12.2). ``evidence_ids`` are
+    the Evidence identities available to the task (§27.8).
     """
     if review_contract not in CONTRACTS:
         raise ValidationError(f"not a P4 contract: {review_contract!r}", code="review_contract_invalid")
@@ -669,7 +670,7 @@ def discovery_request(
         "succession": succession,
         "set_aside_runs": _set_aside(set_aside_runs),
         "human_decision": None if human_decision is None else human_decision.to_record(),
-        "kind_material": kind_material,
+        "evidence_ids": sorted(set(evidence_ids)),
     })
 
 
@@ -1854,6 +1855,23 @@ def convergence_problems(state: ConvergenceInput) -> list[str]:
         if not held:
             unmet.append(message)
     return unmet
+
+
+def convergence_from_records(reader: Any, review_run_id: str, chain: Any, envelope: Mapping[str, Any], *,
+                             evidence_current: bool) -> list[str]:
+    """§27.12: the unmet §12.18 conditions of a P4 Run at its generation 4, read through any Review reader.
+
+    Inert: ``reader`` only reads (the working tree's or one commit's records).
+    The latest Repair Result of the cycle is the one the Run's own successor
+    linkage names; a first-generation Run has none.
+    """
+    found = reader.read_adjudication(review_run_id)
+    succession = envelope.get("succession")
+    prior = None if succession is None else reader.read_repair_result(str(succession["repair_batch_id"]))
+    discovery = {str(task["task_id"]) for task in discovery_tasks(chain)}
+    durable = all(reader.report_exists(str(task["result_digest"])) for task in chain.generation(2).settled_tasks
+                  if str(task["task_id"]) in discovery)
+    return convergence_problems(convergence_of(found, prior, reports_durable=durable, evidence_current=evidence_current))
 
 
 def convergence_of(found: records.P4Adjudication, prior_result: records.P4RepairResult | None, *,
