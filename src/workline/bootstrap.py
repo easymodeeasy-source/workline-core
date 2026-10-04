@@ -164,20 +164,86 @@ def bootstrap_conflict_error() -> StopError:
     )
 
 
-def is_established_project(store: ProjectStore) -> bool:
-    """A Project whose canonical state is present, valid and tracked."""
+#: :func:`project_establishment`: no established Project identity here at all.
+NOT_ESTABLISHED = "not_established"
+#: :func:`project_establishment`: an established Project whose canonical state cannot be read or is invalid.
+INVALID = "invalid"
+#: :func:`project_establishment`: an established Project whose canonical state is present, valid and tracked.
+ESTABLISHED = "established"
+
+
+@dataclass(frozen=True)
+class Establishment:
+    """Whether a folder is an established Workline Project, and if not why - with the cause kept (RB10 N6-3).
+
+    Project identity and Project canonical validity are two questions.
+    ``not_established`` means there is no Project identity to speak of:
+    ``project.yaml`` is not there, or Git does not track it (the Project's
+    initial commit never happened). ``invalid`` means the identity is there -
+    a tracked ``project.yaml`` - but the canonical state does not read or does
+    not validate; ``code`` and ``message`` are the reader's or validator's own,
+    unchanged. Such a Project is established and broken: it is never a folder
+    to initialize, and nothing repairs it on its own.
+    """
+
+    status: str
+    code: str | None = None
+    message: str = ""
+
+
+def project_establishment(store: ProjectStore) -> Establishment:
+    """The cause-preserving form of :func:`is_established_project`; reads only, writes and repairs nothing.
+
+    Identity first - ``project.yaml`` present and tracked - then validity:
+    ``project.yaml``'s own validation, then the Roadmap relations, the Related
+    relations and the event log, each as the canonical reader reads it.
+    """
     if not store.project_yaml.is_file():
-        return False
-    if validate_project_yaml(store):
-        return False
-    try:
-        store.read_roadmap_relations()
-        store.read_related()
-        store.read_events()
-    except StopError:
-        return False
+        return Establishment(NOT_ESTABLISHED, "not_a_project", f"{WORKLINE_DIR}/project.yaml is missing")
     tracked = gitcmd.run_git(store.root, "ls-files", "--", f"{WORKLINE_DIR}/project.yaml", check=False)
-    return tracked.ok and bool(tracked.stdout.strip())
+    if not (tracked.ok and tracked.stdout.strip()):
+        return Establishment(
+            NOT_ESTABLISHED, "not_a_project", f"{WORKLINE_DIR}/project.yaml is not tracked by the Project repository"
+        )
+    problems = validate_project_yaml(store)
+    if problems:
+        return Establishment(INVALID, problems[0].code, "; ".join(f"{p.code}: {p.message}" for p in problems))
+    for read in (store.read_roadmap_relations, store.read_related, store.read_events):
+        try:
+            read()
+        except StopError as exc:
+            return Establishment(INVALID, exc.code, exc.message)
+    return Establishment(ESTABLISHED)
+
+
+def is_established_project(store: ProjectStore) -> bool:
+    """A Project whose canonical state is present, valid and tracked (yes / no only; see :func:`project_establishment`)."""
+    return project_establishment(store).status == ESTABLISHED
+
+
+def require_established_for_maintenance(store: ProjectStore, operation: str) -> None:
+    """STOP unless ``store`` is an established, valid Project - keeping why it is not (RB10 N6-3).
+
+    No Project identity is ``not_a_project``. An established Project whose
+    canonical state does not read or validate STOPs with that state's own code
+    and reason (``relations_invalid``, ``events_invalid``,
+    ``project_yaml_invalid`` ...): it is reported as the broken Project it is,
+    never as an absent one and never as one to initialize, and nothing is
+    written or repaired.
+    """
+    found = project_establishment(store)
+    if found.status == ESTABLISHED:
+        return
+    if found.status == NOT_ESTABLISHED:
+        raise StopError(
+            f"not an established Workline Project ({found.message}); {operation} does not initialize a Project",
+            code="not_a_project",
+        )
+    raise StopError(
+        f"this established Workline Project's canonical state is invalid ({found.message}); {operation} does not "
+        "initialize, repair or rewrite it, and nothing was written",
+        code=found.code or "project_invalid",
+    )
 
 
 @dataclass(frozen=True)
@@ -219,12 +285,7 @@ def backfill_bootstrap(project_root: Path) -> BackfillResult:
 
 
 def _backfill_locked(store: ProjectStore, root: Path) -> BackfillResult:
-    if not is_established_project(store):
-        raise StopError(
-            "not a valid established Workline Project (project.yaml missing, invalid or untracked); "
-            "backfill does not initialize a Project",
-            code="not_a_project",
-        )
+    require_established_for_maintenance(store, "backfill")
 
     workline = store.workline_root()
     validation = validate_registry(workline)

@@ -13,7 +13,7 @@ starts anything and is not a Git finalizer.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .errors import SpecViolation, ValidationError
 from .ids import is_valid_id
@@ -197,7 +197,16 @@ def register_phases(
     relations: list[PhaseRelationSpec] = (),
     *,
     future_plan_change: bool = False,
+    before_record: Callable[[list[Effect]], None] | None = None,
 ) -> PhaseRegistrationResult:
+    """Register one Phase stage in ``mutation``; no Git.
+
+    ``before_record`` is called with the stage's effects right before a stage
+    not recorded yet is recorded, after every refusal of the registration: an
+    owner whose first effect this stage is proves there that nothing it writes
+    overlaps a change from before it (RB10 N2,
+    :func:`gitops.ensure_separable_before_effects`).
+    """
     store = mutation.store
     if not specs:
         raise ValidationError("Phase CREATE needs at least one Phase")
@@ -212,6 +221,8 @@ def register_phases(
     # nothing and leaves a mutation with no effect to carry.
     refuse_invalid_phase_writes(mutation, decided.effects, view)
     if not mutation.has_stage(stage):
+        if before_record is not None:
+            before_record(list(decided.effects))
         mutation.add_effects(stage, list(decided.effects))
     mutation.apply()
 

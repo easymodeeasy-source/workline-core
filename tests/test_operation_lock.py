@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -30,6 +32,7 @@ from workline import project_start as ps
 from workline import roadmap as rm
 from workline import start as st
 from workline.create import RelatedSpec, WorkSpec, create_standalone_work
+from workline.durable import durable_write_text
 from workline.errors import ProjectOperationBusy, ProjectOperationNested, StopError
 from workline.mutation import INTENT_VERSION, MutationController, WriteScope
 from workline.phase_create import PhaseSpec
@@ -460,6 +463,79 @@ class ProjectStartAndCompatibilityTests(ExecutionLockTestCase):
         self.assertEqual([p for p in git(store.root, "ls-files").split() if p.startswith(".workline/runtime/")], [])
         for line in store.events_text().splitlines():
             self.assertEqual(set(json.loads(line)), {"id", "type", "entity", "at"})
+
+
+class UnwritableDescriptionTests(ExecutionLockTestCase):
+    """RB10 N3(b): a holder description JSON or UTF-8 cannot carry never fails the operation or leaks the lock.
+
+    The description is written as soon as the lock is taken, before the block that releases it. A caller value it
+    names that cannot be written - a lone surrogate in a Work ID, a remote name, a Roadmap name - escaped there as a
+    raw ``UnicodeEncodeError``: the lock stayed held for the rest of the process (every later operation was
+    ``project_operation_nested``) and a temporary file was left in the runtime area. The description is diagnostic
+    only, so it is now left out instead, and the operation's own checks decide the call. An encodable description
+    is written byte for byte as before.
+    """
+
+    LONE = chr(0xD800)
+
+    def assertReleasedAndClean(self, store: ProjectStore) -> None:
+        self.assertIsNone(oplock.held_lock(store))
+        self.assertFalse(store.lock_holder.exists())
+        self.assertEqual([], sorted(p.name for p in store.tmp.iterdir()) if store.tmp.is_dir() else [])
+        with oplock.project_operation(store, "a later operation"):
+            pass
+
+    def test_a_description_it_cannot_write_is_left_out(self) -> None:
+        store = self.new_project()
+        with oplock.project_operation(store, "probe", {"value": "w" + self.LONE, "object": object()}) as lock:
+            self.assertIs(oplock.held_lock(store), lock)
+            self.assertFalse(store.lock_holder.exists(), "no description, and no partial one")
+        self.assertReleasedAndClean(store)
+
+    def test_an_encodable_description_is_written_exactly_as_before(self) -> None:
+        store = self.new_project()
+        details = {"name": "日本語の Roadmap", "id": "w_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
+        with oplock.project_operation(store, "probe", details) as lock:
+            record = {
+                "workline": oplock.HOLDER_MARKER, "version": oplock.HOLDER_VERSION, "operation": "probe",
+                "details": details, "mutation_id": None, "pid": os.getpid(), "host": socket.gethostname(),
+                "acquired_at": lock.acquired_at,
+            }
+            expected = (json.dumps(record, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            self.assertEqual(expected, store.lock_holder.read_bytes())
+        self.assertReleasedAndClean(store)
+
+    def test_start_plan_exclusion_and_pin_refuse_normally(self) -> None:
+        store = self.new_project()
+        with oplock.project_operation(store, "creates the lock file once"):
+            pass
+        before = snapshot(store)
+        work_id = "w_01ARZ3NDEKTSV4RRFFQ69G5FAV" + self.LONE
+        for label, call, code in (
+            ("START", lambda: st.start(store, work_id, "single-work", completing_executor(store)), "entity_unresolvable"),
+            ("standalone plan exclusion", lambda: st.plan_exclude_standalone_work(store, work_id), "validation_failed"),
+            ("pin maintenance", lambda: pin_push_destination(store.root, ["C:/repos/bare.git"], remote="origin" + self.LONE),
+             "push_destination_remote_missing"),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(StopError) as refused:
+                    call()
+                self.assertEqual(code, refused.exception.code)
+                self.assertNotIsInstance(refused.exception, ProjectOperationNested)
+                self.assertReleasedAndClean(store)
+        self.assertEqual(before, snapshot(store))
+
+    def test_a_durable_write_takes_its_temporary_file_away_on_content_it_cannot_write(self) -> None:
+        target = self.tmp / "target.txt"
+        target.write_text("kept\n", encoding="utf-8")
+        scratch = self.tmp / "scratch"
+        with self.assertRaises(UnicodeEncodeError):
+            durable_write_text(target, "x" + self.LONE, tmp_dir=scratch)
+        self.assertEqual("kept\n", target.read_text(encoding="utf-8"))
+        self.assertEqual([], list(scratch.iterdir()))
+        durable_write_text(target, "written\n", tmp_dir=scratch)
+        self.assertEqual(b"written\n", target.read_bytes())
+        self.assertEqual([], list(scratch.iterdir()))
 
 
 if __name__ == "__main__":

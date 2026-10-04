@@ -433,9 +433,11 @@ class FirstInvocationTests(ProjectCase):
 
     @staticmethod
     def plan(separator: str) -> rm.RoadmapPlan:
+        """The separator in every section. A name is one identity the reader keeps one line of, so a name holding
+        one is refused before anything is written (RB10 N3, HD-1); the names here hold none."""
         s = separator
         return rm.RoadmapPlan(
-            f"R{s}M", f"BG{s}1", f"DS{s}2", {"a": PhaseSpec(f"P{s}A", f"A{s}3")}, scope=f"S{s}4", out_of_scope=f"O{s}5"
+            "RM", f"BG{s}1", f"DS{s}2", {"a": PhaseSpec("PA", f"A{s}3")}, scope=f"S{s}4", out_of_scope=f"O{s}5"
         )
 
     @staticmethod
@@ -456,7 +458,7 @@ class FirstInvocationTests(ProjectCase):
         written = [ProjectStore.entity_rel_path("roadmap", result.roadmap_id), ProjectStore.entity_rel_path("phase", result.phase_ids["a"])]
         self.assert_finished(store, "proj", written)
         self.assertEqual(self.reading(twin), self.reading(store), "read exactly as the LF twin is")
-        self.assertEqual([[("R", ["BG\n1", "DS\n2", "S\n4", "O\n5"])], [("P", "A\n3")]], self.reading(store))
+        self.assertEqual([[("RM", ["BG\n1", "DS\n2", "S\n4", "O\n5"])], [("PA", "A\n3")]], self.reading(store))
 
     def test_phase_addition(self) -> None:
         store, created, _ = self.base_project()

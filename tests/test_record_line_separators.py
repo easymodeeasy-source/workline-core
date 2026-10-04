@@ -310,7 +310,9 @@ class OperationTests(SeparatorCase):
         self.assertNothingLeftOver()
 
     def test_an_interrupted_record_written_before_the_fix_blocks_no_unrelated_operation_and_resumes(self) -> None:
-        spec = cr.WorkSpec(f"note{NEL}name", "メモが残っている")
+        # The separator rides in the desired state: a name is one identity the reader keeps one line of, so a name
+        # holding one is refused before anything is recorded (RB10 N3, HD-1).
+        spec = cr.WorkSpec("note name", f"メモ{NEL}が残っている")
         self.refuse_pushes(True)
         with self.assertRaises(StopError) as interrupted:
             cr.create_standalone_work(self.store, spec)
@@ -329,7 +331,7 @@ class OperationTests(SeparatorCase):
         self.assertNothingLeftOver()
 
     def test_a_request_its_own_validation_refused_leaves_a_record_nothing_is_blocked_by(self) -> None:
-        refused = cr.WorkSpec(f"note{PS}name", "メモが残っている", related=(cr.RelatedSpec("not_a_related_type", "docs/x.md"),))
+        refused = cr.WorkSpec("note name", f"メモ{PS}が残っている", related=(cr.RelatedSpec("not_a_related_type", "docs/x.md"),))
         with self.assertRaises(ValidationError):
             cr.create_standalone_work(self.store, refused)
         record = self.only_record("abandoned")
@@ -368,8 +370,19 @@ class OperationTests(SeparatorCase):
         )
         self.assertNothingLeftOver()
 
-    def test_create_work_on_the_command_line_takes_a_name_holding_a_separator(self) -> None:
-        command = launcher_command(WORKLINE_ROOT, "create-work", ".", "--name", f"note{LS}name", "--desired-state", "メモが残っている")
+    def test_create_work_on_the_command_line_takes_a_desired_state_holding_a_separator(self) -> None:
+        # A name holding a separator is refused before anything is recorded: the reader keeps one line of a name
+        # (RB10 N3, HD-1). The separator rides in the desired state, which keeps it, and is carried as before.
+        records = MutationController(self.store).list_records()
+        refused = run_python(
+            launcher_command(WORKLINE_ROOT, "create-work", ".", "--name", f"note{LS}name", "--desired-state", "メモが残っている"),
+            cwd=self.root,
+        )
+        self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
+        self.assertIn("STOP [input_unrepresentable]", refused.stdout)
+        self.assertEqual(MutationController(self.store).list_records(), records, "nothing was recorded")
+
+        command = launcher_command(WORKLINE_ROOT, "create-work", ".", "--name", "note name", "--desired-state", f"メモ{LS}が残っている")
         self.refuse_pushes(True)
         interrupted = run_python(command, cwd=self.root)
         self.assertEqual(interrupted.returncode, 1, interrupted.stdout + interrupted.stderr)
@@ -383,7 +396,7 @@ class OperationTests(SeparatorCase):
         self.assertIn("create-work: w_", created.stdout)
         self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
         self.assertIn("project validation: PASS", checked.stdout)
-        self.assertEqual(self.only_record("completed")["invocation"]["name"], f"note{LS}name")
+        self.assertEqual(self.only_record("completed")["invocation"]["request"]["desired_state"], f"メモ{LS}が残っている")
         self.assertNothingLeftOver()
 
 
@@ -396,7 +409,8 @@ class CancelDecisionTests(CancelCase):
         entry = self.simple_entry(self.store, pa, {"w1": "W1", "w2": "W2"})
         w1, i1 = entry.work_ids["w1"], entry.integration_id
         reason = f"superseded{NEL}by R{LS}for good{PS}"
-        name, desired, detail, target = f"置き換え{LS}R", f"replaces W1{PS}entirely", f"W1 was{NEL}the wrong cut", f"docs/a{LS}b.md"
+        # Not in the name: the reader keeps one line of a name, so a name holding a separator is refused (RB10 N3, HD-1).
+        name, desired, detail, target = "置き換え R", f"replaces W1{PS}entirely", f"W1 was{NEL}the wrong cut", f"docs/a{LS}b.md"
         replan = Replan(
             remove_relation_ids=(self.rel("requires_completion", w1, i1),),
             add_relations=(cr.RelationSpec("requires_completion", "r", i1),),

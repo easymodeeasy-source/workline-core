@@ -15,7 +15,7 @@ from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Callable, Iterable
 
-from . import gitops, yamlish
+from . import gitops, input_validation, yamlish
 from .create import (
     RelationSpec,
     WorkSpec,
@@ -127,8 +127,18 @@ def plan_replan(
     view: ProjectView,
     replan: Replan,
 ) -> tuple[dict[str, str], list[Relation], list[Relation]]:
-    """Reserve IDs and resolve a replan into (new work ids, removals, additions)."""
+    """Reserve IDs and resolve a replan into (new work ids, removals, additions).
+
+    A new Work whose name or desired state the canonical reader would read back
+    as something else is refused first, before any ID is reserved or anything
+    is recorded (RB10 N3, HD-1): every owner of a replan - Roadmap's and START's
+    plan exclusion and START's cancel - decides a fresh replan here. A replan
+    its record already holds is carried on from that record and never comes
+    back here (:func:`_resume_plan_exclusion`), and its registration
+    (:func:`apply_replan`) does not judge the text again.
+    """
     removals = _resolve_removals(view, replan)
+    input_validation.require_works_text(replan.new_works, "replan work")
     work_ids = {key: mutation.reserve_id(f"{prefix}:works:work:{key}", "work") for key in replan.new_works}
     additions: list[Relation] = []
     relation_stage = f"{prefix}:works" if replan.new_works else f"{prefix}:relations"

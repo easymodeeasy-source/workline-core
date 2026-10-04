@@ -134,7 +134,13 @@ class PassTests(_WriterCase):
 
 
 class LegacyTests(PlanningTestCase):
-    """I: the legacy API keeps the baseline outcomes of §29 item 7, and runs no preflight."""
+    """I: the legacy API runs no Review preflight; since RB10 N3(b) its own validator refuses what its record cannot carry.
+
+    The baseline outcomes of §29 item 7 were serializer errors - a float, an empty key or a nested sequence failing
+    in the save, a non-text key in JSON, a lone surrogate in the UTF-8 write (leaving a temporary file), a tuple
+    stranding a pending mutation with no effect. The legacy path now refuses each before its mutation is opened, as
+    ``input_unrepresentable`` (``workline.input_validation``), and still never runs the review-v1 preflight.
+    """
 
     def setUp(self) -> None:
         super().setUp()
@@ -148,33 +154,28 @@ class LegacyTests(PlanningTestCase):
     def records(self) -> list[dict]:
         return MutationController(self.store).list_pending()
 
-    def test_a_float_an_empty_key_and_a_nested_sequence_fail_in_save_with_nothing_recorded(self) -> None:
+    def assert_legacy_refused(self, cond) -> None:
+        before = state_entries(self.store)
+        with self.assertRaises(ValidationError) as raised:
+            self.legacy(cond)
+        self.assertEqual("input_unrepresentable", raised.exception.code)
+        self.assertEqual([], self.records())
+        self.assertEqual(before, state_entries(self.store), "no record, no temporary file, no write")
+
+    def test_a_float_an_empty_key_and_a_nested_sequence_are_refused_with_nothing_recorded(self) -> None:
         for described, cond in {"a float": {**BASE, "weight": 1.5}, "an empty key": {**BASE, "": "x"},
-                                 "a nested sequence": {**BASE, "extra": [["a"]]}}.items():
+                                "a nested sequence": {**BASE, "extra": [["a"]]}}.items():
             with self.subTest(described):
-                with self.assertRaises(yamlish.YamlishError):
-                    self.legacy(cond)
-                self.assertEqual([], self.records())
+                self.assert_legacy_refused(cond)
 
-    def test_a_non_text_key_fails_in_json_with_nothing_recorded(self) -> None:
-        with self.assertRaises(TypeError):
-            self.legacy({**BASE, 1: "x"})
-        self.assertEqual([], self.records())
+    def test_a_non_text_key_is_refused_with_nothing_recorded(self) -> None:
+        self.assert_legacy_refused({**BASE, 1: "x"})
 
-    def test_a_lone_surrogate_fails_in_the_utf8_write_and_leaves_a_temporary_file(self) -> None:
-        tmp = self.store.root / ".workline" / "runtime" / "tmp"
-        before = set(tmp.iterdir()) if tmp.exists() else set()
-        with self.assertRaises(UnicodeEncodeError):
-            self.legacy({**BASE, "note": LONE_SURROGATE})
-        self.assertEqual([], self.records())
-        self.assertTrue(set(tmp.iterdir()) - before, "a temporary file is left")
+    def test_a_lone_surrogate_is_refused_and_leaves_no_temporary_file(self) -> None:
+        self.assert_legacy_refused({**BASE, "note": LONE_SURROGATE})
 
-    def test_a_tuple_strands_a_pending_mutation_with_no_effect(self) -> None:
-        with self.assertRaises(yamlish.YamlishError):
-            self.legacy({**BASE, "extra": ("a", "b")})
-        (record,) = self.records()
-        self.assertEqual([], record["effects"])
-        self.assertNotIn("review_contract", record["invocation"])
+    def test_a_tuple_is_refused_and_strands_no_pending_mutation(self) -> None:
+        self.assert_legacy_refused({**BASE, "extra": ("a", "b")})
 
 
 class RetryTests(_PreflightCase):
@@ -277,8 +278,9 @@ class OneSerializerTests(_PreflightCase):
 
 
 # --------------------------------------------------------------------------- §21.3 O10 at the execution lock
-#: A legacy call with a lone surrogate in the value its lock description names, run in a child process: the
-#: failure leaves the lock held for the rest of that process, and only the process's end releases it.
+#: A legacy call with a lone surrogate in the value its lock description names, run in a child process, then the next
+#: operation in that same process. On the baseline the failure left the lock held for the rest of that process; since
+#: RB10 N3(b) the value is refused before the lock is taken, and the next operation runs.
 LEGACY_CHILD = """
 import json, sys
 from pathlib import Path
@@ -410,10 +412,10 @@ class LockHolderTests(PlanningTestCase):
         self.assertEqual([("roadmap-create", {"name": "Legacy Roadmap"}), ("phase-entry", {"phase_id": self.phase_id})],
                          seen)
 
-    def test_legacy_keeps_its_live_outcome(self) -> None:
-        """§5.6 Legacy: a legacy invocation keeps its live outcome, serializer errors included. Its description
-        still names the caller's value, so a lone surrogate there fails in the holder's UTF-8 write, leaves a
-        temporary file, and holds the lock for the rest of that process; the end of the process releases it."""
+    def test_legacy_refuses_before_its_lock(self) -> None:
+        """§5.6 Legacy, since RB10 N3(b): the legacy description still names the caller's value, and a value the
+        holder's UTF-8 write cannot carry - a lone surrogate - is refused before the lock is taken. The baseline
+        failed in that write, left a temporary file and held the lock for the rest of the process."""
         for operation in ("roadmap-create", "phase-entry"):
             with self.subTest(operation):
                 tmp_before = set(self.store.tmp.iterdir())
@@ -425,11 +427,10 @@ class LockHolderTests(PlanningTestCase):
                 reports = [line for line in completed.stdout.splitlines() if line.startswith("{")]
                 self.assertTrue(reports, f"the child reported nothing: {completed.stdout}\n{completed.stderr}")
                 self.assertEqual(
-                    {"first": "UnicodeEncodeError", "held_in_this_process": True, "next": "project_operation_nested"},
+                    {"first": "ValidationError", "held_in_this_process": False, "next": "returned"},
                     json.loads(reports[-1]),
                 )
-                (left,) = set(self.store.tmp.iterdir()) - tmp_before
-                self.assertTrue(left.name.startswith(".holder.json."), left.name)
+                self.assertEqual(set(), set(self.store.tmp.iterdir()) - tmp_before, "no temporary file is left")
                 self.assertEqual([], self.pending(self.store), "no mutation was opened")
                 with oplock.project_operation(self.store, "after the child"):
                     pass

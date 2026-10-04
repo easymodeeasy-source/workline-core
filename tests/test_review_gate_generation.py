@@ -245,6 +245,9 @@ class GateChainTests(WorklineTestCase):
         with self.assertRaises(ValidationError) as caught:
             gate.next_generation_scope(self.store, RUN_ID)
         self.assertEqual("review_generation_pending", caught.exception.code)
+        # RB10 N6-1: the diagnostic names the pending record by its durable mutation_id, never "None".
+        self.assertIn(f"pending generation mutation ({mutation.id})", caught.exception.message)
+        self.assertNotIn("None", caught.exception.message)
 
     @CREATE_ONLY
     def test_no_n_plus_two_fork_after_that_crash(self) -> None:
@@ -294,6 +297,10 @@ class GateChainTests(WorklineTestCase):
         with self.assertRaises(ValidationError) as caught:
             gate.next_generation_scope(self.store, RUN_ID)
         self.assertEqual("review_generation_conflict", caught.exception.code)
+        # RB10 N6-1: every pending record's real mutation_id, in one deterministic (sorted) order.
+        ids = ", ".join(sorted([first.id, "mut_01ARZ3NDEKTSV4RRFFQ69G5FAW"]))
+        self.assertIn(f"2 pending generation mutations ({ids})", caught.exception.message)
+        self.assertNotIn("None", caught.exception.message)
 
     def test_a_pending_mutation_for_another_run_does_not_block(self) -> None:
         self.controller.open(

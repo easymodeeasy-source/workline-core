@@ -184,8 +184,13 @@ class AfterTheFreezeTests(_FreezeCase):
 
 
 class LegacyTests(PlanningTestCase):
-    def test_the_legacy_late_dirty_overlap_is_unchanged(self) -> None:
-        """The baseline outcome (measured on de3681c): effects applied, the Git stage refused, the mutation pending."""
+    def test_the_legacy_dirty_overlap_is_refused_before_the_first_effect(self) -> None:
+        """RB10 N2: a legacy Roadmap creation refuses a pre-existing change to a ledger it writes before its first effect.
+
+        The baseline outcome (measured on de3681c) was the late one: the Roadmap file and its Phases applied, the Git
+        stage refused, the mutation left pending. The refusal is the same ``dirty_overlap`` and now comes first, on
+        the same snapshot: nothing is applied, the mutation is abandoned, nothing is committed, and the person's bytes
+        are left as they were."""
         store = self.planning_project()
         persons = (store.root / ROADMAP_YAML).read_bytes() + b"\n"
         (store.root / ROADMAP_YAML).write_bytes(persons)
@@ -194,14 +199,9 @@ class LegacyTests(PlanningTestCase):
         self.assertEqual("dirty_overlap", raised.exception.code)
         self.assertTrue(str(raised.exception).startswith(
             "pre-existing changes overlap operation-owned paths and cannot be separated safely"))
-        (record,) = self.pending(store)
-        self.assertNotIn("review_contract", record["invocation"])
-        self.assertEqual(
-            [("roadmap", "write_file", True), ("phases", "write_file", True), ("phases", "write_file", True),
-             ("phases", "add_relation", True)],
-            [(e["stage"], e["kind"], e["applied"]) for e in record["effects"]],
-            "its domain effects applied and its Git stage never recorded, exactly as at the baseline",
-        )
+        self.assertEqual([], self.pending(store), "abandoned before its first effect")
+        self.assertFalse(any((store.root / ".workline" / "roadmaps").glob("*.md")), "no Roadmap file applied")
+        self.assertEqual(persons, (store.root / ROADMAP_YAML).read_bytes(), "the person's bytes are untouched")
         self.assertEqual("attributes", self.subjects(store)[0], "nothing committed")
 
 

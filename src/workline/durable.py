@@ -57,12 +57,22 @@ def durable_write_text(path: Path, content: str, *, tmp_dir: Path | None = None)
         os.replace(tmp, path)
         _fsync_dir(directory)
     except OSError as exc:
-        try:
-            if tmp.exists():
-                tmp.unlink()
-        except OSError:
-            pass
+        _remove_temporary(tmp)
         raise DurableWriteError(f"durable write failed for {path}: {exc}") from exc
+    except Exception:
+        # Content the file cannot hold - text UTF-8 cannot write, such as a lone surrogate - fails before
+        # anything reaches ``path``. The temporary file is this write's own and is taken away; the error itself
+        # is the caller's to report, unchanged.
+        _remove_temporary(tmp)
+        raise
+
+
+def _remove_temporary(tmp: Path) -> None:
+    try:
+        if tmp.exists():
+            tmp.unlink()
+    except OSError:
+        pass
 
 
 def read_text(path: Path) -> str:

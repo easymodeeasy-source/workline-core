@@ -13,17 +13,20 @@ registry-routed canonical Skills（.claude/skills/<name>/SKILL.md）
 
 canonical Skillの現在の集合は `registry.md` の `workline-id: skills/*` から読む。README側にSkill一覧を二重管理しない。
 
-旧 `aiproject-vault/new-dev-os-redesign/` の checkpoint / audit / fix / live-spec は設計履歴・rationaleとして保持するが、実装時のnormative sourceとして横断合成しない。
+repository内の過去のcheckpoint / audit / fix / contract文書（`REVIEW_SYSTEM_*` 等）は設計履歴・rationaleであり、実装時のnormative sourceとして横断合成しない。
 
 非正本の改善候補一覧は `BACKLOG.md` に置くが、正本は引き続き `registry.md` と canonical Skills だけである。
 
 ## Local clone
 
-想定clone先:
+任意のlocal directoryへcloneしてよい。固定のclone先は無い。以下、cloneしたこのrepositoryのrootをWorkline root（`<workline-root>`、Runtimeでは `<R>`）、Workline Projectにするfolderを `<project-root>` と表す。
 
 ```text
-D:\AIproject\workline-core
+<workline-root>   このrepositoryのclone（registry.md・canonical Skills・src/workline）
+<project-root>    Workline Project（.workline/project.yaml の workline.root が configured Workline root を指す）
 ```
+
+Workline root自身はProjectにしない（self-hostingは現在サポートしない）。
 
 ## Runtime
 
@@ -108,10 +111,10 @@ Python 3.11以上で起動する
 
 ### 新規Project
 
-workline-core を Claude Code アプリで開き、ProjectSTART を使う。
+Workline root（`<workline-root>`）を Claude Code アプリで開き、ProjectSTART を使う。
 
 ```text
-Claude Codeアプリで D:\AIproject\workline-core を開く
+Claude Codeアプリで <workline-root> を開く
 → ProjectSTART
 → 対象directoryがWorkline Projectになる
 ```

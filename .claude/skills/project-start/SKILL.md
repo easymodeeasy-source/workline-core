@@ -94,7 +94,7 @@ concrete Skillからowning Workline rootを一意解決できなければ、conf
 2. Workline rootが存在するdirectoryであることを確認する。
 3. Project rootとWorkline rootが別の実体directoryであることを確認する（`rules/git` のUnsupported self-hosting。同じ実体directory、または別だと証明できない場合は `workline_self_hosting_unsupported` で何も書かずSTOP）。
 4. 実行中のWorkline implementationがそのWorkline rootのものであることを確認する（`rules/git` のWorkline implementation。不一致なら何も書かずSTOP）。
-5. `<workline-root>/registry.md` を読み、必須4 rule IDと5 Skill IDを一意解決する。
+5. `<workline-root>/registry.md` を読み、必須4 rule IDと必須7 Skill IDを一意解決する。
 6. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。
 7. Git boundaryを確認する。
 
@@ -354,7 +354,7 @@ commit失敗時は同じmutationをresumeし、既に一致するdomain filesを
 - Git top-level = Project root
 - project.yamlが指定Workline rootを保持
 - 4 rulesが一意解決
-- 5 common Skillsが一意解決
+- 必須7 Skill IDが一意解決
 - required central storesが有効
 - Project bootstrap Skillがexpected内容で存在しtrackedである
 - initial commitが成立
@@ -382,6 +382,8 @@ lock: 成立済みProjectのexecution lockを取得して行う（他processが�
 ```
 
 backfillは通常のmaintenanceなので、Project開始の「初期commit必須・push不要」例外を適用しない。remoteがあればcommit後pushまで行う（clone先で利用可能である必要があるため）。
+
+Project identityの有無とProject正本の妥当性は別の問いである。`.workline/project.yaml` が無い、またはGitがtrackしていないfolderは `not_a_project` でSTOPする。trackedな `project.yaml` を持つ成立済みProjectで、`project.yaml` のvalidation・Roadmap relation・Related relation・event logのどれかが読めない・妥当でない場合は、`not_a_project` にせず、その読取り・validationのcode（`project_yaml_invalid`・`relations_invalid`・`events_invalid` 等）と理由のままSTOPする。どちらも何も書かず、正本を初期化・修復・上書きしない。
 
 中断したbackfillは、同じbackfillの再実行で継続する。bootstrapは固定textなので、存在・一致・trackedであることは誰が置いたかを示さない。そのため再実行は、bootstrapの現在状態を見る前に、このProjectの未完了のbackfill record（owner単位で探す）を確認する。
 

@@ -68,6 +68,8 @@ pushする場合の宛先は `rules/git` のpush destinationに従う。mutation
 
 Direct standalone invocationでは `origin.type = standalone`。Phase Workのdirect creationをこの経路で推測して作らない。
 
+Work nameと成立状態は、canonical writerが書きcanonical readerが読み戻した時に同じ値でなければならない。nameは1つのidentityであり、改行（LF・CR・CRLF、`str.splitlines` が行の区切りとする文字を含む）・前後の空白・見出しを含むnameは読み戻すと別のnameになる。成立状態の複数行textは保持するが（CRLF・単独CRはLFとして読まれる）、`## ` 見出しを足す・繰り返す・分けるtextは別のsection構造になる。direct standalone invocationとRoadmap（Phase entry・plan exclusionのreplan）は、そのような入力と、recovery recordが同じ値として保持できない値（lone surrogate、float、tuple、textでないkey等）を、mutationを開く・IDを予約するより前に `input_unrepresentable` で拒否する。STARTのcancel・plan exclusionのreplanも、そのような新Workのname・成立状態を、IDを予約するより前に同じく拒否する。escapeして書き換えることはしない。同じrequestの未完了mutationはそのrecordのまま継続する。
+
 ## Identity / format
 
 stable ID:
@@ -230,6 +232,8 @@ direct standalone invocationは、最初のID予約より前に、決定内容�
 記録済みrequestが今回のrequestと一致する時だけresumeする。一致しない再実行は、mutationを開くより前に `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationの開始は行わない。requestを記録していない旧実装のpending recordも自動resumeせず、同じく `reconcile_required` とする。
 
 direct standalone invocationの予定write scopeは、`relations/related.yaml` と登録するWork自身とする。relation payloadを渡さずlifecycle eventも記録しないため、`relations/roadmap.yaml` と `events/events.jsonl` はこの経路では書き得ない。registration coreがRoadmap / STARTのmutationへ参加する場合のscopeは、その呼び出し元operationが宣言する。
+
+direct standalone invocationは、開始前からの未commit変更が、登録するWork本体とderivation detail（予約したIDの下）、Relatedがあれば `relations/related.yaml` と重なる場合、最初のeffectを記録する前に `dirty_overlap` でSTOPし、何も書かずmutationをabandonする（`rules/git` のCommit / push）。`relations/roadmap.yaml` はこの判定に含めない。
 
 中央正本の物理writeはMutation Controller経由。
 

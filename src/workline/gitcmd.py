@@ -230,11 +230,19 @@ def add_paths(repo: Path, paths: list[str]) -> None:
     run_git(repo, "add", "--", *paths)
 
 
+#: The message cleanup every Workline-owned ``git commit`` uses (RB10 N6-4), whatever the repository or the user
+#: configures: trailing whitespace and surrounding / repeated blank lines go - the cleanup ``-m`` already gets when
+#: nothing is configured - and every line is kept, a line starting with ``#`` included. ``commit.cleanup=strip``
+#: would otherwise read caller text such as ``# heading`` as commentary and drop it, or empty a message that is only
+#: that and make the commit fail.
+COMMIT_CLEANUP = "--cleanup=whitespace"
+
+
 def commit_only(repo: Path, message: str, paths: list[str]) -> str:
-    """Commit exactly ``paths`` (``git commit --only``) and return the new HEAD."""
+    """Commit exactly ``paths`` (``git commit --only``) with the pinned message cleanup and return the new HEAD."""
     if not paths:
         raise GitError("nothing to commit: empty path list")
-    run_git(repo, "commit", "--only", "-m", message, "--", *paths)
+    run_git(repo, "commit", "--only", COMMIT_CLEANUP, "-m", message, "--", *paths)
     head = head_commit(repo)
     if head is None:
         raise GitError("commit did not produce a HEAD")

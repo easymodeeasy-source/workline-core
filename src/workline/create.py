@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 import json
 from typing import Any, Sequence
 
-from . import gitops
+from . import gitops, input_validation
 from .errors import SpecViolation, ValidationError
 from .ids import is_valid_id
 from .mutation import (
@@ -29,6 +29,7 @@ from .mutation import (
     MutationController,
     WriteScope,
     abandon_on_stop,
+    effect_path,
     pending_for_slot,
     require_same_request,
     unapplied_effects,
@@ -248,15 +249,7 @@ def register_works(
     structure = _without_roadmap_relations(view, removed_after)
 
     # stable IDs (reserved once per mutation; resumed unchanged) --------------
-    work_ids = {key: mutation.reserve_id(f"{stage}:work:{key}", "work") for key in specs}
-    relation_ids = {index: mutation.reserve_id(f"{stage}:rel:{index}", "relation") for index in range(len(relations))}
-    related_ids: dict[tuple[str, int], str] = {}
-    derivation_ids: dict[str, str] = {}
-    for key, spec in specs.items():
-        for index in range(len(spec.related)):
-            related_ids[(key, index)] = mutation.reserve_id(f"{stage}:related:{key}:{index}", "relation")
-        if spec.derivation_detail is not None:
-            derivation_ids[key] = mutation.reserve_id(f"{stage}:der:{key}", "derivation")
+    work_ids, relation_ids, related_ids, derivation_ids = _reserve_registration_ids(mutation, stage, specs, len(relations))
     mutation.extend_scope(entities=list(work_ids.values()))
 
     # relation payload validation -----------------------------------------------
@@ -367,6 +360,58 @@ def _registration_effects(
             extra = {"condition": related.condition} if related.condition is not None else {}
             effects.append(Effect.add_relation("related", Relation(related_ids[(key, index)], related.type, work_ids[key], related.to, extra)))
     return effects
+
+
+def effect_paths(effects: "Sequence[Effect]") -> list[str]:
+    """The canonical paths ``effects`` write, each once, in sorted order."""
+    return sorted({path for path in (effect_path(effect) for effect in effects) if path is not None})
+
+
+def _reserve_registration_ids(
+    mutation: Mutation, stage: str, specs: dict[str, WorkSpec], relation_count: int
+) -> tuple[dict[str, str], dict[int, str], dict[tuple[str, int], str], dict[str, str]]:
+    """The IDs a registration stage takes - Works, relations, Related edges, derivation details - in that order.
+
+    Reserved once per mutation and returned unchanged on every later call, so
+    an owner that reserves them before the stage runs
+    (:func:`planned_registration_paths`) hands the stage these very IDs, issued
+    in the very order the stage itself issues them.
+    """
+    work_ids = {key: mutation.reserve_id(f"{stage}:work:{key}", "work") for key in specs}
+    relation_ids = {index: mutation.reserve_id(f"{stage}:rel:{index}", "relation") for index in range(relation_count)}
+    related_ids: dict[tuple[str, int], str] = {}
+    derivation_ids: dict[str, str] = {}
+    for key, spec in specs.items():
+        for index in range(len(spec.related)):
+            related_ids[(key, index)] = mutation.reserve_id(f"{stage}:related:{key}:{index}", "relation")
+        if spec.derivation_detail is not None:
+            derivation_ids[key] = mutation.reserve_id(f"{stage}:der:{key}", "derivation")
+    return work_ids, relation_ids, related_ids, derivation_ids
+
+
+def planned_registration_paths(
+    mutation: Mutation, stage: str, specs: dict[str, WorkSpec], *, relation_count: int
+) -> list[str]:
+    """The canonical paths a registration stage not recorded yet will write, known before any of it is recorded.
+
+    The decision half of :func:`register_works`, for an owner that must know
+    every path it writes before its first effect (RB10 N2): the stage's IDs are
+    reserved here exactly as :func:`register_works` reserves them - the same
+    keys, in the same order, so the stage takes these very IDs and the Project
+    gets the IDs it always got - and the paths are each Work's entity file and
+    derivation detail under them, ``roadmap.yaml`` when the stage registers
+    Roadmap relations (``relation_count``), and ``related.yaml`` when a Work
+    carries Related: exactly the paths the stage's effects write. Only
+    reservations are made; nothing is recorded or written.
+    """
+    work_ids, _, _, derivation_ids = _reserve_registration_ids(mutation, stage, specs, relation_count)
+    paths = [ProjectStore.entity_rel_path("work", work_id) for work_id in work_ids.values()]
+    paths += [f"{WORKLINE_DIR}/derivations/{derivation_id}.md" for derivation_id in derivation_ids.values()]
+    if relation_count:
+        paths.append(f"{WORKLINE_DIR}/relations/roadmap.yaml")
+    if any(spec.related for spec in specs.values()):
+        paths.append(f"{WORKLINE_DIR}/relations/related.yaml")
+    return paths
 
 
 def _check_registration(
@@ -490,6 +535,9 @@ def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_ke
         raise SpecViolation("direct CREATE only creates standalone Works (origin.type = standalone)")
     if spec.work_kind is not None:
         raise SpecViolation("direct CREATE does not create special Phase Works")
+    # Before the execution lock, whose holder description names the Work (RB10 N3(b)): a caller value the
+    # request cannot be read with, or UTF-8 cannot write, is refused here rather than escaping as a raw error.
+    input_validation.require_work_spec(spec, "the Work")
     with project_operation(store, DIRECT_OWNER, {"name": spec.name}):
         return _create_standalone_locked(store, spec, invocation_key)
 
@@ -510,12 +558,27 @@ def _create_standalone_locked(store: ProjectStore, spec: WorkSpec, invocation_ke
     # domain write: a request that decided something other than the unfinished
     # one in this slot is refused rather than quietly taking its record over,
     # and an unpinned or drifted push destination STOPs here.
-    require_same_request(pending_for_slot(store, DIRECT_OWNER, slot), request, f"direct CREATE of {spec.name!r}")
+    pending = pending_for_slot(store, DIRECT_OWNER, slot)
+    require_same_request(pending, request, f"direct CREATE of {spec.name!r}")
+    # The invocation is what the record keeps (RB10 N3(b)), and a new request's Work text must read back as
+    # itself (N3(a), HD-1). An unfinished CREATE of this very request is carried on under its own record.
+    input_validation.require_durable(invocation, "the direct CREATE request")
+    if not pending:
+        input_validation.require_work_text("work", spec, "the Work")
     destination = gitops.ensure_push_destination(store)
     mutation = controller.open(DIRECT_OWNER, invocation, scope)
     with abandon_on_stop(mutation):
         gitops.ensure_git_ready(store.root)
         gitops.record_preexisting_dirty(mutation, store.root)
+        if not mutation.has_stage("register"):
+            # The Work file, its derivation detail and ``related.yaml`` when it has Related - the exact paths this
+            # registration writes, under the IDs it will use, reserved now - are checked against the changes that
+            # were there before this operation, after its payload rules and before its first effect (RB10 N2).
+            specs = {"work": spec}
+            validate_work_specs(specs, ProjectView.load(store))
+            gitops.ensure_separable_before_effects(
+                mutation, planned_registration_paths(mutation, "register", specs, relation_count=0)
+            )
         result = register_works(mutation, "register", {"work": spec})
     work_id = result.work_ids["work"]
     message = f"chore(workline): create {ProjectView.load(store).works[work_id].display}"

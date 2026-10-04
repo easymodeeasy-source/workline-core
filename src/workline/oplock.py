@@ -183,8 +183,12 @@ def _write_holder(lock: ProjectLock) -> None:
             json.dumps(record, ensure_ascii=False, indent=2) + "\n",
             tmp_dir=lock.store.tmp,
         )
-    except OSError:
-        pass  # a description that cannot be written never fails the operation
+    except (OSError, ValueError, TypeError):
+        # A description that cannot be written never fails the operation. That includes a caller value the
+        # description names but JSON or UTF-8 cannot carry - a lone surrogate, an object - which used to escape
+        # here as a raw error, after the lock was taken and before the block that releases it, leaving the lock
+        # held for the rest of the process. The operation's own checks then decide the call (RB10 N3(b)).
+        pass
 
 
 def _clear_holder(store: ProjectStore) -> None:
