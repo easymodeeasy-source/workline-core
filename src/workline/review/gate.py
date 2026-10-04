@@ -209,7 +209,7 @@ def next_generation_scope(store: ProjectStore, review_run_id: str) -> Generation
     """
     pending = pending_generation_mutations(store, review_run_id)
     if len(pending) > 1:
-        ids = ", ".join(sorted(str(record.get("id")) for record in pending))
+        ids = ", ".join(sorted(str(record["mutation_id"]) for record in pending))
         raise ValidationError(
             f"Review Run {review_run_id} has {len(pending)} pending generation mutations ({ids}); "
             "which one owns the next generation cannot be decided here: reconcile required",
@@ -217,7 +217,7 @@ def next_generation_scope(store: ProjectStore, review_run_id: str) -> Generation
         )
     if pending:
         raise ValidationError(
-            f"Review Run {review_run_id} has a pending generation mutation ({pending[0].get('id')}); "
+            f"Review Run {review_run_id} has a pending generation mutation ({pending[0]['mutation_id']}); "
             "it is resumed or reconciled before any new generation is calculated",
             code="review_generation_pending",
         )

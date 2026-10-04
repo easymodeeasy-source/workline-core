@@ -1124,6 +1124,17 @@ class _Session:
             view, [effect for effect in self.mutation.stage_effects(recorded) if effect.get("applied")]
         )
         specs, relations = _derivation_registration(view, judged, work, outcome)
+        if replay is None:
+            # RB10 N3: a derivation decided now carries the executor's text. A name or desired state the
+            # canonical reader would read back as something else, and a value the recovery record cannot
+            # carry, are refused here - before the derivation is kept, before its registration reserves an
+            # ID, and before a refused result could keep it for a retry. A derivation the record already
+            # holds is carried on from that record and is not judged again.
+            from . import input_validation
+
+            input_validation.require_work_specs(specs, "derived work")
+            input_validation.require_relations(relations, specs, "derived relation")
+            input_validation.require_works_text(specs, "derived work")
         # The registration writes relation files, and which ones is known only now,
         # from what the executor returned. A change that was there before this
         # operation in one of them is refused here, before a Work, a derivation
@@ -3385,6 +3396,13 @@ def _start_locked(
 
 def plan_exclude_standalone_work(store: ProjectStore, work_id: str, replan: Replan = Replan()):
     """START-owned plan exclusion of an unstarted standalone Work."""
+    # RB10 N3(b): a target and a replan the request cannot be read with, or UTF-8 cannot write, are refused
+    # before the execution lock - as Roadmap's plan exclusion refuses them - rather than escaping later as a
+    # raw serializer error. The replan's new Work text is judged where every replan is decided (``ops.plan_replan``).
+    from . import input_validation
+
+    input_validation.require_text(work_id, "the Work ID")
+    input_validation.require_replan(replan)
     with project_operation(store, "start-plan-exclude", {"work_id": work_id}):
         return _plan_exclude_standalone_locked(store, work_id, replan)
 
@@ -3418,6 +3436,10 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
     display = resumed.display if resumed is not None and resumed.display is not None else view.works[work_id].display
     destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
+    # What the record keeps must read back as itself (RB10 N3(b)): refused before the mutation is opened.
+    from . import input_validation
+
+    input_validation.require_durable({**slot, "request": request}, "the plan exclusion request")
     mutation = controller.open(OWNER, {**slot, "request": request}, WriteScope(entities=(work_id,), files=LEDGER_FILES))
     gitops.ensure_git_ready(store.root)
     gitops.record_preexisting_dirty(mutation, store.root)

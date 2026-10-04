@@ -15,12 +15,14 @@ from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Callable
 
-from . import gitcmd, gitops
+from . import gitcmd, gitops, input_validation
 from .create import (
     RegistrationResult,
     RelatedSpec,
     RelationSpec,
     WorkSpec,
+    effect_paths,
+    planned_registration_paths,
     refuse_invalid_work_writes,
     register_works,
     related_edge_key,
@@ -657,6 +659,9 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan, *, review: Any = None
         from . import roadmap_review
 
         roadmap_review.require_entry_gate(review)
+    else:
+        # Before the execution lock, whose holder description names the Roadmap (RB10 N3(b)).
+        input_validation.require_roadmap_plan(plan)
     if not plan.name.strip() or not plan.background.strip() or not plan.desired_state.strip():
         raise ValidationError("Roadmap needs name, background and desired state")
     if not plan.phases:
@@ -671,17 +676,43 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan, *, review: Any = None
         require_marker_compatible(pending, "roadmap-create", review_v1=review is not None)
         if review is not None:
             return roadmap_review.create_roadmap_reviewed(store, plan, request, review, pending)
-        mutation, destination = _open(
-            store, "roadmap-create", {"name": plan.name, "request": request}, refuse_recorded=refuse_invalid_phase_writes
-        )
+        invocation = {"name": plan.name, "request": request}
+        _require_new_request_input(invocation, pending, lambda: _require_roadmap_text(plan))
+        mutation, destination = _open(store, "roadmap-create", invocation, refuse_recorded=refuse_invalid_phase_writes)
         with abandon_on_stop(mutation):
             return _create_roadmap(store, mutation, destination, plan)
+
+
+def _require_new_request_input(invocation: dict[str, Any], pending: list, text: Callable[[], None]) -> None:
+    """Refuse, before a legacy mutation is opened, caller input its record or its canonical files cannot carry (RB10 N3).
+
+    The invocation is what the recovery record keeps, so it must be read back as
+    itself (:func:`input_validation.require_durable`). The text a new request
+    renders as Markdown structure must read back as itself as well (``text``,
+    HD-1). An unfinished mutation of this very request - ``pending``, already
+    shown to be the same request - is carried on under the record it already
+    holds, whatever rules that record was written under: refusing it now would
+    leave what it has applied unfinished.
+    """
+    input_validation.require_durable(invocation, "the request")
+    if not pending:
+        text()
+
+
+def _require_roadmap_text(plan: RoadmapPlan) -> None:
+    """N3(a): the Roadmap and every Phase a new Roadmap creation writes read back as decided."""
+    stages = roadmap_stages(plan)
+    input_validation.require_entity_text("roadmap", plan.name, list(stages.sections), "the Roadmap")
+    input_validation.require_works_text(plan.phases, "phase", kind="phase")
 
 
 def _create_roadmap(
     store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, plan: RoadmapPlan
 ) -> RoadmapResult:
-    roadmap_id, phases = _register_roadmap(store, mutation, roadmap_stages(plan))
+    roadmap_id, phases = _register_roadmap(
+        store, mutation, roadmap_stages(plan),
+        before_first_effect=lambda paths: gitops.ensure_separable_before_effects(mutation, paths),
+    )
     head = _finalize(
         mutation, destination, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}"
     )
@@ -694,11 +725,18 @@ def _register_roadmap(
     stages: RoadmapStages,
     *,
     before_stage: Callable[[str], None] | None = None,
+    before_first_effect: Callable[[list[str]], None] | None = None,
 ):
     """Register the Roadmap and its Phases in ``mutation``, from ``stages``; no Git.
 
     ``before_stage`` is called right before a registration stage is recorded -
     the review-v1 display base check. The legacy path passes none.
+
+    ``before_first_effect`` is called right before the Roadmap file - the first
+    effect - is recorded, with every path the creation writes: the Roadmap
+    file, each Phase file and ``roadmap.yaml`` when Phase relations were
+    decided, all known once their IDs are reserved (RB10 N2). The legacy path
+    refuses there a change from before the operation that overlaps them.
     """
     roadmap_id = mutation.reserve_id("roadmap", "roadmap")
     mutation.extend_scope(entities=[roadmap_id])
@@ -721,6 +759,8 @@ def _register_roadmap(
         projected = ProjectView.load(store).with_effects(written)
         decided = decide_phases(mutation, "phases", roadmap_id, stages.phases, list(stages.relations), view=projected)
         refuse_invalid_phase_writes(mutation, decided.effects, projected)
+        if before_first_effect is not None:
+            before_first_effect(effect_paths(written + list(decided.effects)))
         mutation.add_effects("roadmap", written)
     mutation.apply()
 
@@ -757,6 +797,9 @@ def add_phases(
     """
     if not phases:
         raise ValidationError("Phase addition needs at least one decided Phase")
+    # Before the execution lock, whose holder description names the Roadmap (RB10 N3(b)).
+    input_validation.require_text(roadmap_id, "the Roadmap ID")
+    input_validation.require_phase_addition(phases, relations)
     with project_operation(store, "roadmap-add-phases", {"roadmap_id": roadmap_id}):
         return _add_phases_locked(store, roadmap_id, phases, relations, future_plan_change, invocation_key)
 
@@ -785,24 +828,27 @@ def _add_phases_locked(
     # First, so that an unfinished addition this request cannot continue is
     # reported as what it is. The held-Roadmap rule below would otherwise hide
     # it behind a lifecycle fact that says nothing about the stranded record.
-    require_same_request(
-        pending_for_slot(store, OWNER, {"operation": "roadmap-add-phases", **identity}),
-        request,
-        f"Phase addition to {roadmap_id}",
-    )
+    pending = pending_for_slot(store, OWNER, {"operation": "roadmap-add-phases", **identity})
+    require_same_request(pending, request, f"Phase addition to {roadmap_id}")
     if lifecycle == HELD and not future_plan_change:
         # Still decided before the mutation exists, so two requests differing
         # only in this flag are one request as far as resume is concerned, and a
         # request refused for it leaves no record behind. Phase CREATE keeps the
         # same precheck as part of its own contract.
         raise SpecViolation(f"Roadmap {roadmap_id} is held; Phase addition needs a decided future-plan change")
+    invocation = {**identity, "request": request}
+    _require_new_request_input(
+        invocation, pending, lambda: input_validation.require_works_text(phases, "phase", kind="phase")
+    )
     mutation, destination = _open(
-        store, "roadmap-add-phases", {**identity, "request": request}, [roadmap_id],
-        refuse_recorded=refuse_invalid_phase_writes,
+        store, "roadmap-add-phases", invocation, [roadmap_id], refuse_recorded=refuse_invalid_phase_writes,
     )
     with abandon_on_stop(mutation):
+        # The Phase files and ``roadmap.yaml`` when Phase relations were decided - the exact paths this addition
+        # writes - are checked against the changes that were there before it, before its first effect (RB10 N2).
         registered = register_phases(
-            mutation, "phases", roadmap_id, phases, list(relations), future_plan_change=future_plan_change
+            mutation, "phases", roadmap_id, phases, list(relations), future_plan_change=future_plan_change,
+            before_record=lambda effects: gitops.ensure_separable_before_effects(mutation, effect_paths(effects)),
         )
         head = _finalize(mutation, destination, f"chore(workline): add phases to roadmap {display}")
     return PhaseAdditionResult(
@@ -991,6 +1037,10 @@ def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign, *,
         from . import roadmap_review
 
         roadmap_review.require_entry_gate(review)
+    else:
+        # Before the execution lock, whose holder description names the Phase (RB10 N3(b)).
+        input_validation.require_text(phase_id, "the Phase ID")
+        input_validation.require_phase_entry_design(design)
     with project_operation(store, "phase-entry", _lock_details({"phase_id": phase_id}, review)):
         return _enter_phase_locked(store, phase_id, design, review)
 
@@ -1082,9 +1132,10 @@ def _enter_phase_locked(
         return roadmap_review.enter_phase_reviewed(
             store, phase_id, roadmap_id, phase, design, identity, review, interrupted
         )
+    invocation = {"phase_id": phase_id, "design": identity}
+    _require_new_request_input(invocation, interrupted, lambda: input_validation.require_phase_entry_text(design))
     mutation, destination = _open(
-        store, "phase-entry", {"phase_id": phase_id, "design": identity}, [phase_id],
-        refuse_recorded=refuse_invalid_work_writes,
+        store, "phase-entry", invocation, [phase_id], refuse_recorded=refuse_invalid_work_writes,
     )
     if mutation.resumed:
         # An expansion that already exists is carried forward, never given up:
@@ -1214,7 +1265,8 @@ def _entry_the_plan_points_to(view: ProjectView, startable: list[Entity]) -> str
 
 def _expand_phase(store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, phase: Entity, phase_id: str, roadmap_id: str, design: PhaseEntryDesign) -> PhaseEntryResult:
     normal, integration_id, confirmation_id, paths = _register_phase_expansion(
-        store, mutation, phase_entry_stages(design, phase_id, roadmap_id)
+        store, mutation, phase_entry_stages(design, phase_id, roadmap_id),
+        before_first_effect=lambda owned: gitops.ensure_separable_before_effects(mutation, owned),
     )
     head = _finalize(mutation, destination, f"chore(workline): expand phase {phase.display}", paths)
 
@@ -1241,11 +1293,23 @@ def _register_phase_expansion(
     stages: PhaseEntryStages,
     *,
     before_stage: Callable[[str], None] | None = None,
+    before_first_effect: Callable[[list[str]], None] | None = None,
 ) -> tuple[RegistrationResult, str, str | None, list[str]]:
     """Register a Phase expansion's three stages in ``mutation``, from ``stages``, and check its structure; no Git.
 
     ``before_stage`` is called right before a registration stage is recorded -
     the review-v1 display base check. The legacy path passes none.
+
+    ``before_first_effect`` is called once, while the mutation has recorded no
+    effect: after every stage's payload rules and before the first stage is
+    registered, with every path the expansion writes - every Work file of
+    every stage not recorded yet, under the IDs reserved for it now (the keys
+    :func:`register_works` then takes them under), ``roadmap.yaml`` and
+    ``related.yaml`` when a stage writes them (RB10 N2). An expansion writes
+    its stages one after another, so a check per stage would let an earlier
+    stage be applied before a later stage's path was found overlapping a
+    change from before the operation; the legacy path refuses that overlap
+    there, before anything is recorded.
     """
     normal_specs = stages.normal_specs
     normal_relations = list(stages.normal_relations)
@@ -1269,6 +1333,17 @@ def _register_phase_expansion(
     for stage, specs in stage_specs:
         if not mutation.has_stage(stage):
             validate_work_specs(specs, view)
+
+    if before_first_effect is not None and not mutation.effects:
+        # Every stage not recorded yet, with the paths it writes under the IDs reserved for it now, stage by
+        # stage in the order the stages reserve them: the normal Works' stage takes the relations the design
+        # decided, the integration's one per normal Work, the confirmation's one (RB10 N2).
+        relations_of = {"works": len(normal_relations), "integration": len(normal_specs), "confirmation": 1}
+        owned: set[str] = set()
+        for stage, specs in stage_specs:
+            if not mutation.has_stage(stage):
+                owned.update(planned_registration_paths(mutation, stage, specs, relation_count=relations_of[stage]))
+        before_first_effect(sorted(owned))
 
     def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
         if mutation.has_stage(stage):
@@ -1307,6 +1382,8 @@ def _register_phase_expansion(
 # --------------------------------------------------------------------------- lifecycle
 
 def _lifecycle(store: ProjectStore, operation: str, entity_id: str, event_type: str, precheck) -> OperationResult:
+    # Before the execution lock, whose holder description names the entity (RB10 N3(b)).
+    input_validation.require_text(entity_id, "the entity ID")
     with project_operation(store, operation, {"entity": entity_id}):
         return _record_lifecycle(store, operation, entity_id, event_type, precheck)
 
@@ -1485,6 +1562,9 @@ def cancel_roadmap(store: ProjectStore, roadmap_id: str) -> OperationResult:
 
 
 def _plan_exclude(store: ProjectStore, operation: str, entity_id: str, replan: Replan, precheck) -> OperationResult:
+    # Before the execution lock, whose holder description names the target (RB10 N3(b)).
+    input_validation.require_text(entity_id, "the target ID")
+    input_validation.require_replan(replan)
     with project_operation(store, operation, {"entity": entity_id}):
         return _plan_exclude_locked(store, operation, entity_id, replan, precheck)
 
@@ -1504,6 +1584,9 @@ def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, re
     else:
         view = _stop_on_structure(store, "precheck")
         precheck(view)
+        # What the record keeps must read back as itself (RB10 N3(b)). The replan's new Work text is judged where
+        # every replan owner decides one, before any ID is reserved (``ops.plan_replan``, N3(a)).
+        input_validation.require_durable(identity, "the plan exclusion request")
         mutation, destination = _open(store, operation, identity, [entity_id])
         with abandon_on_stop(mutation):
             work_ids, removals, additions = plan_replan(mutation, "replan", view, replan)
@@ -1696,6 +1779,9 @@ def maintain_work_related(
     """
     if not add and not remove_relation_ids:
         raise ValidationError("related maintenance needs at least one add or remove")
+    # Before the execution lock, whose holder description names the Work (RB10 N3(b)).
+    input_validation.require_text(work_id, "the Work ID")
+    input_validation.require_related_maintenance(add, remove_relation_ids)
     with project_operation(store, "work-related-maintenance", {"work_id": work_id}):
         return _maintain_work_related_locked(store, work_id, add, remove_relation_ids, invocation_key)
 
@@ -1758,6 +1844,8 @@ def _maintain_work_related_locked(
         if not removals and not effective_adds:
             return no_change
 
+    # What the record keeps must read back as itself (RB10 N3(b)); Related is data, not Markdown structure.
+    input_validation.require_durable(identity, "the related maintenance request")
     mutation, destination = _open(store, operation, identity, [work_id])
     with abandon_on_stop(mutation):
         if not mutation.has_stage("related"):
@@ -1786,6 +1874,8 @@ def _maintain_work_related_locked(
                 ),
                 "related maintenance",
             )
+            # ``related.yaml`` is all a Related maintenance writes; the Work body is read, never written (RB10 N2).
+            gitops.ensure_separable_before_effects(mutation, [RELATED_RELATIONS])
             mutation.add_effects(
                 "related",
                 [Effect.remove_relation(RELATED_FILE, relation) for relation in removals]
@@ -1874,6 +1964,8 @@ def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, d
             return AchievementResult("not_achieved", roadmap_id, detail=detail or "add Phases / replan without changing the desired state")
         return AchievementResult("desired_state_change_required", roadmap_id, detail=detail)
 
+    # Before the execution lock, whose holder description names the Roadmap (RB10 N3(b)).
+    input_validation.require_text(roadmap_id, "the Roadmap ID")
     with project_operation(store, "roadmap-achievement", {"entity": roadmap_id}):
         view, applied = _decide_lifecycle(
             store, "roadmap-achievement", roadmap_id, "roadmap_achieved",
