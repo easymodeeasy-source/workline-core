@@ -3352,7 +3352,9 @@ def _adopt(session: "_Session", initial: WorkRun) -> Any:
 # ```
 
 STATE_P4 = "p4_cycle"
-NOTE_P4_DECISION = "p4_human_decision"
+#: The START mutation's durable G-4 bindings: waiting Review Run ID -> the Human decision that exits its wait
+#: (P4-R7). One binding per waiting Run, never one per mutation: a pending START may wait more than once.
+NOTE_P4_DECISIONS = "p4_human_decisions"
 
 
 def is_p4_mutation(mutation: Mutation) -> bool:
@@ -3447,18 +3449,53 @@ def _p4_requirement(store: ProjectStore, git: HermeticGit, work_id: str) -> dict
     return work_review.requirement_authority(work_id, work.body)
 
 
-def _p4_bind_decision(session: "_Session") -> p4.HumanDecision | None:
+def _p4_decision_bindings(mutation: Mutation) -> dict[str, dict[str, Any]]:
+    """This START's durable G-4 bindings, waiting Review Run ID -> Human-decision record (P4-R7)."""
+    found = mutation.note(NOTE_P4_DECISIONS)
+    if found is None:
+        return {}
+    if not isinstance(found, dict) or not all(
+        isinstance(run_id, str) and isinstance(record, dict) for run_id, record in found.items()
+    ):
+        raise p4.reconcile(f"START mutation {mutation.id}'s Human-decision bindings are not a waiting-Run mapping",
+                           p4.REASON_LINKAGE_INVALID)
+    return dict(found)
+
+
+def _p4_bind_decision(session: "_Session", waiting_run_id: str, chain: Any) -> p4.HumanDecision | None:
+    """G-4 (P4-R7): the decision that exits ``waiting_run_id``'s HUMAN_WAIT, bound durably before any reservation.
+
+    The binding is per waiting Run, never per mutation, because a pending START can wait more than once:
+    the same decision for the same Run is idempotent; a different decision for a Run that is already bound is
+    refused (``review_p4_human_decision_invalid``) and the binding stays as it was; a later waiting Run of the
+    same pending START binds its own, later decision. A decision that already exits another Run's wait, or that
+    the waiting Run's own request already carried (it was supplied before the wait existed), exits nothing and
+    returns None. A decision identity reused with another disposition is refused.
+    """
     decision = getattr(session.review, "human_decision", None)
     if decision is None:
         return None
     record = decision.to_record()
-    bound = session.mutation.note(NOTE_P4_DECISION)
-    if bound is None:
-        session.mutation.set_note(NOTE_P4_DECISION, record)
-    elif bound != record:
-        raise p4.stop(p4.CODE_HUMAN_DECISION_INVALID,
-                      f"START mutation {session.mutation.id} already bound Human decision {bound.get('decision_id')!r}, "
-                      f"and this invocation carries {decision.decision_id!r}; one owner mutation binds one decision")
+    bindings = _p4_decision_bindings(session.mutation)
+    bound = bindings.get(waiting_run_id)
+    if bound is not None:
+        if bound != record:
+            raise p4.stop(p4.CODE_HUMAN_DECISION_INVALID,
+                          f"START mutation {session.mutation.id} already binds Human decision "
+                          f"{bound.get('decision_id')!r} to the wait of Work Review Run {waiting_run_id}, and this "
+                          f"invocation carries {decision.decision_id!r} for it; the binding is left unchanged")
+        return decision
+    for other, found in sorted(bindings.items()):
+        if found.get("decision_id") != decision.decision_id:
+            continue
+        if found != record:
+            raise p4.stop(p4.CODE_HUMAN_DECISION_INVALID,
+                          f"Human decision {decision.decision_id!r} is bound to the wait of Work Review Run {other} "
+                          "with another disposition; one decision identity is one decision")
+        return None
+    if _p4_envelope(session.store, chain).get("human_decision") == record:
+        return None
+    session.mutation.set_note(NOTE_P4_DECISIONS, {**bindings, waiting_run_id: record})
     return decision
 
 
@@ -3488,7 +3525,7 @@ class _P4Frozen:
 def _p4_freeze_material(
     session: "_Session", run: WorkRun, git: HermeticGit, candidate: dict[str, Any], snapshot: records.CandidateSnapshot,
     resulting: str, pre_base: str, *, generation: int, succession: dict[str, Any] | None,
-    set_aside: list[dict[str, Any]], declared: bool, write_snapshot: bool,
+    set_aside: list[dict[str, Any]], declared: bool, write_snapshot: bool, human_decision: p4.HumanDecision | None,
 ) -> _P4Frozen:
     """Context, isolated verification, discovery requests and Evidence of one P4 Run's Candidate (§27.8)."""
     from .implementation import package_directory
@@ -3506,7 +3543,6 @@ def _p4_freeze_material(
     reconstruction = work_review.read_material(snapshot, work_review.candidate_hash(candidate), width)
     verified = work_verify.verify(store, git, reconstruction, resulting_tree_id=resulting)
     requirement = _p4_requirement(store, git, run.work_id)
-    decision = _p4_bind_decision(session)
     task_ids = [str(session.mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot)))
                 for binding in _p4_bindings(session)]
     task_inputs = []
@@ -3514,7 +3550,7 @@ def _p4_freeze_material(
         envelope = p4.discovery_request(
             review_contract=work_review.P4_CONTRACT, review_kind=work_review.REVIEW_KIND, viewpoint=binding.viewpoint,
             candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
-            succession=succession, set_aside_runs=set_aside, human_decision=decision,
+            succession=succession, set_aside_runs=set_aside, human_decision=human_decision,
             evidence_ids=[f"work-isolated-verification:{verified.resulting_tree}"],
         )
         task_inputs.append(p4.task_input(
@@ -3566,7 +3602,8 @@ def freeze_and_review_p4(session: "_Session", view: ProjectView, work: Entity, o
     ownership.require_current(store, git, witnesses, pre_base)
     checkout.require_namespace_readable(store)
     frozen = _p4_freeze_material(session, run, git, candidate, snapshot, resulting, pre_base, generation=1,
-                                 succession=None, set_aside=set_aside, declared=bool(owned), write_snapshot=True)
+                                 succession=None, set_aside=set_aside, declared=bool(owned), write_snapshot=True,
+                                 human_decision=getattr(session.review, "human_decision", None))
     _p4_accept(session, run, frozen)
     session._drop_refused_result(work.id)
     return _continue_p4(session, run)
@@ -3930,13 +3967,11 @@ def p4_invalidate(session: "_Session", run: WorkRun, chain: Any) -> None:
 
 def _p4_human_wait(session: "_Session", run: WorkRun, chain: Any) -> None:
     """G-4: HUMAN_WAIT stays at G4 and the START stays pending; a Human decision sets the Run aside for a new Run."""
-    decision = getattr(session.review, "human_decision", None)
-    bound = _p4_envelope(session.store, chain).get("human_decision")
-    if decision is None or bound == decision.to_record():
+    if _p4_bind_decision(session, run.review_run_id, chain) is None:
         raise p4.stop(p4.CODE_HUMAN_WAIT,
                       f"Work Review Run {run.review_run_id} waits on a Human requirement decision at generation 4; "
                       "no repair guesses it, and this START stays pending until an invocation carries the decision")
-    _p4_bind_decision(session)
+    # bound durably above, before the successor's reservation (P4-R7 invariant 4)
     successor = session.mutation.reserve_id(gate.review_successor_run_key(run.review_run_id), "review_run")
     _p4_reserve(session.mutation, successor, run.work_id, _p4_bindings(session), predecessor=run.review_run_id)
 
@@ -4157,9 +4192,13 @@ def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) 
                                           batch.repair_batch_id, result_digest)
         set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_REPAIRED}]
         write_snapshot = False
+        decision = getattr(session.review, "human_decision", None)
     elif len(predecessor.generations) == p4.ADJUDICATION_SETTLE_GENERATION \
             and review.read_adjudication(predecessor_id).outcome == p4.HUMAN_WAIT \
+            and predecessor_id in _p4_decision_bindings(session.mutation) \
             and getattr(session.review, "human_decision", None) is not None:
+        # the decision bound to this predecessor's wait before the reservation: the same one again, or a refusal
+        decision = _p4_bind_decision(session, predecessor_id, predecessor)
         result_paths, deleted_paths = work_review.declared_paths(predecessor_material.candidate)
         witnesses = ownership.bind_declarations(store, git, result_paths, deleted_paths, pre_base)
         ownership.assert_ownership(session.mutation, witnesses)
@@ -4172,7 +4211,7 @@ def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) 
         set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_HUMAN_DECISION}]
     else:
         raise p4.reconcile(f"{run.review_run_id} is reserved as the successor of {predecessor_id}, which neither "
-                           "settled a repair nor waits on a Human decision this invocation carries",
+                           "settled a repair nor waits on a Human decision this START binds and this invocation carries",
                            p4.REASON_LINKAGE_INVALID)
     width = len(base["base_commit"])
     reconstruction = work_review.read_material(snapshot, snapshot.candidate_hash, width)
@@ -4184,7 +4223,7 @@ def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) 
     frozen = _p4_freeze_material(
         session, run, git, reconstruction.candidate, snapshot, resulting, pre_base, generation=generation,
         succession=succession, set_aside=set_aside, declared=bool(work_review.entries_of(reconstruction.candidate)),
-        write_snapshot=write_snapshot,
+        write_snapshot=write_snapshot, human_decision=decision,
     )
     if succession is not None:
         problems = p4.linkage_problems(
