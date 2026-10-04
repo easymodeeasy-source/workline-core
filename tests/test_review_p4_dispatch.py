@@ -182,6 +182,16 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(set(), v1 & mine)
         self.assertEqual(7, len(mine))
 
+    def test_a_first_generation_with_no_accepted_task_binds_no_contract(self) -> None:
+        """No TaskInput at generation 1 is not P4 and not a contract conflict: the v1 passes own it unchanged."""
+        from workline.review import validate
+
+        empty = chain(gate(1, (), ()))
+        self.assertEqual(set(), p4.run_contracts(None, empty))
+        self.assertEqual([], validate._p4_chain(None, RUN, empty, {"adjudication": {}}))
+        named = validate._p4_chain(None, RUN, empty, {"adjudication": {RUN: object()}})
+        self.assertEqual(["review_record_conflict"], [problem.code for problem in named])
+
     def test_work_operation_identity_is_unchanged_by_p4(self) -> None:
         identity = work_review.request_identity_record("w_01ARZ3NDEKTSV4RRFFQ69G5FAV")
         self.assertEqual("review-v1-work-v1", identity["review_contract"])

@@ -234,7 +234,7 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
         first, third = chain.generations[0], chain.generations[p4.SEAL_GENERATION - 1]
     else:
         seal_generation, invalidation_generation = planning.SEAL_GENERATION, planning.INVALIDATION_GENERATION
-        _require(chain is not None and contracts == {None} and len(chain.generations) == planning.SEAL_GENERATION, "CP2",
+        _require(chain is not None and contracts <= {None} and len(chain.generations) == planning.SEAL_GENERATION, "CP2",
                  f"the Run's chain at {parent} is not generations 1-3")
         first, second, third = chain.generations
         _require(

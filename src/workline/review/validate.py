@@ -574,7 +574,7 @@ def _p4_chain(
     except ValidationError:
         return []  # a missing or malformed task input is the provenance pass's to report
     contracts = {p4.contract_of_task_input(found) for found in task_inputs}
-    if contracts == {None}:
+    if contracts <= {None}:  # no TaskInput, or only v1 ones: not a P4 Run, the v1 passes own it
         if run_id in stored["adjudication"]:
             return [ReviewProblem(
                 "review_record_conflict",
