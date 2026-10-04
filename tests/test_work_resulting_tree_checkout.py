@@ -249,10 +249,13 @@ class CoveredSurfaceTests(CapabilityCase):
         error = self.refusal(lambda: self.capability([entry], {stray: data}), "review_checkout_unsafe")
         self.assertIn("closed Review namespace", str(error))
 
-    def test_the_closed_namespace_is_the_contracts_seven_subdirectories(self) -> None:
+    def test_the_closed_namespace_is_the_contracts_eleven_subdirectories(self) -> None:
+        # P1's seven, then P4's four (WORKLINE_COMPLETION_SPRINT §12.22 / §27.5): every P4 record kind is
+        # inside the closed namespace and its checkout/path-safety proof.
         self.assertEqual(review_paths.REVIEW_SUBDIRS, (
             "gates", "receipts", "consumptions", "supersessions",
             "candidate-snapshots", "task-inputs", "activation",
+            "reports", "adjudications", "repair-batches", "repair-results",
         ))
 
 

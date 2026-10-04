@@ -36,6 +36,11 @@ SUPERSESSIONS_DIR = f"{REVIEW_DIR}/supersessions"
 CANDIDATE_SNAPSHOTS_DIR = f"{REVIEW_DIR}/candidate-snapshots"
 TASK_INPUTS_DIR = f"{REVIEW_DIR}/task-inputs"
 ACTIVATION_DIR = f"{REVIEW_DIR}/activation"
+#: The P4 record areas (§12.22 / §27.5): raw discovery reports, adjudications, Repair Batches and Results.
+REPORTS_DIR = f"{REVIEW_DIR}/reports"
+ADJUDICATIONS_DIR = f"{REVIEW_DIR}/adjudications"
+REPAIR_BATCHES_DIR = f"{REVIEW_DIR}/repair-batches"
+REPAIR_RESULTS_DIR = f"{REVIEW_DIR}/repair-results"
 
 #: The ephemeral Review area. Never canonical truth, never evidence, never the
 #: only material an accepted task can be reconstructed from (``R1`` §3).
@@ -86,6 +91,10 @@ REVIEW_SUBDIRS = (
     "candidate-snapshots",
     "task-inputs",
     "activation",
+    "reports",
+    "adjudications",
+    "repair-batches",
+    "repair-results",
 )
 
 #: Gate generation files are zero-padded to this width.
@@ -162,6 +171,29 @@ def task_input_rel(review_task_id: str) -> str:
     return f"{TASK_INPUTS_DIR}/{review_task_id}.yaml"
 
 
+def report_rel(result_digest: str) -> str:
+    """A P4 raw discovery report, named by its own canonical digest (the settled ``result_digest``)."""
+    _require_digest(result_digest, "result_digest")
+    return f"{REPORTS_DIR}/{result_digest}.yaml"
+
+
+def adjudication_rel(review_run_id: str) -> str:
+    """The one P4 adjudication of ``review_run_id``."""
+    _require_id(review_run_id, "review_run")
+    return f"{ADJUDICATIONS_DIR}/{review_run_id}.yaml"
+
+
+def repair_batch_rel(repair_batch_id: str) -> str:
+    _require_id(repair_batch_id, "review_repair_batch")
+    return f"{REPAIR_BATCHES_DIR}/{repair_batch_id}.yaml"
+
+
+def repair_result_rel(repair_batch_id: str) -> str:
+    """The Repair Result of ``repair_batch_id``: one batch, at most one result."""
+    _require_id(repair_batch_id, "review_repair_batch")
+    return f"{REPAIR_RESULTS_DIR}/{repair_batch_id}.yaml"
+
+
 def is_review_path(relative: str) -> bool:
     """Whether ``relative`` is inside the canonical Review namespace."""
     return isinstance(relative, str) and relative.startswith(REVIEW_DIR + "/")
@@ -182,7 +214,10 @@ def _require_digest(value: str, described: str) -> None:
 # --------------------------------------------------------------------------- record path shape
 
 #: The Review subdirectories whose records sit directly inside them, by name.
-_FLAT_RECORD_DIRS = ("receipts", "consumptions", "supersessions", "candidate-snapshots", "task-inputs", "activation")
+_FLAT_RECORD_DIRS = (
+    "receipts", "consumptions", "supersessions", "candidate-snapshots", "task-inputs", "activation",
+    "reports", "adjudications", "repair-batches", "repair-results",
+)
 
 
 def require_review_record_path(relative: str) -> None:

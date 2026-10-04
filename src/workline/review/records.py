@@ -16,6 +16,16 @@ task input          clone-safe material to rebuild an accepted task's request
 activation          the P3 boundary between legacy and review-v1 terminals
 ```
 
+P4 (``WORKLINE_COMPLETION_SPRINT`` §12.22 / §27.5) adds four more, each its own
+versioned schema, so no record above changes meaning:
+
+```text
+P4 report           one unadjudicated discovery report, named by its own digest
+P4 adjudication     the one normalized adjudication of one P4 Review Run
+P4 repair batch     the one Repair Batch of one Candidate generation
+P4 repair result    the immutable result of one successful repair
+```
+
 None of them is lifecycle truth. ``ProjectView`` / ``state.py`` never reads any
 of them, and nothing here derives Work, Phase or Roadmap state.
 
@@ -1223,4 +1233,947 @@ class WorkTerminalActivation:
             legacy_event_count=_require_int(record, "legacy_event_count", described, minimum=0),
             legacy_event_prefix_sha256=_require_digest(record, "legacy_event_prefix_sha256", described),
             activation_base_head=head,
+        )
+
+
+# --------------------------------------------------------------------------- P4 vocabulary (§12 / §27)
+#
+# The closed vocabularies the four P4 record kinds are validated against. The
+# common P4 semantic core (:mod:`workline.review.p4`) uses exactly these, so a
+# record this module reads and a decision that module makes cannot disagree
+# about what a word means.
+
+SCHEMA_P4_REPORT = "review-p4-report"
+SCHEMA_P4_ADJUDICATION = "review-p4-adjudication"
+SCHEMA_P4_REPAIR_BATCH = "review-p4-repair-batch"
+SCHEMA_P4_REPAIR_RESULT = "review-p4-repair-result"
+
+#: The two P4 Review contracts (§12.21 / G-6): distinct durable identities, never a v1 string.
+P4_PLANNING_CONTRACT = "review-v1-planning-p4-v1"
+P4_WORK_CONTRACT = "review-v1-work-p4-v1"
+P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT)
+
+#: The P4 discovery task slot prefix; the rest of the slot is the viewpoint.
+P4_DISCOVERY_SLOT_PREFIX = "p4-discovery."
+
+P4_REPORT_STATUSES = ("completed", "declined")
+P4_SEVERITIES = ("HIGH", "MID", "LOW")
+P4_SEVERITY_RANK = {"HIGH": 3, "MID": 2, "LOW": 1}
+
+#: §12.4: the one outcome each raw claim is adjudicated to. Only Problem and Improvement are content
+#: categories; unsupported and HUMAN are adjudication outcomes, never categories.
+OUTCOME_UNSUPPORTED = "unsupported"
+OUTCOME_HUMAN = "HUMAN"
+OUTCOME_PROBLEM = "Problem"
+OUTCOME_IMPROVEMENT = "Improvement"
+OUTCOME_DISMISSED = "dismissed_non_actionable"
+P4_OUTCOMES = (OUTCOME_UNSUPPORTED, OUTCOME_HUMAN, OUTCOME_PROBLEM, OUTCOME_IMPROVEMENT, OUTCOME_DISMISSED)
+P4_CATEGORIES = (OUTCOME_PROBLEM, OUTCOME_IMPROVEMENT)
+
+#: §12.19 / §27.24: the non-blocking current-cycle dispositions, and the one blocking one.
+DISPOSITION_REPAIR_REQUIRED = "repair_required"
+DISPOSITION_REPAIRED_CURRENT_CYCLE = "repaired_current_cycle"
+DISPOSITION_RETAINED_HISTORY_ONLY = "retained_history_only"
+DISPOSITION_FUTURE_WORK_CANDIDATE = "future_work_candidate"
+DISPOSITION_NO_ACTION = "no_action_after_adjudication"
+P4_NONBLOCKING_DISPOSITIONS = (
+    DISPOSITION_REPAIRED_CURRENT_CYCLE, DISPOSITION_RETAINED_HISTORY_ONLY, DISPOSITION_FUTURE_WORK_CANDIDATE,
+    DISPOSITION_NO_ACTION,
+)
+P4_DISPOSITIONS = (DISPOSITION_REPAIR_REQUIRED,) + P4_NONBLOCKING_DISPOSITIONS
+
+#: §12.16: the A/B/C relationship of a Finding after a repair.
+RELATION_A_NEW = "A_NEW"
+RELATION_B_RECURRENCE = "B_RECURRENCE"
+RELATION_C_REPAIR_INDUCED = "C_REPAIR_INDUCED"
+P4_RELATIONS = (RELATION_A_NEW, RELATION_B_RECURRENCE, RELATION_C_REPAIR_INDUCED)
+
+#: §12.12: how an adjudication resolves a declared discovery coverage gap.
+GAP_NOT_APPLICABLE = "not_applicable"
+GAP_COVERED = "covered"
+GAP_TARGETED_CHECK = "targeted_check_required"
+GAP_HUMAN = "HUMAN"
+P4_GAP_RESOLUTIONS = (GAP_NOT_APPLICABLE, GAP_COVERED, GAP_TARGETED_CHECK, GAP_HUMAN)
+
+#: §27.11: the one owner branch a settled adjudication derives.
+AUTHORIZATION_READY = "AUTHORIZATION_READY"
+REPAIR_REQUIRED = "REPAIR_REQUIRED"
+HUMAN_WAIT = "HUMAN_WAIT"
+P4_ADJUDICATION_OUTCOMES = (AUTHORIZATION_READY, REPAIR_REQUIRED, HUMAN_WAIT)
+
+#: §12.17: the repair strategy a Repair Batch selects.
+STRATEGY_ORDINARY = "ordinary"
+STRATEGY_CHANGE = "strategy_change"
+P4_STRATEGIES = (STRATEGY_ORDINARY, STRATEGY_CHANGE)
+P4_STRATEGY_CHANGE_CLASSES = (
+    "repair_shared_responsibility",
+    "widen_scope",
+    "reconsider_state_lifecycle_authority",
+    "replace_or_rollback_prior_repair",
+    "restructure_around_simpler_invariant",
+)
+
+#: §12.14: the one change-impact class every successful repair records.
+IMPACT_LOCAL = "LOCAL"
+IMPACT_SHARED = "SHARED"
+IMPACT_CONTRACT = "CONTRACT"
+IMPACT_FOUNDATION = "FOUNDATION"
+P4_IMPACT_CLASSES = (IMPACT_LOCAL, IMPACT_SHARED, IMPACT_CONTRACT, IMPACT_FOUNDATION)
+
+P4_REPAIR_SCOPES = ("local", "widened")
+P4_REUSE_STATES = ("reusable", "unknown", "invalidated")
+P4_VERIFICATION_RESULTS = ("pass", "fail")
+
+#: The longest public-safe P4 text (H-3, P-4) and the longest P4 label.
+P4_MAX_TEXT = 2000
+P4_MAX_LABEL = 200
+
+#: H-3 (§12.3): shapes a canonical P4 text never carries. Deterministic and deliberately narrow: the
+#: reviewer instruction requires public-safe structured output, and this refuses what is recognisably
+#: not, before anything is persisted. A refusal never settles the task.
+_H3_UNSAFE = (
+    ("an absolute Windows drive path", re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:[\\/]")),
+    ("a UNC path", re.compile(r"\\\\[^\\\s]")),
+    ("a file URL", re.compile(r"(?i)\bfile://")),
+    ("a home-relative path", re.compile(r"(?<![A-Za-z0-9._-])~[\\/]")),
+    ("an absolute local path", re.compile(r"(?:^|[\s\"'(=,;])/(?:home|Users|root|tmp|var|etc|mnt|opt|private|proc|srv)/")),
+    ("a URL credential", re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@")),
+    ("a private key block", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY")),
+    ("an API-token-like value", re.compile(r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}")),
+    ("a GitHub-token-like value", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}")),
+    ("an AWS-key-like value", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("a Slack-token-like value", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
+    ("a JWT-like value", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.")),
+    ("a credential assignment", re.compile(r"(?i)\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|token)\s*[:=]\s*\S+")),
+)
+
+#: Characters that are never part of public-safe single-line text: line breaks of every kind, other
+#: control characters, and the bidirectional overrides that make text read differently than it is.
+_H3_FORBIDDEN_CHARS = re.compile(
+    "[" + "".join(
+        re.escape(chr(code))
+        for code in (
+            *range(0x00, 0x20), *range(0x7F, 0xA0), 0x2028, 0x2029, 0x200E, 0x200F,
+            *range(0x202A, 0x202F), *range(0x2066, 0x206A), 0xFEFF,
+        )
+    ) + "]"
+)
+
+
+def public_safe_problem(value: object, *, limit: int = P4_MAX_TEXT) -> str | None:
+    """Why ``value`` is not H-3 public-safe single-line P4 text, or ``None`` when it is (§12.3, P-4)."""
+    if not isinstance(value, str) or not value:
+        return "it is not non-empty text"
+    if value != value.strip():
+        return "it carries surrounding whitespace"
+    if len(value) > limit:
+        return f"it is longer than {limit} characters"
+    if _H3_FORBIDDEN_CHARS.search(value):
+        return "it carries a line break or control character"
+    for described, pattern in _H3_UNSAFE:
+        if pattern.search(value):
+            return f"it carries {described}"
+    return None
+
+
+def _require_public_text(record: dict[str, Any], key: str, described: str, *, limit: int = P4_MAX_TEXT) -> str:
+    value = record.get(key)
+    problem = public_safe_problem(value, limit=limit)
+    if problem is not None:
+        raise ValidationError(f"{described} {key} is not public-safe P4 text: {problem}", code="review_record_invalid")
+    return str(value)
+
+
+def _require_label(record: dict[str, Any], key: str, described: str) -> str:
+    return _require_public_text(record, key, described, limit=P4_MAX_LABEL)
+
+
+def _require_bool(record: dict[str, Any], key: str, described: str) -> bool:
+    value = record.get(key)
+    if type(value) is not bool:
+        raise ValidationError(f"{described} needs boolean {key}, not {value!r}", code="review_record_invalid")
+    return value
+
+
+def _require_public_list(record: dict[str, Any], key: str, described: str, *, labels: bool = False) -> list[str]:
+    items = _require_list(record, key, described)
+    for item in items:
+        problem = public_safe_problem(item, limit=P4_MAX_LABEL if labels else P4_MAX_TEXT)
+        if problem is not None:
+            raise ValidationError(
+                f"{described} {key} holds text that is not public-safe: {problem}", code="review_record_invalid"
+            )
+    return items
+
+
+def _require_sorted_unique(items: list[Any], key: str, described: str) -> None:
+    if items != sorted(set(items)):
+        raise ValidationError(f"{described} {key} is not sorted and duplicate-free", code="review_record_invalid")
+
+
+def _require_optional_digest(record: dict[str, Any], key: str, described: str) -> str | None:
+    value = record.get(key)
+    if value is None:
+        return None
+    return _require_digest(record, key, described)
+
+
+def _require_ids(record: dict[str, Any], key: str, kind: str, described: str) -> list[str]:
+    """An ordered, duplicate-free list of ids of one kind (empty allowed)."""
+    return _require_id_list(record, key, kind, described)
+
+
+def _source_key(source: dict[str, Any]) -> tuple[str, str, int]:
+    return (str(source["task_id"]), str(source["result_digest"]), int(source["claim_index"]))
+
+
+SOURCE_FIELDS = ("task_id", "result_digest", "claim_index")
+
+
+def _validate_source(value: object, described: str, *, exact: bool = True) -> dict[str, Any]:
+    source = _require_mapping(value, f"{described} source")
+    if exact:
+        _require_exact_fields(source, SOURCE_FIELDS, f"{described} source")
+    _require_id(source, "task_id", "review_task", described)
+    _require_digest(source, "result_digest", described)
+    _require_int(source, "claim_index", described, minimum=0)
+    return source
+
+
+# --------------------------------------------------------------------------- P4 report
+
+P4_REPORT_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "review_kind",
+    "review_contract",
+    "task_id",
+    "task_slot",
+    "reviewer_identity",
+    "reviewer_version",
+    "status",
+    "claims",
+    "coverage",
+)
+P4_CLAIM_FIELDS = ("severity", "code", "message")
+P4_COVERAGE_FIELDS = ("viewpoint", "inspected", "checked", "evidence_ids", "not_inspected")
+
+
+@dataclass(frozen=True)
+class P4Report:
+    """One unadjudicated P4 discovery report (§12.3 / §27.4), stored at ``reports/<its own digest>.yaml``.
+
+    "Raw" means unadjudicated, never unsanitized: every text field is already
+    H-3 public-safe, and the reviewer's severity is input to adjudication, not
+    authority. It is never rewritten to reflect a later adjudication.
+    """
+
+    review_kind: str
+    review_contract: str
+    task_id: str
+    task_slot: str
+    reviewer_identity: str
+    reviewer_version: str
+    status: str
+    claims: tuple[dict[str, Any], ...]
+    coverage: dict[str, Any]
+
+    @property
+    def viewpoint(self) -> str:
+        return str(self.coverage["viewpoint"])
+
+    def to_record(self) -> dict[str, Any]:
+        record = _header(SCHEMA_P4_REPORT)
+        record.update(
+            {
+                "review_kind": self.review_kind,
+                "review_contract": self.review_contract,
+                "task_id": self.task_id,
+                "task_slot": self.task_slot,
+                "reviewer_identity": self.reviewer_identity,
+                "reviewer_version": self.reviewer_version,
+                "status": self.status,
+                "claims": [dict(claim) for claim in self.claims],
+                "coverage": {
+                    "viewpoint": self.coverage["viewpoint"],
+                    "inspected": list(self.coverage["inspected"]),
+                    "checked": list(self.coverage["checked"]),
+                    "evidence_ids": list(self.coverage["evidence_ids"]),
+                    "not_inspected": list(self.coverage["not_inspected"]),
+                },
+            }
+        )
+        return record
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "P4Report":
+        serialize.require_schema(record, SCHEMA_P4_REPORT, VERSION, described)
+        _require_exact_fields(record, P4_REPORT_FIELDS, described)
+        slot = _require_text(record, "task_slot", described)
+        if not slot.startswith(P4_DISCOVERY_SLOT_PREFIX) or len(slot) == len(P4_DISCOVERY_SLOT_PREFIX):
+            raise ValidationError(f"{described} task_slot {slot!r} is not a P4 discovery slot", code="review_record_invalid")
+        claims: list[dict[str, Any]] = []
+        for item in _require_list(record, "claims", described):
+            claim = _require_mapping(item, f"{described} claim")
+            _require_exact_fields(claim, P4_CLAIM_FIELDS, f"{described} claim")
+            _require_choice(claim, "severity", P4_SEVERITIES, f"{described} claim")
+            _require_label(claim, "code", f"{described} claim")
+            _require_public_text(claim, "message", f"{described} claim")
+            claims.append(claim)
+        coverage = _require_mapping(record.get("coverage"), f"{described} coverage")
+        _require_exact_fields(coverage, P4_COVERAGE_FIELDS, f"{described} coverage")
+        viewpoint = _require_label(coverage, "viewpoint", f"{described} coverage")
+        if slot != P4_DISCOVERY_SLOT_PREFIX + viewpoint:
+            raise ValidationError(
+                f"{described} coverage viewpoint {viewpoint!r} is not its task slot's", code="review_record_invalid"
+            )
+        for key in ("inspected", "checked", "not_inspected"):
+            _require_public_list(coverage, key, f"{described} coverage")
+        _require_public_list(coverage, "evidence_ids", f"{described} coverage", labels=True)
+        status = _require_choice(record, "status", P4_REPORT_STATUSES, described)
+        if status == "declined" and claims:
+            raise ValidationError(f"{described} is declined and carries claims", code="review_record_invalid")
+        return P4Report(
+            review_kind=_require_text(record, "review_kind", described),
+            review_contract=_require_choice(record, "review_contract", P4_CONTRACTS, described),
+            task_id=_require_id(record, "task_id", "review_task", described),
+            task_slot=slot,
+            reviewer_identity=_require_text(record, "reviewer_identity", described),
+            reviewer_version=_require_text(record, "reviewer_version", described),
+            status=status,
+            claims=tuple(claims),
+            coverage=dict(coverage),
+        )
+
+
+# --------------------------------------------------------------------------- P4 adjudication
+
+P4_ADJUDICATION_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "review_run_id",
+    "review_kind",
+    "target_identity",
+    "operation_identity",
+    "candidate_hash",
+    "candidate_generation",
+    "review_context_hash",
+    "effective_policy_hash",
+    "review_contract",
+    "adjudication_contract",
+    "instruction",
+    "task_id",
+    "adjudicator_identity",
+    "adjudicator_version",
+    "reports",
+    "objective_holds",
+    "entries",
+    "findings",
+    "coverage_gaps",
+    "prior",
+    "outcome",
+    "obligations",
+)
+P4_ENTRY_FIELDS = SOURCE_FIELDS + (
+    "outcome",
+    "supported",
+    "requirement_decision_required",
+    "fails_requirement",
+    "better_alternative",
+    "finding_id",
+    "reason",
+)
+P4_FINDING_FIELDS = (
+    "finding_id",
+    "category",
+    "severity",
+    "statement",
+    "semantic_surface",
+    "repair_identity",
+    "sources",
+    "disposition",
+    "blocking",
+    "relation",
+    "linked_finding_ids",
+    "linked_repair_batch_ids",
+    "causal_evidence_digest",
+)
+P4_GAP_FIELDS = ("task_id", "surface", "resolution", "evidence_ids")
+P4_PRIOR_FIELDS = (
+    "predecessor_review_run_id",
+    "predecessor_adjudication_digest",
+    "repair_batch_id",
+    "repair_result_digest",
+)
+P4_OBLIGATION_FIELDS = (
+    "unadjudicated",
+    "problem_high",
+    "problem_mid",
+    "problem_low",
+    "improvement",
+    "human",
+    "coverage_unresolved",
+    "strategy_change_required",
+)
+
+
+@dataclass(frozen=True)
+class P4Adjudication:
+    """The one canonical normalized adjudication of one P4 Review Run (§12.5 / §27.6).
+
+    Every raw claim of every bound report has exactly one entry; only Problem
+    and Improvement entries name a Finding, and only Findings carry a reserved
+    ``finding_id``. The record is structurally total here; the §12.4 decision
+    order, merging and causal-linkage rules are checked by
+    :func:`workline.review.p4.adjudication_problems`.
+    """
+
+    review_run_id: str
+    review_kind: str
+    target_identity: str
+    operation_identity: str
+    candidate_hash: str
+    candidate_generation: int
+    review_context_hash: str
+    effective_policy_hash: str
+    review_contract: str
+    adjudication_contract: str
+    instruction: str
+    task_id: str
+    adjudicator_identity: str
+    adjudicator_version: str
+    reports: tuple[dict[str, Any], ...]
+    objective_holds: bool
+    entries: tuple[dict[str, Any], ...]
+    findings: tuple[dict[str, Any], ...]
+    coverage_gaps: tuple[dict[str, Any], ...]
+    prior: dict[str, Any]
+    outcome: str
+    obligations: dict[str, Any]
+
+    def finding(self, finding_id: str) -> dict[str, Any] | None:
+        for found in self.findings:
+            if found["finding_id"] == finding_id:
+                return found
+        return None
+
+    def to_record(self) -> dict[str, Any]:
+        record = _header(SCHEMA_P4_ADJUDICATION)
+        record.update(
+            {
+                "review_run_id": self.review_run_id,
+                "review_kind": self.review_kind,
+                "target_identity": self.target_identity,
+                "operation_identity": self.operation_identity,
+                "candidate_hash": self.candidate_hash,
+                "candidate_generation": self.candidate_generation,
+                "review_context_hash": self.review_context_hash,
+                "effective_policy_hash": self.effective_policy_hash,
+                "review_contract": self.review_contract,
+                "adjudication_contract": self.adjudication_contract,
+                "instruction": self.instruction,
+                "task_id": self.task_id,
+                "adjudicator_identity": self.adjudicator_identity,
+                "adjudicator_version": self.adjudicator_version,
+                "reports": [dict(item) for item in self.reports],
+                "objective_holds": self.objective_holds,
+                "entries": [dict(item) for item in self.entries],
+                "findings": [
+                    {**dict(item), "sources": [dict(source) for source in item["sources"]]} for item in self.findings
+                ],
+                "coverage_gaps": [dict(item) for item in self.coverage_gaps],
+                "prior": dict(self.prior),
+                "outcome": self.outcome,
+                "obligations": dict(self.obligations),
+            }
+        )
+        return record
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "P4Adjudication":
+        serialize.require_schema(record, SCHEMA_P4_ADJUDICATION, VERSION, described)
+        _require_exact_fields(record, P4_ADJUDICATION_FIELDS, described)
+        reports: list[dict[str, Any]] = []
+        for item in _require_list(record, "reports", described):
+            entry = _require_mapping(item, f"{described} report")
+            _require_exact_fields(entry, ("task_id", "result_digest"), f"{described} report")
+            _require_id(entry, "task_id", "review_task", described)
+            _require_digest(entry, "result_digest", described)
+            reports.append(entry)
+        if not reports:
+            raise ValidationError(f"{described} binds no report", code="review_record_invalid")
+        if len({item["result_digest"] for item in reports}) != len(reports):
+            raise ValidationError(f"{described} binds one report twice", code="review_record_invalid")
+        entries: list[dict[str, Any]] = []
+        seen_sources: set[tuple[str, str, int]] = set()
+        for item in _require_list(record, "entries", described):
+            entry = _require_mapping(item, f"{described} entry")
+            _require_exact_fields(entry, P4_ENTRY_FIELDS, f"{described} entry")
+            _validate_source(entry, f"{described} entry", exact=False)
+            _require_choice(entry, "outcome", P4_OUTCOMES, f"{described} entry")
+            for key in ("supported", "requirement_decision_required", "fails_requirement", "better_alternative"):
+                _require_bool(entry, key, f"{described} entry")
+            _require_optional_id(entry, "finding_id", "review_finding", f"{described} entry")
+            _require_public_text(entry, "reason", f"{described} entry")
+            key = _source_key(entry)
+            if key in seen_sources:
+                raise ValidationError(f"{described} adjudicates one claim twice", code="review_record_invalid")
+            seen_sources.add(key)
+            entries.append(entry)
+        findings: list[dict[str, Any]] = []
+        finding_ids: set[str] = set()
+        for item in _require_list(record, "findings", described):
+            finding = _require_mapping(item, f"{described} finding")
+            where = f"{described} finding"
+            _require_exact_fields(finding, P4_FINDING_FIELDS, where)
+            finding_id = _require_id(finding, "finding_id", "review_finding", where)
+            if finding_id in finding_ids:
+                raise ValidationError(f"{described} holds Finding {finding_id} twice", code="review_record_invalid")
+            finding_ids.add(finding_id)
+            _require_choice(finding, "category", P4_CATEGORIES, where)
+            _require_choice(finding, "severity", P4_SEVERITIES, where)
+            _require_public_text(finding, "statement", where)
+            _require_label(finding, "semantic_surface", where)
+            _require_label(finding, "repair_identity", where)
+            sources = [_validate_source(source, where) for source in _require_list(finding, "sources", where)]
+            if not sources:
+                raise ValidationError(f"{where} {finding_id} names no source claim", code="review_record_invalid")
+            if [_source_key(source) for source in sources] != sorted({_source_key(source) for source in sources}):
+                raise ValidationError(f"{where} {finding_id} sources are not canonically ordered", code="review_record_invalid")
+            _require_choice(finding, "disposition", P4_DISPOSITIONS, where)
+            _require_bool(finding, "blocking", where)
+            _require_choice(finding, "relation", P4_RELATIONS, where)
+            _require_ids(finding, "linked_finding_ids", "review_finding", where)
+            _require_ids(finding, "linked_repair_batch_ids", "review_repair_batch", where)
+            _require_optional_digest(finding, "causal_evidence_digest", where)
+            findings.append(finding)
+        gaps: list[dict[str, Any]] = []
+        for item in _require_list(record, "coverage_gaps", described):
+            gap = _require_mapping(item, f"{described} coverage gap")
+            _require_exact_fields(gap, P4_GAP_FIELDS, f"{described} coverage gap")
+            _require_id(gap, "task_id", "review_task", f"{described} coverage gap")
+            _require_public_text(gap, "surface", f"{described} coverage gap")
+            _require_choice(gap, "resolution", P4_GAP_RESOLUTIONS, f"{described} coverage gap")
+            _require_public_list(gap, "evidence_ids", f"{described} coverage gap", labels=True)
+            gaps.append(gap)
+        prior = _require_mapping(record.get("prior"), f"{described} prior")
+        _require_exact_fields(prior, P4_PRIOR_FIELDS, f"{described} prior")
+        _require_optional_id(prior, "predecessor_review_run_id", "review_run", f"{described} prior")
+        _require_optional_digest(prior, "predecessor_adjudication_digest", f"{described} prior")
+        _require_optional_id(prior, "repair_batch_id", "review_repair_batch", f"{described} prior")
+        _require_optional_digest(prior, "repair_result_digest", f"{described} prior")
+        linked = [prior[key] is None for key in P4_PRIOR_FIELDS]
+        if any(linked) and not all(linked):
+            raise ValidationError(
+                f"{described} prior names some predecessor linkage and not all of it", code="review_record_invalid"
+            )
+        obligations = _require_mapping(record.get("obligations"), f"{described} obligations")
+        _require_exact_fields(obligations, P4_OBLIGATION_FIELDS, f"{described} obligations")
+        for key in P4_OBLIGATION_FIELDS[:-1]:
+            _require_int(obligations, key, f"{described} obligations", minimum=0)
+        _require_bool(obligations, "strategy_change_required", f"{described} obligations")
+        generation = _require_int(record, "candidate_generation", described, minimum=1)
+        if generation == 1 and not all(linked):
+            raise ValidationError(
+                f"{described} is candidate generation 1 and names a predecessor", code="review_record_invalid"
+            )
+        if generation > 1 and any(linked):
+            raise ValidationError(
+                f"{described} is candidate generation {generation} and names no predecessor", code="review_record_invalid"
+            )
+        return P4Adjudication(
+            review_run_id=_require_id(record, "review_run_id", "review_run", described),
+            review_kind=_require_text(record, "review_kind", described),
+            target_identity=_require_text(record, "target_identity", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            candidate_hash=_require_digest(record, "candidate_hash", described),
+            candidate_generation=generation,
+            review_context_hash=_require_digest(record, "review_context_hash", described),
+            effective_policy_hash=_require_digest(record, "effective_policy_hash", described),
+            review_contract=_require_choice(record, "review_contract", P4_CONTRACTS, described),
+            adjudication_contract=_require_text(record, "adjudication_contract", described),
+            instruction=_require_text(record, "instruction", described),
+            task_id=_require_id(record, "task_id", "review_task", described),
+            adjudicator_identity=_require_text(record, "adjudicator_identity", described),
+            adjudicator_version=_require_text(record, "adjudicator_version", described),
+            reports=tuple(reports),
+            objective_holds=_require_bool(record, "objective_holds", described),
+            entries=tuple(entries),
+            findings=tuple(findings),
+            coverage_gaps=tuple(gaps),
+            prior=dict(prior),
+            outcome=_require_choice(record, "outcome", P4_ADJUDICATION_OUTCOMES, described),
+            obligations=dict(obligations),
+        )
+
+
+# --------------------------------------------------------------------------- P4 repair batch
+
+P4_REPAIR_BATCH_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "repair_batch_id",
+    "review_kind",
+    "target_identity",
+    "operation_identity",
+    "review_contract",
+    "source_review_run_id",
+    "source_candidate_hash",
+    "candidate_generation",
+    "adjudication_digest",
+    "finding_ids",
+    "deliberate_low_finding_ids",
+    "semantic_surfaces",
+    "repair_purpose",
+    "strategy",
+    "strategy_change_required",
+    "strategy_change_class",
+    "allowed_result_surface",
+    "prior_relations",
+)
+P4_PRIOR_RELATION_FIELDS = ("finding_id", "relation", "linked_finding_ids", "linked_repair_batch_ids")
+
+
+@dataclass(frozen=True)
+class P4RepairBatch:
+    """The one immutable Repair Batch of one Candidate generation (§12.8 / §27.14)."""
+
+    repair_batch_id: str
+    review_kind: str
+    target_identity: str
+    operation_identity: str
+    review_contract: str
+    source_review_run_id: str
+    source_candidate_hash: str
+    candidate_generation: int
+    adjudication_digest: str
+    finding_ids: tuple[str, ...]
+    deliberate_low_finding_ids: tuple[str, ...]
+    semantic_surfaces: tuple[str, ...]
+    repair_purpose: str
+    strategy: str
+    strategy_change_required: bool
+    strategy_change_class: str | None
+    allowed_result_surface: tuple[str, ...]
+    prior_relations: tuple[dict[str, Any], ...]
+
+    def to_record(self) -> dict[str, Any]:
+        record = _header(SCHEMA_P4_REPAIR_BATCH)
+        record.update(
+            {
+                "repair_batch_id": self.repair_batch_id,
+                "review_kind": self.review_kind,
+                "target_identity": self.target_identity,
+                "operation_identity": self.operation_identity,
+                "review_contract": self.review_contract,
+                "source_review_run_id": self.source_review_run_id,
+                "source_candidate_hash": self.source_candidate_hash,
+                "candidate_generation": self.candidate_generation,
+                "adjudication_digest": self.adjudication_digest,
+                "finding_ids": list(self.finding_ids),
+                "deliberate_low_finding_ids": list(self.deliberate_low_finding_ids),
+                "semantic_surfaces": list(self.semantic_surfaces),
+                "repair_purpose": self.repair_purpose,
+                "strategy": self.strategy,
+                "strategy_change_required": self.strategy_change_required,
+                "strategy_change_class": self.strategy_change_class,
+                "allowed_result_surface": list(self.allowed_result_surface),
+                "prior_relations": [dict(item) for item in self.prior_relations],
+            }
+        )
+        return record
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "P4RepairBatch":
+        serialize.require_schema(record, SCHEMA_P4_REPAIR_BATCH, VERSION, described)
+        _require_exact_fields(record, P4_REPAIR_BATCH_FIELDS, described)
+        finding_ids = _require_ids(record, "finding_ids", "review_finding", described)
+        if not finding_ids:
+            raise ValidationError(f"{described} names no Finding to repair", code="review_record_invalid")
+        deliberate = _require_ids(record, "deliberate_low_finding_ids", "review_finding", described)
+        if not set(deliberate) <= set(finding_ids):
+            raise ValidationError(
+                f"{described} names a deliberate LOW Finding it does not repair", code="review_record_invalid"
+            )
+        surfaces = _require_public_list(record, "semantic_surfaces", described, labels=True)
+        _require_sorted_unique(surfaces, "semantic_surfaces", described)
+        if not surfaces:
+            raise ValidationError(f"{described} names no semantic surface", code="review_record_invalid")
+        allowed = _require_public_list(record, "allowed_result_surface", described)
+        _require_sorted_unique(allowed, "allowed_result_surface", described)
+        if not allowed:
+            raise ValidationError(f"{described} allows no result surface", code="review_record_invalid")
+        strategy = _require_choice(record, "strategy", P4_STRATEGIES, described)
+        required = _require_bool(record, "strategy_change_required", described)
+        change_class = record.get("strategy_change_class")
+        if strategy == STRATEGY_CHANGE:
+            _require_choice(record, "strategy_change_class", P4_STRATEGY_CHANGE_CLASSES, described)
+        elif change_class is not None:
+            raise ValidationError(
+                f"{described} is an ordinary strategy and names a strategy-change class", code="review_record_invalid"
+            )
+        if required and strategy != STRATEGY_CHANGE:
+            raise ValidationError(
+                f"{described} requires STRATEGY_CHANGE and selects an ordinary unchanged strategy",
+                code="review_record_invalid",
+            )
+        relations: list[dict[str, Any]] = []
+        for item in _require_list(record, "prior_relations", described):
+            relation = _require_mapping(item, f"{described} prior relation")
+            _require_exact_fields(relation, P4_PRIOR_RELATION_FIELDS, f"{described} prior relation")
+            _require_id(relation, "finding_id", "review_finding", f"{described} prior relation")
+            _require_choice(relation, "relation", P4_RELATIONS, f"{described} prior relation")
+            _require_ids(relation, "linked_finding_ids", "review_finding", f"{described} prior relation")
+            _require_ids(relation, "linked_repair_batch_ids", "review_repair_batch", f"{described} prior relation")
+            relations.append(relation)
+        if [item["finding_id"] for item in relations] != finding_ids:
+            raise ValidationError(
+                f"{described} prior relations do not name exactly its Findings, in order", code="review_record_invalid"
+            )
+        return P4RepairBatch(
+            repair_batch_id=_require_id(record, "repair_batch_id", "review_repair_batch", described),
+            review_kind=_require_text(record, "review_kind", described),
+            target_identity=_require_text(record, "target_identity", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            review_contract=_require_choice(record, "review_contract", P4_CONTRACTS, described),
+            source_review_run_id=_require_id(record, "source_review_run_id", "review_run", described),
+            source_candidate_hash=_require_digest(record, "source_candidate_hash", described),
+            candidate_generation=_require_int(record, "candidate_generation", described, minimum=1),
+            adjudication_digest=_require_digest(record, "adjudication_digest", described),
+            finding_ids=tuple(finding_ids),
+            deliberate_low_finding_ids=tuple(deliberate),
+            semantic_surfaces=tuple(surfaces),
+            repair_purpose=_require_public_text(record, "repair_purpose", described),
+            strategy=strategy,
+            strategy_change_required=required,
+            strategy_change_class=None if change_class is None else str(change_class),
+            allowed_result_surface=tuple(allowed),
+            prior_relations=tuple(relations),
+        )
+
+
+# --------------------------------------------------------------------------- P4 repair result
+
+P4_REPAIR_RESULT_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "repair_batch_id",
+    "review_kind",
+    "target_identity",
+    "operation_identity",
+    "review_contract",
+    "source_review_run_id",
+    "source_candidate_hash",
+    "source_candidate_generation",
+    "result_candidate_hash",
+    "result_candidate_generation",
+    "result_candidate_material_digest",
+    "repair_task_id",
+    "repair_identity",
+    "repair_version",
+    "repaired_surface",
+    "impact_class",
+    "coverage_check",
+    "coverage_check_digest",
+    "evidence_decisions",
+    "reverification",
+    "reverification_digest",
+    "causal_summary",
+    "successor_eligible",
+)
+P4_COVERAGE_CHECK_FIELDS = (
+    "semantic_behavior_changed",
+    "semantic_responsibility",
+    "other_sites",
+    "shared_responsibility",
+    "enumerable",
+    "affected_set",
+    "covers_affected_set",
+    "repair_scope",
+    "unresolved_gap",
+)
+P4_EVIDENCE_DECISION_FIELDS = ("evidence_id", "reusable", "state", "reasons")
+P4_REVERIFICATION_FIELDS = ("required", "completed", "residual")
+
+
+@dataclass(frozen=True)
+class P4RepairResult:
+    """The immutable result of one successful repair (§12.10 / §27.20), named by its Repair Batch.
+
+    Candidate N+1 is a complete Candidate stored as its own Candidate
+    snapshot; this record links it to the source Candidate, Run and batch and
+    carries the coverage, Evidence and reverification decisions the successor
+    Run's convergence reads. It is written only for a repair that settled
+    successfully and is eligible to start a successor Run.
+    """
+
+    repair_batch_id: str
+    review_kind: str
+    target_identity: str
+    operation_identity: str
+    review_contract: str
+    source_review_run_id: str
+    source_candidate_hash: str
+    source_candidate_generation: int
+    result_candidate_hash: str
+    result_candidate_generation: int
+    result_candidate_material_digest: str
+    repair_task_id: str
+    repair_identity: str
+    repair_version: str
+    repaired_surface: tuple[str, ...]
+    impact_class: str
+    coverage_check: dict[str, Any]
+    coverage_check_digest: str
+    evidence_decisions: tuple[dict[str, Any], ...]
+    reverification: dict[str, Any]
+    reverification_digest: str
+    causal_summary: str
+    successor_eligible: bool
+
+    def to_record(self) -> dict[str, Any]:
+        record = _header(SCHEMA_P4_REPAIR_RESULT)
+        record.update(
+            {
+                "repair_batch_id": self.repair_batch_id,
+                "review_kind": self.review_kind,
+                "target_identity": self.target_identity,
+                "operation_identity": self.operation_identity,
+                "review_contract": self.review_contract,
+                "source_review_run_id": self.source_review_run_id,
+                "source_candidate_hash": self.source_candidate_hash,
+                "source_candidate_generation": self.source_candidate_generation,
+                "result_candidate_hash": self.result_candidate_hash,
+                "result_candidate_generation": self.result_candidate_generation,
+                "result_candidate_material_digest": self.result_candidate_material_digest,
+                "repair_task_id": self.repair_task_id,
+                "repair_identity": self.repair_identity,
+                "repair_version": self.repair_version,
+                "repaired_surface": list(self.repaired_surface),
+                "impact_class": self.impact_class,
+                "coverage_check": {
+                    **dict(self.coverage_check),
+                    "other_sites": list(self.coverage_check["other_sites"]),
+                    "affected_set": list(self.coverage_check["affected_set"]),
+                },
+                "coverage_check_digest": self.coverage_check_digest,
+                "evidence_decisions": [
+                    {**dict(item), "reasons": list(item["reasons"])} for item in self.evidence_decisions
+                ],
+                "reverification": {
+                    "required": list(self.reverification["required"]),
+                    "completed": [dict(item) for item in self.reverification["completed"]],
+                    "residual": self.reverification["residual"],
+                },
+                "reverification_digest": self.reverification_digest,
+                "causal_summary": self.causal_summary,
+                "successor_eligible": self.successor_eligible,
+            }
+        )
+        return record
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "P4RepairResult":
+        serialize.require_schema(record, SCHEMA_P4_REPAIR_RESULT, VERSION, described)
+        _require_exact_fields(record, P4_REPAIR_RESULT_FIELDS, described)
+        source_generation = _require_int(record, "source_candidate_generation", described, minimum=1)
+        result_generation = _require_int(record, "result_candidate_generation", described, minimum=2)
+        if result_generation != source_generation + 1:
+            raise ValidationError(
+                f"{described} result_candidate_generation {result_generation} is not source generation "
+                f"{source_generation} + 1",
+                code="review_record_invalid",
+            )
+        source_hash = _require_digest(record, "source_candidate_hash", described)
+        result_hash = _require_digest(record, "result_candidate_hash", described)
+        if source_hash == result_hash:
+            raise ValidationError(
+                f"{described} names the source Candidate as its result; a repaired Candidate is a new one",
+                code="review_record_invalid",
+            )
+        repaired = _require_public_list(record, "repaired_surface", described)
+        _require_sorted_unique(repaired, "repaired_surface", described)
+        if not repaired:
+            raise ValidationError(f"{described} names no repaired surface", code="review_record_invalid")
+        check = _require_mapping(record.get("coverage_check"), f"{described} coverage_check")
+        where = f"{described} coverage_check"
+        _require_exact_fields(check, P4_COVERAGE_CHECK_FIELDS, where)
+        _require_public_text(check, "semantic_behavior_changed", where)
+        _require_label(check, "semantic_responsibility", where)
+        _require_public_list(check, "other_sites", where)
+        for key in ("shared_responsibility", "enumerable", "covers_affected_set"):
+            _require_bool(check, key, where)
+        _require_public_list(check, "affected_set", where)
+        _require_choice(check, "repair_scope", P4_REPAIR_SCOPES, where)
+        if check.get("unresolved_gap") is not None:
+            _require_public_text(check, "unresolved_gap", where)
+        check_digest = _require_digest(record, "coverage_check_digest", described)
+        if serialize.digest(dict(check)) != check_digest:
+            raise ValidationError(f"{described} coverage_check_digest is not its check's digest", code="review_record_invalid")
+        decisions: list[dict[str, Any]] = []
+        for item in _require_list(record, "evidence_decisions", described):
+            decision = _require_mapping(item, f"{described} evidence decision")
+            _require_exact_fields(decision, P4_EVIDENCE_DECISION_FIELDS, f"{described} evidence decision")
+            _require_label(decision, "evidence_id", f"{described} evidence decision")
+            reusable = _require_bool(decision, "reusable", f"{described} evidence decision")
+            state = _require_choice(decision, "state", P4_REUSE_STATES, f"{described} evidence decision")
+            if reusable != (state == "reusable"):
+                raise ValidationError(
+                    f"{described} evidence decision says reusable {reusable} with state {state}",
+                    code="review_record_invalid",
+                )
+            _require_public_list(decision, "reasons", f"{described} evidence decision")
+            decisions.append(decision)
+        if len({item["evidence_id"] for item in decisions}) != len(decisions):
+            raise ValidationError(f"{described} decides one Evidence twice", code="review_record_invalid")
+        reverification = _require_mapping(record.get("reverification"), f"{described} reverification")
+        where = f"{described} reverification"
+        _require_exact_fields(reverification, P4_REVERIFICATION_FIELDS, where)
+        required = _require_public_list(reverification, "required", where, labels=True)
+        _require_sorted_unique(required, "required", where)
+        completed = []
+        for item in _require_list(reverification, "completed", where):
+            done = _require_mapping(item, f"{where} completed")
+            _require_exact_fields(done, ("id", "result"), f"{where} completed")
+            _require_label(done, "id", f"{where} completed")
+            _require_choice(done, "result", P4_VERIFICATION_RESULTS, f"{where} completed")
+            completed.append(done)
+        if [item["id"] for item in completed] != sorted({item["id"] for item in completed}):
+            raise ValidationError(f"{where} completed is not sorted and duplicate-free", code="review_record_invalid")
+        residual = _require_int(reverification, "residual", where, minimum=0)
+        passed = {item["id"] for item in completed if item["result"] == "pass"}
+        if residual != len(set(required) - passed):
+            raise ValidationError(
+                f"{where} residual {residual} is not the count of required verification not passed",
+                code="review_record_invalid",
+            )
+        reverification_digest = _require_digest(record, "reverification_digest", described)
+        if serialize.digest(dict(reverification)) != reverification_digest:
+            raise ValidationError(
+                f"{described} reverification_digest is not its reverification's digest", code="review_record_invalid"
+            )
+        return P4RepairResult(
+            repair_batch_id=_require_id(record, "repair_batch_id", "review_repair_batch", described),
+            review_kind=_require_text(record, "review_kind", described),
+            target_identity=_require_text(record, "target_identity", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            review_contract=_require_choice(record, "review_contract", P4_CONTRACTS, described),
+            source_review_run_id=_require_id(record, "source_review_run_id", "review_run", described),
+            source_candidate_hash=source_hash,
+            source_candidate_generation=source_generation,
+            result_candidate_hash=result_hash,
+            result_candidate_generation=result_generation,
+            result_candidate_material_digest=_require_digest(record, "result_candidate_material_digest", described),
+            repair_task_id=_require_id(record, "repair_task_id", "review_task", described),
+            repair_identity=_require_text(record, "repair_identity", described),
+            repair_version=_require_text(record, "repair_version", described),
+            repaired_surface=tuple(repaired),
+            impact_class=_require_choice(record, "impact_class", P4_IMPACT_CLASSES, described),
+            coverage_check=dict(check),
+            coverage_check_digest=check_digest,
+            evidence_decisions=tuple(decisions),
+            reverification=dict(reverification),
+            reverification_digest=reverification_digest,
+            causal_summary=_require_public_text(record, "causal_summary", described),
+            successor_eligible=_require_bool(record, "successor_eligible", described),
         )

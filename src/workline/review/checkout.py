@@ -296,6 +296,14 @@ def require_namespace_readable(store: ProjectStore) -> None:
             review.read_candidate_snapshot(candidate_hash)
         for task_id in review.task_input_ids():
             review.read_task_input(task_id)
+        for result_digest in review.report_digests():
+            review.read_report(result_digest)
+        for review_run_id in review.adjudication_run_ids():
+            review.read_adjudication(review_run_id)
+        for repair_batch_id in review.repair_batch_ids():
+            review.read_repair_batch(repair_batch_id)
+        for repair_batch_id in review.repair_result_ids():
+            review.read_repair_result(repair_batch_id)
         review.read_activation()
     except ValidationError as exc:
         raise StopError(

@@ -39,7 +39,7 @@ from ..errors import StopError, ValidationError
 from ..ids import is_valid_id
 from ..store import EVENT_LIFECYCLE_FIELDS, ProjectStore
 from . import activation as work_activation
-from . import paths
+from . import paths, serialize
 from .records import OPERATION_CONTRACT_REVIEW_V1, Consumption, GateGeneration, PlanningConsumption, Receipt
 from .store import GateChain, ReviewStore
 
@@ -129,6 +129,7 @@ def review_problems(review: ReviewStore) -> list[ReviewProblem]:
     problems.extend(_candidate_snapshots(review))
     problems.extend(_task_inputs(review))
     problems.extend(_provenance(review, chains))
+    problems.extend(_p4_records(review, chains))
     problems.extend(_activation(review))
     return problems
 
@@ -138,7 +139,7 @@ def _problem(exc: ValidationError) -> ReviewProblem:
 
 
 def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
-    """Only the seven known directories, each a plain directory, and nothing else - read without following."""
+    """Only the known directories (P1's seven, P4's four), each a plain directory - read without following."""
     try:
         found = review.entries(paths.REVIEW_DIR) or []
     except ValidationError as exc:
@@ -478,6 +479,173 @@ def _task_inputs(review: ReviewStore) -> list[ReviewProblem]:
             review.read_task_input(task_id)
         except ValidationError as exc:
             problems.append(_problem(exc))
+    return problems
+
+
+def _p4_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[ReviewProblem]:
+    """The four P4 record kinds, referenced or orphaned, and every P4 Run's chain against them (§12.22, §27.5).
+
+    Each stored record is read through its strict reader whether or not anything
+    references it - a valid orphan (a crash between a record's create and its
+    generation's commit) is only validated, never condemned. A P4 Run is known
+    by the explicit contract its stored TaskInput binds, never by its shape;
+    its chain must be a P4 shape, and every record its generations reference
+    must be stored and agree with what the generation binds.
+    """
+    from . import p4
+
+    problems: list[ReviewProblem] = []
+    stored: dict[str, dict[str, Any]] = {"report": {}, "adjudication": {}, "batch": {}, "result": {}}
+    for kind, list_ids, read in (
+        ("report", review.report_digests, review.read_report),
+        ("adjudication", review.adjudication_run_ids, review.read_adjudication),
+        ("batch", review.repair_batch_ids, review.read_repair_batch),
+        ("result", review.repair_result_ids, review.read_repair_result),
+    ):
+        try:
+            identifiers = list_ids()
+        except ValidationError as exc:
+            problems.append(_problem(exc))
+            continue
+        for identifier in identifiers:
+            try:
+                stored[kind][identifier] = read(identifier)
+            except ValidationError as exc:
+                problems.append(_problem(exc))
+    for run_id, found in sorted(stored["adjudication"].items()):
+        for message in p4.adjudication_problems(found):
+            problems.append(ReviewProblem("review_record_invalid", f"P4 adjudication of {run_id}: {message}"))
+    for batch_id, batch in sorted(stored["batch"].items()):
+        source = stored["adjudication"].get(batch.source_review_run_id)
+        if source is None:
+            continue
+        try:
+            source_digest = review.adjudication_digest(batch.source_review_run_id)
+        except ValidationError as exc:
+            problems.append(_problem(exc))
+            continue
+        if batch.adjudication_digest != source_digest or batch.source_candidate_hash != source.candidate_hash:
+            problems.append(ReviewProblem(
+                "review_record_conflict",
+                f"Repair Batch {batch_id} does not bind the adjudication of its source Run {batch.source_review_run_id}",
+            ))
+        expected, deliberate = p4.repair_finding_ids(source)
+        if list(batch.finding_ids) != expected or list(batch.deliberate_low_finding_ids) != deliberate:
+            problems.append(ReviewProblem(
+                "review_record_conflict",
+                f"Repair Batch {batch_id} does not hold exactly the blocking and deliberately repaired Findings of "
+                f"{batch.source_review_run_id}",
+            ))
+    for batch_id, result in sorted(stored["result"].items()):
+        batch = stored["batch"].get(batch_id)
+        if batch is None:
+            continue
+        for message in p4.linkage_problems(
+            batch, result, source_run_id=batch.source_review_run_id, source_candidate_hash=batch.source_candidate_hash,
+            source_candidate_generation=batch.candidate_generation, snapshot_hash=result.result_candidate_hash,
+        ):
+            problems.append(ReviewProblem("review_record_conflict", f"Repair Result {batch_id}: {message}"))
+        if not review.candidate_snapshot_exists(result.result_candidate_hash):
+            continue  # an orphan Result (its generation never committed) is only validated
+        try:
+            material = review.candidate_material_digest(result.result_candidate_hash)
+        except ValidationError as exc:
+            problems.append(_problem(exc))
+            continue
+        if material != result.result_candidate_material_digest:
+            problems.append(ReviewProblem(
+                "review_record_conflict",
+                f"Repair Result {batch_id} binds Candidate material {result.result_candidate_material_digest}, and the "
+                f"stored snapshot digests to {material}",
+            ))
+    for run_id, chain in sorted(chains.items()):
+        problems.extend(_p4_chain(review, run_id, chain, stored))
+    return problems
+
+
+def _p4_chain(
+    review: ReviewStore, run_id: str, chain: GateChain, stored: dict[str, dict[str, Any]]
+) -> list[ReviewProblem]:
+    from . import p4
+
+    first = chain.generations[0]
+    try:
+        task_inputs = [review.read_task_input(str(task["task_id"])) for task in first.accepted_tasks]
+    except ValidationError:
+        return []  # a missing or malformed task input is the provenance pass's to report
+    contracts = {p4.contract_of_task_input(found) for found in task_inputs}
+    if contracts == {None}:
+        if run_id in stored["adjudication"]:
+            return [ReviewProblem(
+                "review_record_conflict",
+                f"a P4 adjudication names Review Run {run_id}, whose generation 1 binds no P4 contract",
+            )]
+        return []
+    where = f"P4 Review Run {run_id}"
+    if len(contracts) != 1:
+        return [ReviewProblem("review_record_conflict", f"{where} binds more than one contract at generation 1")]
+    problems = [ReviewProblem("review_gate_chain", f"{where}: {message}") for message in p4.chain_problems(chain)]
+    if problems:
+        return problems
+    for task in p4.discovery_tasks(chain):
+        settled = p4.settled_of(chain, str(task["task_id"]))
+        if settled is None:
+            continue
+        report = stored["report"].get(str(settled["result_digest"]))
+        if report is None:
+            problems.append(ReviewProblem(
+                "review_record_missing",
+                f"{where} settles discovery task {task['task_id']} with report {settled['result_digest']}, which is "
+                "not stored canonically",
+            ))
+        elif report.task_id != str(task["task_id"]) or report.task_slot != str(task["task_slot"]):
+            problems.append(ReviewProblem(
+                "review_record_conflict", f"{where}: report {settled['result_digest']} is not of the task it settles",
+            ))
+    if len(chain.generations) >= p4.ADJUDICATION_SETTLE_GENERATION:
+        fourth = chain.generation(p4.ADJUDICATION_SETTLE_GENERATION)
+        found = stored["adjudication"].get(run_id)
+        if found is None:
+            problems.append(ReviewProblem("review_record_missing", f"{where} settles its adjudication, which is not stored"))
+        else:
+            if fourth.adjudication_digest != review.adjudication_digest(run_id) \
+                    or found.candidate_hash != first.candidate_hash:
+                problems.append(ReviewProblem(
+                    "review_record_conflict", f"{where}: generation 4 does not bind its stored adjudication",
+                ))
+            if fourth.obligation_digest != serialize.digest(p4.obligations_record(found)):
+                problems.append(ReviewProblem(
+                    "review_record_conflict", f"{where}: generation 4 does not bind its adjudication's obligations",
+                ))
+    if p4.shape_of(chain) == p4.SHAPE_REPAIR:
+        repair = p4.repair_task(chain)
+        try:
+            envelope = review.read_task_input(str(repair["task_id"])).request_envelope if repair else {}
+        except ValidationError:
+            envelope = {}
+        batch_id = str(envelope.get("repair_batch_id"))
+        batch = stored["batch"].get(batch_id)
+        if batch is None or batch.source_review_run_id != run_id:
+            problems.append(ReviewProblem(
+                "review_record_missing",
+                f"{where} accepts a repair of Repair Batch {batch_id}, which is not stored as its own",
+            ))
+            return problems
+        if review.repair_batch_digest(batch_id) != envelope.get("repair_batch_digest"):
+            problems.append(ReviewProblem("review_record_conflict", f"{where}: the repair request binds another batch"))
+        if len(chain.generations) >= p4.REPAIR_SETTLE_GENERATION and repair is not None:
+            settled = p4.settled_of(chain, str(repair["task_id"]))
+            result = stored["result"].get(batch_id)
+            if settled is None or result is None:
+                problems.append(ReviewProblem("review_record_missing", f"{where} settles a repair whose Result is not stored"))
+            elif review.repair_result_digest(batch_id) != settled["result_digest"]:
+                problems.append(ReviewProblem(
+                    "review_record_conflict", f"{where}: generation 6 does not settle its stored Repair Result",
+                ))
+            elif not review.candidate_snapshot_exists(result.result_candidate_hash):
+                problems.append(ReviewProblem(
+                    "review_record_missing", f"{where}: Candidate N+1 {result.result_candidate_hash} is not stored",
+                ))
     return problems
 
 

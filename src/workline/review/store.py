@@ -46,6 +46,10 @@ from .records import (
     CandidateSnapshot,
     Consumption,
     GateGeneration,
+    P4Adjudication,
+    P4RepairBatch,
+    P4RepairResult,
+    P4Report,
     PlanningConsumption,
     Receipt,
     Supersession,
@@ -684,6 +688,108 @@ class ReviewStore:
                  f"{snapshot.reconstruction_mode}")
             )
         return problems
+
+    # P4 records (§12.22 / §27.5) -----------------------------------------------
+    def _read_identified(self, relative: str, described: str, parse: Callable[[dict[str, Any], str], Any]) -> tuple[Any, str]:
+        return self._read_record(relative, f"{described} {relative}", parse)
+
+    def read_report(self, result_digest: str) -> P4Report:
+        """One P4 raw discovery report; its canonical digest must be the digest its filename names."""
+        found, _ = self._read_report(result_digest)
+        return found
+
+    def _read_report(self, result_digest: str) -> tuple[P4Report, str]:
+        relative = paths.report_rel(result_digest)
+        found, text = self._read_identified(relative, "Review P4 report", P4Report.from_record)
+        stored = serialize.digest_of_text(text)
+        if stored != result_digest:
+            raise ValidationError(
+                f"Review P4 report {relative} digests to {stored}, not the result digest its filename names",
+                code="review_record_invalid",
+            )
+        return found, text
+
+    def report_exists(self, result_digest: str) -> bool:
+        return self.read_bytes(paths.report_rel(result_digest)) is not None
+
+    def report_digests(self) -> tuple[str, ...]:
+        """Every stored P4 report, by the result digest its filename must be, in sorted order."""
+        return self._stems_in(paths.REPORTS_DIR, lambda stem: records.DIGEST_RE.match(stem) is not None, "result digest")
+
+    def read_adjudication(self, review_run_id: str) -> P4Adjudication:
+        found, _ = self._read_adjudication(review_run_id)
+        return found
+
+    def _read_adjudication(self, review_run_id: str) -> tuple[P4Adjudication, str]:
+        relative = paths.adjudication_rel(review_run_id)
+        found, text = self._read_identified(relative, "Review P4 adjudication", P4Adjudication.from_record)
+        if found.review_run_id != review_run_id:
+            raise ValidationError(
+                f"Review P4 adjudication {relative} declares Review Run {found.review_run_id}, not the one its filename "
+                "names",
+                code="review_record_invalid",
+            )
+        return found, text
+
+    def adjudication_exists(self, review_run_id: str) -> bool:
+        return self.read_bytes(paths.adjudication_rel(review_run_id)) is not None
+
+    def adjudication_digest(self, review_run_id: str) -> str:
+        _, text = self._read_adjudication(review_run_id)
+        return serialize.digest_of_text(text)
+
+    def adjudication_run_ids(self) -> tuple[str, ...]:
+        return self._ids_in(paths.ADJUDICATIONS_DIR, "review_run")
+
+    def read_repair_batch(self, repair_batch_id: str) -> P4RepairBatch:
+        found, _ = self._read_repair_batch(repair_batch_id)
+        return found
+
+    def _read_repair_batch(self, repair_batch_id: str) -> tuple[P4RepairBatch, str]:
+        relative = paths.repair_batch_rel(repair_batch_id)
+        found, text = self._read_identified(relative, "Review P4 Repair Batch", P4RepairBatch.from_record)
+        if found.repair_batch_id != repair_batch_id:
+            raise ValidationError(
+                f"Review P4 Repair Batch {relative} declares {found.repair_batch_id}, not the one its filename names",
+                code="review_record_invalid",
+            )
+        return found, text
+
+    def repair_batch_exists(self, repair_batch_id: str) -> bool:
+        return self.read_bytes(paths.repair_batch_rel(repair_batch_id)) is not None
+
+    def repair_batch_digest(self, repair_batch_id: str) -> str:
+        _, text = self._read_repair_batch(repair_batch_id)
+        return serialize.digest_of_text(text)
+
+    def repair_batch_ids(self) -> tuple[str, ...]:
+        return self._ids_in(paths.REPAIR_BATCHES_DIR, "review_repair_batch")
+
+    def read_repair_result(self, repair_batch_id: str) -> P4RepairResult:
+        found, _ = self._read_repair_result(repair_batch_id)
+        return found
+
+    def _read_repair_result(self, repair_batch_id: str) -> tuple[P4RepairResult, str]:
+        relative = paths.repair_result_rel(repair_batch_id)
+        found, text = self._read_identified(relative, "Review P4 Repair Result", P4RepairResult.from_record)
+        if found.repair_batch_id != repair_batch_id:
+            raise ValidationError(
+                f"Review P4 Repair Result {relative} declares batch {found.repair_batch_id}, not the one its filename "
+                "names",
+                code="review_record_invalid",
+            )
+        return found, text
+
+    def repair_result_exists(self, repair_batch_id: str) -> bool:
+        return self.read_bytes(paths.repair_result_rel(repair_batch_id)) is not None
+
+    def repair_result_digest(self, repair_batch_id: str) -> str:
+        _, text = self._read_repair_result(repair_batch_id)
+        return serialize.digest_of_text(text)
+
+    def repair_result_ids(self) -> tuple[str, ...]:
+        # A Repair Result is named after the Repair Batch it settles.
+        return self._ids_in(paths.REPAIR_RESULTS_DIR, "review_repair_batch")
 
     # activation -------------------------------------------------------------
     def activation_exists(self) -> bool:

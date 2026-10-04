@@ -485,5 +485,16 @@ def _read_every_record(reader: ResultingTreeReviewStore, record_paths: Sequence[
         elif area == "activation":
             _require_closed_activation_area(reader)
             reader.read_activation()
+        elif area == "reports":
+            reader.read_report(stem)
+        elif area == "adjudications":
+            reader.read_adjudication(stem)
+        elif area == "repair-batches":
+            reader.read_repair_batch(stem)
+        elif area == "repair-results":
+            reader.read_repair_result(stem)
+        else:
+            # Never skipped: an area this reader does not read is an area it cannot prove (P-12).
+            raise _unsafe(f"the resulting tree holds {relative}, in a Review area no strict reader reads")
     for review_run_id in sorted(runs):
         reader.gate_chain(review_run_id)
