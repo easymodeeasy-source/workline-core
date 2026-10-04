@@ -23,7 +23,11 @@ shape that no pending START mutation of the Work holds is incomplete, and these 
 * T7  a Run another mode's pending START holds is left to that START: opening refuses on the existing
       write-scope conflict, nothing begins beside it, and its own START then resumes it;
 * T8  at the discovery core: two recoverable Runs are ``review_recovery_ambiguous`` (the closest reachable form:
-      the live model never holds two), and a Run the held set does not own is incomplete.
+      the live model never holds two), and a Run the held set does not own is incomplete;
+* T9  a START that began its Run is never abandoned on a STOP, even with no recorded effect (a Work already in
+      progress with its target records no lifecycle effect): (a) a reviewer error keeps it pending and the next
+      START relaunches the same task and completes, (b) a settlement that does not authorize stops the same way
+      again on every retry, as for an unstarted Work, (c) a STOP before any Run began still abandons.
 """
 
 from __future__ import annotations
@@ -31,16 +35,19 @@ from __future__ import annotations
 from unittest import mock
 
 from test_work_review_recovery import AdoptionCase, Upgrade
-from test_work_review_runtime import Reviewer
+from test_work_review_runtime import Reviewer, git
 from test_work_terminal import Crash
 
 from workline import start as st
 from workline import start_review
-from workline.errors import ReconcileRequired
-from workline.mutation import MutationController
+from workline.errors import ReconcileRequired, StopError
+from workline.ids import new_id
+from workline.mutation import MutationController, utc_now
 from workline.review import paths as review_paths
 from workline.review import recovery, serialize, validate, work_review
 from workline.review.store import ReviewStore
+from workline.state import IN_PROGRESS, ProjectView
+from workline.store import Event, render_event_line
 
 #: The phrase the Work recovery policy states for a Run of a recoverable shape no pending START holds.
 UNOWNED = "no pending START mutation of this Work holds it"
@@ -272,3 +279,94 @@ class SuccessorNamingTests(OrphanCase):
         older = ({"review_run_id": not_authorized, "reason": "not_authorized"},)
         ids = self.assert_adopted(record, remote=False, older=older)
         self.assertEqual(self.request_of(ids["initial"])["set_aside_runs"], list(older))
+
+
+class StopKeepsBegunRunMixin:
+    """(b): a settlement that does not authorize stops every retry the same way, and no new Run begins."""
+
+    def assert_not_authorized_stops_the_same_way_on_every_retry(self) -> None:
+        finding = work_review.WorkReviewFinding("HIGH", "blocking", "not acceptable")
+        reviewer = Reviewer(findings=(finding,))
+        with self.assertRaises(ReconcileRequired) as first:
+            st.start(self.store, self.work_id, "single-work", self.completing(), review=self.review(reviewer))
+        (record,) = self.start_records()
+        run = self.first_run_of(record)
+        with self.assertRaises(ReconcileRequired) as again:
+            st.start(self.store, self.work_id, "single-work", self.never, review=self.review(reviewer))
+        self.assertEqual((again.exception.reason, str(again.exception)), (first.exception.reason, str(first.exception)))
+        (still,) = self.start_records()
+        self.assertEqual(still["mutation_id"], record["mutation_id"], "the same record, still pending")
+        self.assertEqual(ReviewStore(self.store).run_ids(), (run,), "no new Run")
+        self.assertEqual(len(reviewer.tasks), 1, "a settled task is not launched again")
+        self.assertEqual(ReviewStore(self.store).receipt_ids(), ())
+
+
+class InProgressStopTests(StopKeepsBegunRunMixin, OrphanCase):
+    """T9 on a Work already in progress with its target (an earlier cycle committed its opening events)."""
+
+    def prepare(self) -> None:
+        log = self.root / ".workline" / "events" / "events.jsonl"
+        held = log.read_bytes()
+        lines = "".join(render_event_line(Event(new_id("event"), kind, self.work_id, utc_now())) + "\n"
+                        for kind in ("work_started", "work_target_added"))
+        separator = b"" if not held or held.endswith(b"\n") else b"\n"
+        log.write_bytes(held + separator + lines.encode("utf-8"))
+        git(self.root, "add", "--", ".workline/events/events.jsonl")
+        git(self.root, "commit", "-m", "an earlier cycle opened the Work", "--no-verify")
+
+    def setUp(self) -> None:
+        super().setUp()
+        state = ProjectView.load(self.store).work_state(self.work_id)
+        self.assertEqual((state.state, state.has_target), (IN_PROGRESS, True))
+
+    def test_t9a_a_reviewer_error_keeps_the_start_pending_and_the_next_start_relaunches_the_same_task(self) -> None:
+        failed: list[str] = []
+
+        def fail_once(task):
+            if not failed:
+                failed.append(task.task_id)
+                raise RuntimeError("the reviewer service is down")
+
+        reviewer = Reviewer(before=fail_once)
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, self.work_id, "single-work", self.completing(write={"out.txt": b"out\n"}),
+                     review=self.review(reviewer))
+        self.assertEqual(raised.exception.code, "review_reviewer_failed")
+        (record,) = self.start_records()
+        self.assertEqual((record["status"], record["effects"]), ("pending", []), "no effect, and still pending")
+        run = self.first_run_of(record)
+        # the next START: the same record, the same Run, the same task to the same reviewer identity
+        result = st.start(self.store, self.work_id, "single-work", self.never, review=self.review(reviewer))
+        self.assertEqual((result.status, result.mutation_id), ("completed", record["mutation_id"]))
+        self.assertEqual([task.task_id for task in reviewer.tasks], [failed[0], failed[0]])
+        self.assertEqual(reviewer.tasks[0], reviewer.tasks[1], "the very task, relaunched")
+        self.assertEqual(self.first_run_of(self.captured[-1]), run)
+        review = ReviewStore(self.store)
+        self.assertEqual(review.run_ids(), (run,))
+        self.assertEqual(len(review.receipt_ids()), 1)
+        self.assertEqual(len(review.consumption_ids()), 1)
+        self.assertEqual(len(list((self.root / review_paths.CANDIDATE_SNAPSHOTS_DIR).glob("*"))), 1, "no new Candidate")
+        self.assertEqual(self.pending(), [])
+
+    def test_t9b_a_settlement_that_does_not_authorize_stops_the_same_way_on_every_retry(self) -> None:
+        self.assert_not_authorized_stops_the_same_way_on_every_retry()
+
+    def test_t9c_a_stop_before_any_run_began_still_abandons(self) -> None:
+        def stop(ctx):
+            raise StopError("the executor stopped", code="executor_stopped")
+
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, self.work_id, "single-work", stop, review=self.review())
+        self.assertEqual(raised.exception.code, "executor_stopped")
+        self.assertEqual(self.start_records(), [])
+        (record,) = [r for r in MutationController(self.store).list_records()
+                     if (r.get("invocation") or {}).get("operation") == "start"]
+        self.assertEqual((record["status"], record["effects"]), ("abandoned", []))
+        self.assertEqual(ReviewStore(self.store).run_ids(), ())
+
+
+class UnstartedStopTests(StopKeepsBegunRunMixin, OrphanCase):
+    """T9b's twin on an unstarted Work, whose START records ``work_started`` and so was always kept pending."""
+
+    def test_t9b_unstarted_a_settlement_that_does_not_authorize_stops_the_same_way_on_every_retry(self) -> None:
+        self.assert_not_authorized_stops_the_same_way_on_every_retry()

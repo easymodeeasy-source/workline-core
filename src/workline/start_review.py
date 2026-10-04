@@ -39,12 +39,13 @@ with its C-2 re-evaluated before it is recorded and again before it is applied (
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 import json
 from typing import TYPE_CHECKING, Any
 
 from . import gitcmd, gitops
-from .errors import ReconcileRequired, StopError, ValidationError
+from .errors import ReconcileRequired, StopError, ValidationError, WorklineError
 from .mutation import _HELD_BEFORE, _WROTE, Effect, Mutation, MutationController, WriteScope, _last_wrote, abandon_on_stop
 from .ops import stage_name
 from .review import (
@@ -460,8 +461,7 @@ def select_in_flight(mutation: Mutation) -> InFlight | None:
         if successors:
             raise _reconcile(f"START mutation {mutation.id} reserves a successor Work Review Run ({successors}) without "
                              "the Class-A checkpoint that alone selects one")
-        begun = gate.pending_generation_mutations(store, run_id) or ReviewStore(store).next_generation(run_id) > 1
-        if not begun:
+        if not _begun(store, run_id):
             return None
         return InFlight(STATE_INITIAL, _reserved_run(mutation, work_id, run_id))
     initial = _reserved_run(mutation, work_id, run_id)
@@ -497,6 +497,45 @@ def select_in_flight(mutation: Mutation) -> InFlight | None:
         return InFlight(STATE_SUCCESSOR_SEALED, initial, successor_id)
     raise _reconcile(f"successor Work Review Run {successor_id} has generation {latest}; a successor is never invalidated "
                      "or replaced again (no recursive Class A)", REASON_CLASS_A_INELIGIBLE)
+
+
+def _begun(store: ProjectStore, run_id: str) -> bool:
+    """Whether a reserved Work Review Run has begun: its generation 1 exists, or a generation mutation of it is pending."""
+    return bool(gate.pending_generation_mutations(store, run_id)) or ReviewStore(store).next_generation(run_id) > 1
+
+
+@contextmanager
+def abandon_unbegun_on_stop(mutation: Mutation):
+    """A review-v1 START's STOP guard: abandon the mutation only when it recorded no effect AND began no Run.
+
+    ``mutation.abandon_on_stop`` abandons on "no effect" alone. A START on a
+    Work already in progress with its target records no lifecycle effect
+    before its review, so a STOP after its Work Review Run began - a reviewer
+    error at generation 1, a settlement that does not authorize - would abandon
+    the one record that can resume that Run, and every later START would find
+    the Run held by no pending START: incomplete (``recovery.discover_work``).
+    The Work Review Policy's ``error_disposition`` ("no settlement; the same
+    task is launched again by the next run") and F4 §11.16 (an interruption at
+    reviewer launch or settlement resumes, with no new Candidate) keep it
+    pending instead: the next START opens it again and :func:`select_in_flight`
+    continues the same Run. A STOP before any Run began abandons exactly as
+    before. Whether a Run began is read as :func:`select_in_flight` reads it,
+    and a record whose Runs cannot be read is kept, never abandoned.
+    """
+    try:
+        yield mutation
+    except StopError:
+        if mutation.status == "pending" and not mutation.effects and not _holds_begun_run(mutation):
+            mutation.abandon()
+        raise
+
+
+def _holds_begun_run(mutation: Mutation) -> bool:
+    try:
+        return any(_begun(mutation.store, run_id)
+                   for run_id in sorted(own_run_ids(mutation.record.get("reserved_ids") or {})))
+    except (WorklineError, OSError):
+        return True
 
 
 def run_in_flight(mutation: Mutation) -> WorkRun | None:

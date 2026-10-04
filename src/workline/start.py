@@ -3283,7 +3283,9 @@ def _start_locked(
     # a pending START mutation on the same Work with another mode is a conflict → reconcile required.
     # A review-v1 START writes its two markers beside them, at this first durable write (F1-D2).
     mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES))
-    with abandon_on_stop(mutation):
+    # review-v1: a STOP after this START began its Work Review Run keeps the record pending, so the next START
+    # continues that Run (the Work Review Policy's error_disposition, F4 §11.16); legacy START is unchanged.
+    with (start_review.abandon_unbegun_on_stop(mutation) if review is not None else abandon_on_stop(mutation)):
         if cancel is not None and mutation.id != cancel.mutation_id:
             raise ReconcileRequired(
                 f"START resumed mutation {mutation.id}, not {cancel.mutation_id} whose cancel it had shown; both are "
