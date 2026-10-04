@@ -37,7 +37,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
-from . import closure, records, serialize
+from . import closure, p4, records, serialize
 from . import work_context
 
 # --------------------------------------------------------------------------- static identities (F2 §4.1)
@@ -1164,3 +1164,175 @@ def entry_identities(candidate: Mapping[str, Any]) -> list[str]:
 def base_identities(candidate: Mapping[str, Any]) -> list[str]:
     """The base tree entries the Candidate was measured against: each entry's old mode, path and object id."""
     return [f"{entry['old_mode']}\t{entry['path']}\t{entry['old_oid']}" for entry in entries_of(candidate)]
+
+
+# --------------------------------------------------------------------------- P4 (WORKLINE_COMPLETION_SPRINT §12 / §27)
+#
+# The Work kind's P4 material. The v1 selector, records and Context above keep
+# their exact meaning; P4 is a separate selector type (§27.3), a separate durable
+# START marker (G-6 Option M, ``work_invocation``), and a P4 Context that binds
+# the P4 contract around the unchanged Work Context v2 (G-6 item 5). The Work
+# operation identity is unchanged (G-7 b): it is still the digest of the v1
+# request identity record, so P4 and v1 Runs of one Work share one recovery
+# matching domain and are told apart by their explicit contract.
+
+P4_CONTRACT = p4.WORK_CONTRACT
+SCHEMA_P4_CONTEXT = "review-p4-work-context"
+P4_CONTEXT_FIELDS = (serialize.SCHEMA_KEY, serialize.VERSION_KEY, "review_contract", "policy_id", "work_context")
+#: The Work kind's own mechanical reverification of a repaired Candidate (§27.19): the isolated verification.
+P4_KIND_CHECK = "work_isolated_verification"
+
+
+@dataclass(frozen=True)
+class WorkReviewP4:
+    """The P4 START selector: ``start(..., review=WorkReviewP4(...))`` (§27.3).
+
+    A new selector type, never an optional mode of :class:`WorkReview`. Its
+    ``human_decision`` is the explicit G-4 Human-decision input of a resumed
+    START that waits at HUMAN_WAIT; it is never START slot identity.
+    """
+
+    discovery: tuple[p4.DiscoveryBinding, ...]
+    adjudicator: p4.ActorBinding
+    repair: p4.ActorBinding
+    human_decision: p4.HumanDecision | None = None
+    contract: str = P4_CONTRACT
+
+
+def validate_work_review_p4(review: object) -> WorkReviewP4:
+    """The P4 ``review`` argument, validated before the lock and before any Project state is read."""
+    if type(review) is not WorkReviewP4:
+        raise ValidationError(f"review must be a WorkReviewP4, not {type(review).__name__}", code="review_contract_invalid")
+    problems: list[str] = []
+    if review.contract != P4_CONTRACT:
+        problems.append(f"contract {review.contract!r} is not {P4_CONTRACT!r}")
+    problems.extend(p4.binding_problems(review.discovery, review.adjudicator, review.repair, review.human_decision))
+    if problems:
+        raise ValidationError("invalid WorkReviewP4: " + "; ".join(problems), code="review_contract_invalid")
+    return review
+
+
+def is_p4(review: object) -> bool:
+    return type(review) is WorkReviewP4
+
+
+def context_record_p4(work_context_record: Mapping[str, Any]) -> dict[str, Any]:
+    """The P4 Work Context: the exact Work Context v2, bound together with the P4 contract and Policy."""
+    work_context.require_context(work_context_record)
+    return serialize.canonical_data({
+        serialize.SCHEMA_KEY: SCHEMA_P4_CONTEXT, serialize.VERSION_KEY: RECORD_VERSION,
+        "review_contract": P4_CONTRACT, "policy_id": p4.POLICY_ID, "work_context": dict(work_context_record),
+    })
+
+
+def inner_context(record: Mapping[str, Any]) -> dict[str, Any]:
+    """The Work Context v2 a P4 Work Context binds; anything else is refused."""
+    if not isinstance(record, Mapping) or record.get(serialize.SCHEMA_KEY) != SCHEMA_P4_CONTEXT \
+            or record.get(serialize.VERSION_KEY) != RECORD_VERSION or set(record) != set(P4_CONTEXT_FIELDS) \
+            or record.get("review_contract") != P4_CONTRACT or record.get("policy_id") != p4.POLICY_ID:
+        raise ValidationError("the P4 Work Context is not the P4 contract's own record", code="review_record_invalid")
+    inner = dict(record["work_context"])
+    work_context.require_context(inner)
+    return inner
+
+
+def requirement_authority(work_id: str, work_body: str) -> dict[str, Any]:
+    """The decided requirement of a Work: its committed body (desired state), re-read, never stored twice (G-4)."""
+    return p4.requirement_record(REVIEW_KIND, {
+        "work_id": work_id, "work_body_digest": hashlib.sha256(work_body.replace("\r\n", "\n").encode("utf-8")).hexdigest(),
+    })
+
+
+def declared_paths(candidate: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """``(declared result paths, declared deleted paths)`` of a Work Candidate, as its content states them."""
+    content = content_of(candidate)
+    if content["artifact_kind"] == ARTIFACT_EMPTY:
+        proof = content["emptiness_proof"]
+        return list(proof["declared_result_paths"]), list(proof["declared_deleted_paths"])
+    entries = entries_of(candidate)
+    return ([entry["path"] for entry in entries if entry["new_kind"] != "absent"],
+            [entry["path"] for entry in entries if entry["new_kind"] == "absent"])
+
+
+def allowed_result_surface(candidate: Mapping[str, Any]) -> list[str]:
+    """What a Work repair may change: exactly the declared result paths of the source Candidate (§27.16)."""
+    result, _ = declared_paths(candidate)
+    return sorted(set(result), key=_utf8)
+
+
+def repaired_candidate(
+    source: "Reconstruction", proposal: object, width: int
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Candidate N+1 of a Work repair proposal: complete, under the source's declared base and declarations.
+
+    The proposal is ``{"files": {path: bytes}, "message": str | None}``: the
+    complete new bytes of declared result paths (a path not named keeps the
+    source's bytes). It never touches the working tree; START adopts it later
+    through its own ownership machinery (G-5). ``ValueError`` names why a
+    proposal is not a complete Candidate on the allowed surface.
+    """
+    if not isinstance(proposal, dict) or set(proposal) - {"files", "message"} or not isinstance(proposal.get("files"), dict):
+        raise ValueError("the proposal is not {'files': {path: bytes}, 'message': text or None}")
+    files: dict[str, Any] = proposal["files"]
+    allowed = set(allowed_result_surface(source.candidate))
+    outside = sorted(set(files) - allowed)
+    if outside:
+        raise ValueError(f"the proposal writes outside the allowed result surface: {outside}")
+    if not files or any(not isinstance(data, bytes) for data in files.values()):
+        raise ValueError("the proposal names no complete file bytes")
+    content = content_of(source.candidate)
+    message = proposal.get("message")
+    if message is None:
+        message = content.get("message")
+    if message is not None and not (isinstance(message, str) and message):
+        raise ValueError("the proposal's message is not text")
+    payloads = dict(source.payloads)
+    entries: list[dict[str, Any]] = []
+    for entry in entries_of(source.candidate):
+        path = entry["path"]
+        if path not in files:
+            entries.append(dict(entry))
+            continue
+        data = files[path]
+        old = None if entry["old_kind"] == "absent" else (entry["old_mode"], entry["old_oid"])
+        mode = entry["new_mode"] if entry["new_kind"] == "file" else "100644"
+        entries.append(candidate_entry(path, old, "file", mode, git_blob_id(data, width), data, width))
+        payloads[path] = data
+    result_paths, deleted_paths = declared_paths(source.candidate)
+    base = source.candidate["declared_base"]
+    if message is None and any(changing(entry) for entry in entries):
+        raise ValueError("a result-bearing repaired Candidate needs its commit message")
+    new_content = content_for(entries, message=str(message or ""), base_commit=base["base_commit"],
+                              declared_result=result_paths, declared_deleted=deleted_paths)
+    candidate = candidate_record(new_content, base, source.candidate["activation"])
+    if candidate_hash(candidate) == candidate_hash(source.candidate):
+        raise ValueError("the proposal is the source Candidate unchanged; a repaired Candidate is a new one")
+    return candidate, {path: data for path, data in payloads.items()
+                       if any(e["path"] == path and e["new_kind"] in BYTE_KINDS for e in entries)}
+
+
+def task_input_problems_p4(task_input: records.TaskInput, snapshot_material: Mapping[str, Any], run_candidate_hash: str,
+                           run_context_hash: str) -> list[str]:
+    """The P4 analogue of :func:`task_input_problems` for a Work P4 TaskInput."""
+    problems: list[str] = []
+    envelope = task_input.request_envelope
+    if serialize.digest(envelope) != task_input.request_digest:
+        problems.append("the task input's request_digest is not the digest of its request envelope")
+    if p4.contract_of_task_input(task_input) != P4_CONTRACT:
+        problems.append("the task input does not bind the Work P4 contract")
+    if envelope.get(serialize.SCHEMA_KEY) == p4.SCHEMA_DISCOVERY_REQUEST:
+        if envelope.get("candidate") != snapshot_material.get("candidate"):
+            problems.append("the request envelope's candidate is not the stored snapshot's Candidate")
+        context = envelope.get("context")
+        if not isinstance(context, dict) or serialize.digest(context) != run_context_hash:
+            problems.append("the request envelope's context does not digest to the Run's review_context_hash")
+        else:
+            try:
+                inner_context(context)
+            except ValidationError as exc:
+                problems.append(str(exc))
+    if serialize.digest(dict(snapshot_material).get("candidate") or {}) != run_candidate_hash:
+        problems.append("the stored snapshot's Candidate does not digest to the Run's candidate_hash")
+    if p4.policy_named(envelope.get("policy_id")) is None or task_input.effective_policy_hash != p4.policy_hash():
+        problems.append("the request envelope names no policy whose digest is the P4 Effective Policy")
+    return problems

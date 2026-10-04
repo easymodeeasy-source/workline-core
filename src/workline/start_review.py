@@ -56,6 +56,7 @@ from .review import (
     fsafe,
     gate,
     ownership,
+    p4,
     records,
     resulting_tree,
     serialize,
@@ -160,7 +161,10 @@ def entry_gate(store: ProjectStore, review: object) -> work_review.WorkReview:
     ``review_git_transform``     the attribute source of HEAD - PRE_S_C0_BASE's source - fails the
                                  universal predicate (§7.4, §7.8)
     """
-    checked = work_review.validate_work_review(review)
+    if work_review.is_p4(review):
+        checked: Any = work_review.validate_work_review_p4(review)
+    else:
+        checked = work_review.validate_work_review(review)
     if not fsafe.immutable_create_supported():
         raise StopError(
             "review-v1 Work writes immutable Review records, which this platform cannot keep inside the Project; "
@@ -353,6 +357,10 @@ class WorkRun:
     predecessor_review_run_id: str | None = None
     #: generation -> the exact commit its generation mutation made, as C-1 owned it (this process only).
     generation_commits: dict[int, str] = field(default_factory=dict)
+    #: The explicit Review contract of the Run: ``None`` for v1 (F3 / F4), the Work P4 contract for P4.
+    contract: str | None = None
+    #: P4 only: every record path of this START's P4 cycle - the own-Review set of L-2 (filled where a store is read).
+    own_paths: tuple[str, ...] = ()
 
 
 def run_key(work_id: str) -> str:
@@ -443,6 +451,8 @@ def select_in_flight(mutation: Mutation) -> InFlight | None:
     a successor reserved before the first Run's generation 4 is committed, or a
     successor chain past generation 3, is reconcile required.
     """
+    if is_p4_mutation(mutation):
+        return select_in_flight_p4(mutation)
     reserved = mutation.record.get("reserved_ids") or {}
     prefix = f"review-run:{work_review.REVIEW_KIND}:"
     keys = [key for key in reserved if str(key).startswith(prefix)]
@@ -553,6 +563,8 @@ def run_in_flight(mutation: Mutation) -> WorkRun | None:
 
 def continue_selected(session: "_Session", selected: InFlight) -> "Sealed | Adoption":
     """Continue what :func:`select_in_flight` selected: the first Run as F3 does, or the Class-A replacement."""
+    if selected.state == STATE_P4:
+        return _continue_p4(session, selected.initial)
     if selected.state == STATE_INITIAL:
         return _continue(session, selected.initial)
     return Adoption(selected.initial)
@@ -633,15 +645,15 @@ def entry_recovery(store: ProjectStore, work_id: str) -> None:
 
 
 def _generation_invocation(mutation: Mutation, run: WorkRun, generation: int, gate_record: records.GateGeneration,
-                           receipt_id: str | None, basis: str, branch: str) -> dict[str, Any]:
+                           receipt_id: str | None, basis: str, branch: str, transition: str | None = None) -> dict[str, Any]:
     return {
         "operation": OPERATION_GENERATION,
-        "review_contract": work_review.REVIEW_CONTRACT,
+        "review_contract": work_review.REVIEW_CONTRACT if run.contract is None else run.contract,
         "start_mutation_id": mutation.id,
         "review_kind": work_review.REVIEW_KIND,
         "review_run_id": run.review_run_id,
         "generation": generation,
-        "transition": TRANSITIONS[generation],
+        "transition": TRANSITIONS[generation] if transition is None else transition,
         "candidate_hash": gate_record.candidate_hash,
         "review_context_hash": gate_record.review_context_hash,
         "effective_policy_hash": gate_record.effective_policy_hash,
@@ -668,8 +680,13 @@ def _finish_generation(store: ProjectStore, gen: Mutation) -> str:
 def _start_generation(
     session: "_Session", run: WorkRun, generation: int, gate_record: records.GateGeneration,
     extra: list[tuple[str, dict[str, Any]]], base: dict[str, Any], *, receipt_id: str | None = None,
+    transition: str | None = None,
 ) -> str:
-    """Open, record, commit and prove persisted the generation mutation writing ``gate_record`` (and ``extra``)."""
+    """Open, record, commit and prove persisted the generation mutation writing ``gate_record`` (and ``extra``).
+
+    ``transition`` is given by the P4 flow only (its generations 5 and 6 each have two shapes); an accept writes
+    its TaskInput(s) before the gate that names them. A v1 generation keeps its exact invocation.
+    """
     store, mutation = session.store, session.mutation
     scope = gate.next_generation_scope(store, run.review_run_id)
     if scope.generation != generation:
@@ -679,10 +696,10 @@ def _start_generation(
             "review_chain_invalid",
         )
     writes = [(scope.gate_path, gate_record.to_record())] + list(extra)
-    if generation == records.FIRST_GENERATION:
+    if generation == records.FIRST_GENERATION or transition == p4.TRANSITION_ACCEPT:
         writes = list(extra) + [(scope.gate_path, gate_record.to_record())]
     invocation_record = _generation_invocation(mutation, run, generation, gate_record, receipt_id, base["base_commit"],
-                                               base["branch"])
+                                               base["branch"], transition)
     record_paths = [path for path, _ in writes]
     gen = MutationController(store).open(OWNER, invocation_record,
                                          WriteScope(files=tuple(scope.files) + tuple(path for path, _ in extra)))
@@ -738,7 +755,11 @@ def resolve_pending_generation(session: "_Session", run: WorkRun) -> None:
         gate_path = review_paths.gate_rel(run.review_run_id, int(generation))
         stored = ReviewStore(store).read_bytes(gate_path)
         fits = stored is not None and gate_path in recorded and stored == recorded[gate_path].encode("utf-8")
-    if not fits or found.get("transition") != TRANSITIONS.get(generation):
+    if found.get("review_contract") == work_review.P4_CONTRACT:
+        allowed = p4.TRANSITIONS.get(int(generation), ()) if type(generation) is int else ()
+    else:
+        allowed = (TRANSITIONS.get(generation),)
+    if not fits or found.get("transition") not in allowed:
         raise _reconcile(
             f"the pending generation mutation {gen.id} writes generation {generation} ({found.get('transition')}) of "
             f"Work Review Run {run.review_run_id}, which is not the chain's next transition",
@@ -853,6 +874,8 @@ def freeze_and_review(session: "_Session", view: ProjectView, work: Entity, outc
     """F3 §5.1 steps 5a ... 16 for a Completed outcome; the sealed Run, or a STOP."""
     from .start import _result_message, completion_precheck
 
+    if work_review.is_p4(session.review):
+        return freeze_and_review_p4(session, view, work, outcome)
     store, mutation = session.store, session.mutation
     # F4 §11.12 / §11.6: every other matching Run classified (it is never resumed here), read before anything of this
     # Run is durable; the new Run's request names each one with the reason it is set aside - none, in the ordinary case
@@ -1309,6 +1332,17 @@ def work_record(record: dict[str, Any]) -> WorkRecord:
     keys = [key for key in reserved if str(key).startswith(prefix)]
     if len(keys) != 1:
         raise _reconcile(f"START mutation {record.get('mutation_id')} holds {len(keys)} Work Review Runs, not one")
+    if work_invocation.contract_of(record.get("invocation")) == work_review.P4_CONTRACT:
+        # P4: the Run whose Receipt is consumed is the current Run of the cycle; never a Class-A adoption
+        p4_work_id = keys[0][len(prefix):]
+        runs = _p4_reserved_runs(reserved, p4_work_id)
+        current = _p4_work_run(reserved, p4_work_id, runs[-1])
+        if not current.task_id or not current.receipt_id:
+            raise _reconcile(f"START mutation {record.get('mutation_id')} holds P4 Run {current.review_run_id} without "
+                             "its task or Receipt id")
+        return WorkRecord(str(record.get("mutation_id")), current,
+                          record.get("effects") if isinstance(record.get("effects"), list) else [],
+                          record.get("notes") if isinstance(record.get("notes"), dict) else {}, reserved)
     run_id = str(reserved[keys[0]])
     task_id = reserved.get(gate.review_task_key(run_id, work_review.TASK_SLOT))
     receipt_id = reserved.get(gate.review_receipt_key(run_id, work_review.SEAL_GENERATION))
@@ -1468,7 +1502,7 @@ def _completion_metadata(run: WorkRun) -> dict[str, Any]:
         "operation_contract": OPERATION_CONTRACT,
         "review_receipt_id": run.receipt_id,
         "review_run_id": run.review_run_id,
-        "review_generation": work_review.SEAL_GENERATION,
+        "review_generation": work_review.SEAL_GENERATION if run.contract is None else p4.SEAL_GENERATION,
     }
 
 
@@ -1476,7 +1510,13 @@ def _completion_metadata(run: WorkRun) -> dict[str, Any]:
 
 
 def run_record_paths(run: WorkRun, chain: Any) -> list[str]:
-    """This Run's own canonical Review record paths, DERIVED from its validated chain (L-2), never hardcoded."""
+    """This Run's own canonical Review record paths, DERIVED from its validated chain (L-2), never hardcoded.
+
+    A P4 Run's own set is its whole current cycle's records (every Run, report, adjudication, Repair Batch and
+    Result of this START), read where a store is held (:func:`p4_cycle_paths`); without it nothing extra is owned.
+    """
+    if run.contract is not None and run.own_paths:
+        return sorted(run.own_paths)
     first = chain.generations[0]
     found = {review_paths.candidate_snapshot_rel(first.candidate_hash)}
     for generation in chain.generations:
@@ -1547,6 +1587,8 @@ class ProofMaterial:
     task_input: records.TaskInput
     context: dict[str, Any]
     receipt: records.Receipt
+    #: P4 only: the Run's canonical adjudication, which is what authorizes it (never generation 2).
+    adjudication: Any = None
 
     @property
     def candidate(self) -> dict[str, Any]:
@@ -1563,6 +1605,8 @@ class ProofMaterial:
 
 def _material_at(at: "CommittedRecords", record: WorkRecord, item: str) -> ProofMaterial:
     run = record.run
+    if run.contract is not None:
+        return _p4_material_at(at, record, item)
     try:
         chain = at.gate_chain(run.review_run_id)
         if chain is None or len(chain.generations) != work_review.SEAL_GENERATION:
@@ -1599,7 +1643,8 @@ def _namespace_clean(at: "CommittedRecords", run: WorkRun, item: str) -> None:
     problems = validate.review_problems(at)
     if problems:
         raise _proof_failed(item, f"the Review namespace at {at.commit} does not read canonically: {problems[0].message}")
-    if at.entry(review_paths.gate_rel(run.review_run_id, 4)) is not None or at.supersession_exists(run.receipt_id):
+    invalidation = INVALIDATION_GENERATION if run.contract is None else p4.INVALIDATION_GENERATION
+    if at.entry(review_paths.gate_rel(run.review_run_id, invalidation)) is not None or at.supersession_exists(run.receipt_id):
         raise _proof_failed(item, f"{at.commit} holds an invalidation of Run {run.review_run_id} or a Supersession")
 
 
@@ -1618,7 +1663,12 @@ def _require_receipt_current(material: ProofMaterial, record: WorkRecord, item: 
     }
     problems += [f"{name} is {getattr(receipt, name)!r}" for name, value in expected.items()
                  if getattr(receipt, name) != value]
-    if not work_review.authorizes(material.chain.generations[1]):
+    if record.run.contract is not None:
+        found = material.adjudication
+        if found is None or found.outcome != p4.AUTHORIZATION_READY or found.obligations["problem_high"] \
+                or found.obligations["problem_mid"] or found.obligations["human"]:
+            problems.append("the P4 adjudication does not authorize")
+    elif not work_review.authorizes(material.chain.generations[1]):
         problems.append("the settlement does not authorize")
     if problems:
         raise _proof_failed(item, "the Receipt is not this Run's authorization of exactly this Candidate for "
@@ -1639,9 +1689,11 @@ def _require_identities(store: ProjectStore, git: HermeticGit, material: ProofMa
         )
     except StopError as exc:
         raise _proof_failed(item, f"the Work Review Context cannot be recomputed: {exc}") from exc
-    if work_context.context_hash(recomputed) != first.review_context_hash:
+    p4_run = p4.contract_of_task_input(material.task_input) is not None
+    bound = serialize.digest(work_review.context_record_p4(recomputed)) if p4_run else work_context.context_hash(recomputed)
+    if bound != first.review_context_hash:
         raise _proof_failed(item, "the Work Review Context no longer recomputes to the bound review_context_hash")
-    if work_review.policy_hash() != first.effective_policy_hash:
+    if (p4.policy_hash() if p4_run else work_review.policy_hash()) != first.effective_policy_hash:
         raise _proof_failed(item, "the Effective Policy is not the bound one")
     entries = work_review.entries_of(material.candidate)
     verified = work_verify.Verified(material.base["base_commit"], capability["resulting_tree"], len(entries))
@@ -1723,6 +1775,8 @@ def prove_result(store: ProjectStore, git: HermeticGit, mutation_record: dict[st
     """
     record = work_record(mutation_record)
     work_id = record.work_id
+    if record.run.contract is not None:
+        record.run.own_paths = p4_cycle_paths(store, record.reserved, work_id)
     stage = record.one_stage(f"{work_id}:results")
     effect = _commit_effect(record, stage)
     # W1 - ownership: the S-c1 effect promoted by O-7a, and nothing else confers it
@@ -1829,6 +1883,8 @@ def prove_terminal(store: ProjectStore, git: HermeticGit, mutation_record: dict[
     """C-2(K2), ``review-v1-work-proof-v1`` T1 ... T12 (F3 §16), for exactly ``k2``; the terminal-proof note's content."""
     record = work_record(mutation_record)
     work_id, run = record.work_id, record.run
+    if run.contract is not None:
+        run.own_paths = p4_cycle_paths(store, record.reserved, work_id)
     stage = record.one_stage(f"{work_id}:finalize")
     effect = _commit_effect(record, stage)
     # T1 - ownership
@@ -2138,6 +2194,8 @@ def terminalize(session: "_Session", sealed: "Sealed | Adoption") -> Any:
     run, material = sealed.run, sealed.material
     candidate, base = material.candidate, material.base
     work_id = run.work_id
+    if run.contract is not None:
+        run.own_paths = p4_cycle_paths(store, mutation.record.get("reserved_ids") or {}, work_id)
     result = work_review.artifact_kind(candidate) == work_review.ARTIFACT_RESULT
     git = hermetic_module.enter(store)
     remote = session.destination is not None
@@ -2168,6 +2226,8 @@ def terminalize(session: "_Session", sealed: "Sealed | Adoption") -> Any:
             try:
                 proven = prove_result(store, git, mutation.record, k1)
             except ReconcileRequired as failure:
+                if run.contract is not None:
+                    _p4_post_commit(session, sealed, git, failure)
                 # F4: K1 exists and its normal proof no longer holds. Only an explicit, fail-closed post-commit
                 # classification decides whether this is Class A; B, C and everything unproven stay reconcile.
                 return _post_commit(session, sealed, git, k1, failure)
@@ -2242,11 +2302,18 @@ def _terminal(session: "_Session", sealed: Sealed, git: HermeticGit, chain: Any,
             note = mutation.note(NOTE_RESULT_PROOF)
             if not isinstance(note, dict) or note.get("result_commit") != k1:
                 raise _reconcile("the terminal stage is recorded only after C-2(K1) and its note")
-        if not chain.latest.sealed or not work_review.authorizes(chain.generations[1]):
-            raise _reconcile(f"Work Review Run {run.review_run_id} is not sealed with an authorizing settlement")
         review = ReviewStore(store)
+        if run.contract is not None:
+            authorizing = review.adjudication_exists(run.review_run_id) and \
+                review.read_adjudication(run.review_run_id).outcome == p4.AUTHORIZATION_READY
+            invalidation = p4.INVALIDATION_GENERATION
+        else:
+            authorizing = work_review.authorizes(chain.generations[1])
+            invalidation = INVALIDATION_GENERATION
+        if not chain.latest.sealed or not authorizing:
+            raise _reconcile(f"Work Review Run {run.review_run_id} is not sealed with an authorizing settlement")
         if (any(c.receipt_id == run.receipt_id for c in review.consumptions()) or review.supersession_exists(run.receipt_id)
-                or review.read_bytes(review_paths.gate_rel(run.review_run_id, 4)) is not None):
+                or review.read_bytes(review_paths.gate_rel(run.review_run_id, invalidation)) is not None):
             raise _reconcile(f"Receipt {run.receipt_id} is consumed, superseded or invalidated")
         stage = stage_name(mutation, f"{work_id}:lifecycle")  # 25: every identifier durable before apply
         removed = new_event(mutation, f"{stage}:event:0", TERMINAL_EVENTS[0], work_id)
@@ -3082,18 +3149,22 @@ def _recovery_currency(store: ProjectStore):
 
     def currency(found: Any) -> _Currency:
         first = found.chain.generations[0]
+        p4_run = getattr(found, "contract", None) is not None
         try:
             context = ReviewStore(store).read_task_input(found.task_id).request_envelope["context"]
+            if p4_run:
+                context = work_review.inner_context(context)
             capability = context["review_checkout_capability"]
             recomputed = work_context.context_record(
                 store.workline_root(), package_directory(store.workline_root()), context["activation"],
                 capability["base_tree"], capability["resulting_tree"],
             )
-        except (StopError, KeyError, TypeError) as exc:
+        except (StopError, KeyError, TypeError, ValidationError) as exc:
             return _Currency(False, False, f"the Context cannot be recomputed ({exc})")
-        if work_context.context_hash(recomputed) != first.review_context_hash:
+        bound = serialize.digest(work_review.context_record_p4(recomputed)) if p4_run else work_context.context_hash(recomputed)
+        if bound != first.review_context_hash:
             return _Currency(False, True, "review_context_changed")
-        if work_review.policy_hash() != first.effective_policy_hash:
+        if (p4.policy_hash() if p4_run else work_review.policy_hash()) != first.effective_policy_hash:
             return _Currency(False, True, "review_policy_changed")
         return _Currency(True, False, "current")
 
@@ -3261,3 +3332,944 @@ def _adopt(session: "_Session", initial: WorkRun) -> Any:
     view = ProjectView.load(store)
     return StartResult("completed", work_id, mutation.id, tuple(session.completed), view.works[work_id].phase_id,
                        head=k_terminal)
+
+
+# =========================================================================== P4 Work (§12 / §27)
+#
+# The P4 START flow: the same START mutation, generation mutations and terminal
+# path as v1 (S-c1 / K1, Consumption, S-c2 / K2, publication), with the P4 Run
+# shape between the freeze and the seal. Dispatch is by the START mutation's
+# durable marker (G-6 Option M, ``work_invocation.contract_of``); a Run's own
+# contract is the one its generation-1 TaskInputs bind. A P4 Run never enters the
+# F4 Class-A path (G-3): a stale P4 seal is invalidated by its own G6.
+#
+# ```text
+# freeze (unchanged steps 5a-12) -> G1 discovery -> G2 + raw reports -> G3 adjudication -> G4 + adjudication
+#   AUTHORIZATION_READY -> capability (15a) -> G5 seal + Receipt (generation 5) -> terminal path
+#   REPAIR_REQUIRED     -> G5 Repair Batch + repair accept -> G6 Repair Result + Candidate N+1
+#                          -> START adopts N+1 onto the declared result paths (G-5) -> successor Run
+#   HUMAN_WAIT          -> STOP, the START stays pending; a Human decision sets the Run aside (G-4)
+# ```
+
+STATE_P4 = "p4_cycle"
+NOTE_P4_DECISION = "p4_human_decision"
+
+
+def is_p4_mutation(mutation: Mutation) -> bool:
+    return work_invocation.contract_of(mutation.invocation) == work_review.P4_CONTRACT
+
+
+def lock_details(review: object) -> dict[str, Any]:
+    """The execution lock's holder description: the static contract marker of this invocation, never a caller value."""
+    if work_review.is_p4(review):
+        return {"review_contract": work_review.P4_CONTRACT}
+    return dict(LOCK_DETAILS)
+
+
+def invocation_for(work_id: str, mode: str, review: object) -> dict[str, Any]:
+    """The live invocation plus exactly the two markers of this selector's contract (G-6 Option M)."""
+    if work_review.is_p4(review):
+        return {"operation": "start", "work_id": work_id, "mode": mode,
+                **work_invocation.markers(work_review.P4_CONTRACT)}
+    return invocation(work_id, mode)
+
+
+def _p4_reserved_runs(reserved: dict[str, Any], work_id: str) -> list[str]:
+    """The P4 Runs one START mutation holds, first to current, by its exact successor reservations (§27.21)."""
+    first = reserved.get(run_key(work_id))
+    if not isinstance(first, str):
+        return []
+    found = [first]
+    while True:
+        successor = reserved.get(gate.review_successor_run_key(found[-1]))
+        if successor is None:
+            return found
+        if not isinstance(successor, str) or successor in found:
+            raise p4.reconcile(f"the successor reservations of Work Review Run {found[-1]} are not one chain",
+                               p4.REASON_SUCCESSOR_CONFLICT)
+        found.append(successor)
+
+
+def _p4_work_run(reserved: dict[str, Any], work_id: str, run_id: str) -> WorkRun:
+    prefix = f"review-task:{run_id}:{records.P4_DISCOVERY_SLOT_PREFIX}"
+    tasks = sorted(str(value) for key, value in reserved.items() if str(key).startswith(prefix))
+    receipt = reserved.get(gate.review_receipt_key(run_id, p4.SEAL_GENERATION))
+    return WorkRun(work_id, run_id, tasks[0] if tasks else "", str(receipt) if receipt else "",
+                   contract=work_review.P4_CONTRACT)
+
+
+def select_in_flight_p4(mutation: Mutation) -> InFlight | None:
+    """The P4 recovery selector: the current Run of this START's cycle, or None before generation 1 exists."""
+    reserved = mutation.record.get("reserved_ids") or {}
+    prefix = f"review-run:{work_review.REVIEW_KIND}:"
+    keys = [key for key in reserved if str(key).startswith(prefix)]
+    if not keys:
+        return None
+    if len(keys) > 1:
+        raise _reconcile(f"START mutation {mutation.id} reserved more than one Work Review Run ({sorted(keys)})")
+    work_id = keys[0][len(prefix):]
+    runs = _p4_reserved_runs(reserved, work_id)
+    if not runs or (len(runs) == 1 and not _begun(mutation.store, runs[0])):
+        return None
+    return InFlight(STATE_P4, _p4_work_run(reserved, work_id, runs[-1]))
+
+
+def _p4_envelope(store: ProjectStore, chain: Any) -> dict[str, Any]:
+    first = chain.generations[0]
+    return ReviewStore(store).read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
+
+
+def _p4_require_shape(store: ProjectStore, run: WorkRun, chain: Any) -> None:
+    review = ReviewStore(store)
+    try:
+        contracts = p4.run_contracts(review, chain)
+    except ValidationError as exc:
+        raise _reconcile(f"Work Review Run {run.review_run_id}'s task inputs do not read: {exc}", "review_chain_invalid") from exc
+    if contracts != {work_review.P4_CONTRACT}:
+        raise p4.reconcile(f"Work Review Run {run.review_run_id} binds {sorted(str(c) for c in contracts)}, not the Work "
+                           "P4 contract this START runs under; it is neither upgraded nor downgraded",
+                           p4.REASON_CONTRACT_MISMATCH)
+    first = chain.generations[0]
+    problems = p4.chain_problems(chain)
+    if first.review_kind != work_review.REVIEW_KIND or first.target_identity != run.work_id \
+            or first.operation_identity != work_review.operation_identity(run.work_id):
+        problems.append("generation 1 is not a Work Review of this Work under its operation identity")
+    if problems:
+        raise p4.reconcile(f"Work Review Run {run.review_run_id}: " + "; ".join(problems), p4.REASON_CHAIN_INVALID)
+
+
+def _p4_requirement(store: ProjectStore, git: HermeticGit, work_id: str) -> dict[str, Any]:
+    """The Work's decided requirement, read from HEAD's committed Work body (G-1 item 6 / G-4)."""
+    view = committed_view_at(store, git, _head(git)[1])
+    work = view.works.get(work_id)
+    if work is None:
+        raise _reconcile(f"HEAD's committed view holds no Work {work_id}")
+    return work_review.requirement_authority(work_id, work.body)
+
+
+def _p4_bind_decision(session: "_Session") -> p4.HumanDecision | None:
+    decision = getattr(session.review, "human_decision", None)
+    if decision is None:
+        return None
+    record = decision.to_record()
+    bound = session.mutation.note(NOTE_P4_DECISION)
+    if bound is None:
+        session.mutation.set_note(NOTE_P4_DECISION, record)
+    elif bound != record:
+        raise p4.stop(p4.CODE_HUMAN_DECISION_INVALID,
+                      f"START mutation {session.mutation.id} already bound Human decision {bound.get('decision_id')!r}, "
+                      f"and this invocation carries {decision.decision_id!r}; one owner mutation binds one decision")
+    return decision
+
+
+def _p4_reserve(mutation: Mutation, run_id: str, work_id: str, bindings: list[p4.DiscoveryBinding],
+                *, predecessor: str | None = None) -> WorkRun:
+    task_ids = [mutation.reserve_id(gate.review_task_key(run_id, binding.task_slot), "review_task")
+                for binding in bindings]
+    receipt = mutation.reserve_id(gate.review_receipt_key(run_id, p4.SEAL_GENERATION), "review_receipt")
+    return WorkRun(work_id, run_id, task_ids[0], receipt, predecessor_review_run_id=predecessor,
+                   contract=work_review.P4_CONTRACT)
+
+
+def _p4_bindings(session: "_Session") -> list[p4.DiscoveryBinding]:
+    return sorted(session.review.discovery, key=lambda binding: binding.viewpoint)
+
+
+@dataclass(frozen=True)
+class _P4Frozen:
+    candidate: dict[str, Any]
+    snapshot: records.CandidateSnapshot
+    context: dict[str, Any]
+    task_inputs: list[records.TaskInput]
+    evidence: dict[str, Any]
+    write_snapshot: bool
+
+
+def _p4_freeze_material(
+    session: "_Session", run: WorkRun, git: HermeticGit, candidate: dict[str, Any], snapshot: records.CandidateSnapshot,
+    resulting: str, pre_base: str, *, generation: int, succession: dict[str, Any] | None,
+    set_aside: list[dict[str, Any]], declared: bool, write_snapshot: bool,
+) -> _P4Frozen:
+    """Context, isolated verification, discovery requests and Evidence of one P4 Run's Candidate (§27.8)."""
+    from .implementation import package_directory
+
+    store = session.store
+    activation = session.activation
+    if activation is None:
+        raise _reconcile("a review-v1 START session holds no activation proven at its entry")
+    inner = work_context.context_record(
+        store.workline_root(), package_directory(store.workline_root()), activation.binding(),
+        resulting_tree.root_tree_id(git, pre_base), resulting,
+    )
+    context = work_review.context_record_p4(inner)
+    width = len(candidate["declared_base"]["base_commit"])
+    reconstruction = work_review.read_material(snapshot, work_review.candidate_hash(candidate), width)
+    verified = work_verify.verify(store, git, reconstruction, resulting_tree_id=resulting)
+    requirement = _p4_requirement(store, git, run.work_id)
+    decision = _p4_bind_decision(session)
+    task_ids = [str(session.mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot)))
+                for binding in _p4_bindings(session)]
+    task_inputs = []
+    for task_id, binding in zip(task_ids, _p4_bindings(session)):
+        envelope = p4.discovery_request(
+            review_contract=work_review.P4_CONTRACT, review_kind=work_review.REVIEW_KIND, viewpoint=binding.viewpoint,
+            candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
+            succession=succession, set_aside_runs=set_aside, human_decision=decision,
+        )
+        task_inputs.append(p4.task_input(
+            task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
+            actor_identity=binding.identity, actor_version=binding.version, envelope=envelope,
+            candidate_hash=snapshot.candidate_hash, candidate_material_digest=work_review.material_digest(snapshot),
+            review_context_hash=serialize.digest(context), accepted_generation=p4.DISCOVERY_ACCEPT_GENERATION,
+        ))
+    evidence = _evidence(git, candidate, snapshot, task_inputs[0], inner, serialize.digest(context), p4.policy_hash(),
+                         activation, verified, declared=declared)
+    return _P4Frozen(candidate, snapshot, context, task_inputs, evidence, write_snapshot)
+
+
+def freeze_and_review_p4(session: "_Session", view: ProjectView, work: Entity, outcome: Any) -> Sealed:
+    """F3 §5.1 steps 5a ... 12 exactly as v1, then the P4 Run of the frozen Candidate (§27.8)."""
+    from .start import _result_message, completion_precheck
+
+    store, mutation = session.store, session.mutation
+    recovered = recovery_discovery(store, work.id, own_run_ids(mutation.record.get("reserved_ids") or {}))
+    set_aside = [dict(item) for item in recovered.set_aside]
+    result_paths = tuple(p.replace("\\", "/") for p in outcome.result_paths)
+    deleted_paths = tuple(p.replace("\\", "/") for p in outcome.deleted_paths)
+    git = hermetic_module.enter(store)
+    branch, pre_base = _head(git)
+    witnesses = ownership.bind_declarations(store, git, result_paths, deleted_paths, pre_base)
+    ownership.assert_ownership(mutation, witnesses)
+    completion_precheck(store, view, work, result_paths, deleted_paths)
+    owned = sorted(set(result_paths) | set(deleted_paths))
+    if owned:
+        preexisting = gitops.record_preexisting_dirty(mutation, store.root)
+        overlap = sorted(set(preexisting) & set(owned))
+        if overlap:
+            session._refuse_overlapping_result(work, outcome, overlap, overlap)
+        attributes.require_pinned_path_evaluation(store, git, pre_base, owned)
+    commit_stage(session, f"{work.id}:entry", f"chore(workline): enter {work.display}",
+                 plan_class=workcommit.CLASS_ENTRY)
+    branch_after, base_commit = _head(git)
+    if branch_after != branch:
+        raise _reconcile(f"HEAD left {branch} while the completion of {work.id} was being frozen")
+    candidate, payloads = _p4_candidate_from_witnesses(
+        session, git, witnesses, base_commit, branch, work.id, _result_message(outcome.message, work),
+        result_paths, deleted_paths,
+    )
+    snapshot = work_review.snapshot_for(work_review.snapshot_material(candidate, payloads))
+    resulting = resulting_tree.resulting_tree_id(
+        store, git, base_commit, resulting_tree.entries_from_records(work_review.entries_of(candidate)), payloads
+    )
+    run = _p4_reserve(mutation, mutation.reserve_id(run_key(work.id), "review_run"), work.id, _p4_bindings(session))
+    ownership.require_current(store, git, witnesses, pre_base)
+    checkout.require_namespace_readable(store)
+    frozen = _p4_freeze_material(session, run, git, candidate, snapshot, resulting, pre_base, generation=1,
+                                 succession=None, set_aside=set_aside, declared=bool(owned), write_snapshot=True)
+    _p4_accept(session, run, frozen)
+    session._drop_refused_result(work.id)
+    return _continue_p4(session, run)
+
+
+def _p4_candidate_from_witnesses(
+    session: "_Session", git: HermeticGit, witnesses: Any, base_commit: str, branch: str, work_id: str, message: str,
+    result_paths: Any, deleted_paths: Any,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Step 10 exactly: the Candidate from the bound witnesses and ``base_commit``'s tree, no pathname read again."""
+    width = len(base_commit)
+    base = declared_base(session.store, git, base_commit, branch, work_id)
+    held = workcommit._tree_entries(git, base_commit, [witness.path for witness in witnesses])
+    entries: list[dict[str, Any]] = []
+    payloads: dict[str, bytes] = {}
+    for witness in witnesses:
+        old = held.get(witness.path)
+        entries.append(work_review.candidate_entry(
+            witness.path, None if old is None else (old.mode, old.oid), witness.kind, witness.git_mode,
+            None if witness.kind == ownership.KIND_ABSENT else witness.identity, witness.material, width,
+        ))
+        if witness.material is not None:
+            payloads[witness.path] = witness.material
+    content = work_review.content_for(entries, message=message, base_commit=base_commit,
+                                      declared_result=result_paths, declared_deleted=deleted_paths)
+    activation = session.activation
+    if activation is None:
+        raise _reconcile("a review-v1 START session holds no activation proven at its entry")
+    return work_review.candidate_record(content, base, activation.binding()), payloads
+
+
+def _p4_accept(session: "_Session", run: WorkRun, frozen: _P4Frozen) -> None:
+    """G1: the snapshot (when new), every discovery TaskInput and the open gate, in one generation mutation."""
+    required = [(found.task_slot, found.task_id) for found in frozen.task_inputs]
+    gate_one = records.GateGeneration(
+        review_run_id=run.review_run_id, generation=1, previous_generation=None, previous_digest=None,
+        review_kind=work_review.REVIEW_KIND, target_identity=run.work_id,
+        operation_identity=work_review.operation_identity(run.work_id),
+        candidate_hash=frozen.snapshot.candidate_hash, review_context_hash=serialize.digest(frozen.context),
+        effective_policy_hash=p4.policy_hash(), evidence_digest=serialize.digest(frozen.evidence),
+        coverage_digest=serialize.digest(p4.coverage_record(required, [])),
+        raw_report_set_digest=serialize.digest(p4.report_set_record([])),
+        adjudication_digest=serialize.digest(p4.pending_adjudication_record()),
+        obligation_digest=serialize.digest(p4.obligations_record(None)),
+        accepted_tasks=tuple(p4.accepted_descriptor(found) for found in frozen.task_inputs), settled_tasks=(),
+        status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
+    )
+    extra: list[tuple[str, dict[str, Any]]] = []
+    if frozen.write_snapshot and not ReviewStore(session.store).candidate_snapshot_exists(frozen.snapshot.candidate_hash):
+        extra.append((review_paths.candidate_snapshot_rel(frozen.snapshot.candidate_hash), frozen.snapshot.to_record()))
+    extra += [(review_paths.task_input_rel(found.task_id), found.to_record()) for found in frozen.task_inputs]
+    _start_generation(session, run, 1, gate_one, extra, frozen.candidate["declared_base"],
+                      transition=p4.TRANSITION_ACCEPT)
+
+
+def _p4_base(store: ProjectStore, chain: Any) -> dict[str, Any]:
+    snapshot = ReviewStore(store).read_candidate_snapshot(chain.generations[0].candidate_hash)
+    return ((snapshot.material or {}).get("candidate") or {})["declared_base"]
+
+
+def p4_run_material(store: ProjectStore, run: WorkRun, chain: Any) -> RunMaterial:
+    """The first discovery task, the exact Candidate with its payloads, and the bound Work Context v2."""
+    review = ReviewStore(store)
+    first = chain.generations[0]
+    descriptor = first.accepted_tasks[0]
+    problems = review.provenance_problems(descriptor, 1)
+    if problems:
+        raise _reconcile("the accepted task's provenance: " + "; ".join(message for _, message in problems),
+                         "review_task_invalid")
+    task_input = review.read_task_input(str(descriptor["task_id"]))
+    snapshot = review.read_candidate_snapshot(first.candidate_hash)
+    material = snapshot.material or {}
+    width = len(str((material.get("candidate") or {}).get("declared_base", {}).get("base_commit", "")))
+    if width not in (40, 64):
+        raise _reconcile("the stored Candidate names no declared base of a known object width")
+    reconstruction = work_review.read_material(snapshot, first.candidate_hash, width)
+    problems_p4 = work_review.task_input_problems_p4(task_input, material, first.candidate_hash, first.review_context_hash)
+    if problems_p4:
+        raise _reconcile("the accepted task's request: " + "; ".join(problems_p4), "review_task_invalid")
+    return RunMaterial(task_input, reconstruction, work_review.inner_context(task_input.request_envelope["context"]))
+
+
+def _continue_p4(session: "_Session", run: WorkRun) -> Sealed:
+    """The P4 owner loop over the validated chain of the current Run of this START's cycle (§27.1)."""
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    while True:
+        runs = _p4_reserved_runs(mutation.record.get("reserved_ids") or {}, run.work_id)
+        if runs and runs[-1] != run.review_run_id:
+            run = _p4_work_run(mutation.record.get("reserved_ids") or {}, run.work_id, runs[-1])
+        resolve_pending_generation(session, run)
+        chain = _chain(store, run)
+        if chain is None:
+            if len(runs) < 2:
+                raise _reconcile(f"Work Review Run {run.review_run_id} has no chain to continue", "review_chain_invalid")
+            _p4_begin_successor(session, run, runs[-2])
+            continue
+        _p4_require_shape(store, run, chain)
+        latest = chain.latest.generation
+        shape = p4.shape_of(chain)
+        if latest == 1:
+            _p4_launch_discovery(session, run, chain)
+        elif latest == 2:
+            if any(task["status"] != records.TASK_SETTLED_OK for task in chain.latest.settled_tasks):
+                _refuse_seal(mutation, run, "not_authorized", None)
+                raise _reconcile(f"Work Review Run {run.review_run_id}'s discovery was declined; START does not "
+                                 f"terminalize an unauthorized completion of {run.work_id}")
+            _p4_accept_adjudication(session, run, chain)
+        elif latest == 3:
+            _p4_adjudicate(session, run, chain)
+        elif latest == 4:
+            outcome = review.read_adjudication(run.review_run_id).outcome
+            if outcome == p4.HUMAN_WAIT:
+                _p4_human_wait(session, run, chain)
+            elif outcome == p4.REPAIR_REQUIRED:
+                _p4_accept_repair(session, run, chain)
+            else:
+                material = p4_run_material(store, run, chain)
+                require_capability(session, run, material)
+                _p4_seal(session, run, chain)
+        elif latest == 5 and shape == p4.SHAPE_SEAL:
+            run.receipt_id = str(chain.latest.receipt_id)
+            return Sealed(run, p4_run_material(store, run, chain), chain)
+        elif latest == 5:
+            _p4_repair(session, run, chain)
+        elif shape == p4.SHAPE_SEAL:
+            raise p4.stop(p4.CODE_RECEIPT_INVALIDATED,
+                          f"Work Review Run {run.review_run_id}'s Receipt is invalidated at generation 6; a P4 Run is "
+                          "never continued as a current authorization and never enters Class A: reconcile under the "
+                          "START owner")
+        else:
+            _p4_adopt(session, run, chain)
+            successor = mutation.reserve_id(gate.review_successor_run_key(run.review_run_id), "review_run")
+            _p4_reserve(mutation, successor, run.work_id, _p4_bindings(session), predecessor=run.review_run_id)
+
+
+def _p4_launch_discovery(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G1 -> G2: every accepted discovery task launched to its bound actor, then the raw reports and G2 (§27.9)."""
+    store = session.store
+    review = ReviewStore(store)
+    first = chain.latest
+    tasks = list(first.accepted_tasks)
+    gate.require_persisted(store, [review_paths.candidate_snapshot_rel(first.candidate_hash),
+                                   review_paths.gate_rel(run.review_run_id, 1)]
+                           + [review_paths.task_input_rel(str(task["task_id"])) for task in tasks])
+    material = p4_run_material(store, run, chain)
+    for task in tasks:
+        problems = [message for _, message in review.provenance_problems(task, 1)]
+        problems += work_review.task_input_problems_p4(review.read_task_input(str(task["task_id"])),
+                                                       review.read_candidate_snapshot(first.candidate_hash).material or {},
+                                                       first.candidate_hash, first.review_context_hash)
+        if problems:
+            raise _reconcile("the accepted discovery task: " + "; ".join(problems), "review_task_invalid")
+    bindings = {binding.task_slot: binding for binding in session.review.discovery}
+    settled: list[dict[str, Any]] = []
+    reports: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = str(task["task_id"])
+        binding = bindings.get(str(task["task_slot"]))
+        if binding is None or (binding.identity, binding.version) != (task["reviewer_identity"], task["reviewer_version"]):
+            raise StopError(
+                f"discovery task {task_id} ({task['task_slot']}) was accepted for {task['reviewer_identity']} "
+                f"{task['reviewer_version']}, and this invocation binds no such actor to that viewpoint; nothing is launched",
+                code="review_reviewer_mismatch",
+            )
+        task_input = review.read_task_input(task_id)
+        launched = p4.P4DiscoveryTask(
+            task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind,
+            review_kind=work_review.REVIEW_KIND, viewpoint=binding.viewpoint,
+            request_envelope=serialize.canonical_data(task_input.request_envelope),
+            request_digest=task_input.request_digest, candidate_hash=task_input.candidate_hash,
+            review_context_hash=task_input.review_context_hash, effective_policy_hash=task_input.effective_policy_hash,
+        )
+        try:
+            returned = binding.actor(launched)
+        except Exception as exc:
+            raise StopError(f"the discovery actor raised for task {task_id}: {exc}; nothing is settled",
+                            code="review_reviewer_failed") from exc
+        report = p4.report_record(returned, task, review_kind=work_review.REVIEW_KIND,
+                                  review_contract=work_review.P4_CONTRACT)
+        result_digest = serialize.digest(report)
+        gate.validate_settlement(store, run.review_run_id, task_id, result_digest, str(returned.reviewer_identity))
+        settled.append({"task_id": task_id, "status": p4.settled_status(report), "result_digest": result_digest,
+                        "settled_generation": 2})
+        reports[task_id] = report
+    required = [(str(task["task_slot"]), str(task["task_id"])) for task in tasks]
+    gate_two = replace(
+        first, generation=2, previous_generation=1, previous_digest=chain.latest_digest,
+        coverage_digest=serialize.digest(p4.coverage_record(required, settled, reports)),
+        raw_report_set_digest=serialize.digest(p4.report_set_record(settled)), settled_tasks=tuple(settled),
+    )
+    extra = [(review_paths.report_rel(task["result_digest"]), reports[task["task_id"]]) for task in settled]
+    _start_generation(session, run, 2, gate_two, extra, material.base, transition=p4.TRANSITION_SETTLE)
+
+
+def _p4_reports(review: ReviewStore, chain: Any) -> list[tuple[str, str, dict[str, Any]]]:
+    discovery = {str(task["task_id"]) for task in p4.discovery_tasks(chain)}
+    return [
+        (str(task["task_id"]), str(task["result_digest"]),
+         serialize.canonical_data(review.read_report(str(task["result_digest"])).to_record()))
+        for task in chain.generation(2).settled_tasks if str(task["task_id"]) in discovery
+    ]
+
+
+def _p4_prior(store: ProjectStore, chain: Any) -> p4.PriorCycle | None:
+    """The current-cycle predecessor of a repaired Candidate's Run, from explicit linkage only (§12.11)."""
+    review = ReviewStore(store)
+    succession = _p4_envelope(store, chain).get("succession")
+    if succession is None:
+        return None
+    try:
+        predecessor_id = str(succession["predecessor_review_run_id"])
+        predecessor = review.gate_chain(predecessor_id)
+        adjudication = review.read_adjudication(predecessor_id)
+        batch = review.read_repair_batch(str(succession["repair_batch_id"]))
+        result = review.read_repair_result(batch.repair_batch_id)
+        prior = p4.PriorCycle(predecessor_id, adjudication, review.adjudication_digest(predecessor_id), batch, result,
+                              review.repair_result_digest(batch.repair_batch_id))
+    except (ValidationError, KeyError, TypeError) as exc:
+        raise p4.reconcile(f"the predecessor of Work Review Run {chain.review_run_id} does not read: {exc}",
+                           p4.REASON_LINKAGE_INVALID) from exc
+    if predecessor is None:
+        raise p4.reconcile(f"the predecessor {predecessor_id} has no chain", p4.REASON_LINKAGE_INVALID)
+    earlier = _p4_prior(store, predecessor)
+    history = (() if earlier is None else earlier.bc_history) + (p4.bc_surfaces(adjudication),)
+    return replace(prior, bc_history=history)
+
+
+def _p4_accept_adjudication(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G3: one adjudication TaskInput built from canonical material only, accepted before any launch (§27.10)."""
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    second = chain.latest
+    envelope = _p4_envelope(store, chain)
+    reports = _p4_reports(review, chain)
+    prior = _p4_prior(store, chain)
+    request = p4.adjudication_request(
+        review_contract=work_review.P4_CONTRACT, review_kind=work_review.REVIEW_KIND, review_run_id=run.review_run_id,
+        candidate_hash=second.candidate_hash, candidate_generation=int(envelope["candidate_generation"]),
+        review_context_hash=second.review_context_hash, requirement=envelope["requirement"],
+        reports=[{"task_id": t, "result_digest": d} for t, d, _ in reports],
+        prior=p4.NO_PRIOR if prior is None else prior.prior_record(),
+        evidence_ids=[eid for _, _, report in reports for eid in report["coverage"]["evidence_ids"]],
+    )
+    task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_ADJUDICATOR), "review_task")
+    adjudicator = session.review.adjudicator
+    task_input = p4.task_input(
+        task_id=task_id, task_slot=p4.SLOT_ADJUDICATOR, task_kind=p4.TASK_KIND_ADJUDICATION,
+        actor_identity=adjudicator.identity, actor_version=adjudicator.version, envelope=request,
+        candidate_hash=second.candidate_hash,
+        candidate_material_digest=review.candidate_material_digest(second.candidate_hash),
+        review_context_hash=second.review_context_hash, accepted_generation=p4.ADJUDICATION_ACCEPT_GENERATION,
+    )
+    gate_three = replace(second, generation=3, previous_generation=2, previous_digest=chain.latest_digest,
+                         accepted_tasks=second.accepted_tasks + (p4.accepted_descriptor(task_input),))
+    _start_generation(session, run, 3, gate_three, [(review_paths.task_input_rel(task_id), task_input.to_record())],
+                      _p4_base(store, chain), transition=p4.TRANSITION_ACCEPT)
+
+
+def _p4_adjudicate(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G3 -> G4: the adjudicator, launched only to its bound identity; its return validated and normalized (§27.11)."""
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    third = chain.latest
+    descriptor = p4.adjudication_task(chain)
+    assert descriptor is not None
+    task_id = str(descriptor["task_id"])
+    reports = _p4_reports(review, chain)
+    gate.require_persisted(store, [review_paths.task_input_rel(task_id), review_paths.gate_rel(run.review_run_id, 3)]
+                           + [review_paths.report_rel(digest) for _, digest, _ in reports])
+    problems = review.provenance_problems(descriptor, 3)
+    if problems:
+        raise _reconcile("the accepted adjudication task: " + "; ".join(m for _, m in problems), "review_task_invalid")
+    binding = session.review.adjudicator
+    if (binding.identity, binding.version) != (descriptor["reviewer_identity"], descriptor["reviewer_version"]):
+        raise StopError(
+            f"adjudication task {task_id} was accepted for {descriptor['reviewer_identity']} "
+            f"{descriptor['reviewer_version']}, and this invocation binds {binding.identity} {binding.version}; the "
+            "adjudicator is not launched",
+            code="review_reviewer_mismatch",
+        )
+    task_input = review.read_task_input(task_id)
+    prior = _p4_prior(store, chain)
+    snapshot = review.read_candidate_snapshot(third.candidate_hash)
+    launched = p4.P4AdjudicationTask(
+        task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind,
+        review_kind=work_review.REVIEW_KIND, request_envelope=serialize.canonical_data(task_input.request_envelope),
+        request_digest=task_input.request_digest, candidate_hash=third.candidate_hash,
+        review_context_hash=third.review_context_hash, effective_policy_hash=third.effective_policy_hash,
+        candidate=(snapshot.material or {}).get("candidate") or {}, reports=tuple(r for _, _, r in reports),
+        prior_findings=() if prior is None else tuple(prior.adjudication.findings),
+        prior_repair_batch=None if prior is None else prior.repair_batch.to_record(),
+        prior_repair_result=None if prior is None else prior.repair_result.to_record(),
+    )
+    try:
+        returned = binding.actor(launched)
+    except Exception as exc:
+        raise p4.stop(p4.CODE_ADJUDICATOR_FAILED,
+                      f"the adjudicator raised for task {task_id}: {exc}; nothing is settled") from exc
+    normalized = p4.normalize_adjudication(returned, descriptor, reports, prior)
+    finding_ids = [mutation.reserve_id(gate.review_finding_key(run.review_run_id, ordinal), "review_finding")
+                   for ordinal in range(1, len(normalized.drafts) + 1)]
+    adjudication = p4.adjudication(
+        normalized, finding_ids, review_run_id=run.review_run_id, gate_record=third,
+        candidate_generation=int(_p4_envelope(store, chain)["candidate_generation"]),
+        review_contract=work_review.P4_CONTRACT, descriptor=descriptor, reports=reports, prior=prior,
+    )
+    record = adjudication.to_record()
+    digest = serialize.digest(record)
+    gate.validate_settlement(store, run.review_run_id, task_id, digest, str(returned.adjudicator_identity))
+    settled = {"task_id": task_id, "status": records.TASK_SETTLED_OK, "result_digest": digest, "settled_generation": 4}
+    gate_four = replace(third, generation=4, previous_generation=3, previous_digest=chain.latest_digest,
+                        adjudication_digest=digest, obligation_digest=serialize.digest(p4.obligations_record(adjudication)),
+                        settled_tasks=third.settled_tasks + (settled,))
+    _start_generation(session, run, 4, gate_four, [(review_paths.adjudication_rel(run.review_run_id), record)],
+                      _p4_base(store, chain), transition=p4.TRANSITION_SETTLE)
+
+
+def _p4_seal(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G5 seal: the Receipt at generation 5 (§27.12), reached only on ``capable``."""
+    fourth = chain.latest
+    receipt_id = session.mutation.reserve_id(gate.review_receipt_key(run.review_run_id, p4.SEAL_GENERATION),
+                                             "review_receipt")
+    run.receipt_id = receipt_id
+    gate_five = replace(fourth, generation=5, previous_generation=4, previous_digest=chain.latest_digest,
+                        status=records.GATE_STATUS_SEALED, receipt_id=receipt_id,
+                        authorized_operation_stage=work_review.AUTHORIZED_OPERATION_STAGE)
+    receipt = records.Receipt(
+        receipt_id=receipt_id, review_run_id=run.review_run_id, review_generation=p4.SEAL_GENERATION,
+        review_kind=fourth.review_kind, target_identity=fourth.target_identity,
+        operation_identity=fourth.operation_identity, authorized_candidate_hash=fourth.candidate_hash,
+        review_context_hash=fourth.review_context_hash, effective_policy_hash=fourth.effective_policy_hash,
+        coverage_hash=fourth.coverage_digest, adjudication_hash=fourth.adjudication_digest,
+        obligation_digest=fourth.obligation_digest, unresolved_obligations=0,
+        authorized_operation_stage=work_review.AUTHORIZED_OPERATION_STAGE,
+    )
+    if session.mutation.note(NOTE_SEAL_REFUSAL) is not None:
+        session.mutation.set_note(NOTE_SEAL_REFUSAL, None)
+    _start_generation(session, run, 5, gate_five, [(review_paths.receipt_rel(receipt_id), receipt.to_record())],
+                      _p4_base(session.store, chain), receipt_id=receipt_id, transition=p4.TRANSITION_SEAL)
+
+
+def p4_invalidate(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G-3: a stale P4 G5 Receipt is superseded by the P4 G6 invalidation, atomically; never F4 Class A."""
+    fifth = chain.latest
+    receipt_id = str(fifth.receipt_id)
+    gate_six = replace(
+        fifth, generation=6, previous_generation=5, previous_digest=chain.latest_digest,
+        evidence_digest=serialize.digest(p4.invalidation_evidence_record(receipt_id, p4.INVALIDATION_STALE_RECEIPT)),
+        status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
+    )
+    supersession = records.Supersession(receipt_id, run.review_run_id, 6, p4.INVALIDATION_STALE_RECEIPT)
+    _start_generation(session, run, 6, gate_six, [(review_paths.supersession_rel(receipt_id), supersession.to_record())],
+                      _p4_base(session.store, chain), receipt_id=receipt_id, transition=p4.TRANSITION_INVALIDATE)
+
+
+def _p4_human_wait(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G-4: HUMAN_WAIT stays at G4 and the START stays pending; a Human decision sets the Run aside for a new Run."""
+    decision = getattr(session.review, "human_decision", None)
+    bound = _p4_envelope(session.store, chain).get("human_decision")
+    if decision is None or bound == decision.to_record():
+        raise p4.stop(p4.CODE_HUMAN_WAIT,
+                      f"Work Review Run {run.review_run_id} waits on a Human requirement decision at generation 4; "
+                      "no repair guesses it, and this START stays pending until an invocation carries the decision")
+    _p4_bind_decision(session)
+    successor = session.mutation.reserve_id(gate.review_successor_run_key(run.review_run_id), "review_run")
+    _p4_reserve(session.mutation, successor, run.work_id, _p4_bindings(session), predecessor=run.review_run_id)
+
+
+def _p4_accept_repair(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G5 repair branch: the one Repair Batch and its repair TaskInput, accepted together, no Receipt (§27.15)."""
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    fourth = chain.latest
+    adjudication = review.read_adjudication(run.review_run_id)
+    candidate = (review.read_candidate_snapshot(fourth.candidate_hash).material or {}).get("candidate") or {}
+    batch_id = mutation.reserve_id(gate.review_repair_batch_key(run.review_run_id), "review_repair_batch")
+    batch = p4.repair_batch(adjudication, review.adjudication_digest(run.review_run_id), repair_batch_id=batch_id,
+                            allowed_result_surface=work_review.allowed_result_surface(candidate) or ["(no result path)"])
+    envelope = _p4_envelope(store, chain)
+    request = p4.repair_request(
+        review_contract=work_review.P4_CONTRACT, review_kind=work_review.REVIEW_KIND, review_run_id=run.review_run_id,
+        candidate_hash=fourth.candidate_hash, candidate_generation=int(envelope["candidate_generation"]),
+        requirement=envelope["requirement"], repair_batch_id=batch_id, repair_batch_digest=serialize.digest(batch.to_record()),
+        allowed_result_surface=batch.allowed_result_surface, strategy=batch.strategy, evidence_constraints=(),
+    )
+    task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_REPAIR), "review_task")
+    repair = session.review.repair
+    task_input = p4.task_input(
+        task_id=task_id, task_slot=p4.SLOT_REPAIR, task_kind=p4.TASK_KIND_REPAIR, actor_identity=repair.identity,
+        actor_version=repair.version, envelope=request, candidate_hash=fourth.candidate_hash,
+        candidate_material_digest=review.candidate_material_digest(fourth.candidate_hash),
+        review_context_hash=fourth.review_context_hash, accepted_generation=p4.REPAIR_ACCEPT_GENERATION,
+    )
+    gate_five = replace(fourth, generation=5, previous_generation=4, previous_digest=chain.latest_digest,
+                        accepted_tasks=fourth.accepted_tasks + (p4.accepted_descriptor(task_input),))
+    _start_generation(session, run, 5, gate_five, [
+        (review_paths.repair_batch_rel(batch_id), batch.to_record()),
+        (review_paths.task_input_rel(task_id), task_input.to_record()),
+    ], _p4_base(store, chain), transition=p4.TRANSITION_ACCEPT)
+
+
+def _p4_repair(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G5 -> G6: the repair actor's proposal turned into a complete Candidate N+1, never written to the tree (G-5)."""
+    store = session.store
+    review = ReviewStore(store)
+    fifth = chain.latest
+    descriptor = p4.repair_task(chain)
+    assert descriptor is not None
+    task_id = str(descriptor["task_id"])
+    task_input = review.read_task_input(task_id)
+    batch_id = str(task_input.request_envelope.get("repair_batch_id"))
+    gate.require_persisted(store, [review_paths.task_input_rel(task_id), review_paths.gate_rel(run.review_run_id, 5),
+                                   review_paths.repair_batch_rel(batch_id)])
+    problems = review.provenance_problems(descriptor, 5)
+    if problems:
+        raise _reconcile("the accepted repair task: " + "; ".join(m for _, m in problems), "review_task_invalid")
+    batch = review.read_repair_batch(batch_id)
+    if review.repair_batch_digest(batch_id) != task_input.request_envelope.get("repair_batch_digest") \
+            or batch.source_review_run_id != run.review_run_id:
+        raise p4.reconcile(f"the repair task of {run.review_run_id} does not bind its Repair Batch", p4.REASON_LINKAGE_INVALID)
+    binding = session.review.repair
+    if (binding.identity, binding.version) != (descriptor["reviewer_identity"], descriptor["reviewer_version"]):
+        raise StopError(
+            f"repair task {task_id} was accepted for {descriptor['reviewer_identity']} {descriptor['reviewer_version']}, "
+            f"and this invocation binds {binding.identity} {binding.version}; the repair actor is not launched",
+            code="review_reviewer_mismatch",
+        )
+    material = p4_run_material(store, run, chain)
+    adjudication = review.read_adjudication(run.review_run_id)
+    launched = p4.P4RepairTask(
+        task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind,
+        review_kind=work_review.REVIEW_KIND, request_envelope=serialize.canonical_data(task_input.request_envelope),
+        request_digest=task_input.request_digest, candidate_hash=fifth.candidate_hash,
+        source_candidate={"candidate": material.candidate, "payloads": dict(material.reconstruction.payloads)},
+        repair_batch=batch.to_record(),
+        findings=tuple(adjudication.finding(finding_id) for finding_id in batch.finding_ids),
+    )
+    try:
+        returned = binding.actor(launched)
+    except Exception as exc:
+        raise p4.stop(p4.CODE_REPAIR_INVALID, f"the repair actor raised for task {task_id}: {exc}; nothing is settled") from exc
+    refused = p4.repair_return_problems(returned, descriptor)
+    if refused:
+        code, message = refused[0]
+        if code == "review_reviewer_mismatch":
+            raise StopError(f"{message}; nothing is settled", code="review_reviewer_mismatch")
+        raise p4.stop(code, f"{message}; nothing is settled")
+    width = len(material.base["base_commit"])
+    try:
+        candidate, payloads = work_review.repaired_candidate(material.reconstruction, returned.proposal, width)
+    except (ValueError, StopError, ValidationError) as exc:
+        raise p4.stop(p4.CODE_REPAIR_INVALID, f"the repair proposal is not a complete Work Candidate: {exc}; nothing "
+                      "is settled") from exc
+    snapshot = work_review.snapshot_for(work_review.snapshot_material(candidate, payloads))
+    git = hermetic_module.enter(store)
+    resulting = resulting_tree.resulting_tree_id(
+        store, git, material.base["base_commit"], resulting_tree.entries_from_records(work_review.entries_of(candidate)),
+        payloads,
+    )
+    verified = work_verify.verify(store, git, work_review.read_material(snapshot, snapshot.candidate_hash, width),
+                                  resulting_tree_id=resulting)
+    envelope = _p4_envelope(store, chain)
+    result = p4.repair_result(
+        batch=batch, source_candidate_generation=int(envelope["candidate_generation"]),
+        result_candidate_hash=snapshot.candidate_hash, result_candidate_material_digest=work_review.material_digest(snapshot),
+        repair_task_id=task_id, returned=returned,
+        evidence=(p4.evidence_reuse("work-isolated-verification", None, None, prior_identities=(),
+                                    new_identities=(verified.resulting_tree,), assumption_invalidated=True),),
+        kind_checks=(p4.P4Verification(work_review.P4_KIND_CHECK, "pass"),),
+    )
+    record = result.to_record()
+    digest = serialize.digest(record)
+    gate.validate_settlement(store, run.review_run_id, task_id, digest, str(returned.repair_identity))
+    settled = {"task_id": task_id, "status": records.TASK_SETTLED_OK, "result_digest": digest, "settled_generation": 6}
+    gate_six = replace(fifth, generation=6, previous_generation=5, previous_digest=chain.latest_digest,
+                       settled_tasks=fifth.settled_tasks + (settled,))
+    _start_generation(session, run, 6, gate_six, [
+        (review_paths.repair_result_rel(batch_id), record),
+        (review_paths.candidate_snapshot_rel(snapshot.candidate_hash), snapshot.to_record()),
+    ], material.base, transition=p4.TRANSITION_SETTLE)
+
+
+def _p4_settled_result(store: ProjectStore, chain: Any) -> tuple[records.P4RepairBatch, records.P4RepairResult, str]:
+    review = ReviewStore(store)
+    repair = p4.repair_task(chain)
+    batch_id = str(review.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
+    return review.read_repair_batch(batch_id), review.read_repair_result(batch_id), review.repair_result_digest(batch_id)
+
+
+def _p4_adopt(session: "_Session", run: WorkRun, chain: Any) -> None:
+    """G-5: START alone adopts the exact Candidate N+1 onto the declared result paths, before any successor Review.
+
+    1 the exact persisted N+1 material is read; 2 only the source's declared
+    result paths may change; 3 START writes the bytes; 4 the ownership,
+    containment, reserved-path and pre-existing-dirty checks run again through
+    the existing machinery; 5 fresh witnesses are bound; 6 they hold the
+    adopted bytes; 7 the Candidate is rebuilt from them exactly as step 10
+    builds one; 8 its hash must be the persisted N+1 hash; 9 the isolated
+    verification runs. Any difference fails closed. A replay finds the bytes
+    already adopted and only re-proves them.
+    """
+    import os
+
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    batch, result, _ = _p4_settled_result(store, chain)
+    source = p4_run_material(store, run, chain)
+    snapshot = review.read_candidate_snapshot(result.result_candidate_hash)
+    width = len(source.base["base_commit"])
+    target = work_review.read_material(snapshot, result.result_candidate_hash, width)
+    base = target.candidate["declared_base"]
+    if base != source.base or target.candidate.get("activation") != source.candidate.get("activation"):
+        raise p4.reconcile("Candidate N+1 does not keep the source's declared base and activation",
+                           p4.REASON_ADOPTION_MISMATCH)
+    result_paths, deleted_paths = work_review.declared_paths(source.candidate)
+    if work_review.declared_paths(target.candidate) != (result_paths, deleted_paths):
+        raise p4.reconcile("Candidate N+1 changes the declared paths", p4.REASON_ADOPTION_MISMATCH)
+    allowed = set(batch.allowed_result_surface)
+    changed = {path: data for path, data in target.payloads.items() if source.reconstruction.payloads.get(path) != data}
+    if not set(changed) <= allowed:
+        raise p4.reconcile("Candidate N+1 changes a path outside the Repair Batch's allowed result surface",
+                           p4.REASON_ADOPTION_MISMATCH)
+    git = hermetic_module.enter(store)
+    pre_base = _pre_s_c0_base(work_record(mutation.record), base["base_commit"])
+    owned = ownership.own_witnesses(mutation)
+    preexisting = set(gitops.record_preexisting_dirty(mutation, store.root))
+    if preexisting & set(changed):
+        raise p4.reconcile(f"{sorted(preexisting & set(changed))} held changes before this START began",
+                           p4.REASON_ADOPTION_MISMATCH)
+    for path, data in sorted(changed.items()):
+        current = ownership.capture(store, git, path, deletion=False, base=pre_base)
+        if current.material == data:
+            continue  # already adopted by an earlier attempt: only re-proven below
+        witness = owned.get(path)
+        if witness is None or ownership.witness_problem(store, git, witness, pre_base) is not None:
+            raise p4.reconcile(f"{path} does not hold the bytes this START witnessed, so N+1 is not adopted over it",
+                               p4.REASON_ADOPTION_MISMATCH)
+        destination = store.root / path
+        temporary = destination.with_name(f".{destination.name}.workline-p4-adopt")
+        temporary.write_bytes(data)
+        os.replace(temporary, destination)
+    witnesses = ownership.bind_declarations(store, git, result_paths, deleted_paths, pre_base)
+    ownership.assert_ownership(mutation, witnesses)
+    for witness in witnesses:
+        expected = target.payloads.get(witness.path)
+        if expected is not None and witness.material != expected:
+            raise p4.reconcile(f"{witness.path} does not hold Candidate N+1's bytes after adoption",
+                               p4.REASON_ADOPTION_MISMATCH)
+    content = work_review.content_of(target.candidate)
+    rebuilt, payloads = _p4_candidate_from_witnesses(
+        session, git, witnesses, base["base_commit"], base["branch"], run.work_id, str(content.get("message") or ""),
+        result_paths, deleted_paths,
+    )
+    if work_review.candidate_hash(rebuilt) != result.result_candidate_hash:
+        raise p4.reconcile("the Candidate rebuilt from the adopted working tree is not the persisted Candidate N+1",
+                           p4.REASON_ADOPTION_MISMATCH)
+    ownership.require_current(store, git, witnesses, pre_base)
+    resulting = resulting_tree.resulting_tree_id(
+        store, git, base["base_commit"], resulting_tree.entries_from_records(work_review.entries_of(rebuilt)), payloads,
+    )
+    work_verify.verify(store, git, target, resulting_tree_id=resulting)
+
+
+def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) -> None:
+    """The successor's G1: Candidate N+1 (after adoption) or, on a Human decision, the re-witnessed Candidate."""
+    store = session.store
+    review = ReviewStore(store)
+    predecessor = review.gate_chain(predecessor_id)
+    if predecessor is None:
+        raise p4.reconcile(f"the predecessor {predecessor_id} has no chain", p4.REASON_LINKAGE_INVALID)
+    git = hermetic_module.enter(store)
+    predecessor_material = p4_run_material(store, WorkRun(run.work_id, predecessor_id, "", ""), predecessor)
+    base = predecessor_material.base
+    pre_base = _pre_s_c0_base(work_record(session.mutation.record), base["base_commit"])
+    predecessor_envelope = _p4_envelope(store, predecessor)
+    if p4.shape_of(predecessor) == p4.SHAPE_REPAIR and len(predecessor.generations) == p4.REPAIR_SETTLE_GENERATION:
+        _p4_adopt(session, WorkRun(run.work_id, predecessor_id, "", "", contract=work_review.P4_CONTRACT), predecessor)
+        batch, result, result_digest = _p4_settled_result(store, predecessor)
+        snapshot = review.read_candidate_snapshot(result.result_candidate_hash)
+        generation = int(predecessor_envelope["candidate_generation"]) + 1
+        succession = p4.succession_record(predecessor_id, predecessor.generations[0].candidate_hash,
+                                          batch.repair_batch_id, result_digest)
+        set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_REPAIRED}]
+        write_snapshot = False
+    elif len(predecessor.generations) == p4.ADJUDICATION_SETTLE_GENERATION \
+            and review.read_adjudication(predecessor_id).outcome == p4.HUMAN_WAIT \
+            and getattr(session.review, "human_decision", None) is not None:
+        result_paths, deleted_paths = work_review.declared_paths(predecessor_material.candidate)
+        witnesses = ownership.bind_declarations(store, git, result_paths, deleted_paths, pre_base)
+        ownership.assert_ownership(session.mutation, witnesses)
+        candidate, payloads = _p4_candidate_from_witnesses(
+            session, git, witnesses, base["base_commit"], base["branch"], run.work_id,
+            str(work_review.content_of(predecessor_material.candidate).get("message") or ""), result_paths, deleted_paths,
+        )
+        snapshot = work_review.snapshot_for(work_review.snapshot_material(candidate, payloads))
+        generation, succession, write_snapshot = 1, None, True
+        set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_HUMAN_DECISION}]
+    else:
+        raise p4.reconcile(f"{run.review_run_id} is reserved as the successor of {predecessor_id}, which neither "
+                           "settled a repair nor waits on a Human decision this invocation carries",
+                           p4.REASON_LINKAGE_INVALID)
+    width = len(base["base_commit"])
+    reconstruction = work_review.read_material(snapshot, snapshot.candidate_hash, width)
+    resulting = resulting_tree.resulting_tree_id(
+        store, git, base["base_commit"],
+        resulting_tree.entries_from_records(work_review.entries_of(reconstruction.candidate)), reconstruction.payloads,
+    )
+    run.contract = work_review.P4_CONTRACT
+    frozen = _p4_freeze_material(
+        session, run, git, reconstruction.candidate, snapshot, resulting, pre_base, generation=generation,
+        succession=succession, set_aside=set_aside, declared=bool(work_review.entries_of(reconstruction.candidate)),
+        write_snapshot=write_snapshot,
+    )
+    if succession is not None:
+        problems = p4.linkage_problems(
+            batch, result, source_run_id=predecessor_id, source_candidate_hash=predecessor.generations[0].candidate_hash,
+            source_candidate_generation=int(predecessor_envelope["candidate_generation"]),
+            snapshot_hash=snapshot.candidate_hash, successor_envelope=frozen.task_inputs[0].request_envelope,
+            repair_result_digest=result_digest,
+        )
+        if problems:
+            raise p4.reconcile("the repaired Candidate's linkage: " + "; ".join(problems), p4.REASON_LINKAGE_INVALID)
+    _p4_accept(session, run, frozen)
+
+
+def p4_cycle_paths(store: ProjectStore, reserved: dict[str, Any], work_id: str) -> tuple[str, ...]:
+    """Every canonical record path of every Run this START's P4 cycle holds (the L-2 own-Review set)."""
+    from .review import recovery
+
+    review = ReviewStore(store)
+    found: set[str] = set()
+    for run_id in _p4_reserved_runs(reserved, work_id):
+        chain = review.gate_chain(run_id)
+        if chain is None:
+            continue
+        found |= set(recovery.p4_record_paths(review, run_id, chain))
+    return tuple(sorted(path for path in found if not path.startswith(review_paths.SUPERSESSIONS_DIR + "/")))
+
+
+def _p4_material_at(at: "CommittedRecords", record: WorkRecord, item: str) -> ProofMaterial:
+    """The P4 Run's records exactly as one commit holds them: discovered, adjudicated and sealed at generation 5."""
+    run = record.run
+    try:
+        chain = at.gate_chain(run.review_run_id)
+        if chain is None or len(chain.generations) != p4.SEAL_GENERATION or p4.chain_problems(chain) \
+                or p4.shape_of(chain) != p4.SHAPE_SEAL:
+            raise _proof_failed(item, f"{at.commit} does not hold P4 Run {run.review_run_id} as discovered, adjudicated "
+                                      "and sealed")
+        fifth = chain.latest
+        if not fifth.sealed or fifth.receipt_id != run.receipt_id:
+            raise _proof_failed(item, f"{at.commit} does not hold the seal issuing Receipt {run.receipt_id}")
+        first = chain.generations[0]
+        snapshot = at.read_candidate_snapshot(first.candidate_hash)
+        candidate = (snapshot.material or {}).get("candidate") or {}
+        width = len(str(candidate.get("declared_base", {}).get("base_commit", "")))
+        reconstruction = work_review.read_material(snapshot, first.candidate_hash, width)
+        task_input = at.read_task_input(str(first.accepted_tasks[0]["task_id"]))
+        problems = work_review.task_input_problems_p4(task_input, snapshot.material or {}, first.candidate_hash,
+                                                      first.review_context_hash)
+        if problems:
+            raise _proof_failed(item, "; ".join(problems))
+        receipt = at.read_receipt(run.receipt_id)
+        adjudication = at.read_adjudication(run.review_run_id)
+        if serialize.digest(adjudication.to_record()) != chain.generation(p4.ADJUDICATION_SETTLE_GENERATION).adjudication_digest:
+            raise _proof_failed(item, f"the adjudication at {at.commit} is not the one generation 4 binds")
+        context = work_review.inner_context(task_input.request_envelope["context"])
+    except ValidationError as exc:
+        raise _proof_failed(item, f"the Run's records at {at.commit} do not read: {exc}") from exc
+    return ProofMaterial(chain, snapshot, reconstruction, task_input, context, receipt, adjudication)
+
+
+def _p4_post_commit(session: "_Session", sealed: Sealed, git: HermeticGit, failure: ReconcileRequired) -> None:
+    """K1 exists and C-2(K1) fails for a P4 Run: never F4 Class A (G-3).
+
+    When the failure is staleness of the authorization - the bound Context or
+    Policy no longer re-derives - the G5 Receipt is superseded by the P4 G6
+    invalidation at once, so no live Receipt survives known staleness, and the
+    START stops for reconciliation. Anything else is reconcile as it stands.
+    """
+    from .implementation import package_directory
+
+    store, run = session.store, sealed.run
+    chain = _chain(store, run)
+    stale = False
+    activation = session.activation
+    if activation is not None and chain is not None:
+        capability = sealed.material.context["review_checkout_capability"]
+        try:
+            recomputed = work_context.context_record(
+                store.workline_root(), package_directory(store.workline_root()), activation.binding(),
+                capability["base_tree"], capability["resulting_tree"],
+            )
+            first = chain.generations[0]
+            stale = serialize.digest(work_review.context_record_p4(recomputed)) != first.review_context_hash \
+                or p4.policy_hash() != first.effective_policy_hash
+        except StopError:
+            stale = False
+    review = ReviewStore(store)
+    if stale and chain is not None and chain.latest.generation == p4.SEAL_GENERATION and chain.latest.sealed \
+            and not review.supersession_exists(str(chain.latest.receipt_id)):
+        p4_invalidate(session, run, chain)
+        raise p4.stop(p4.CODE_RECEIPT_INVALIDATED,
+                      f"the authorization of Work Review Run {run.review_run_id} is stale ({failure.message}); its "
+                      "generation-5 Receipt is superseded by the P4 generation-6 invalidation, and the START stops for "
+                      "reconciliation (never F4 Class A)")
+    raise failure
