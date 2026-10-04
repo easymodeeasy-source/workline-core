@@ -28,7 +28,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from ..errors import StopError, ValidationError
-from . import records, serialize
+from . import p4, records, serialize
 
 # --------------------------------------------------------------------------- static contract identifiers
 
@@ -743,3 +743,157 @@ def delta_record(parent: str, commit: str, entries: list[dict[str, str]]) -> dic
             for entry in sorted(entries, key=lambda item: item["path"].encode("utf-8", "surrogateescape"))
         ],
     }
+
+
+# --------------------------------------------------------------------------- P4 (WORKLINE_COMPLETION_SPRINT §12 / §27)
+#
+# The planning kind's P4 material. The v1 identities, records and selector above
+# keep their exact meaning; P4 is a separate selector type, a separate durable
+# contract marker (G-6 Option M) and a separate Context contract field. The
+# common P4 semantics live in :mod:`workline.review.p4`; what is here is what
+# only the planning kind knows: its Candidate, its requirement authority and
+# what a repaired planning Candidate may change.
+
+#: The planning P4 Review contract, recorded verbatim as the planning owner's durable marker.
+P4_CONTRACT = p4.PLANNING_CONTRACT
+#: A P4 Candidate is stale when its decided requirement / desired-state authority changed (G-1 item 6).
+STALE_REQUIREMENT = "review_p4_requirement_changed"
+#: Why a P4 G6 invalidation set the Run aside (G-3).
+STALE_RECEIPT = p4.INVALIDATION_STALE_RECEIPT
+
+
+@dataclass(frozen=True)
+class PlanningReviewP4:
+    """The P4 planning opt-in: ``create_roadmap(..., review=PlanningReviewP4(...))`` (§27.3).
+
+    A new selector type, never an optional mode of :class:`PlanningReview`: it
+    binds the required discovery actor(s), one adjudicator and one repair actor,
+    each with the durable identity and version a task binds before any launch.
+    ``human_decision`` is the explicit G-4 Human-decision input of a later
+    invocation after ``human_wait``; it is never slot identity.
+    """
+
+    discovery: tuple[p4.DiscoveryBinding, ...]
+    adjudicator: p4.ActorBinding
+    repair: p4.ActorBinding
+    human_decision: p4.HumanDecision | None = None
+    contract: str = P4_CONTRACT
+
+
+def validate_planning_review_p4(review: object) -> PlanningReviewP4:
+    """The P4 ``review`` argument, validated before the lock and before any Project state is read."""
+    if type(review) is not PlanningReviewP4:
+        raise ValidationError(
+            f"review must be a PlanningReviewP4, not {type(review).__name__}", code="review_contract_invalid"
+        )
+    problems: list[str] = []
+    if review.contract != P4_CONTRACT:
+        problems.append(f"contract {review.contract!r} is not {P4_CONTRACT!r}")
+    problems.extend(p4.binding_problems(review.discovery, review.adjudicator, review.repair, review.human_decision))
+    if problems:
+        raise ValidationError("invalid PlanningReviewP4: " + "; ".join(problems), code="review_contract_invalid")
+    return review
+
+
+def is_p4(review: object) -> bool:
+    return type(review) is PlanningReviewP4
+
+
+def invocation_markers_p4() -> dict[str, str]:
+    """The two keys a P4 planning invocation carries beside the live invocation (G-6 Option M).
+
+    The review marker is the distinct P4 contract. The publication marker is
+    the v1 one: the planning publication validator and barrier dispatch by the
+    committed Run records, never by this marker, so it distinguishes no
+    contract generation (G-6 item 3).
+    """
+    return {MARKER_REVIEW: P4_CONTRACT, MARKER_PUBLICATION: PUBLICATION_CONTRACT}
+
+
+def marker_contract(invocation: object) -> str | None:
+    """The planning review contract a durable invocation's markers name, or ``None`` (legacy or unreadable)."""
+    if not isinstance(invocation, dict):
+        return None
+    found = invocation.get(MARKER_REVIEW)
+    return found if found in (PLANNING_CONTRACT, P4_CONTRACT) else None
+
+
+def context_record_p4(workline_root: Path, review_kind: str) -> dict[str, Any]:
+    """The P4 review Context: the v1 Context's fields, binding the P4 contract instead of v1's."""
+    record = dict(context_record(workline_root, review_kind))
+    record["contract"] = P4_CONTRACT
+    return serialize.canonical_data(record)
+
+
+def requirement_authority(operation: str, request_digest_value: str, phase_id: str | None,
+                          phase_body: str | None) -> dict[str, Any]:
+    """The decided requirement / desired-state authority a planning P4 Run is reviewed against.
+
+    The caller's request is the plan's requirement; a Phase entry also rests on
+    the Phase's own desired state, read from the committed Phase body. It is
+    re-read, never stored as a second copy of truth (G-4).
+    """
+    authority: dict[str, Any] = {"operation": operation, "request_digest": request_digest_value}
+    if operation == OPERATION_PHASE_ENTRY:
+        authority["phase_id"] = phase_id
+        authority["phase_body_digest"] = None if phase_body is None else _lf_digest(phase_body.encode("utf-8"))
+    return p4.requirement_record(kind_of_operation(operation).review_kind, authority)
+
+
+def allowed_result_surface(material: dict[str, Any]) -> list[str]:
+    """What a planning repair may change: the Candidate's reviewed content, under the same reserved identities."""
+    return [f"planning-content:{material['review_kind']}"]
+
+
+def repaired_candidate_problems(source: dict[str, Any], proposal: object) -> list[str]:
+    """Why a repair proposal is not a complete planning Candidate N+1 for ``source`` (§27.16).
+
+    The proposal is the complete reviewed content. It keeps the kind, the
+    declared base and every reserved entity identity of the source (the owner
+    reserved them, and a repair never allocates new ones), and it differs.
+    """
+    if not isinstance(proposal, dict):
+        return ["the proposal is not the complete planning Candidate content"]
+    try:
+        candidate = candidate_record(source["review_kind"], proposal, source["declared_base"])
+        require_planning_candidate(candidate, "the repaired Candidate")
+    except (ValidationError, KeyError, TypeError) as exc:
+        return [f"the proposal is not a planning Candidate: {exc}"]
+    problems: list[str] = []
+    if candidate_hash(candidate) == candidate_hash(source):
+        problems.append("the proposal is the source Candidate unchanged; a repaired Candidate is a new one")
+    if _entity_ids(candidate_content(candidate)) != _entity_ids(candidate_content(source)):
+        problems.append("the proposal changes the reserved entity identities; a repair keeps the owner's reservations")
+    return problems
+
+
+def _entity_ids(content: dict[str, Any]) -> tuple[Any, ...]:
+    if "roadmap" in content:
+        return ("roadmap", content["roadmap"].get("id"),
+                tuple(sorted(str(phase.get("id")) for phase in content.get("phases") or [])))
+    works = sorted(str(work.get("id")) for work in content.get("works") or [])
+    integration = (content.get("integration") or {}).get("id")
+    confirmation = None if content.get("confirmation") is None else content["confirmation"].get("id")
+    return ("phase", content.get("phase_id"), content.get("roadmap_id"), tuple(works), integration, confirmation)
+
+
+def task_input_problems_p4(task_input: records.TaskInput, snapshot_material: dict[str, Any], run_candidate_hash: str,
+                           run_context_hash: str) -> list[str]:
+    """The P4 analogue of :func:`task_input_problems` for a planning P4 TaskInput."""
+    problems: list[str] = []
+    envelope = task_input.request_envelope
+    if serialize.digest(envelope) != task_input.request_digest:
+        problems.append("the task input's request_digest is not the digest of its request envelope")
+    if p4.contract_of_task_input(task_input) != P4_CONTRACT:
+        problems.append("the task input does not bind the planning P4 contract")
+    if envelope.get(serialize.SCHEMA_KEY) == p4.SCHEMA_DISCOVERY_REQUEST:
+        if envelope.get("candidate") != snapshot_material:
+            problems.append("the request envelope's candidate is not the stored snapshot's material")
+        context = envelope.get("context")
+        if not isinstance(context, dict) or serialize.digest(context) != run_context_hash:
+            problems.append("the request envelope's context does not digest to the Run's review_context_hash")
+    if serialize.digest(snapshot_material) != run_candidate_hash:
+        problems.append("the stored snapshot's material does not digest to the Run's candidate_hash")
+    if p4.policy_named(envelope.get("policy_id")) is None or task_input.effective_policy_hash != p4.policy_hash():
+        problems.append("the request envelope names no policy whose digest is the P4 Effective Policy")
+    return problems

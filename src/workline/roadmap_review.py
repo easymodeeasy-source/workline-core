@@ -51,7 +51,7 @@ from .mutation import (
     planned_write,
 )
 from .phase_create import PhaseRelationSpec, PhaseSpec, phase_registration_effects, resolve_phase_relations
-from .review import checkout, committed, gate, paths as review_paths, planning, records, serialize
+from .review import checkout, committed, gate, p4, paths as review_paths, planning, records, serialize
 from .review import fsafe
 from .review.planning import (
     PlanningReview,
@@ -143,7 +143,10 @@ def require_entry_gate(review: object) -> PlanningReview:
     unknown version. Nothing is read or written, and a pending planning mutation
     is left exactly as it is.
     """
-    checked = planning.validate_planning_review(review)
+    if planning.is_p4(review):
+        checked: Any = planning.validate_planning_review_p4(review)
+    else:
+        checked = planning.validate_planning_review(review)
     if not fsafe.immutable_create_supported():
         raise StopError(
             "review-v1 planning writes immutable Review records, which this platform cannot keep inside the "
@@ -1421,16 +1424,16 @@ _TRANSITION_OF = {1: "accept", 2: "settle", 3: "seal", 4: "invalidate"}
 
 def _generation_invocation(
     mutation: Mutation, material_kind: str, run: _Run, generation: int, gate_record: records.GateGeneration,
-    receipt_id: str | None, reason: str | None,
+    receipt_id: str | None, reason: str | None, contract: str | None = None, transition: str | None = None,
 ) -> dict[str, Any]:
     return {
         "operation": planning.OPERATION_GENERATION,
-        "review_contract": planning.PLANNING_CONTRACT,
+        "review_contract": planning.PLANNING_CONTRACT if contract is None else contract,
         "planning_mutation_id": mutation.id,
         "review_kind": material_kind,
         "review_run_id": run.review_run_id,
         "generation": generation,
-        "transition": _TRANSITION_OF[generation],
+        "transition": _TRANSITION_OF[generation] if transition is None else transition,
         "candidate_hash": gate_record.candidate_hash,
         "review_context_hash": gate_record.review_context_hash,
         "effective_policy_hash": gate_record.effective_policy_hash,
@@ -1492,8 +1495,14 @@ def _start_generation(
     *,
     receipt_id: str | None = None,
     reason: str | None = None,
+    contract: str | None = None,
+    transition: str | None = None,
 ) -> None:
-    """Start, apply, commit and complete the generation mutation writing ``gate_record`` (and ``extra``)."""
+    """Start, apply, commit and complete the generation mutation writing ``gate_record`` (and ``extra``).
+
+    ``contract`` / ``transition`` are given by the P4 flow only; a v1 generation keeps its exact invocation.
+    A P4 accept writes its TaskInput(s) before the gate that names them, as generation 1 always does.
+    """
     require_binding(store, mutation)
     scope = gate.next_generation_scope(store, run.review_run_id)
     if scope.generation != generation:
@@ -1504,10 +1513,12 @@ def _start_generation(
         )
     extra_paths = [path for path, _ in extra]
     writes = [(scope.gate_path, gate_record.to_record())] + list(extra)
-    if generation == records.FIRST_GENERATION:
+    if generation == records.FIRST_GENERATION or transition == p4.TRANSITION_ACCEPT:
         # accept: the snapshot and the task input are written before gate 1, which names them
         writes = list(extra) + [(scope.gate_path, gate_record.to_record())]
-    invocation = _generation_invocation(mutation, review_kind, run, generation, gate_record, receipt_id, reason)
+    invocation = _generation_invocation(
+        mutation, review_kind, run, generation, gate_record, receipt_id, reason, contract, transition
+    )
     files = tuple(scope.files) + tuple(extra_paths)
     gen = MutationController(store).open(OWNER, invocation, WriteScope(files=files))
     record_paths = [path for path, _ in writes]
@@ -1565,7 +1576,11 @@ def resolve_pending_generation(store: ProjectStore, mutation: Mutation, run: _Ru
         gate_path = review_paths.gate_rel(run.review_run_id, int(generation))
         stored = ReviewStore(store).read_bytes(gate_path)
         fits = stored is not None and gate_path in recorded and stored == recorded[gate_path].encode("utf-8")
-    if not fits or invocation.get("transition") != _TRANSITION_OF.get(generation):
+    if invocation.get("review_contract") == planning.P4_CONTRACT:
+        allowed = p4.TRANSITIONS.get(int(generation), ()) if type(generation) is int else ()
+    else:
+        allowed = (_TRANSITION_OF.get(generation),)
+    if not fits or invocation.get("transition") not in allowed:
         raise _reconcile(
             f"the pending generation mutation {gen.id} writes generation {generation} ({invocation.get('transition')}) "
             f"of Review Run {run.review_run_id}, which is not the chain's next transition",
@@ -1735,11 +1750,21 @@ def _enter(op: _Op, pending: list[dict[str, Any]]) -> ReviewedPlanningResult:
     from . import roadmap as rm
 
     discovery = None
+    contract = planning.P4_CONTRACT if _p4(op) else planning.PLANNING_CONTRACT
     if pending:
+        for record in pending:
+            found = planning.marker_contract(record.get("invocation"))
+            if found != contract:
+                raise _reconcile(
+                    f"the unfinished {op.operation} mutation {record.get('mutation_id')} runs under review contract "
+                    f"{found}, and this invocation selects {contract}; it is neither upgraded nor downgraded and is "
+                    "left untouched",
+                    "review_marker_mismatch",
+                )
         identity = {key: value for key, value in pending[0]["invocation"].items() if key != "operation"}
     else:
         discovery = _discover(op)
-        identity = {**op.live_identity, **planning.invocation_markers()}
+        identity = {**op.live_identity, **(planning.invocation_markers_p4() if _p4(op) else planning.invocation_markers())}
         if discovery.recoverable is not None:
             identity[planning.MARKER_RECOVERY] = discovery.recoverable.review_run_id
     live_refusal = rm.refuse_invalid_phase_writes if op.roadmap_kind else rm.refuse_invalid_work_writes
@@ -1759,11 +1784,19 @@ def _discover(op: _Op):
     def run_currency(found: Any) -> Currency:
         reserved = {key: identifier for key, identifier, _ in reservations_of(found.material)}
         head = gitcmd.head_commit(op.store.root) or ""
+        if getattr(found, "contract", None) is not None:
+            return _p4_currency(op, found.chain, head, reserved)
         return currency(
             op.store, found.material, op.request, reserved, found.chain.latest.review_context_hash,
             found.chain.latest.effective_policy_hash, head, op.entry_key,
         )
 
+    if _p4(op):
+        decision = op.review.human_decision
+        return recovery.discover(
+            op.store, op.kind.review_kind, op.operation_identity, currency=run_currency, contract=planning.P4_CONTRACT,
+            human_decision=None if decision is None else decision.to_record(),
+        )
     return recovery.discover(op.store, op.kind.review_kind, op.operation_identity, currency=run_currency)
 
 
@@ -1841,6 +1874,8 @@ def _run(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> Revie
     else:
         run = _recorded_run(op, mutation)
     try:
+        if _p4(op):
+            return _proceed_p4(op, mutation, destination, run)
         return _proceed(op, mutation, destination, run)
     except StopError:
         _abandon_if_nothing_started(op, mutation)
@@ -1862,6 +1897,8 @@ def _recorded_run(op: _Op, mutation: Mutation) -> _Run:
     run_id = _reserved_run_id(op, mutation)
     if run_id is None:
         raise _reconcile(f"the planning mutation {mutation.id} recorded no Review Run", "review_chain_invalid")
+    if _p4(op):
+        return _p4_run(op, mutation, _p4_run_ids(op, mutation)[-1])
     task_id = mutation.reserved(gate.review_task_key(run_id, op.kind.task_slot))
     receipt_id = mutation.reserved(gate.review_receipt_key(run_id, planning.SEAL_GENERATION))
     consumption_id = None if receipt_id is None else mutation.reserved(gate.review_consumption_key(receipt_id))
@@ -1900,8 +1937,8 @@ def _require_known_reservations(op: _Op, mutation: Mutation) -> None:
 
 
 def _setup_new_run(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> _Run:
-    from . import roadmap as rm
-
+    if planning.is_p4(op.review):
+        return _setup_new_run_p4(op, mutation, destination, discovery)
     store = op.store
     if mutation.note(NOTE_DISCOVERY) is None:
         outcome = discovery
@@ -1917,6 +1954,57 @@ def _setup_new_run(op: _Op, mutation: Mutation, destination: Any, discovery: Any
     set_aside = list((mutation.note(NOTE_DISCOVERY) or {}).get("set_aside") or [])
     _require_known_reservations(op, mutation)
 
+    candidate, snapshot, first_id, head = _freeze_candidate(op, mutation)
+
+    # step 3 - Context, Policy, evidence, envelope
+    context = planning.context_record(store.workline_root(), op.kind.review_kind)
+    evidence = planning.evidence_record(first_id, phase_entry=not op.roadmap_kind, remote=destination is not None)
+    envelope = planning.request_envelope(op.kind.review_kind, candidate, context, set_aside)
+
+    # step 4 - the Review IDs, in order
+    target = candidate_target(candidate)
+    run_id = mutation.reserve_id(gate.review_run_key(op.kind.review_kind, target), "review_run")
+    task_id = mutation.reserve_id(gate.review_task_key(run_id, op.kind.task_slot), "review_task")
+    receipt_id = mutation.reserve_id(gate.review_receipt_key(run_id, planning.SEAL_GENERATION), "review_receipt")
+    consumption_id = mutation.reserve_id(gate.review_consumption_key(receipt_id), "review_consumption")
+    mutation.extend_scope(files=[review_paths.consumption_rel(consumption_id)])
+    _require_known_reservations(op, mutation)
+
+    # step 5 - committability, persistence, capability, namespace, dirty overlap, barrier
+    records_paths = run_record_paths(run_id, candidate, task_id, receipt_id) + [review_paths.consumption_rel(consumption_id)]
+    gate.require_committable(store, records_paths)
+    owned = planning_owned_paths(run_id, candidate, task_id, receipt_id, consumption_id)
+    git_persistence_preflight(store, owned, sorted(set(records_paths + checkout.committed_review_paths(store))))
+    checkout.require_namespace_readable(store)
+    gitops.ensure_separable_before_effects(mutation, owned)
+    if destination is not None:
+        from .review import publication
+
+        publication.require_barrier_clear(store.root, head)
+
+    # step 6 - the operation binding
+    _note_binding(store, mutation)
+    task_input = planning.task_input_for(
+        task_id=task_id, review_kind=op.kind.review_kind, reviewer_identity=op.review.reviewer_identity,
+        reviewer_version=op.review.reviewer_version, envelope=envelope, candidate=candidate,
+        review_context_hash=serialize.digest(context), effective_policy_hash=planning.policy_hash(),
+    )
+    return _Run(run_id, task_id, receipt_id, consumption_id, frozen={
+        "candidate": candidate, "snapshot": snapshot, "task_input": task_input, "evidence": evidence,
+        "context": context, "target": target,
+    })
+
+
+def _freeze_candidate(op: _Op, mutation: Mutation) -> tuple[dict[str, Any], records.CandidateSnapshot, str | None, str]:
+    """Steps 1-2 of a new Run's setup: the live reservations and refusals, then the Candidate on HEAD's basis.
+
+    Shared by the v1 and the P4 setup, unchanged in order and in every check;
+    returns the Candidate, its snapshot, the canonical first Work (Phase entry)
+    and the committed HEAD it was frozen on.
+    """
+    from . import roadmap as rm
+
+    store = op.store
     # step 1 - the live reservations and payload refusals
     wt_view = ProjectView.load(store)
     if op.roadmap_kind:
@@ -2024,44 +2112,7 @@ def _setup_new_run(op: _Op, mutation: Mutation, destination: Any, discovery: Any
             "a projected Candidate representability failure: its canonical text does not read back",
             code="review_candidate_unrepresentable",
         )
-
-    # step 3 - Context, Policy, evidence, envelope
-    context = planning.context_record(store.workline_root(), op.kind.review_kind)
-    evidence = planning.evidence_record(first_id, phase_entry=not op.roadmap_kind, remote=destination is not None)
-    envelope = planning.request_envelope(op.kind.review_kind, candidate, context, set_aside)
-
-    # step 4 - the Review IDs, in order
-    target = candidate_target(candidate)
-    run_id = mutation.reserve_id(gate.review_run_key(op.kind.review_kind, target), "review_run")
-    task_id = mutation.reserve_id(gate.review_task_key(run_id, op.kind.task_slot), "review_task")
-    receipt_id = mutation.reserve_id(gate.review_receipt_key(run_id, planning.SEAL_GENERATION), "review_receipt")
-    consumption_id = mutation.reserve_id(gate.review_consumption_key(receipt_id), "review_consumption")
-    mutation.extend_scope(files=[review_paths.consumption_rel(consumption_id)])
-    _require_known_reservations(op, mutation)
-
-    # step 5 - committability, persistence, capability, namespace, dirty overlap, barrier
-    records_paths = run_record_paths(run_id, candidate, task_id, receipt_id) + [review_paths.consumption_rel(consumption_id)]
-    gate.require_committable(store, records_paths)
-    owned = planning_owned_paths(run_id, candidate, task_id, receipt_id, consumption_id)
-    git_persistence_preflight(store, owned, sorted(set(records_paths + checkout.committed_review_paths(store))))
-    checkout.require_namespace_readable(store)
-    gitops.ensure_separable_before_effects(mutation, owned)
-    if destination is not None:
-        from .review import publication
-
-        publication.require_barrier_clear(store.root, head)
-
-    # step 6 - the operation binding
-    _note_binding(store, mutation)
-    task_input = planning.task_input_for(
-        task_id=task_id, review_kind=op.kind.review_kind, reviewer_identity=op.review.reviewer_identity,
-        reviewer_version=op.review.reviewer_version, envelope=envelope, candidate=candidate,
-        review_context_hash=serialize.digest(context), effective_policy_hash=planning.policy_hash(),
-    )
-    return _Run(run_id, task_id, receipt_id, consumption_id, frozen={
-        "candidate": candidate, "snapshot": snapshot, "task_input": task_input, "evidence": evidence,
-        "context": context, "target": target,
-    })
+    return candidate, snapshot, first_id, head
 
 
 def _note_binding(store: ProjectStore, mutation: Mutation) -> None:
@@ -2138,6 +2189,8 @@ def _request_phase_stages(design: dict[str, Any], phase_id: str, roadmap_id: str
 def _setup_recovery(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> _Run:
     from .committed_view import committed_view as load_committed
 
+    if _p4(op):
+        return _setup_recovery_p4(op, mutation, destination, discovery)
     store = op.store
     run_id = str(mutation.invocation[planning.MARKER_RECOVERY])
     review = ReviewStore(store)
@@ -2320,6 +2373,8 @@ def _reserved_map(op: _Op, mutation: Mutation, material: dict[str, Any]) -> dict
 
 
 def _run_currency(op: _Op, mutation: Mutation, run: _Run, chain: Any, base: str) -> Currency:
+    if _p4(op):
+        return _p4_run_currency(op, mutation, chain, base)
     material = _run_material(op, chain)
     first = chain.generations[0]
     return currency(
@@ -2498,6 +2553,8 @@ def _invalidate(op: _Op, mutation: Mutation, run: _Run, chain: Any, reason: str)
 
 def _run_record_bytes(op: _Op, run: _Run, chain: Any, *, generations: int = 3) -> dict[str, bytes]:
     review = ReviewStore(op.store)
+    if _p4(op):
+        return {relative: (review.read_bytes(relative) or b"") for relative in p4_run_record_paths(review, run.review_run_id, chain)}
     first = chain.generations[0]
     task_id = str(first.accepted_tasks[0]["task_id"])
     wanted = [
@@ -2518,7 +2575,7 @@ def _receipt_problems(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> lis
     review = ReviewStore(op.store)
     problems: list[str] = []
     third = chain.latest
-    if third.generation != 3 or not third.sealed or third.receipt_id != run.receipt_id:
+    if third.generation != _seal_generation(op) or not third.sealed or third.receipt_id != run.receipt_id:
         return ["the latest generation is not the seal issuing the reserved Receipt"]
     try:
         receipt = review.read_receipt(str(run.receipt_id))
@@ -2761,6 +2818,8 @@ def _pre_replay_kp(op: _Op, mutation: Mutation) -> None:
 
 
 def _planning_owned(run: _Run, chain: Any, material: dict[str, Any]) -> list[str]:
+    if any(task["task_kind"] == p4.TASK_KIND_DISCOVERY for task in chain.generations[0].accepted_tasks):
+        return p4_planning_owned_paths(run, chain, material)
     task_id = str(chain.generations[0].accepted_tasks[0]["task_id"])
     return planning_owned_paths(run.review_run_id, material, task_id, str(run.receipt_id), str(run.consumption_id))
 
@@ -2864,7 +2923,7 @@ def _c2_kp(op: _Op, mutation: Mutation, run: _Run, chain: Any, material: dict[st
     found = _run_currency(op, mutation, run, chain, parent)
     if not found.current:
         raise _proof_failed("P12", f"the authorized pre-state does not hold on {parent}: {found.detail}")
-    third = chain.generation(planning.SEAL_GENERATION)
+    third = chain.generation(_seal_generation(op))
     for name, wanted in (
         ("operation_identity", op.operation_identity), ("target_identity", candidate_target(material)),
         ("review_kind", op.kind.review_kind), ("authorized_operation_stage", op.kind.authorized_operation_stage),
@@ -2877,7 +2936,7 @@ def _c2_kp(op: _Op, mutation: Mutation, run: _Run, chain: Any, material: dict[st
         for relative, data in wanted.items():
             if at_parent.read_bytes(relative) != data or at_parent.blob_id(relative) is None:
                 raise _proof_failed("P12", f"{parent} does not hold {relative} with its canonical bytes")
-        if at_parent.entry(review_paths.gate_rel(run.review_run_id, 4)) is not None or at_parent.supersession_exists(str(run.receipt_id)):
+        if at_parent.entry(review_paths.gate_rel(run.review_run_id, _invalidation_generation(op))) is not None or at_parent.supersession_exists(str(run.receipt_id)):
             raise _proof_failed("P12", f"{parent} holds an invalidation of the Receipt")
         if any(found_consumption.receipt_id == run.receipt_id for found_consumption in at_parent.consumptions()):
             raise _proof_failed("P12", f"{parent} holds a Consumption of the Receipt")
@@ -2909,7 +2968,7 @@ def _consumption_record(
     claims["branch"] = (mutation.note(NOTE_BINDING) or {}).get("branch")
     return records.PlanningConsumption(
         consumption_id=str(run.consumption_id), receipt_id=str(run.receipt_id), review_run_id=run.review_run_id,
-        review_generation=planning.SEAL_GENERATION, review_kind=first.review_kind,
+        review_generation=_seal_generation(op), review_kind=first.review_kind,
         authorized_candidate_hash=first.candidate_hash, operation_identity=first.operation_identity,
         operation_mutation_id=mutation.id, target_identity=first.target_identity,
         persisted_result=serialize.canonical_data(claims),
@@ -2962,7 +3021,7 @@ def _c2_km(op: _Op, mutation: Mutation, run: _Run, chain: Any, material: dict[st
                 raise _metadata_failed("M4", f"{km} does not hold {relative} with its canonical bytes")
         if at_km.read_bytes(consumption_path) != content:
             raise _metadata_failed("M4", f"{km} does not hold the Consumption with its canonical bytes")
-        if at_km.entry(review_paths.gate_rel(run.review_run_id, 4)) is not None or at_km.supersession_exists(str(run.receipt_id)):
+        if at_km.entry(review_paths.gate_rel(run.review_run_id, _invalidation_generation(op))) is not None or at_km.supersession_exists(str(run.receipt_id)):
             raise _metadata_failed("M4", f"{km} holds an invalidation of the Receipt")
         kp_entries = gitcmd.tree_entries(repo, kp, registration_paths(material))
         km_entries = gitcmd.tree_entries(repo, km, registration_paths(material))
@@ -3005,10 +3064,1125 @@ def _finish(
         current = chain if chain is not None else ReviewStore(op.store).gate_chain(run.review_run_id)
     except ValidationError:
         current = None
-    findings = () if current is None else _findings(op, current)
+    findings = () if current is None else (_p4_findings(op, current) if _p4(op) else _findings(op, current))
     if _is_recovery(mutation):
         detail = f"{detail}; recovered Run {run.review_run_id}"
     return ReviewedPlanningResult(
         status=status, operation=op.operation, mutation_id=mutation.id, review_run_id=run.review_run_id,
         receipt_id=receipt_id, consumption_id=consumption_id, registration=registration, findings=findings, detail=detail,
     )
+
+
+# =========================================================================== P4 planning (§12 / §27)
+#
+# The planning P4 owner flow: the same planning mutation, generation mutations,
+# registration, commits and push as v1, with the P4 Run shape between the freeze
+# and the registration. Dispatch is by the selector type at the entry and by the
+# durable marker of a pending planning mutation (G-6 Option M); a Run's contract
+# is the one its generation-1 TaskInputs bind, never inferred from its shape.
+#
+# ```text
+# G1 discovery accept -> G2 settle + raw reports -> G3 adjudication accept -> G4 settle + adjudication
+#   AUTHORIZATION_READY -> G5 seal + Receipt (generation 5) -> registration / Consumption / publication
+#   REPAIR_REQUIRED     -> G5 Repair Batch + repair accept -> G6 Repair Result + Candidate N+1
+#                          -> successor Run (review-successor-run:<pred>) for N+1
+#   HUMAN_WAIT          -> ends human_wait at G4; a later invocation with a Human decision sets it aside
+# a stale G5 seal       -> G6 invalidation + Supersession (G-3) -> stale; never a repair successor
+# ```
+
+STATUS_HUMAN_WAIT = "human_wait"
+NOTE_P4_DECISION = "p4_human_decision"
+#: The planning kind's own mechanical reverification of a repaired Candidate (§27.19).
+P4_KIND_CHECK = "planning_candidate_validator"
+
+
+def _p4(op: _Op) -> bool:
+    return planning.is_p4(op.review)
+
+
+def _seal_generation(op: _Op) -> int:
+    return p4.SEAL_GENERATION if _p4(op) else planning.SEAL_GENERATION
+
+
+def _invalidation_generation(op: _Op) -> int:
+    return p4.INVALIDATION_GENERATION if _p4(op) else planning.INVALIDATION_GENERATION
+
+
+def _p4_run_ids(op: _Op, mutation: Mutation) -> list[str]:
+    """The Runs this planning mutation holds, first to current, by its exact successor reservations (§27.21)."""
+    first = _reserved_run_id(op, mutation)
+    if first is None:
+        return []
+    found = [first]
+    reserved = mutation.record.get("reserved_ids") or {}
+    while True:
+        successor = reserved.get(gate.review_successor_run_key(found[-1]))
+        if successor is None:
+            return found
+        if str(successor) in found:
+            raise p4.reconcile(f"the successor reservations of {mutation.id} form a cycle", p4.REASON_SUCCESSOR_CONFLICT)
+        found.append(str(successor))
+
+
+def _p4_run(op: _Op, mutation: Mutation, run_id: str) -> _Run:
+    receipt_id = mutation.reserved(gate.review_receipt_key(run_id, p4.SEAL_GENERATION))
+    consumption_id = None if receipt_id is None else mutation.reserved(gate.review_consumption_key(receipt_id))
+    tasks = tuple(
+        str(identifier) for key, identifier in sorted((mutation.record.get("reserved_ids") or {}).items())
+        if key.startswith(f"review-task:{run_id}:{records.P4_DISCOVERY_SLOT_PREFIX}")
+    )
+    return _Run(run_id, tasks[0] if tasks else None, receipt_id, consumption_id)
+
+
+def _p4_discovery_bindings(op: _Op) -> list[p4.DiscoveryBinding]:
+    return sorted(op.review.discovery, key=lambda binding: binding.viewpoint)
+
+
+def _p4_requirement(op: _Op, view: ProjectView) -> dict[str, Any]:
+    """The current decided requirement / desired-state authority, read from ``view`` (G-1 item 6)."""
+    body = None
+    if not op.roadmap_kind:
+        phase = view.phases.get(op.phase_id or "")
+        body = None if phase is None else phase.body
+    return planning.requirement_authority(op.operation, op.request_digest, op.phase_id, body)
+
+
+def _p4_envelope(store: ProjectStore, chain: Any) -> dict[str, Any]:
+    """The discovery request the Run's first generation-1 TaskInput binds."""
+    first = chain.generations[0]
+    return ReviewStore(store).read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
+
+
+def _p4_require_shape(op: _Op, run: _Run, chain: Any) -> None:
+    """A P4 chain: explicitly P4 at generation 1, and one of the P4 shapes (§27.31, G-3)."""
+    review = ReviewStore(op.store)
+    try:
+        contracts = {
+            p4.contract_of_task_input(review.read_task_input(str(task["task_id"])))
+            for task in chain.generations[0].accepted_tasks
+        }
+    except ValidationError as exc:
+        raise _reconcile(f"Review Run {run.review_run_id}'s task inputs do not read: {exc}", "review_chain_invalid") from exc
+    if contracts != {planning.P4_CONTRACT}:
+        raise p4.reconcile(
+            f"Review Run {run.review_run_id} binds {sorted(str(c) for c in contracts)}, not the planning P4 contract this "
+            "planning mutation runs under; it is neither upgraded nor downgraded",
+            p4.REASON_CONTRACT_MISMATCH,
+        )
+    problems = p4.chain_problems(chain)
+    if problems:
+        raise p4.reconcile(f"Review Run {run.review_run_id}: " + "; ".join(problems), p4.REASON_CHAIN_INVALID)
+
+
+def _expected_review_keys_p4(op: _Op, mutation: Mutation) -> set[str]:
+    keys = {key for key, _ in op.domain_keys()}
+    target = _target_of(op, mutation)
+    if target is None:
+        return keys
+    run_key = gate.review_run_key(op.kind.review_kind, target)
+    keys.add(run_key)
+    run_id = mutation.reserved(run_key)
+    if run_id is not None:
+        keys.update(gate.review_task_key(run_id, binding.task_slot) for binding in op.review.discovery)
+        receipt_key = gate.review_receipt_key(run_id, p4.SEAL_GENERATION)
+        keys.add(receipt_key)
+        receipt_id = mutation.reserved(receipt_key)
+        if receipt_id is not None:
+            keys.add(gate.review_consumption_key(receipt_id))
+    return keys
+
+
+def _require_known_reservations_p4(op: _Op, mutation: Mutation) -> None:
+    recorded = set((mutation.record.get("reserved_ids") or {}).keys())
+    unknown = sorted(recorded - _expected_review_keys_p4(op, mutation))
+    if unknown:
+        raise _reconcile(
+            f"the planning mutation {mutation.id} recorded reservation(s) {', '.join(unknown)}, which its P4 setup does "
+            "not reserve",
+            "review_setup_invalid",
+        )
+
+
+def _p4_record_paths(run_id: str, material: dict[str, Any], task_ids: list[str], receipt_id: str) -> list[str]:
+    """The P4 Run's record paths known at its freeze: snapshot, discovery task inputs, gates 1-6, Receipt, Supersession."""
+    return [
+        review_paths.candidate_snapshot_rel(planning.candidate_hash(material)),
+        *(review_paths.task_input_rel(task_id) for task_id in task_ids),
+        *(review_paths.gate_rel(run_id, number) for number in range(1, p4.LAST_GENERATION + 1)),
+        review_paths.receipt_rel(receipt_id),
+        review_paths.supersession_rel(receipt_id),
+    ]
+
+
+def _p4_bind_decision(op: _Op, mutation: Mutation) -> p4.HumanDecision | None:
+    """G-4: the Human decision this invocation carries, bound once in current-cycle owner material."""
+    decision = op.review.human_decision
+    if decision is None:
+        return None
+    record = decision.to_record()
+    bound = mutation.note(NOTE_P4_DECISION)
+    if bound is None:
+        mutation.set_note(NOTE_P4_DECISION, record)
+    elif bound != record:
+        raise p4.stop(
+            p4.CODE_HUMAN_DECISION_INVALID,
+            f"the planning mutation {mutation.id} already bound Human decision {bound.get('decision_id')!r}, and this "
+            f"invocation carries {decision.decision_id!r}; one owner mutation binds one decision",
+        )
+    return decision
+
+
+def _p4_task_inputs(
+    op: _Op, run_id: str, task_ids: list[str], candidate: dict[str, Any], snapshot: records.CandidateSnapshot,
+    context: dict[str, Any], requirement: dict[str, Any], generation: int, succession: dict[str, Any] | None,
+    set_aside: list[dict[str, Any]], decision: p4.HumanDecision | None,
+) -> list[records.TaskInput]:
+    found = []
+    for task_id, binding in zip(task_ids, _p4_discovery_bindings(op)):
+        envelope = p4.discovery_request(
+            review_contract=planning.P4_CONTRACT, review_kind=op.kind.review_kind, viewpoint=binding.viewpoint,
+            candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
+            succession=succession, set_aside_runs=set_aside, human_decision=decision,
+        )
+        found.append(p4.task_input(
+            task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
+            actor_identity=binding.identity, actor_version=binding.version, envelope=envelope,
+            candidate_hash=snapshot.candidate_hash, candidate_material_digest=serialize.digest(snapshot.to_record()),
+            review_context_hash=serialize.digest(context), accepted_generation=p4.DISCOVERY_ACCEPT_GENERATION,
+        ))
+    return found
+
+
+def _p4_reserve_run_ids(op: _Op, mutation: Mutation, run_key: str) -> tuple[str, list[str], str, str]:
+    run_id = mutation.reserve_id(run_key, "review_run")
+    task_ids = [mutation.reserve_id(gate.review_task_key(run_id, binding.task_slot), "review_task")
+                for binding in _p4_discovery_bindings(op)]
+    receipt_id = mutation.reserve_id(gate.review_receipt_key(run_id, p4.SEAL_GENERATION), "review_receipt")
+    consumption_id = mutation.reserve_id(gate.review_consumption_key(receipt_id), "review_consumption")
+    mutation.extend_scope(files=[review_paths.consumption_rel(consumption_id)])
+    return run_id, task_ids, receipt_id, consumption_id
+
+
+def _setup_new_run_p4(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> _Run:
+    """The P4 freeze of a new Run: v1's steps 1-2 unchanged, then the P4 Context, requests and IDs (§27.8)."""
+    store = op.store
+    if mutation.note(NOTE_DISCOVERY) is None:
+        outcome = discovery
+        if outcome is None:
+            outcome = _discover(op)
+            if outcome.recoverable is not None:
+                raise _reconcile(
+                    f"canonical recovery discovery now finds Review Run {outcome.recoverable.review_run_id} recoverable "
+                    f"for this invocation; the planning mutation {mutation.id} names a new Run and is not rewritten",
+                    "review_discovery_changed",
+                )
+        mutation.set_note(NOTE_DISCOVERY, {"set_aside": list(outcome.set_aside)})
+    set_aside = list((mutation.note(NOTE_DISCOVERY) or {}).get("set_aside") or [])
+    _require_known_reservations_p4(op, mutation)
+    candidate, snapshot, first_id, head = _freeze_candidate(op, mutation)
+    context = planning.context_record_p4(store.workline_root(), op.kind.review_kind)
+    evidence = planning.evidence_record(first_id, phase_entry=not op.roadmap_kind, remote=destination is not None)
+    requirement = _p4_requirement(op, _committed_or_stop(store, head))
+    decision = _p4_bind_decision(op, mutation)
+    target = candidate_target(candidate)
+    run_id, task_ids, receipt_id, consumption_id = _p4_reserve_run_ids(
+        op, mutation, gate.review_run_key(op.kind.review_kind, target)
+    )
+    _require_known_reservations_p4(op, mutation)
+    records_paths = _p4_record_paths(run_id, candidate, task_ids, receipt_id) + [review_paths.consumption_rel(consumption_id)]
+    gate.require_committable(store, records_paths)
+    owned = sorted(set(registration_paths(candidate) + records_paths))
+    git_persistence_preflight(store, owned, sorted(set(records_paths + checkout.committed_review_paths(store))))
+    checkout.require_namespace_readable(store)
+    gitops.ensure_separable_before_effects(mutation, owned)
+    if destination is not None:
+        from .review import publication
+
+        publication.require_barrier_clear(store.root, head)
+    _note_binding(store, mutation)
+    task_inputs = _p4_task_inputs(op, run_id, task_ids, candidate, snapshot, context, requirement, 1, None, set_aside,
+                                  decision)
+    return _Run(run_id, task_ids[0], receipt_id, consumption_id, frozen={
+        "candidate": candidate, "snapshot": snapshot, "task_inputs": task_inputs, "evidence": evidence,
+        "context": context, "target": target, "write_snapshot": True,
+    })
+
+
+def _p4_accept(op: _Op, mutation: Mutation, run: _Run) -> None:
+    """G1: the Candidate snapshot (when new), every discovery TaskInput and the open gate, together (§27.8)."""
+    frozen = run.frozen or {}
+    task_inputs: list[records.TaskInput] = frozen["task_inputs"]
+    candidate = frozen["candidate"]
+    required = [(found.task_slot, found.task_id) for found in task_inputs]
+    gate_one = records.GateGeneration(
+        review_run_id=run.review_run_id, generation=1, previous_generation=None, previous_digest=None,
+        review_kind=op.kind.review_kind, target_identity=frozen["target"], operation_identity=op.operation_identity,
+        candidate_hash=planning.candidate_hash(candidate), review_context_hash=serialize.digest(frozen["context"]),
+        effective_policy_hash=p4.policy_hash(), evidence_digest=serialize.digest(frozen["evidence"]),
+        coverage_digest=serialize.digest(p4.coverage_record(required, [])),
+        raw_report_set_digest=serialize.digest(p4.report_set_record([])),
+        adjudication_digest=serialize.digest(p4.pending_adjudication_record()),
+        obligation_digest=serialize.digest(p4.obligations_record(None)),
+        accepted_tasks=tuple(p4.accepted_descriptor(found) for found in task_inputs), settled_tasks=(),
+        status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
+    )
+    extra: list[tuple[str, dict[str, Any]]] = []
+    if frozen.get("write_snapshot"):
+        snapshot = frozen["snapshot"]
+        extra.append((review_paths.candidate_snapshot_rel(snapshot.candidate_hash), snapshot.to_record()))
+    extra += [(review_paths.task_input_rel(found.task_id), found.to_record()) for found in task_inputs]
+    _start_generation(op.store, mutation, run, op.kind.review_kind, 1, gate_one, extra,
+                      contract=planning.P4_CONTRACT, transition=p4.TRANSITION_ACCEPT)
+
+
+# --------------------------------------------------------------------------- P4 currency (G-1)
+
+def _p4_currency(op: _Op, chain: Any, base: str, reserved: dict[str, str]) -> Currency:
+    """Currency of a P4 Run on ``base``: Context, Policy, requirement, declared base, then the Candidate itself.
+
+    Candidate generation 1 is rebuilt from the caller's request exactly as v1
+    does. A repaired Candidate (generation > 1) is never rebuilt from the
+    Candidate-N request: it is proven from its immutable Repair Result, its
+    complete stored snapshot, the successor linkage, the current declared base,
+    Context, Policy and requirement, and the planning Candidate validator (G-1).
+    """
+    store = op.store
+    material = _run_material(op, chain)
+    first = chain.generations[0]
+    envelope = _p4_envelope(store, chain)
+    kind = material["review_kind"]
+    context = planning.context_record_p4(store.workline_root(), kind)
+    if serialize.digest(context) != first.review_context_hash:
+        return Currency("stale", planning.STALE_CONTEXT)
+    if p4.policy_hash() != first.effective_policy_hash:
+        return Currency("stale", planning.STALE_POLICY)
+    try:
+        view = committed_view(store, base)
+    except (CommittedReadError, ValidationError) as exc:
+        return Currency("mismatch", f"the committed view of {base} cannot be read: {exc}")
+    content = planning.candidate_content(material)
+    try:
+        found_base = declared_base(view, content)
+    except _NotInBase as exc:
+        return Currency("stale", planning.STALE_DECLARED_BASE) if exc.entity_id else Currency("mismatch", str(exc))
+    if serialize.canonical_data(found_base) != material["declared_base"]:
+        return Currency("stale", planning.STALE_DECLARED_BASE)
+    if _p4_requirement(op, view) != envelope.get("requirement"):
+        return Currency("stale", planning.STALE_REQUIREMENT)
+    if envelope.get("succession") is None:
+        try:
+            rebuilt = rebuild_content(kind, op.request, reserved, view, content.get("phase_id"))
+            if kind == planning.KIND_PHASE_ENTRY:
+                projected = project_on(store, material, base)
+                rebuilt["canonical_first_work"] = first_work_of(
+                    r9_selection(projected.view, content["phase_id"]), rebuilt, op.entry_key
+                )
+            record = planning.candidate_record(kind, rebuilt, found_base)
+        except (KeyError, TypeError, ValidationError, StopError, ExpectedUnavailable, _NotInBase) as exc:
+            return Currency("mismatch", f"the Candidate cannot be rebuilt: {exc}")
+        if record != material:
+            return Currency("mismatch", "the rebuilt Candidate is not the reviewed one")
+        return Currency("current")
+    first_gate = chain.generations[0]
+    problems = _p4_linkage_problems(
+        op, envelope, first_gate.candidate_hash,
+        (first_gate.operation_identity, first_gate.target_identity, first_gate.review_kind),
+    )
+    if problems:
+        return Currency("mismatch", "the repaired Candidate's linkage: " + "; ".join(problems))
+    if any(reserved.get(key) != identifier for key, identifier, _ in reservations_of(material)):
+        return Currency("mismatch", "the repaired Candidate names identities this planning mutation did not reserve")
+    problem = _p4_validator_problem(op, material, base)
+    if problem is not None:
+        return Currency("mismatch", problem)
+    return Currency("current")
+
+
+def _p4_validator_problem(op: _Op, material: dict[str, Any], base: str) -> str | None:
+    """The normal planning Candidate validator over a stored Candidate on ``base`` (G-1 item 8)."""
+    try:
+        planning.require_planning_candidate(material, "the Candidate")
+        projected = project_on(op.store, material, base)
+    except (ValidationError, ExpectedUnavailable) as exc:
+        return f"the Candidate does not validate: {exc}"
+    problems = validate_structure(projected.view)
+    if problems:
+        return "the Candidate's projection fails the structure postcheck: " + "; ".join(p.message for p in problems)
+    if semantic_projection(material, projected.view) != reviewed_projection(material):
+        return "what the writer would persist does not read back as the Candidate"
+    content = planning.candidate_content(material)
+    if material["review_kind"] == planning.KIND_PHASE_ENTRY:
+        expected = first_work_of(r9_selection(projected.view, content["phase_id"]), content, op.entry_key)
+        if expected != content.get("canonical_first_work"):
+            return "the Candidate's canonical first Work is not the R9 selection on the base"
+    return None
+
+
+def _p4_linkage_problems(op: _Op, envelope: dict[str, Any], candidate_hash: str,
+                         identities: tuple[str, str, str]) -> list[str]:
+    """G-1 items 1-4 and 9: the immutable Repair Result, the stored N+1 snapshot and the successor linkage agree.
+
+    ``envelope`` is the successor's discovery request, ``candidate_hash`` its
+    Candidate and ``identities`` its (operation, target, kind). Missing,
+    contradictory or stale linkage is a problem; nothing is inferred.
+    """
+    review = ReviewStore(op.store)
+    succession = envelope.get("succession") or {}
+    try:
+        predecessor_id = str(succession.get("predecessor_review_run_id"))
+        predecessor = review.gate_chain(predecessor_id)
+        batch = review.read_repair_batch(str(succession.get("repair_batch_id")))
+        result = review.read_repair_result(batch.repair_batch_id)
+        result_digest = review.repair_result_digest(batch.repair_batch_id)
+        predecessor_envelope = _p4_envelope(op.store, predecessor) if predecessor is not None else {}
+    except (ValidationError, TypeError) as exc:
+        return [f"the predecessor's records do not read: {exc}"]
+    if predecessor is None or p4.shape_of(predecessor) != p4.SHAPE_REPAIR or len(predecessor.generations) != 6:
+        return ["the predecessor Run has not settled its repair"]
+    problems = p4.linkage_problems(
+        batch, result, source_run_id=predecessor_id, source_candidate_hash=predecessor.generations[0].candidate_hash,
+        source_candidate_generation=int(predecessor_envelope.get("candidate_generation") or 0),
+        snapshot_hash=candidate_hash if review.candidate_snapshot_exists(candidate_hash) else None,
+        successor_envelope=envelope, repair_result_digest=result_digest,
+    )
+    repair = p4.repair_task(predecessor)
+    settled = None if repair is None else p4.settled_of(predecessor, str(repair["task_id"]))
+    if settled is None or settled["result_digest"] != result_digest:
+        problems.append("the predecessor's generation 6 does not settle this Repair Result")
+    first = predecessor.generations[0]
+    if (first.operation_identity, first.target_identity, first.review_kind) != identities:
+        problems.append("the successor's operation identity, target or kind is not the predecessor's")
+    return problems
+
+
+def _p4_run_currency(op: _Op, mutation: Mutation, chain: Any, base: str) -> Currency:
+    """P4 currency with the planning mutation's own reservations (recorded, or bound from the recovered Run)."""
+    return _p4_currency(op, chain, base, _reserved_map(op, mutation, _run_material(op, chain)))
+
+
+def _p4_recovered_bindings(op: _Op, found: Any) -> list[tuple[str, str, str]]:
+    """``(key, id, kind)`` a P4 recovery binds from canonical records: domain IDs, the Run, every task, the Findings,
+    the Repair Batch and the sealed Receipt - so the resumed Run reserves nothing it already has."""
+    review = ReviewStore(op.store)
+    chain = found.chain
+    run_id = found.review_run_id
+    bindings = list(reservations_of(found.material))
+    bindings.append((gate.review_run_key(op.kind.review_kind, candidate_target(found.material)), run_id, "review_run"))
+    for task in chain.latest.accepted_tasks:
+        bindings.append((gate.review_task_key(run_id, str(task["task_slot"])), str(task["task_id"]), "review_task"))
+    if review.adjudication_exists(run_id):
+        for ordinal, finding in enumerate(review.read_adjudication(run_id).findings, start=1):
+            bindings.append((gate.review_finding_key(run_id, ordinal), str(finding["finding_id"]), "review_finding"))
+    repair = p4.repair_task(chain)
+    if repair is not None:
+        batch_id = str(review.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
+        bindings.append((gate.review_repair_batch_key(run_id), batch_id, "review_repair_batch"))
+    for generation in chain.generations:
+        if generation.sealed and generation.receipt_id:
+            bindings.append((gate.review_receipt_key(run_id, p4.SEAL_GENERATION), generation.receipt_id, "review_receipt"))
+    return bindings
+
+
+def _setup_recovery_p4(op: _Op, mutation: Mutation, destination: Any, discovery: Any) -> _Run:
+    """A P4 recovery planning mutation: the recovered Run's canonical reservations bound, then the usual checks."""
+    from .committed_view import committed_view as load_committed
+    from .mutation import _bind_recovered_reservations
+
+    store = op.store
+    run_id = str(mutation.invocation[planning.MARKER_RECOVERY])
+    review = ReviewStore(store)
+    if mutation.note(NOTE_RECOVERY_BINDING) is None:
+        if mutation.record.get("reserved_ids"):
+            raise _reconcile(
+                f"the recovery planning mutation {mutation.id} holds reservations without its recovered binding",
+                "review_recovery_reservation_conflict",
+            )
+        outcome = _discover(op)
+        if outcome.recoverable is None or outcome.recoverable.review_run_id != run_id:
+            raise _reconcile(f"Review Run {run_id} is no longer the one recoverable Run for this invocation",
+                             "review_discovery_changed")
+        bindings = _p4_recovered_bindings(op, outcome.recoverable)
+        head = gitcmd.head_commit(store.root) or ""
+        used = _used_ids(ProjectView.load(store)) | _used_ids(load_committed(store, head))
+        _bind_recovered_reservations(
+            mutation, bindings, used,
+            (NOTE_RECOVERY_BINDING, {"review_run_id": run_id, "latest_generation": outcome.recoverable.chain.latest.generation}),
+        )
+    else:
+        chain = review.gate_chain(run_id)
+        if chain is None:
+            raise _reconcile(f"Review Run {run_id} has no chain", "review_recovery_reservation_conflict")
+        material = review.read_candidate_snapshot(chain.generations[0].candidate_hash).material or {}
+        wanted = {key: identifier for key, identifier, _ in _p4_recovered_bindings(op, _RecoverySource(run_id, chain, material))}
+        recorded = mutation.record.get("reserved_ids") or {}
+        if any(recorded.get(key) != identifier for key, identifier in wanted.items()):
+            raise _reconcile(
+                f"the recovery planning mutation {mutation.id}'s bound reservations are not the canonical ones of "
+                f"Review Run {run_id}",
+                "review_recovery_reservation_conflict",
+            )
+    chain = review.gate_chain(run_id)
+    if chain is None:
+        raise _reconcile(f"Review Run {run_id} has no chain", "review_chain_invalid")
+    material = review.read_candidate_snapshot(chain.generations[0].candidate_hash).material or {}
+    receipt_id = mutation.reserve_id(gate.review_receipt_key(run_id, p4.SEAL_GENERATION), "review_receipt")
+    consumption_id = mutation.reserve_id(gate.review_consumption_key(receipt_id), "review_consumption")
+    entity_ids = [identifier for _, identifier, kind_name in reservations_of(material) if kind_name != "relation"]
+    mutation.extend_scope(entities=entity_ids, files=[review_paths.consumption_rel(consumption_id)])
+    task_ids = [str(task["task_id"]) for task in p4.discovery_tasks(chain)]
+    records_paths = _p4_record_paths(run_id, material, task_ids, receipt_id) + [review_paths.consumption_rel(consumption_id)]
+    gate.require_committable(store, records_paths)
+    owned = sorted(set(registration_paths(material) + records_paths))
+    git_persistence_preflight(store, owned, sorted(set(records_paths + checkout.committed_review_paths(store))))
+    checkout.require_namespace_readable(store)
+    gitops.ensure_separable_before_effects(mutation, owned)
+    if destination is not None:
+        from .review import publication
+
+        publication.require_barrier_clear(store.root, gitcmd.head_commit(store.root))
+    _note_binding(store, mutation)
+    return _p4_run(op, mutation, run_id)
+
+
+# --------------------------------------------------------------------------- P4 generations 1-6
+
+def _p4_launch_discovery(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> ReviewedPlanningResult | None:
+    """G1 -> G2: every accepted discovery task launched to its bound actor, then the raw reports and G2 (§27.9)."""
+    store = op.store
+    review = ReviewStore(store)
+    first = chain.latest
+    tasks = list(first.accepted_tasks)
+    record_paths = [review_paths.candidate_snapshot_rel(first.candidate_hash), review_paths.gate_rel(run.review_run_id, 1)]
+    record_paths += [review_paths.task_input_rel(str(task["task_id"])) for task in tasks]
+    require_committed_records(store, {relative: (review.read_bytes(relative) or b"") for relative in record_paths})
+    material = review.read_candidate_snapshot(first.candidate_hash).material or {}
+    for task in tasks:
+        problems = [message for _, message in review.provenance_problems(task, 1)]
+        if not problems:
+            problems = planning.task_input_problems_p4(
+                review.read_task_input(str(task["task_id"])), material, first.candidate_hash, first.review_context_hash
+            )
+        if problems:
+            raise _reconcile("the accepted discovery task's provenance: " + "; ".join(problems), "review_task_invalid")
+    require_binding(store, mutation)
+    found = _p4_run_currency(op, mutation, chain, gitcmd.head_commit(store.root) or "")
+    if found.stale:
+        return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
+    if not found.current:
+        raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
+    bindings = {binding.task_slot: binding for binding in op.review.discovery}
+    settled: list[dict[str, Any]] = []
+    reports: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        task_id = str(task["task_id"])
+        binding = bindings.get(str(task["task_slot"]))
+        if binding is None or (binding.identity, binding.version) != (task["reviewer_identity"], task["reviewer_version"]):
+            raise StopError(
+                f"discovery task {task_id} ({task['task_slot']}) was accepted for {task['reviewer_identity']} "
+                f"{task['reviewer_version']}, and this invocation binds no such actor to that viewpoint; nothing is launched",
+                code="review_reviewer_mismatch",
+            )
+        task_input = review.read_task_input(task_id)
+        launched = p4.P4DiscoveryTask(
+            task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind,
+            review_kind=first.review_kind, viewpoint=binding.viewpoint,
+            request_envelope=serialize.canonical_data(task_input.request_envelope),
+            request_digest=task_input.request_digest, candidate_hash=task_input.candidate_hash,
+            review_context_hash=task_input.review_context_hash, effective_policy_hash=task_input.effective_policy_hash,
+        )
+        try:
+            returned = binding.actor(launched)
+        except Exception as exc:
+            raise StopError(f"the discovery actor raised for task {task_id}: {exc}; nothing is settled",
+                            code="review_reviewer_failed") from exc
+        report = p4.report_record(returned, task, review_kind=first.review_kind, review_contract=planning.P4_CONTRACT)
+        result_digest = serialize.digest(report)
+        gate.validate_settlement(store, run.review_run_id, task_id, result_digest, str(returned.reviewer_identity))
+        settled.append({"task_id": task_id, "status": p4.settled_status(report), "result_digest": result_digest,
+                        "settled_generation": 2})
+        reports[task_id] = report
+    found = _p4_run_currency(op, mutation, chain, gitcmd.head_commit(store.root) or "")
+    if found.stale:
+        return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
+    if not found.current:
+        raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
+    required = [(str(task["task_slot"]), str(task["task_id"])) for task in tasks]
+    gate_two = replace(
+        first, generation=2, previous_generation=1, previous_digest=chain.latest_digest,
+        coverage_digest=serialize.digest(p4.coverage_record(required, settled, reports)),
+        raw_report_set_digest=serialize.digest(p4.report_set_record(settled)), settled_tasks=tuple(settled),
+    )
+    extra = [(review_paths.report_rel(task["result_digest"]), reports[task["task_id"]]) for task in settled]
+    _start_generation(store, mutation, run, first.review_kind, 2, gate_two, extra,
+                      contract=planning.P4_CONTRACT, transition=p4.TRANSITION_SETTLE)
+    return None
+
+
+def _p4_reports(review: ReviewStore, chain: Any) -> list[tuple[str, str, dict[str, Any]]]:
+    """The settled discovery reports, read canonically, in the order generation 2 settled them."""
+    discovery_ids = {str(task["task_id"]) for task in p4.discovery_tasks(chain)}
+    found = []
+    for task in chain.generation(2).settled_tasks:
+        if str(task["task_id"]) in discovery_ids:
+            digest = str(task["result_digest"])
+            found.append((str(task["task_id"]), digest, serialize.canonical_data(review.read_report(digest).to_record())))
+    return found
+
+
+def _p4_prior(op: _Op, chain: Any) -> p4.PriorCycle | None:
+    """The current-cycle predecessor of a successor Run, walked back through explicit linkage only (§12.11)."""
+    review = ReviewStore(op.store)
+    envelope = _p4_envelope(op.store, chain)
+    succession = envelope.get("succession")
+    if succession is None:
+        return None
+    try:
+        predecessor_id = str(succession["predecessor_review_run_id"])
+        predecessor = review.gate_chain(predecessor_id)
+        adjudication = review.read_adjudication(predecessor_id)
+        adjudication_digest = review.adjudication_digest(predecessor_id)
+        batch = review.read_repair_batch(str(succession["repair_batch_id"]))
+        result = review.read_repair_result(batch.repair_batch_id)
+        result_digest = review.repair_result_digest(batch.repair_batch_id)
+    except (ValidationError, KeyError, TypeError) as exc:
+        raise p4.reconcile(f"the predecessor of Review Run {chain.review_run_id} does not read: {exc}",
+                           p4.REASON_LINKAGE_INVALID) from exc
+    if predecessor is None:
+        raise p4.reconcile(f"the predecessor {predecessor_id} has no chain", p4.REASON_LINKAGE_INVALID)
+    earlier = _p4_prior(op, predecessor)
+    history = (() if earlier is None else earlier.bc_history) + (p4.bc_surfaces(adjudication),)
+    return p4.PriorCycle(predecessor_id, adjudication, adjudication_digest, batch, result, result_digest, history)
+
+
+def _p4_accept_adjudication(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> None:
+    """G3: one adjudication TaskInput built from canonical material only, accepted before any launch (§27.10)."""
+    store = op.store
+    second = chain.latest
+    review = ReviewStore(store)
+    envelope = _p4_envelope(store, chain)
+    reports = _p4_reports(review, chain)
+    prior = _p4_prior(op, chain)
+    evidence_ids = [eid for _, _, report in reports for eid in report["coverage"]["evidence_ids"]]
+    request = p4.adjudication_request(
+        review_contract=planning.P4_CONTRACT, review_kind=second.review_kind, review_run_id=run.review_run_id,
+        candidate_hash=second.candidate_hash, candidate_generation=int(envelope["candidate_generation"]),
+        review_context_hash=second.review_context_hash, requirement=envelope["requirement"],
+        reports=[{"task_id": t, "result_digest": d} for t, d, _ in reports],
+        prior=p4.NO_PRIOR if prior is None else prior.prior_record(), evidence_ids=evidence_ids,
+    )
+    task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_ADJUDICATOR), "review_task")
+    adjudicator = op.review.adjudicator
+    task_input = p4.task_input(
+        task_id=task_id, task_slot=p4.SLOT_ADJUDICATOR, task_kind=p4.TASK_KIND_ADJUDICATION,
+        actor_identity=adjudicator.identity, actor_version=adjudicator.version, envelope=request,
+        candidate_hash=second.candidate_hash,
+        candidate_material_digest=review.candidate_material_digest(second.candidate_hash),
+        review_context_hash=second.review_context_hash, accepted_generation=p4.ADJUDICATION_ACCEPT_GENERATION,
+    )
+    gate_three = replace(
+        second, generation=3, previous_generation=2, previous_digest=chain.latest_digest,
+        accepted_tasks=second.accepted_tasks + (p4.accepted_descriptor(task_input),),
+    )
+    _start_generation(store, mutation, run, second.review_kind, 3, gate_three,
+                      [(review_paths.task_input_rel(task_id), task_input.to_record())],
+                      contract=planning.P4_CONTRACT, transition=p4.TRANSITION_ACCEPT)
+
+
+def _p4_adjudicate(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> ReviewedPlanningResult | None:
+    """G3 -> G4: the adjudicator, launched only to its bound identity; its return validated and normalized (§27.11)."""
+    store = op.store
+    review = ReviewStore(store)
+    third = chain.latest
+    descriptor = p4.adjudication_task(chain)
+    assert descriptor is not None
+    task_id = str(descriptor["task_id"])
+    reports = _p4_reports(review, chain)
+    wanted = [review_paths.task_input_rel(task_id), review_paths.gate_rel(run.review_run_id, 3)]
+    wanted += [review_paths.report_rel(digest) for _, digest, _ in reports]
+    require_committed_records(store, {relative: (review.read_bytes(relative) or b"") for relative in wanted})
+    problems = review.provenance_problems(descriptor, 3)
+    if problems:
+        raise _reconcile("the accepted adjudication task's provenance: " + "; ".join(m for _, m in problems),
+                         "review_task_invalid")
+    require_binding(store, mutation)
+    found = _p4_run_currency(op, mutation, chain, gitcmd.head_commit(store.root) or "")
+    if found.stale:
+        return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
+    if not found.current:
+        raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
+    binding = op.review.adjudicator
+    if (binding.identity, binding.version) != (descriptor["reviewer_identity"], descriptor["reviewer_version"]):
+        raise StopError(
+            f"adjudication task {task_id} was accepted for {descriptor['reviewer_identity']} "
+            f"{descriptor['reviewer_version']}, and this invocation binds {binding.identity} {binding.version}; the "
+            "adjudicator is not launched",
+            code="review_reviewer_mismatch",
+        )
+    task_input = review.read_task_input(task_id)
+    prior = _p4_prior(op, chain)
+    material = _run_material(op, chain)
+    launched = p4.P4AdjudicationTask(
+        task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind, review_kind=third.review_kind,
+        request_envelope=serialize.canonical_data(task_input.request_envelope), request_digest=task_input.request_digest,
+        candidate_hash=third.candidate_hash, review_context_hash=third.review_context_hash,
+        effective_policy_hash=third.effective_policy_hash, candidate=material,
+        reports=tuple(report for _, _, report in reports),
+        prior_findings=() if prior is None else tuple(prior.adjudication.findings),
+        prior_repair_batch=None if prior is None else prior.repair_batch.to_record(),
+        prior_repair_result=None if prior is None else prior.repair_result.to_record(),
+    )
+    try:
+        returned = binding.actor(launched)
+    except Exception as exc:
+        raise p4.stop(p4.CODE_ADJUDICATOR_FAILED,
+                      f"the adjudicator raised for task {task_id}: {exc}; nothing is settled") from exc
+    normalized = p4.normalize_adjudication(returned, descriptor, reports, prior)
+    finding_ids = [
+        mutation.reserve_id(gate.review_finding_key(run.review_run_id, ordinal), "review_finding")
+        for ordinal in range(1, len(normalized.drafts) + 1)
+    ]
+    envelope = _p4_envelope(store, chain)
+    adjudication = p4.adjudication(
+        normalized, finding_ids, review_run_id=run.review_run_id, gate_record=third,
+        candidate_generation=int(envelope["candidate_generation"]), review_contract=planning.P4_CONTRACT,
+        descriptor=descriptor, reports=reports, prior=prior,
+    )
+    record = adjudication.to_record()
+    digest = serialize.digest(record)
+    gate.validate_settlement(store, run.review_run_id, task_id, digest, str(returned.adjudicator_identity))
+    found = _p4_run_currency(op, mutation, chain, gitcmd.head_commit(store.root) or "")
+    if found.stale:
+        return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
+    if not found.current:
+        raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
+    settled = {"task_id": task_id, "status": records.TASK_SETTLED_OK, "result_digest": digest, "settled_generation": 4}
+    gate_four = replace(
+        third, generation=4, previous_generation=3, previous_digest=chain.latest_digest, adjudication_digest=digest,
+        obligation_digest=serialize.digest(p4.obligations_record(adjudication)),
+        settled_tasks=third.settled_tasks + (settled,),
+    )
+    _start_generation(store, mutation, run, third.review_kind, 4, gate_four,
+                      [(review_paths.adjudication_rel(run.review_run_id), record)],
+                      contract=planning.P4_CONTRACT, transition=p4.TRANSITION_SETTLE)
+    return None
+
+
+def _p4_seal(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> None:
+    """G5 seal: the Receipt at generation 5 (§27.12)."""
+    fourth = chain.latest
+    receipt_id = mutation.reserve_id(gate.review_receipt_key(run.review_run_id, p4.SEAL_GENERATION), "review_receipt")
+    run.receipt_id = receipt_id
+    gate_five = replace(
+        fourth, generation=5, previous_generation=4, previous_digest=chain.latest_digest,
+        status=records.GATE_STATUS_SEALED, receipt_id=receipt_id,
+        authorized_operation_stage=op.kind.authorized_operation_stage,
+    )
+    receipt = records.Receipt(
+        receipt_id=receipt_id, review_run_id=run.review_run_id, review_generation=p4.SEAL_GENERATION,
+        review_kind=fourth.review_kind, target_identity=fourth.target_identity,
+        operation_identity=fourth.operation_identity, authorized_candidate_hash=fourth.candidate_hash,
+        review_context_hash=fourth.review_context_hash, effective_policy_hash=fourth.effective_policy_hash,
+        coverage_hash=fourth.coverage_digest, adjudication_hash=fourth.adjudication_digest,
+        obligation_digest=fourth.obligation_digest, unresolved_obligations=0,
+        authorized_operation_stage=op.kind.authorized_operation_stage,
+    )
+    _start_generation(op.store, mutation, run, fourth.review_kind, 5, gate_five,
+                      [(review_paths.receipt_rel(receipt_id), receipt.to_record())], receipt_id=receipt_id,
+                      contract=planning.P4_CONTRACT, transition=p4.TRANSITION_SEAL)
+
+
+def _p4_invalidate(op: _Op, mutation: Mutation, run: _Run, chain: Any, reason_detail: str) -> None:
+    """G-3: a stale P4 seal is invalidated by G6 + Supersession of the G5 Receipt, never repaired."""
+    fifth = chain.latest
+    receipt_id = str(fifth.receipt_id)
+    planning.context_record_p4(op.store.workline_root(), fifth.review_kind)  # unavailable -> the STOP, never stale
+    gate_six = replace(
+        fifth, generation=6, previous_generation=5, previous_digest=chain.latest_digest,
+        evidence_digest=serialize.digest(p4.invalidation_evidence_record(receipt_id, p4.INVALIDATION_STALE_RECEIPT)),
+        status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
+    )
+    supersession = records.Supersession(receipt_id, run.review_run_id, 6, p4.INVALIDATION_STALE_RECEIPT)
+    _start_generation(op.store, mutation, run, fifth.review_kind, 6, gate_six,
+                      [(review_paths.supersession_rel(receipt_id), supersession.to_record())],
+                      receipt_id=receipt_id, reason=reason_detail,
+                      contract=planning.P4_CONTRACT, transition=p4.TRANSITION_INVALIDATE)
+
+
+def _p4_accept_repair(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> None:
+    """G5 repair branch: the one Repair Batch and its repair TaskInput, accepted together, no Receipt (§27.15)."""
+    store = op.store
+    review = ReviewStore(store)
+    fourth = chain.latest
+    adjudication = review.read_adjudication(run.review_run_id)
+    material = _run_material(op, chain)
+    batch_id = mutation.reserve_id(gate.review_repair_batch_key(run.review_run_id), "review_repair_batch")
+    batch = p4.repair_batch(adjudication, review.adjudication_digest(run.review_run_id), repair_batch_id=batch_id,
+                            allowed_result_surface=planning.allowed_result_surface(material))
+    envelope = _p4_envelope(store, chain)
+    request = p4.repair_request(
+        review_contract=planning.P4_CONTRACT, review_kind=fourth.review_kind, review_run_id=run.review_run_id,
+        candidate_hash=fourth.candidate_hash, candidate_generation=int(envelope["candidate_generation"]),
+        requirement=envelope["requirement"], repair_batch_id=batch_id,
+        repair_batch_digest=serialize.digest(batch.to_record()),
+        allowed_result_surface=batch.allowed_result_surface, strategy=batch.strategy, evidence_constraints=(),
+    )
+    task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_REPAIR), "review_task")
+    repair = op.review.repair
+    task_input = p4.task_input(
+        task_id=task_id, task_slot=p4.SLOT_REPAIR, task_kind=p4.TASK_KIND_REPAIR, actor_identity=repair.identity,
+        actor_version=repair.version, envelope=request, candidate_hash=fourth.candidate_hash,
+        candidate_material_digest=review.candidate_material_digest(fourth.candidate_hash),
+        review_context_hash=fourth.review_context_hash, accepted_generation=p4.REPAIR_ACCEPT_GENERATION,
+    )
+    gate_five = replace(
+        fourth, generation=5, previous_generation=4, previous_digest=chain.latest_digest,
+        accepted_tasks=fourth.accepted_tasks + (p4.accepted_descriptor(task_input),),
+    )
+    _start_generation(store, mutation, run, fourth.review_kind, 5, gate_five, [
+        (review_paths.repair_batch_rel(batch_id), batch.to_record()),
+        (review_paths.task_input_rel(task_id), task_input.to_record()),
+    ], contract=planning.P4_CONTRACT, transition=p4.TRANSITION_ACCEPT)
+
+
+def _p4_freeze_repaired(op: _Op, mutation: Mutation, source: dict[str, Any], proposal: object,
+                        head: str) -> tuple[dict[str, Any], records.CandidateSnapshot]:
+    """Candidate N+1 from a repair proposal, through the planning Candidate builder and validator (§27.16).
+
+    The proposal is data, never authority: its content must keep every reserved
+    identity, its declared base is recomputed on HEAD's committed view, a Phase
+    entry's canonical first Work is the R9 selection there, and what the writer
+    would persist must read back as it. No registration happens here.
+    """
+    def invalid(detail: str) -> StopError:
+        return p4.stop(p4.CODE_REPAIR_INVALID, f"the repair proposal is not a complete planning Candidate: {detail}; "
+                       "nothing is settled")
+
+    problems = planning.repaired_candidate_problems(source, proposal)
+    if problems:
+        raise invalid("; ".join(problems))
+    store = op.store
+    committed = _committed_or_stop(store, head)
+    content = serialize.canonical_data(dict(proposal))  # type: ignore[arg-type]
+    if not op.roadmap_kind:
+        content.pop("canonical_first_work", None)
+    try:
+        base = declared_base(committed, content)
+    except _NotInBase as missing:
+        raise invalid(f"it names {missing.entity_id}, which HEAD's committed view does not hold") from None
+    try:
+        projected = project_on_strict(store, planning.candidate_record(op.kind.review_kind, content, base), head)
+    except (ValidationError, StopError) as exc:
+        raise invalid(str(exc)) from exc
+    structure = validate_structure(projected.view)
+    if structure:
+        raise invalid("postcheck: " + "; ".join(f"{p.code}: {p.message}" for p in structure))
+    if not op.roadmap_kind:
+        content["canonical_first_work"] = first_work_of(
+            r9_selection(projected.view, op.phase_id or ""), content, op.entry_key
+        )
+    candidate = planning.candidate_record(op.kind.review_kind, content, base)
+    if semantic_projection(candidate, projected.view) != reviewed_projection(candidate):
+        raise invalid("what the writer would persist does not read back as the repaired Candidate")
+    reserved = _reserved_map(op, mutation, candidate)
+    if any(reserved.get(key) != identifier for key, identifier, _ in reservations_of(candidate)):
+        raise invalid("it names identities this planning mutation did not reserve")
+    snapshot = planning.snapshot_for(candidate)
+    try:
+        representable = serialize.canonical_roundtrips(snapshot.to_record())
+    except Exception as exc:
+        raise invalid(f"it cannot be represented canonically: {exc}") from exc
+    if not representable:
+        raise invalid("its canonical text does not read back")
+    return candidate, snapshot
+
+
+def _p4_repair(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> ReviewedPlanningResult | None:
+    """G5 -> G6: the repair actor's proposal adopted by the owner into Candidate N+1, then the Repair Result (§27.20)."""
+    store = op.store
+    review = ReviewStore(store)
+    fifth = chain.latest
+    descriptor = p4.repair_task(chain)
+    assert descriptor is not None
+    task_id = str(descriptor["task_id"])
+    task_input = review.read_task_input(task_id)
+    batch_id = str(task_input.request_envelope.get("repair_batch_id"))
+    wanted = [review_paths.task_input_rel(task_id), review_paths.gate_rel(run.review_run_id, 5),
+              review_paths.repair_batch_rel(batch_id)]
+    require_committed_records(store, {relative: (review.read_bytes(relative) or b"") for relative in wanted})
+    problems = review.provenance_problems(descriptor, 5)
+    if problems:
+        raise _reconcile("the accepted repair task's provenance: " + "; ".join(m for _, m in problems),
+                         "review_task_invalid")
+    batch = review.read_repair_batch(batch_id)
+    if review.repair_batch_digest(batch_id) != task_input.request_envelope.get("repair_batch_digest") \
+            or batch.source_review_run_id != run.review_run_id:
+        raise p4.reconcile(f"the repair task of {run.review_run_id} does not bind its Repair Batch", p4.REASON_LINKAGE_INVALID)
+    require_binding(store, mutation)
+    head = gitcmd.head_commit(store.root) or ""
+    found = _p4_run_currency(op, mutation, chain, head)
+    if found.stale:
+        return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
+    if not found.current:
+        raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
+    binding = op.review.repair
+    if (binding.identity, binding.version) != (descriptor["reviewer_identity"], descriptor["reviewer_version"]):
+        raise StopError(
+            f"repair task {task_id} was accepted for {descriptor['reviewer_identity']} {descriptor['reviewer_version']}, "
+            f"and this invocation binds {binding.identity} {binding.version}; the repair actor is not launched",
+            code="review_reviewer_mismatch",
+        )
+    adjudication = review.read_adjudication(run.review_run_id)
+    source = _run_material(op, chain)
+    launched = p4.P4RepairTask(
+        task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind, review_kind=fifth.review_kind,
+        request_envelope=serialize.canonical_data(task_input.request_envelope), request_digest=task_input.request_digest,
+        candidate_hash=fifth.candidate_hash, source_candidate=source, repair_batch=batch.to_record(),
+        findings=tuple(adjudication.finding(finding_id) for finding_id in batch.finding_ids),
+    )
+    try:
+        returned = binding.actor(launched)
+    except Exception as exc:
+        raise p4.stop(p4.CODE_REPAIR_INVALID, f"the repair actor raised for task {task_id}: {exc}; nothing is settled") from exc
+    refused = p4.repair_return_problems(returned, descriptor)
+    if refused:
+        code, message = refused[0]
+        if code == "review_reviewer_mismatch":
+            raise StopError(f"{message}; nothing is settled", code="review_reviewer_mismatch")
+        raise p4.stop(code, f"{message}; nothing is settled")
+    candidate, snapshot = _p4_freeze_repaired(op, mutation, source, returned.proposal, head)
+    envelope = _p4_envelope(store, chain)
+    result = p4.repair_result(
+        batch=batch, source_candidate_generation=int(envelope["candidate_generation"]),
+        result_candidate_hash=snapshot.candidate_hash,
+        result_candidate_material_digest=serialize.digest(snapshot.to_record()), repair_task_id=task_id,
+        returned=returned,
+        evidence=(p4.evidence_reuse("planning-evidence", None, None, prior_identities=(), new_identities=(),
+                                    assumption_invalidated=False),),
+        kind_checks=(p4.P4Verification(P4_KIND_CHECK, "pass"),),
+    )
+    record = result.to_record()
+    digest = serialize.digest(record)
+    gate.validate_settlement(store, run.review_run_id, task_id, digest, str(returned.repair_identity))
+    settled = {"task_id": task_id, "status": records.TASK_SETTLED_OK, "result_digest": digest, "settled_generation": 6}
+    gate_six = replace(fifth, generation=6, previous_generation=5, previous_digest=chain.latest_digest,
+                       settled_tasks=fifth.settled_tasks + (settled,))
+    _start_generation(store, mutation, run, fifth.review_kind, 6, gate_six, [
+        (review_paths.repair_result_rel(batch_id), record),
+        (review_paths.candidate_snapshot_rel(snapshot.candidate_hash), snapshot.to_record()),
+    ], contract=planning.P4_CONTRACT, transition=p4.TRANSITION_SETTLE)
+    return None
+
+
+def _p4_reserve_successor(op: _Op, mutation: Mutation, predecessor: _Run) -> str:
+    """The one deterministic successor of ``predecessor`` (RB3-C1 §11.18.5), with its discovery, Receipt and Consumption."""
+    run_id, _, _, _ = _p4_reserve_run_ids(op, mutation, gate.review_successor_run_key(predecessor.review_run_id))
+    return run_id
+
+
+def _p4_begin_successor(op: _Op, mutation: Mutation, destination: Any, run: _Run,
+                        predecessor_id: str) -> ReviewedPlanningResult | None:
+    """The successor's G1: Candidate N+1 of the predecessor's settled repair, with its explicit linkage (§27.21).
+
+    A Human decision never begins a successor inside the planning mutation that
+    reached HUMAN_WAIT: that mutation ends ``human_wait``, and the later normal
+    invocation carrying the decision begins a new Run (G-4).
+    """
+    store = op.store
+    review = ReviewStore(store)
+    predecessor = review.gate_chain(predecessor_id)
+    if predecessor is None:
+        raise p4.reconcile(f"the predecessor {predecessor_id} of {run.review_run_id} has no chain", p4.REASON_LINKAGE_INVALID)
+    head = gitcmd.head_commit(store.root) or ""
+    committed = _committed_or_stop(store, head)
+    decision = _p4_bind_decision(op, mutation)
+    predecessor_envelope = _p4_envelope(store, predecessor)
+    context = planning.context_record_p4(store.workline_root(), op.kind.review_kind)
+    requirement = _p4_requirement(op, committed)
+    if p4.shape_of(predecessor) == p4.SHAPE_REPAIR and len(predecessor.generations) == p4.REPAIR_SETTLE_GENERATION:
+        repair = p4.repair_task(predecessor)
+        batch_id = str(review.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
+        result = review.read_repair_result(batch_id)
+        result_digest = review.repair_result_digest(batch_id)
+        require_committed_records(store, {
+            relative: (review.read_bytes(relative) or b"")
+            for relative in (review_paths.repair_result_rel(batch_id),
+                             review_paths.candidate_snapshot_rel(result.result_candidate_hash),
+                             review_paths.gate_rel(predecessor_id, p4.REPAIR_SETTLE_GENERATION))
+        })
+        snapshot = review.read_candidate_snapshot(result.result_candidate_hash)
+        candidate = snapshot.material or {}
+        generation = int(predecessor_envelope["candidate_generation"]) + 1
+        succession = p4.succession_record(predecessor_id, predecessor.generations[0].candidate_hash, batch_id,
+                                          result_digest)
+        set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_REPAIRED}]
+        write_snapshot = False
+    else:
+        raise p4.reconcile(
+            f"{run.review_run_id} is reserved as the successor of {predecessor_id}, which has not settled a repair",
+            p4.REASON_LINKAGE_INVALID,
+        )
+    content = planning.candidate_content(candidate)
+    first_work = content.get("canonical_first_work") if not op.roadmap_kind else None
+    evidence = planning.evidence_record(None if first_work is None else first_work["id"],
+                                        phase_entry=not op.roadmap_kind, remote=destination is not None)
+    task_ids = [str(mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot)))
+                for binding in _p4_discovery_bindings(op)]
+    task_inputs = _p4_task_inputs(op, run.review_run_id, task_ids, candidate, snapshot, context, requirement,
+                                  generation, succession, set_aside, decision)
+    # G-1: Candidate N+1 is current only by positive proof, before its Run begins.
+    first = predecessor.generations[0]
+    problems = _p4_linkage_problems(op, task_inputs[0].request_envelope, snapshot.candidate_hash,
+                                    (first.operation_identity, first.target_identity, first.review_kind))
+    if problems:
+        raise p4.reconcile("the repaired Candidate's linkage: " + "; ".join(problems), p4.REASON_LINKAGE_INVALID)
+    problem = _p4_validator_problem(op, candidate, head)
+    if problem is not None:
+        raise _reconcile(f"the repaired Candidate does not validate on HEAD: {problem}", "review_candidate_mismatch")
+    record_paths = [review_paths.task_input_rel(task_id) for task_id in task_ids]
+    record_paths += [review_paths.gate_rel(run.review_run_id, number) for number in range(1, p4.LAST_GENERATION + 1)]
+    gate.require_committable(store, record_paths)
+    run.frozen = {
+        "candidate": candidate, "snapshot": snapshot, "task_inputs": task_inputs, "evidence": evidence,
+        "context": context, "target": predecessor.generations[0].target_identity, "write_snapshot": write_snapshot,
+    }
+    _p4_accept(op, mutation, run)
+    run.frozen = None
+    return None
+
+
+def _p4_human_wait(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> ReviewedPlanningResult:
+    """G-4: HUMAN_WAIT stays a non-authorizing G4; the planning mutation ends ``human_wait``.
+
+    No repair guesses the missing requirement. The later normal invocation that
+    carries the Human decision sets this Run aside as ``human_decision`` at its
+    recovery discovery and begins a new Run with a freshly frozen Candidate.
+    """
+    return _finish(op, mutation, run, STATUS_HUMAN_WAIT, detail=p4.HUMAN_WAIT)
+
+
+def _proceed_p4(op: _Op, mutation: Mutation, destination: Any, run: _Run) -> ReviewedPlanningResult:
+    """The P4 owner loop over the validated chain of the current Run (§27.1)."""
+    review = ReviewStore(op.store)
+    while True:
+        run_ids = _p4_run_ids(op, mutation)
+        if run_ids and run_ids[-1] != run.review_run_id:
+            run = _p4_run(op, mutation, run_ids[-1])
+        resolve_pending_generation(op.store, mutation, run, _registration_started(op, mutation))
+        chain = _chain(op, run)
+        started = _registration_started(op, mutation)
+        if chain is None:
+            if run.frozen is not None:
+                _p4_accept(op, mutation, run)
+                run.frozen = None
+                continue
+            if len(run_ids) < 2:
+                raise _reconcile(f"Review Run {run.review_run_id} has no chain to continue", "review_chain_invalid")
+            result = _p4_begin_successor(op, mutation, destination, run, run_ids[-2])
+            if result is not None:
+                return result
+            continue
+        _p4_require_shape(op, run, chain)
+        latest = chain.latest.generation
+        shape = p4.shape_of(chain)
+        if started and not (latest == p4.SEAL_GENERATION and shape == p4.SHAPE_SEAL):
+            raise _reconcile("a registration stage is recorded while the P4 Run is not sealed", "review_chain_invalid")
+        if latest == 1:
+            result = _p4_launch_discovery(op, mutation, run, chain)
+        elif latest == 2:
+            if any(task["status"] != records.TASK_SETTLED_OK for task in chain.latest.settled_tasks):
+                return _finish(op, mutation, run, STATUS_NOT_AUTHORIZED, detail="not_authorized")
+            _p4_accept_adjudication(op, mutation, run, chain)
+            result = None
+        elif latest == 3:
+            result = _p4_adjudicate(op, mutation, run, chain)
+        elif latest == 4:
+            outcome = review.read_adjudication(run.review_run_id).outcome
+            if outcome == p4.HUMAN_WAIT:
+                result = _p4_human_wait(op, mutation, run, chain)
+            elif outcome == p4.REPAIR_REQUIRED:
+                _p4_accept_repair(op, mutation, run, chain)
+                result = None
+            else:
+                found = _p4_run_currency(op, mutation, chain, gitcmd.head_commit(op.store.root) or "")
+                if found.stale:
+                    return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
+                if not found.current:
+                    raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
+                _p4_seal(op, mutation, run, chain)
+                result = None
+        elif latest == 5 and shape == p4.SHAPE_SEAL:
+            run.receipt_id = chain.latest.receipt_id
+            if run.consumption_id is None:
+                run.consumption_id = mutation.reserved(gate.review_consumption_key(str(run.receipt_id)))
+            if not started:
+                outcome = _use_check(op, mutation, run, chain)
+                if outcome.stale:
+                    _p4_invalidate(op, mutation, run, chain, outcome.detail)
+                    continue
+            return _registration_flow(op, mutation, destination, run, chain)
+        elif latest == 5:
+            result = _p4_repair(op, mutation, run, chain)
+        elif shape == p4.SHAPE_SEAL:
+            receipt_id = str(chain.generation(p4.SEAL_GENERATION).receipt_id)
+            supersession = review.read_supersession(receipt_id)
+            return _finish(op, mutation, run, STATUS_STALE, detail=supersession.reason, receipt_id=receipt_id)
+        else:
+            _p4_reserve_successor(op, mutation, run)
+            result = None
+        if result is not None:
+            return result
+
+
+def _p4_findings(op: _Op, chain: Any) -> tuple[PlanningReviewFinding, ...]:
+    """What a P4 invocation returns as findings: the current Run's normalized Findings, from its canonical adjudication."""
+    review = ReviewStore(op.store)
+    try:
+        if not review.adjudication_exists(chain.review_run_id):
+            return ()
+        found = review.read_adjudication(chain.review_run_id)
+    except ValidationError:
+        return ()
+    return tuple(
+        PlanningReviewFinding(str(item["severity"]), f"{item['category']}:{item['repair_identity']}", str(item["statement"]))
+        for item in found.findings
+    )
+
+
+def p4_run_record_paths(review: ReviewStore, run_id: str, chain: Any) -> list[str]:
+    """Every canonical record a P4 Run's chain names, in a stable order (the use check and C-2 read them back)."""
+    first = chain.generations[0]
+    found = [review_paths.candidate_snapshot_rel(first.candidate_hash)]
+    found += [review_paths.task_input_rel(str(task["task_id"])) for task in chain.latest.accepted_tasks]
+    found += [review_paths.gate_rel(run_id, generation.generation) for generation in chain.generations]
+    found += _p4_report_and_adjudication_paths(run_id, chain)
+    if p4.shape_of(chain) == p4.SHAPE_REPAIR:
+        repair = p4.repair_task(chain)
+        batch_id = str(review.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
+        found.append(review_paths.repair_batch_rel(batch_id))
+        if len(chain.generations) == p4.REPAIR_SETTLE_GENERATION:
+            found.append(review_paths.repair_result_rel(batch_id))
+    found += [review_paths.receipt_rel(str(g.receipt_id)) for g in chain.generations if g.sealed and g.receipt_id]
+    return found
+
+
+def _p4_report_and_adjudication_paths(run_id: str, chain: Any) -> list[str]:
+    discovery_ids = {str(task["task_id"]) for task in p4.discovery_tasks(chain)}
+    found = [review_paths.report_rel(str(task["result_digest"])) for task in chain.latest.settled_tasks
+             if str(task["task_id"]) in discovery_ids]
+    if len(chain.generations) >= p4.ADJUDICATION_SETTLE_GENERATION:
+        found.append(review_paths.adjudication_rel(run_id))
+    return found
+
+
+def p4_planning_owned_paths(run: _Run, chain: Any, material: dict[str, Any]) -> list[str]:
+    """Registration paths + every record path of the P4 Run (gates 1-6, Supersession) + its Consumption."""
+    first = chain.generations[0]
+    found = registration_paths(material) + [review_paths.candidate_snapshot_rel(first.candidate_hash)]
+    found += [review_paths.task_input_rel(str(task["task_id"])) for task in chain.latest.accepted_tasks]
+    found += [review_paths.gate_rel(run.review_run_id, number) for number in range(1, p4.LAST_GENERATION + 1)]
+    found += _p4_report_and_adjudication_paths(run.review_run_id, chain)
+    if run.receipt_id:
+        found += [review_paths.receipt_rel(str(run.receipt_id)), review_paths.supersession_rel(str(run.receipt_id))]
+    if run.consumption_id:
+        found.append(review_paths.consumption_rel(str(run.consumption_id)))
+    return sorted(set(found))

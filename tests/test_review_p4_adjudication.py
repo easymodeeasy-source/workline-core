@@ -311,6 +311,9 @@ class IdentityTests(unittest.TestCase):
         found = adjudicate(reports, returned(disposition(TASK_A, 0, p4.OUTCOME_PROBLEM)))
         record = found.to_record()
         record["outcome"] = p4.AUTHORIZATION_READY
+        with self.assertRaises(ValidationError):  # a repair purpose with no repair is not even a record
+            records.P4Adjudication.from_record(serialize.canonical_data(record), "x")
+        record["repair_purpose"] = None
         tampered = records.P4Adjudication.from_record(serialize.canonical_data(record), "x")
         self.assertTrue(p4.adjudication_problems(tampered))
 

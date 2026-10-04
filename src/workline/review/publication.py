@@ -31,7 +31,7 @@ from .. import gitcmd
 from ..committed_view import CommittedReadError
 from ..errors import StopError, ValidationError
 from ..store import ProjectStore
-from . import committed, paths, planning, records, serialize
+from . import committed, p4, paths, planning, records, serialize
 
 #: The directory whose history the fast path reads.
 FAST_PATH_DIRECTORY = f"{paths.CANDIDATE_SNAPSHOTS_DIR}/"
@@ -129,8 +129,29 @@ def registered_runs(repo: Path, commit: str) -> list[RegisteredRun]:
         if not registering:
             continue  # a Candidate snapshot alone begins no barrier
         candidate_hash = path.rsplit("/", 1)[-1][: -len(".yaml")]
+        if _replaced_by_successor(repo, commit, candidate_hash):
+            continue  # G-2: a P4 predecessor positively replaced, with no registration of its own
         runs.append(RegisteredRun(candidate_hash, material, wanted, registering))
     return runs
+
+
+def _replaced_by_successor(repo: Path, commit: str, candidate_hash: str) -> bool:
+    """G-2: whether the one Run of ``candidate_hash`` at ``commit`` is a P4 predecessor positively replaced.
+
+    Only the committed objects of ``commit`` are read. The five conditions are
+    :func:`workline.review.p4.proven_successor`'s; anything short of them -
+    including anything unreadable - is no proof, and the snapshot stays a
+    registration Run the committed planning proof must prove (fail closed).
+    """
+    try:
+        at_commit = committed.CommittedReviewStore(repo, commit)
+        runs = at_commit.runs_with_candidate(candidate_hash)
+        if len(runs) != 1:
+            return False
+        chain = at_commit.gate_chain(runs[0])
+        return chain is not None and p4.proven_successor(at_commit, runs[0], chain) is not None
+    except (ValidationError, StopError, CommittedReadError):
+        return False
 
 
 # --------------------------------------------------------------------------- the committed planning proof
@@ -200,15 +221,28 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
     _require(len(runs) == 1, "CP2", f"{parent} holds {len(runs)} Runs of the Candidate")
     review_run_id = runs[0]
     chain = _guard("CP2", lambda: at_parent.gate_chain(review_run_id))
-    _require(chain is not None and len(chain.generations) == planning.SEAL_GENERATION, "CP2",
-             f"the Run's chain at {parent} is not generations 1-3")
-    first, second, third = chain.generations
-    _require(
-        first.status == records.GATE_STATUS_OPEN and len(first.accepted_tasks) == 1 and not first.settled_tasks
-        and second.status == records.GATE_STATUS_OPEN and len(second.settled_tasks) == 1
-        and third.sealed and third.receipt_id is not None,
-        "CP2", "the chain is not accept -> settle -> seal",
-    )
+    contracts = _guard("CP2", lambda: p4.run_contracts(at_parent, chain)) if chain is not None else {None}
+    # the Run's contract is the one its generation-1 TaskInputs bind, never its shape (§27.3)
+    p4_run = contracts == {planning.P4_CONTRACT}
+    if p4_run:
+        seal_generation, invalidation_generation = p4.SEAL_GENERATION, p4.INVALIDATION_GENERATION
+        _require(
+            chain is not None and len(chain.generations) == p4.SEAL_GENERATION and not p4.chain_problems(chain)
+            and p4.shape_of(chain) == p4.SHAPE_SEAL,
+            "CP2", f"the P4 Run's chain at {parent} is not discovery -> adjudication -> seal (generations 1-5)",
+        )
+        first, third = chain.generations[0], chain.generations[p4.SEAL_GENERATION - 1]
+    else:
+        seal_generation, invalidation_generation = planning.SEAL_GENERATION, planning.INVALIDATION_GENERATION
+        _require(chain is not None and contracts == {None} and len(chain.generations) == planning.SEAL_GENERATION, "CP2",
+                 f"the Run's chain at {parent} is not generations 1-3")
+        first, second, third = chain.generations
+        _require(
+            first.status == records.GATE_STATUS_OPEN and len(first.accepted_tasks) == 1 and not first.settled_tasks
+            and second.status == records.GATE_STATUS_OPEN and len(second.settled_tasks) == 1
+            and third.sealed and third.receipt_id is not None,
+            "CP2", "the chain is not accept -> settle -> seal",
+        )
     receipt_id = str(third.receipt_id)
     receipt = _guard("CP2", lambda: at_parent.read_receipt(receipt_id))
     for gate_field, receipt_field in GATE_RECEIPT_BINDING:
@@ -223,12 +257,26 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
 
     progress.append("CP3")
     # CP3 - provenance
-    problems = _guard("CP3", lambda: at_parent.provenance_problems(descriptor, 1))
-    _require(not problems, "CP3", "; ".join(message for _, message in problems))
+    if p4_run:
+        for task in third.accepted_tasks:
+            accepted = int(chain.accepted_at(str(task["task_id"])) or 0)
+            problems = _guard("CP3", lambda: at_parent.provenance_problems(task, accepted))
+            _require(not problems, "CP3", "; ".join(message for _, message in problems))
+    else:
+        problems = _guard("CP3", lambda: at_parent.provenance_problems(descriptor, 1))
+        _require(not problems, "CP3", "; ".join(message for _, message in problems))
     _require(snapshot.material == material, "CP3", "the snapshot at the parent is not the Run's Candidate")
-    problems3 = planning.task_input_problems(
-        task_input, material, first.candidate_hash, first.review_context_hash, first.effective_policy_hash
-    )
+    if p4_run:
+        problems3 = []
+        for task in p4.discovery_tasks(chain):
+            problems3 += planning.task_input_problems_p4(
+                _guard("CP3", lambda: at_parent.read_task_input(str(task["task_id"]))), material, first.candidate_hash,
+                first.review_context_hash,
+            )
+    else:
+        problems3 = planning.task_input_problems(
+            task_input, material, first.candidate_hash, first.review_context_hash, first.effective_policy_hash
+        )
     _require(not problems3, "CP3", "; ".join(problems3))
     _require(first.review_kind == material["review_kind"], "CP3", "the Run's kind is not the Candidate's")
     _require(first.target_identity == rr.candidate_target(material), "CP3", "the Run's target is not the Candidate's")
@@ -236,19 +284,23 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
 
     progress.append("CP4")
     # CP4 - the same Run records at C, and no invalidation anywhere in C's history
-    record_paths = [
-        paths.candidate_snapshot_rel(candidate_hash), paths.task_input_rel(task_id),
-        paths.gate_rel(review_run_id, 1), paths.gate_rel(review_run_id, 2), paths.gate_rel(review_run_id, 3),
-        paths.receipt_rel(receipt_id),
-    ]
+    if p4_run:
+        record_paths = _guard("CP4", lambda: rr.p4_run_record_paths(at_parent, review_run_id, chain))
+    else:
+        record_paths = [
+            paths.candidate_snapshot_rel(candidate_hash), paths.task_input_rel(task_id),
+            paths.gate_rel(review_run_id, 1), paths.gate_rel(review_run_id, 2), paths.gate_rel(review_run_id, 3),
+            paths.receipt_rel(receipt_id),
+        ]
     at_commit = _guard("CP4", lambda: committed.CommittedReviewStore(repo, commit))
     for relative in record_paths:
         _require(at_commit.blob_id(relative) == at_parent.blob_id(relative) and at_parent.blob_id(relative) is not None,
                  "CP4", f"{commit} does not hold {relative} as the parent holds it")
     invalidations = _guard("CP4", lambda: committed.added_in_history(
-        repo, commit, [paths.gate_rel(review_run_id, planning.INVALIDATION_GENERATION), paths.supersession_rel(receipt_id)]
+        repo, commit, [paths.gate_rel(review_run_id, invalidation_generation), paths.supersession_rel(receipt_id)]
     ))
-    _require(not invalidations, "CP4", f"{commit}'s history adds a generation 4 or a Supersession of the Receipt")
+    _require(not invalidations, "CP4",
+             f"{commit}'s history adds a generation {invalidation_generation} or a Supersession of the Receipt")
 
     progress.append("CP5")
     # CP5 - physical: K's delta is exactly E
@@ -283,7 +335,7 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
     for name in RECEIPT_CONSUMPTION_BINDING:
         _require(getattr(receipt, name) == getattr(consumption, name), "CP8", f"the Consumption's {name} is not the Receipt's")
     _require(
-        consumption.review_run_id == review_run_id and consumption.review_generation == planning.SEAL_GENERATION
+        consumption.review_run_id == review_run_id and consumption.review_generation == seal_generation
         and consumption.review_kind == first.review_kind and consumption.authorized_candidate_hash == candidate_hash
         and consumption.operation_identity == first.operation_identity
         and consumption.target_identity == first.target_identity,
@@ -324,7 +376,12 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
     q = km_parents[0]
     _require(q == registration or gitcmd.descends_from(repo, q, registration) is True, "CP11",
              f"{km}'s parent does not descend from the registration commit")
-    owned = rr.planning_owned_paths(review_run_id, material, task_id, receipt_id, consumption.consumption_id)
+    if p4_run:
+        owned = rr.p4_planning_owned_paths(
+            rr._Run(review_run_id, task_id, receipt_id, consumption.consumption_id), chain, material
+        )
+    else:
+        owned = rr.planning_owned_paths(review_run_id, material, task_id, receipt_id, consumption.consumption_id)
     touching = gitcmd.commits_touching(repo, registration, q, owned)
     _require(touching == [], "CP11", "a commit between the registration and the metadata commit touches a planning-owned path")
     at_km = _guard("CP11", lambda: committed.CommittedReviewStore(repo, km))
@@ -344,7 +401,7 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
     # CP13 - the metadata commit's tree still holds the Run and the registration as proven
     for relative in record_paths:
         _require(at_km.blob_id(relative) == at_parent.blob_id(relative), "CP13", f"{km} does not hold {relative} as the parent holds it")
-    _require(at_km.entry(paths.gate_rel(review_run_id, planning.INVALIDATION_GENERATION)) is None
+    _require(at_km.entry(paths.gate_rel(review_run_id, invalidation_generation)) is None
              and not at_km.supersession_exists(receipt_id), "CP13", f"{km} holds an invalidation of the Receipt")
     registration_blobs = gitcmd.tree_entries(repo, registration, list(rr.registration_paths(material)))
     km_blobs = gitcmd.tree_entries(repo, km, list(rr.registration_paths(material)))

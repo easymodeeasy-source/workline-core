@@ -1573,6 +1573,8 @@ P4_ADJUDICATION_FIELDS = (
     "prior",
     "outcome",
     "obligations",
+    "repair_purpose",
+    "strategy_change_class",
 )
 P4_ENTRY_FIELDS = SOURCE_FIELDS + (
     "outcome",
@@ -1650,6 +1652,10 @@ class P4Adjudication:
     prior: dict[str, Any]
     outcome: str
     obligations: dict[str, Any]
+    #: What a following repair is for, and - when STRATEGY_CHANGE is required - its class. Present exactly
+    #: when the outcome is REPAIR_REQUIRED, so the Repair Batch is rebuilt from this record alone.
+    repair_purpose: str | None = None
+    strategy_change_class: str | None = None
 
     def finding(self, finding_id: str) -> dict[str, Any] | None:
         for found in self.findings:
@@ -1685,6 +1691,8 @@ class P4Adjudication:
                 "prior": dict(self.prior),
                 "outcome": self.outcome,
                 "obligations": dict(self.obligations),
+                "repair_purpose": self.repair_purpose,
+                "strategy_change_class": self.strategy_change_class,
             }
         )
         return record
@@ -1772,6 +1780,18 @@ class P4Adjudication:
         for key in P4_OBLIGATION_FIELDS[:-1]:
             _require_int(obligations, key, f"{described} obligations", minimum=0)
         _require_bool(obligations, "strategy_change_required", f"{described} obligations")
+        outcome = _require_choice(record, "outcome", P4_ADJUDICATION_OUTCOMES, described)
+        purpose = record.get("repair_purpose")
+        change_class = record.get("strategy_change_class")
+        if outcome == REPAIR_REQUIRED:
+            _require_public_text(record, "repair_purpose", described)
+        elif purpose is not None:
+            raise ValidationError(f"{described} names a repair purpose and no repair follows", code="review_record_invalid")
+        if change_class is not None:
+            _require_choice(record, "strategy_change_class", P4_STRATEGY_CHANGE_CLASSES, described)
+            if outcome != REPAIR_REQUIRED:
+                raise ValidationError(f"{described} names a strategy-change class and no repair follows",
+                                      code="review_record_invalid")
         generation = _require_int(record, "candidate_generation", described, minimum=1)
         if generation == 1 and not all(linked):
             raise ValidationError(
@@ -1802,8 +1822,10 @@ class P4Adjudication:
             findings=tuple(findings),
             coverage_gaps=tuple(gaps),
             prior=dict(prior),
-            outcome=_require_choice(record, "outcome", P4_ADJUDICATION_OUTCOMES, described),
+            outcome=outcome,
             obligations=dict(obligations),
+            repair_purpose=None if purpose is None else str(purpose),
+            strategy_change_class=None if change_class is None else str(change_class),
         )
 
 

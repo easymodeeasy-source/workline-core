@@ -90,9 +90,6 @@ PLANNING_CONTRACT = P4_PLANNING_CONTRACT
 #: owner's durable marker from the first owner write (G-6 Option M).
 WORK_CONTRACT = P4_WORK_CONTRACT
 CONTRACTS = P4_CONTRACTS
-#: The publication contract a P4 planning mutation records (G-6 item 3): its publication proof dispatches
-#: the seal generation (5) by it, so it is distinct from ``review-v1-planning-publication-v1``.
-PLANNING_PUBLICATION_CONTRACT = "review-v1-planning-p4-publication-v1"
 
 #: The one P4 Effective Policy (§12.21): distinct from both v1 policies, and the same for every P4 kind.
 POLICY_ID = "review-v1-p4-policy-v1"
@@ -1409,6 +1406,10 @@ def adjudication(
         "prior": NO_PRIOR if prior is None else prior.prior_record(),
         "outcome": derive_outcome(normalized),
         "obligations": obligations(normalized),
+        "repair_purpose": normalized.repair_purpose if derive_outcome(normalized) == REPAIR_REQUIRED else None,
+        "strategy_change_class": (
+            normalized.strategy_change_class if derive_outcome(normalized) == REPAIR_REQUIRED else None
+        ),
     }
     found = records.P4Adjudication.from_record(serialize.canonical_data(record), "the P4 adjudication")
     problems = adjudication_problems(found)
@@ -1513,8 +1514,8 @@ def repair_batch(
     *,
     repair_batch_id: str,
     allowed_result_surface: Sequence[str],
-    repair_purpose: str,
-    strategy_change_class: str | None,
+    repair_purpose: str | None = None,
+    strategy_change_class: str | None = None,
 ) -> records.P4RepairBatch:
     """The one Repair Batch of a REPAIR_REQUIRED adjudication (§12.8 / §27.14).
 
@@ -1528,6 +1529,10 @@ def repair_batch(
     included, deliberate = repair_finding_ids(found)
     findings = {str(item["finding_id"]): item for item in found.findings}
     required = bool(found.obligations["strategy_change_required"])
+    # The adjudication record is the authority; an explicit argument may only restate it.
+    repair_purpose = found.repair_purpose if repair_purpose is None else repair_purpose
+    if strategy_change_class is None:
+        strategy_change_class = found.strategy_change_class
     strategy = STRATEGY_CHANGE if required or strategy_change_class is not None else STRATEGY_ORDINARY
     record = {
         serialize.SCHEMA_KEY: records.SCHEMA_P4_REPAIR_BATCH, serialize.VERSION_KEY: records.VERSION,
@@ -2091,3 +2096,97 @@ def settled_of(chain: Any, task_id: str) -> Mapping[str, Any] | None:
         if str(task["task_id"]) == task_id:
             return task
     return None
+
+
+# --------------------------------------------------------------------------- set aside by a proven successor (G-2)
+
+def _successor_envelope(reader: Any, chain: Any) -> dict[str, Any] | None:
+    first = chain.generations[0]
+    if not first.accepted_tasks:
+        return None
+    found = reader.read_task_input(str(first.accepted_tasks[0]["task_id"]))
+    return found.request_envelope if contract_of_task_input(found) is not None else None
+
+
+def named_by_successor(reader: Any, predecessor_id: str) -> bool:
+    """Whether any Run's P4 discovery request names ``predecessor_id`` as its repaired predecessor."""
+    try:
+        for run_id in reader.run_ids():
+            chain = reader.gate_chain(run_id)
+            envelope = None if chain is None else _successor_envelope(reader, chain)
+            if envelope is not None and (envelope.get("succession") or {}).get("predecessor_review_run_id") == predecessor_id:
+                return True
+    except (ValidationError, KeyError, TypeError):
+        return True  # what cannot be read cannot be shown not to name it
+    return False
+
+
+def proven_successor(reader: Any, predecessor_id: str, chain: Any) -> str | None:
+    """The one successor Run that positively replaces a P4 predecessor, or ``None`` (G-2, §27.21).
+
+    ``reader`` is any read-only Review reader (the working tree's, or one
+    commit's committed records). All five conditions are positive proof:
+
+    1. the predecessor is a P4 Run whose generation 6 settled its repair;
+    2. its committed successful Repair Result links to exactly one successor;
+    3. that successor's request names the predecessor set aside as repaired;
+    4. the predecessor has no Receipt, so no registration Consumption or
+       registration commit of its own, and no Consumption names it;
+    5. candidate, Run, batch and successor identities round-trip and agree.
+
+    Anything missing, unreadable, ambiguous or contradictory is ``None``: the
+    predecessor is then never treated as set aside.
+    """
+    try:
+        contracts = {contract_of_task_input(reader.read_task_input(str(task["task_id"])))
+                     for task in chain.generations[0].accepted_tasks}
+        if len(contracts) != 1 or None in contracts or chain_problems(chain):
+            return None
+        if shape_of(chain) != SHAPE_REPAIR or len(chain.generations) != REPAIR_SETTLE_GENERATION:
+            return None
+        if any(generation.receipt_id for generation in chain.generations):
+            return None
+        repair = repair_task(chain)
+        settled = None if repair is None else settled_of(chain, str(repair["task_id"]))
+        if settled is None or settled["status"] != records.TASK_SETTLED_OK:
+            return None
+        batch_id = str(reader.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
+        batch = reader.read_repair_batch(batch_id)
+        result = reader.read_repair_result(batch_id)
+        result_digest = reader.repair_result_digest(batch_id)
+        if settled["result_digest"] != result_digest:
+            return None
+        predecessor_envelope = _successor_envelope(reader, chain) or {}
+        first = chain.generations[0]
+        found: list[str] = []
+        for run_id in reader.run_ids():
+            if run_id == predecessor_id:
+                continue
+            other = reader.gate_chain(run_id)
+            envelope = None if other is None else _successor_envelope(reader, other)
+            if envelope is None or (envelope.get("succession") or {}).get("predecessor_review_run_id") != predecessor_id:
+                continue
+            successor_first = other.generations[0]
+            problems = linkage_problems(
+                batch, result, source_run_id=predecessor_id, source_candidate_hash=first.candidate_hash,
+                source_candidate_generation=int(predecessor_envelope.get("candidate_generation") or 0),
+                snapshot_hash=successor_first.candidate_hash if reader.candidate_snapshot_exists(successor_first.candidate_hash) else None,
+                successor_envelope=envelope, repair_result_digest=result_digest,
+            )
+            if problems or run_contracts(reader, other) != contracts or (
+                successor_first.operation_identity, successor_first.target_identity, successor_first.review_kind
+            ) != (first.operation_identity, first.target_identity, first.review_kind):
+                return None  # a contradictory successor: never a proof
+            found.append(run_id)
+        if len(found) != 1:
+            return None
+        if any(consumption.review_run_id == predecessor_id for consumption in reader.consumptions()):
+            return None
+        return found[0]
+    except (ValidationError, KeyError, TypeError, ValueError):
+        return None
+
+
+def run_contracts(reader: Any, chain: Any) -> set[str | None]:
+    return {contract_of_task_input(reader.read_task_input(str(task["task_id"])))
+            for task in chain.generations[0].accepted_tasks}

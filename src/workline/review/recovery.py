@@ -43,7 +43,7 @@ from .. import gitcmd
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
-from . import checkout, committed, gate, paths, planning, records, serialize, work_review
+from . import checkout, committed, gate, p4, paths, planning, records, serialize, work_review
 from .records import GateGeneration
 from .store import GateChain, ReviewStore
 
@@ -61,6 +61,8 @@ class MatchingRun:
     chain: GateChain
     material: dict[str, Any]
     task_id: str
+    #: The explicit contract the Run's generation-1 TaskInputs bind: a P4 contract, or ``None`` for v1.
+    contract: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,14 +93,29 @@ def discover(
     operation_identity: str,
     *,
     currency: Callable[[MatchingRun], Any],
+    contract: str | None = None,
+    human_decision: dict[str, Any] | None = None,
 ) -> Discovery:
     """Canonical recovery discovery (§12.2 steps 1-5) for one invocation; it begins nothing.
 
     ``currency`` evaluates a generation-1 or authorizing generation-2 Run's
     currency on HEAD, in the Roadmap-owned order; it answers ``current``,
     ``stale`` (with the reason) or ``mismatch``.
+
+    Every matching Run is classified by the adapter of the contract its own
+    generation-1 TaskInputs bind (§27.22): a v1 Run exactly as before, a P4
+    Run by :func:`_classify_planning_p4`. ``contract`` is the invocation's
+    (``None`` = v1): a Run of another contract is never recovered by it - a
+    terminal one is set aside, any other refuses (``review_p4_contract_mismatch``).
     """
-    return _discover(store, review_kind, operation_identity, currency, PLANNING)
+    if contract is None and human_decision is None:
+        return _discover(store, review_kind, operation_identity, currency, PLANNING)
+    adapter = RecoveryAdapter(
+        shape=_shape_problem, named=_planning_named,
+        classify=lambda store_, review, head, found, named_aside, currency_: _classify_versioned(
+            store_, review, head, found, named_aside, currency_, contract, human_decision),
+    )
+    return _discover(store, review_kind, operation_identity, currency, adapter)
 
 
 def discover_work(
@@ -284,6 +301,9 @@ def _clean_run(
         raise _incomplete(f"Review Run {review_run_id} has no generation in the working tree")
     if head is None:
         raise _incomplete(f"Review Run {review_run_id} is not committed: HEAD names no commit")
+    contract = run_contract(review, chain)
+    if contract is not None:
+        return _clean_p4_run(store, review, head, review_run_id, chain, contract)
     shape = shape_of(chain)
     if shape:
         raise _incomplete(f"Review Run {review_run_id} {shape}")
@@ -294,28 +314,7 @@ def _clean_run(
         )
     except ValidationError as exc:
         raise _incomplete(f"the records of Review Run {review_run_id} do not read: {exc}") from exc
-    # everything HEAD's history ever added is still in HEAD's tree, with the same blob
-    run_prefix = paths.run_dir(review_run_id) + "/"
-    targets = sorted({paths.run_dir(review_run_id)} | {relative for relative in record_paths if not relative.startswith(run_prefix)})
-    added = committed.added_in_history(repo, head, targets)
-    at_head = {entry.path: entry for entry in (gitcmd.tree_entries(repo, head, record_paths) or [])}
-    for adding, names in added:
-        for name in names:
-            if name not in record_paths and not name.startswith(run_prefix):
-                continue
-            then = {entry.path: entry for entry in (gitcmd.tree_entries(repo, adding, [name]) or [])}
-            if name not in at_head or name not in then or at_head[name].oid != then[name].oid:
-                raise _incomplete(f"{name} of Review Run {review_run_id} was committed and is no longer in HEAD's tree as committed")
-    # every record the working tree holds is committed and unchanged
-    present = [relative for relative in record_paths if review.read_bytes(relative) is not None]
-    try:
-        gate.require_persisted(store, present)
-    except StopError as exc:
-        raise _incomplete(f"a record of Review Run {review_run_id} exists only in the working tree or differs from HEAD: {exc}") from exc
-    for relative in present:
-        entry = at_head.get(relative)
-        if entry is None or entry.mode != "100644" or gitcmd.read_blob(repo, entry.oid) != review.read_bytes(relative):
-            raise _incomplete(f"{relative} of Review Run {review_run_id} is not committed as its working-tree bytes")
+    _require_clean_paths(store, review, head, review_run_id, record_paths)
     # every stage is whole
     first = chain.generations[0]
     task_id = str(first.accepted_tasks[0]["task_id"])
@@ -338,6 +337,35 @@ def _clean_run(
     except ValidationError as exc:
         raise _incomplete(f"the snapshot of Review Run {review_run_id} does not read: {exc}") from exc
     return MatchingRun(review_run_id, chain, material, task_id)
+
+
+def _require_clean_paths(
+    store: ProjectStore, review: ReviewStore, head: str, review_run_id: str, record_paths: list[str]
+) -> None:
+    """A Run's records are committed as HEAD's history added them, and the working tree holds them unchanged."""
+    repo = store.root
+    # everything HEAD's history ever added is still in HEAD's tree, with the same blob
+    run_prefix = paths.run_dir(review_run_id) + "/"
+    targets = sorted({paths.run_dir(review_run_id)} | {relative for relative in record_paths if not relative.startswith(run_prefix)})
+    added = committed.added_in_history(repo, head, targets)
+    at_head = {entry.path: entry for entry in (gitcmd.tree_entries(repo, head, record_paths) or [])}
+    for adding, names in added:
+        for name in names:
+            if name not in record_paths and not name.startswith(run_prefix):
+                continue
+            then = {entry.path: entry for entry in (gitcmd.tree_entries(repo, adding, [name]) or [])}
+            if name not in at_head or name not in then or at_head[name].oid != then[name].oid:
+                raise _incomplete(f"{name} of Review Run {review_run_id} was committed and is no longer in HEAD's tree as committed")
+    # every record the working tree holds is committed and unchanged
+    present = [relative for relative in record_paths if review.read_bytes(relative) is not None]
+    try:
+        gate.require_persisted(store, present)
+    except StopError as exc:
+        raise _incomplete(f"a record of Review Run {review_run_id} exists only in the working tree or differs from HEAD: {exc}") from exc
+    for relative in present:
+        entry = at_head.get(relative)
+        if entry is None or entry.mode != "100644" or gitcmd.read_blob(repo, entry.oid) != review.read_bytes(relative):
+            raise _incomplete(f"{relative} of Review Run {review_run_id} is not committed as its working-tree bytes")
 
 
 def _shape_problem(chain: GateChain) -> str | None:
@@ -458,8 +486,13 @@ def _planning_named(review: ReviewStore, found: MatchingRun) -> list[str]:
     ]
 
 
-#: Planning's policy, exactly as it was before the core was shared.
-PLANNING = RecoveryAdapter(shape=_shape_problem, named=_planning_named, classify=_classify)
+#: Planning's policy, exactly as it was before the core was shared, for every v1 Run; a P4 Run is classified by its
+#: own contract (:func:`_classify_versioned`), and a v1 invocation never recovers it.
+PLANNING = RecoveryAdapter(
+    shape=_shape_problem, named=_planning_named,
+    classify=lambda store, review, head, found, named_aside, currency: _classify_versioned(
+        store, review, head, found, named_aside, currency, None, None),
+)
 
 
 # --------------------------------------------------------------------------- the Work adapter (F4 §11.12, §26.5)
@@ -517,6 +550,8 @@ def _classify_work(
     what its resumption needs and is ``review_recovery_incomplete`` (e).
     """
     chain = found.chain
+    if found.contract is not None:
+        return _classify_work_p4(store, review, head, found, named_aside, currency, owned)
     latest = chain.latest.generation
     if latest == planning.INVALIDATION_GENERATION:
         return planning.SET_ASIDE_INVALIDATED
@@ -593,4 +628,255 @@ def _work_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str
         or first.operation_identity != work_review.operation_identity(work_id)
     ):
         return "the Run's kind, target or operation identity is not the Candidate's Work"
+    return None
+
+
+# --------------------------------------------------------------------------- P4: versioned per-Run dispatch (§27.22)
+
+
+def run_contract(review: ReviewStore, chain: GateChain) -> str | None:
+    """The explicit P4 contract a Run's generation-1 TaskInputs bind, or ``None`` (a v1 Run, or unreadable)."""
+    first = chain.generations[0]
+    try:
+        found = {p4.contract_of_task_input(review.read_task_input(str(task["task_id"]))) for task in first.accepted_tasks}
+    except ValidationError:
+        return None
+    return found.pop() if len(found) == 1 and None not in found else None
+
+
+def p4_record_paths(review: ReviewStore, review_run_id: str, chain: GateChain) -> list[str]:
+    """Every record path a P4 Run's chain names: gates, snapshots, every TaskInput, reports, adjudication,
+    Repair Batch / Result (and Candidate N+1), Receipt and Supersession."""
+    found: list[str] = [f"{paths.run_dir(review_run_id)}/{entry.name}" for entry in (review.entries(paths.run_dir(review_run_id)) or [])]
+    first = chain.generations[0]
+    found.append(paths.candidate_snapshot_rel(first.candidate_hash))
+    found += [paths.task_input_rel(str(task["task_id"])) for task in chain.latest.accepted_tasks]
+    discovery = {str(task["task_id"]) for task in p4.discovery_tasks(chain)}
+    found += [paths.report_rel(str(task["result_digest"])) for task in chain.latest.settled_tasks
+              if str(task["task_id"]) in discovery]
+    if len(chain.generations) >= p4.ADJUDICATION_SETTLE_GENERATION:
+        found.append(paths.adjudication_rel(review_run_id))
+    repair = p4.repair_task(chain)
+    if repair is not None:
+        batch_id = str(review.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
+        found.append(paths.repair_batch_rel(batch_id))
+        if len(chain.generations) == p4.REPAIR_SETTLE_GENERATION:
+            found.append(paths.repair_result_rel(batch_id))
+            found.append(paths.candidate_snapshot_rel(review.read_repair_result(batch_id).result_candidate_hash))
+    for generation in chain.generations:
+        if generation.receipt_id:
+            found += [paths.receipt_rel(generation.receipt_id), paths.supersession_rel(generation.receipt_id)]
+    return found
+
+
+def _clean_p4_run(
+    store: ProjectStore, review: ReviewStore, head: str, review_run_id: str, chain: GateChain, contract: str
+) -> MatchingRun:
+    """A matching P4 Run, proven cleanly persisted and whole under its own shape; incomplete otherwise."""
+    problems = p4.chain_problems(chain)
+    if problems:
+        raise _incomplete(f"P4 Review Run {review_run_id} is not a P4 shape: " + "; ".join(problems))
+    receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
+    try:
+        record_paths = p4_record_paths(review, review_run_id, chain) + _consumption_paths_of(
+            store, review, head, {str(item) for item in receipt_ids}
+        )
+    except ValidationError as exc:
+        raise _incomplete(f"the records of P4 Review Run {review_run_id} do not read: {exc}") from exc
+    _require_clean_paths(store, review, head, review_run_id, record_paths)
+    wanted = [relative for relative in record_paths if not relative.startswith(paths.run_dir(review_run_id) + "/")
+              and not relative.startswith(paths.SUPERSESSIONS_DIR + "/") and not relative.startswith(paths.CONSUMPTIONS_DIR + "/")]
+    missing = [relative for relative in wanted if review.read_bytes(relative) is None]
+    if missing:
+        raise _incomplete(f"P4 Review Run {review_run_id} is not whole: {', '.join(missing)} missing")
+    if p4.shape_of(chain) == p4.SHAPE_SEAL and len(chain.generations) == p4.INVALIDATION_GENERATION:
+        if not review.supersession_exists(str(chain.generation(p4.SEAL_GENERATION).receipt_id)):
+            raise _incomplete(f"generation 6 of P4 Review Run {review_run_id} invalidates with no Supersession")
+    if gate.pending_generation_mutations(store, review_run_id):
+        raise _incomplete(f"a generation mutation of P4 Review Run {review_run_id} is pending without its owner")
+    first = chain.generations[0]
+    try:
+        material = review.read_candidate_snapshot(first.candidate_hash).material or {}
+    except ValidationError as exc:
+        raise _incomplete(f"the snapshot of P4 Review Run {review_run_id} does not read: {exc}") from exc
+    return MatchingRun(review_run_id, chain, material, str(first.accepted_tasks[0]["task_id"]), contract)
+
+
+def _classify_versioned(
+    store: ProjectStore,
+    review: ReviewStore,
+    head: str | None,
+    found: MatchingRun,
+    named_aside: set[str],
+    currency: Callable[[MatchingRun], Any],
+    contract: str | None,
+    human_decision: dict[str, Any] | None,
+) -> str | None:
+    """Each matching Run by its own contract's classifier; a Run of another contract is never recovered."""
+    if found.contract is None:
+        reason = _classify(store, review, head, found, named_aside, currency)
+    else:
+        reason = _classify_planning_p4(store, review, head, found, named_aside, currency, human_decision)
+    if reason is None and found.contract != contract:
+        raise p4.reconcile(
+            f"Review Run {found.review_run_id} is recoverable under contract {found.contract or planning.PLANNING_CONTRACT}, "
+            f"and this invocation runs under {contract or planning.PLANNING_CONTRACT}; it is resumed only under its own "
+            "contract, never upgraded or downgraded",
+            p4.REASON_CONTRACT_MISMATCH,
+        )
+    return reason
+
+
+def _classify_planning_p4(
+    store: ProjectStore,
+    review: ReviewStore,
+    head: str | None,
+    found: MatchingRun,
+    named_aside: set[str],
+    currency: Callable[[MatchingRun], Any],
+    human_decision: dict[str, Any] | None,
+) -> str | None:
+    """The P4 planning classification (§27.22, G-2, G-3, G-4): the set-aside reason, or None for the recoverable one.
+
+    ```text
+    G6 invalidation of a G5 seal                         invalidated          (G-3: terminal)
+    G6 repair settled, positively replaced by a successor p4_repaired         (G-2: before any registration reading)
+    registration / Consumption, proven                   consumed
+    G2 with a declined discovery                         not_authorized
+    named by another matching Run                        set_aside
+    G4 HUMAN_WAIT, and this invocation decides           human_decision       (G-4)
+    does not reconstruct                                 review_recovery_incomplete
+    G1-G4 (not HUMAN_WAIT)                               currency
+    G4 HUMAN_WAIT, G5 seal, G5 repair, G6 settled        recoverable
+    ```
+    """
+    from . import publication
+    from ..roadmap_review import entity_paths
+
+    chain = found.chain
+    latest = chain.latest.generation
+    shape = p4.shape_of(chain)
+    if shape == p4.SHAPE_SEAL and latest == p4.INVALIDATION_GENERATION:
+        return planning.SET_ASIDE_INVALIDATED
+    if shape == p4.SHAPE_REPAIR and latest == p4.REPAIR_SETTLE_GENERATION:
+        if p4.proven_successor(review, found.review_run_id, chain) is not None:
+            return p4.SET_ASIDE_REPAIRED
+        if p4.named_by_successor(review, found.review_run_id):
+            raise _incomplete(
+                f"P4 Review Run {found.review_run_id} is named by a successor whose replacement cannot be positively proven"
+            )
+    wanted = entity_paths(found.material)
+    at_head = {entry.path for entry in (gitcmd.tree_entries(store.root, head or "", wanted) or [])}
+    registering = [
+        listed for listed, names in committed.added_in_history(store.root, head or "", wanted) if set(names) & set(wanted)
+    ]
+    receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
+    consumptions = _consumption_paths_of(store, review, head, {str(r) for r in receipt_ids}) if receipt_ids else []
+    if registering or at_head or consumptions:
+        if shape != p4.SHAPE_SEAL:
+            raise _incomplete(
+                f"P4 Review Run {found.review_run_id} is not sealed and its reserved paths are registered by a Run not "
+                "proven to replace it"
+            )
+        run = publication.RegisteredRun(
+            planning.candidate_hash(found.material), found.material, tuple(wanted), tuple(registering)
+        )
+        failed = publication.committed_planning_proof(store.root, head or "", run)
+        if failed is None:
+            return planning.SET_ASIDE_CONSUMED
+        raise _incomplete(
+            f"P4 Review Run {found.review_run_id} holds a registration or a Consumption the committed planning proof "
+            f"does not prove for HEAD ({failed[0]}: {failed[1]})"
+        )
+    if latest == p4.DISCOVERY_SETTLE_GENERATION and any(
+        task["status"] != records.TASK_SETTLED_OK for task in chain.latest.settled_tasks
+    ):
+        return planning.SET_ASIDE_NOT_AUTHORIZED
+    if found.review_run_id in named_aside:
+        return planning.SET_ASIDE_SET_ASIDE
+    waiting = latest == p4.ADJUDICATION_SETTLE_GENERATION and review.read_adjudication(found.review_run_id).outcome == p4.HUMAN_WAIT
+    if waiting and human_decision is not None:
+        bound = review.read_task_input(found.task_id).request_envelope.get("human_decision")
+        if bound != human_decision:
+            return p4.SET_ASIDE_HUMAN_DECISION
+    problem = _p4_reconstruction_problem(review, found)
+    if problem:
+        raise _incomplete(f"P4 Review Run {found.review_run_id} does not reconstruct: {problem}")
+    if latest <= p4.ADJUDICATION_SETTLE_GENERATION and not waiting:
+        outcome = currency(found)
+        if outcome.current:
+            return None
+        if outcome.stale:
+            return outcome.detail
+        raise _incomplete(f"P4 Review Run {found.review_run_id}'s Candidate does not reproduce on HEAD: {outcome.detail}")
+    return None
+
+
+def _p4_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str | None:
+    """Every accepted task's provenance at its accepting generation, and the discovery requests' bindings."""
+    chain = found.chain
+    first = chain.generations[0]
+    for task in chain.latest.accepted_tasks:
+        accepted_at = chain.accepted_at(str(task["task_id"]))
+        problems = review.provenance_problems(task, int(accepted_at or 0))
+        if problems:
+            return "; ".join(message for _, message in problems)
+    if planning.is_planning_candidate(found.material):
+        try:
+            planning.require_planning_candidate(found.material, "the snapshot's material")
+        except ValidationError as exc:
+            return str(exc)
+        for task in p4.discovery_tasks(chain):
+            problems = planning.task_input_problems_p4(
+                review.read_task_input(str(task["task_id"])), found.material, first.candidate_hash,
+                first.review_context_hash,
+            )
+            if problems:
+                return "; ".join(problems)
+        content = planning.candidate_content(found.material)
+        target = content["roadmap"]["id"] if found.material["review_kind"] == planning.KIND_ROADMAP else content.get("phase_id")
+        if first.target_identity != target or first.review_kind != found.material["review_kind"]:
+            return "the Run's target or kind is not the Candidate's"
+    return None
+
+
+def _classify_work_p4(
+    store: ProjectStore,
+    review: ReviewStore,
+    head: str | None,
+    found: MatchingRun,
+    named_aside: set[str],
+    currency: Callable[[MatchingRun], Any],
+    owned: frozenset[str],
+) -> str | None:
+    """The P4 Work classification (§27.22, G-3, G-4): terminal states are set aside; anything else is
+    recoverable only through the START mutation that holds it (a Work Run is resumed only by its owner)."""
+    chain = found.chain
+    latest = chain.latest.generation
+    shape = p4.shape_of(chain)
+    if shape == p4.SHAPE_SEAL and latest == p4.INVALIDATION_GENERATION:
+        return planning.SET_ASIDE_INVALIDATED
+    if shape == p4.SHAPE_REPAIR and latest == p4.REPAIR_SETTLE_GENERATION \
+            and p4.proven_successor(review, found.review_run_id, chain) is not None:
+        return p4.SET_ASIDE_REPAIRED
+    receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
+    if receipt_ids and _consumption_paths_of(store, review, head, {str(item) for item in receipt_ids}):
+        return planning.SET_ASIDE_CONSUMED
+    if latest == p4.DISCOVERY_SETTLE_GENERATION and any(
+        task["status"] != records.TASK_SETTLED_OK for task in chain.latest.settled_tasks
+    ):
+        return planning.SET_ASIDE_NOT_AUTHORIZED
+    if found.review_run_id in named_aside:
+        return planning.SET_ASIDE_SET_ASIDE
+    problem = _p4_reconstruction_problem(review, found)
+    if problem:
+        raise _incomplete(f"P4 Work Review Run {found.review_run_id} does not reconstruct: {problem}")
+    waiting = latest == p4.ADJUDICATION_SETTLE_GENERATION and review.read_adjudication(found.review_run_id).outcome == p4.HUMAN_WAIT
+    if latest <= p4.ADJUDICATION_SETTLE_GENERATION and not waiting:
+        outcome = currency(found)
+        if outcome.stale:
+            return outcome.detail
+        if not outcome.current:
+            raise _incomplete(f"P4 Work Review Run {found.review_run_id}'s Candidate is indeterminate: {outcome.detail}")
+    _require_owner(found, owned)
     return None
