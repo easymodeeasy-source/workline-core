@@ -123,9 +123,6 @@ REASON_CLASS_B = "review_class_b_unowned_content"
 REASON_CLASS_C = "review_class_c_unprovable"
 REASON_ALREADY_PUBLISHED = "review_result_already_published"
 REASON_DESTINATION_DIVERGENT = "review_destination_divergent"
-#: A recoverable matching Work Run no pending START mutation of this Work holds (a lost START's Run): no canonical
-#: mechanism binds it into a new START mutation, so a fresh START stops rather than beginning a second Run (§11.12).
-REASON_RECOVERY_UNBOUND = "review_recovery_unbound_run"
 #: The Supersession / invalidation-evidence / set-aside reason of a Class-A replacement.
 CLASS_A_REASON = work_review.INVALIDATION_CLASS_A
 
@@ -540,55 +537,45 @@ def recovery_discovery(store: ProjectStore, work_id: str, held: set[str]) -> Any
     Every Run with this Work's review kind and operation identity - which has
     no mutation id, time or mode in it, so a Run another START of the same Work
     began is one of them - is proven and classified, never chosen by recency.
-    ``held`` are the Runs this invocation's own START mutation reserved: they
-    are its recovery selector's (:func:`select_in_flight`) and are not
-    classified here. Every OTHER matching Run must be one this invocation does
-    not resume - consumed, invalidated, not_authorized, set_aside or stale:
+    ``held`` are the Runs the pending START mutations of this Work reserved
+    (once this invocation's mutation is open, exactly its own: opening refuses
+    any other pending START of the Work). A Work Run is resumed only through
+    the START mutation that reserved it, so the held Runs are their selectors'
+    (:func:`select_in_flight`) and are not classified here, and every OTHER
+    matching Run must be one this invocation does not resume - consumed,
+    invalidated, not_authorized, set_aside or stale:
 
     ```text
-    another Run recoverable, no own Run begun   review_recovery_unbound_run (a lost START's Run: no
-                                                canonical mechanism binds it into this START; nothing
-                                                is begun beside it)
-    another Run recoverable, an own Run begun   review_recovery_ambiguous
-    several recoverable                         review_recovery_ambiguous
-    another Run incomplete / contradictory      review_recovery_incomplete
+    another Run of a recoverable shape (generation 1 or an       review_recovery_incomplete: no pending
+    authorizing generation 2 with a current Context, or sealed)  START holds what its resumption needs
+    another Run incomplete / contradictory                       review_recovery_incomplete
     ```
 
-    The Discovery returned names, in ``set_aside``, every other matching Run
-    and the reason it is not resumed - what a new Run's request names (§11.6).
+    No other Run can be recoverable here (``recovery.discover_work``: a Run is
+    recoverable only while one of ``held`` holds it), so the selection is the
+    selector's own Run when there is one and a new Run otherwise. The Discovery
+    returned names, in ``set_aside``, every other matching Run and the reason
+    it is not resumed - what a new Run's request names (§11.6).
     """
     from .review import recovery
 
-    found = recovery.discover_work(store, work_review.operation_identity(work_id), currency=_recovery_currency(store),
-                                   held=held)
-    if found.recoverable is None:
-        return found
-    other = found.recoverable.review_run_id
-    review = ReviewStore(store)
-    begun = any(gate.pending_generation_mutations(store, run_id)
-                or review.read_bytes(review_paths.gate_rel(run_id, records.FIRST_GENERATION)) is not None
-                for run_id in sorted(held))
-    if not begun:
-        raise _reconcile(
-            f"Work Review Run {other} of {work_id} is recoverable and no pending START mutation of this Work holds it; "
-            "nothing binds a Run another START began into a new one, and a new Run is begun only when no matching Run "
-            "is recoverable, so nothing is begun", REASON_RECOVERY_UNBOUND,
-        )
-    raise _reconcile(
-        f"this START's own Work Review Run and {other} are both recoverable for {work_id}; no Run is chosen by age, ID "
-        "or position", "review_recovery_ambiguous",
-    )
+    return recovery.discover_work(store, work_review.operation_identity(work_id), currency=_recovery_currency(store),
+                                  owned=held, held=held)
 
 
 def entry_recovery(store: ProjectStore, work_id: str) -> None:
     """§11.12 at a review-v1 START's entry: after activation, before the mutation is opened, writing nothing.
 
-    The Runs held by pending START mutations of this Work (the one this
-    invocation resumes, or one that conflicts with it, which opening reports)
-    are excluded; every other matching Run is classified by
-    :func:`recovery_discovery`, so a refusing invocation reserves, records and
-    writes nothing and never runs the executor. An unreadable recovery area is
-    reported where it always was, when the mutation is opened.
+    The Runs held by pending START mutations of this Work are excluded: the one
+    whose invocation is this one is resumed by opening it, and its selector
+    continues its own Run (§11.12: the one recoverable Run is resumed); any
+    other - another mode - is reported when the mutation is opened, as the
+    existing write-scope conflict, before anything is reserved, so no Run
+    begins beside a Run another START holds. Every other matching Run is
+    classified by :func:`recovery_discovery`, so a refusing invocation
+    reserves, records and writes nothing and never runs the executor. An
+    unreadable recovery area is reported where it always was, when the
+    mutation is opened.
     """
     try:
         pending = MutationController(store).list_pending()
@@ -3087,7 +3074,8 @@ def _require_recovery_selection(session: "_Session", initial: WorkRun, successor
 
     store = session.store
     found = recovery.discover_work(store, work_review.operation_identity(initial.work_id),
-                                   currency=_recovery_currency(store))
+                                   currency=_recovery_currency(store),
+                                   owned=own_run_ids(session.mutation.record.get("reserved_ids") or {}))
     aside = {item["review_run_id"]: item["reason"] for item in found.set_aside}
     if aside.get(initial.review_run_id) != planning.SET_ASIDE_INVALIDATED:
         raise _reconcile(f"recovery selection does not classify {initial.review_run_id} invalidated "

@@ -27,8 +27,10 @@ several recoverable Runs - are Review-wide. What a Run's chain may look like,
 how its request names Runs set aside, and the classification and
 reconstruction tail are kind policy (F4 §26.5, §26.28 P4): planning keeps its
 adapter exactly as it was, and the Work kind (``work-result-v1``) has its own
-(:func:`discover_work`), which START runs over the Runs of a Class-A
-replacement (``skills/start``).
+(:func:`discover_work`), which every review-v1 Work START invocation runs
+(``skills/start``). A Work Run is resumed only through the START mutation that
+reserved it, so the Work policy needs one more input than planning's: the Runs
+the pending START mutations of the Work hold.
 """
 
 from __future__ import annotations
@@ -104,6 +106,7 @@ def discover_work(
     operation_identity: str,
     *,
     currency: Callable[[MatchingRun], Any],
+    owned: "frozenset[str] | set[str] | tuple[str, ...]",
     held: "frozenset[str] | set[str] | tuple[str, ...]" = (),
 ) -> Discovery:
     """The same canonical discovery over the Work kind's Runs of one operation identity (F4 §11.12).
@@ -114,14 +117,27 @@ def discover_work(
     never chosen by age: one recoverable is the one to continue, several are
     ``review_recovery_ambiguous``, an incomplete one stops the call.
 
-    ``held`` are the Runs the calling START mutation itself reserved: they are
-    its own recovery selector's (``start_review.select_in_flight``), so they are
-    neither proven nor classified here - an own Run with a pending generation
-    mutation is the selector's to resume, never "incomplete" - and the Runs
-    their requests set aside stay set aside. Every OTHER matching Run is
-    classified exactly as above.
+    ``owned`` are the Runs the pending START mutations of this Work reserved. A
+    Work Run is resumed only from the record of the START mutation that
+    reserved it and the canonical Review records (``skills/start``: resume), and
+    what its remaining stages need is in that record alone (:func:`_require_owner`),
+    so a Run of a recoverable shape that no owned set holds is incomplete, never
+    recoverable. ``held`` (some of ``owned``) are the Runs the calling START
+    mutation leaves to its own recovery selector
+    (``start_review.select_in_flight``): they are neither proven nor classified
+    here - an own Run with a pending generation mutation is the selector's to
+    resume, never "incomplete" - and the Runs their requests set aside stay set
+    aside. Every OTHER matching Run is classified exactly as above.
     """
-    return _discover(store, work_review.REVIEW_KIND, operation_identity, currency, WORK, frozenset(held))
+    owned, held = frozenset(owned), frozenset(held)
+    if not held <= owned:
+        raise ValueError("a held Work Review Run is one a pending START mutation of the Work holds")
+    adapter = RecoveryAdapter(
+        shape=_work_shape_problem, named=_work_named,
+        classify=lambda store_, review, head, found, named_aside, currency_: _classify_work(
+            store_, review, head, found, named_aside, currency_, owned),
+    )
+    return _discover(store, work_review.REVIEW_KIND, operation_identity, currency, adapter, held)
 
 
 def _discover(
@@ -482,6 +498,7 @@ def _classify_work(
     found: MatchingRun,
     named_aside: set[str],
     currency: Callable[[MatchingRun], Any],
+    owned: frozenset[str],
 ) -> str | None:
     """Rows a-g for a Work Run: the set-aside reason, or None for the recoverable one.
 
@@ -494,6 +511,10 @@ def _classify_work(
     f  generation 1, or an authorizing generation 2    currency: current -> recoverable, stale -> its reason
     g  sealed at generation 3, unconsumed              recoverable
     ```
+
+    Recoverable (f current, g) means resumable by the START mutation that
+    reserved the Run; one no pending START mutation of this Work holds lacks
+    what its resumption needs and is ``review_recovery_incomplete`` (e).
     """
     chain = found.chain
     latest = chain.latest.generation
@@ -512,11 +533,38 @@ def _classify_work(
     if latest in (1, 2):
         outcome = currency(found)
         if outcome.current:
+            _require_owner(found, owned)
             return None
         if outcome.stale:
             return outcome.detail
         raise _incomplete(f"Work Review Run {found.review_run_id}'s Candidate is indeterminate: {outcome.detail}")
+    _require_owner(found, owned)
     return None
+
+
+def _require_owner(found: MatchingRun, owned: frozenset[str]) -> None:
+    """A Run of a recoverable shape is recoverable only while a pending START mutation of its Work holds it.
+
+    What its remaining stages consume is runtime material of the START
+    mutation that reserved it, never a Review record: the reserved Run, task,
+    Receipt and Consumption IDs (``start_review.select_in_flight`` reads the
+    Run from them), the owner of its generation mutations
+    (``start_review.resolve_pending_generation``), the bound ownership
+    witnesses S-c1 requires (``start_review._result_commit``) and the
+    pre-existing-dirty snapshot its commits are separated against, its S-c0 /
+    S-c1 commits as C-1 owns them (W1), and its terminal stage. Another
+    mutation cannot hold them: it reserves new IDs, binds recovered ones only
+    as a recovery planning mutation, snapshots the bytes the lost START's
+    executor wrote as changes from before it, and never adopts a commit it did
+    not make. So the Run cannot be resumed and is incomplete.
+    """
+    if found.review_run_id not in owned:
+        raise _incomplete(
+            f"Work Review Run {found.review_run_id} has the shape of a recoverable Run, and no pending START mutation "
+            "of this Work holds it: its reservations, its generation mutations' owner, the ownership witnesses and "
+            "pre-existing-dirty snapshot its Candidate was frozen under, its S-c0 / S-c1 commits and its terminal "
+            "stage are runtime material of the START mutation that began it, which no other mutation can hold"
+        )
 
 
 def _work_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str | None:
@@ -546,7 +594,3 @@ def _work_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str
     ):
         return "the Run's kind, target or operation identity is not the Candidate's Work"
     return None
-
-
-#: The Work kind's policy over the same core.
-WORK = RecoveryAdapter(shape=_work_shape_problem, named=_work_named, classify=_classify_work)
