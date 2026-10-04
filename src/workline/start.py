@@ -3205,7 +3205,7 @@ def start(
         from . import start_review
 
         review = start_review.entry_gate(store, review)
-        details = dict(start_review.LOCK_DETAILS)
+        details = start_review.lock_details(review)
     # Project execution lock (rules/git): everything that decides a write is read
     # under it, the executor runs inside it, and it is released when START
     # returns. A question wait releases it too; the mutation stays pending for
@@ -3214,16 +3214,18 @@ def start(
         return _start_locked(store, work_id, mode, executor, review)
 
 
-def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, review_v1: bool) -> None:
+def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, review_contract: str | None) -> None:
     """F1-D3: every pending START record of this slot must fit this invocation's contract, or reconcile.
 
     Read from the durable invocation alone, under the lock and before the
-    mutation is opened; the record is never written. A legacy invocation is
-    refused only by a pending record that carries a review marker - which no
-    legacy run writes, so every legacy outcome is otherwise exactly as it was.
-    A review-v1 invocation continues only a record carrying exactly the frozen
-    marker pair and nothing else: partial, unknown and extra markers are never
-    read as either contract.
+    mutation is opened; the record is never written. A legacy invocation
+    (``review_contract`` None) is refused only by a pending record that carries
+    a review marker - which no legacy run writes, so every legacy outcome is
+    otherwise exactly as it was. A review invocation continues only a record
+    carrying exactly the marker pair of ITS OWN contract (v1, or the distinct
+    P4 contract, G-6 Option M) and nothing else: partial, unknown and extra
+    markers are never read as either contract, and a v1 record is never
+    continued under P4 nor a P4 record under v1.
     """
     slot = ("start", work_id, mode)
     live = {"operation", "work_id", "mode"}
@@ -3238,16 +3240,21 @@ def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, 
         if (invocation.get("operation"), invocation.get("work_id"), invocation.get("mode")) != slot:
             continue
         marked = any(key in invocation for key in work_invocation.MARKER_KEYS)
-        if not review_v1 and not marked:
+        if review_contract is None and not marked:
             continue
         exact = set(invocation) == live | set(work_invocation.markers())
-        if review_v1 and exact and work_invocation.classify(invocation) == work_invocation.WORK:
+        if review_contract is not None and exact and work_invocation.contract_of(invocation) == review_contract:
             continue
         carried = {key: invocation.get(key) for key in work_invocation.MARKER_KEYS if key in invocation}
+        described = (
+            "a legacy invocation" if review_contract is None
+            else "a review-v1 Work invocation" if review_contract == work_invocation.REVIEW_CONTRACT
+            else f"a P4 Work invocation ({review_contract})"
+        )
         raise ReconcileRequired(
             f"the unfinished START mutation {record.get('mutation_id')} carries "
             f"{'review markers ' + str(carried) if carried else 'no review markers'}, and this is "
-            f"{'a review-v1 Work invocation' if review_v1 else 'a legacy invocation'}; it is neither upgraded nor "
+            f"{described}; it is neither upgraded nor "
             "downgraded and is left untouched: reconcile required",
             reason="review_marker_mismatch",
         )
@@ -3257,12 +3264,12 @@ def _start_locked(
     store: ProjectStore, work_id: str, mode: str, executor: Executor, review: Any = None
 ) -> StartResult:
     work = store.read_entity("work", work_id)  # stable resolve; no fallback
-    _require_marker_compatible(store, work_id, mode, review_v1=review is not None)
+    _require_marker_compatible(store, work_id, mode, review_contract=None if review is None else review.contract)
     invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
     if review is not None:
         from . import start_review
 
-        invocation = start_review.invocation(work_id, mode)
+        invocation = start_review.invocation_for(work_id, mode, review)
     # A cancel an interrupted run of this START recorded is answered from its record first: the current Project
     # shows that cancel part-way, and is judged as it stood when the cancel was decided.
     cancel = _cancel_to_finish(store, work, mode, invocation)
