@@ -472,17 +472,22 @@ _MARKER_KEYS = ("review_contract", "publication_contract", "recovery_of_review_r
 def planning_marker(invocation: dict[str, Any], operation: str) -> str:
     """What a planning invocation's markers say: ``legacy``, ``review``, ``recovery`` or ``invalid``.
 
-    ``review`` is exactly the frozen pair beside the live invocation; ``recovery``
-    is that pair plus a well-formed ``recovery_of_review_run_id``. Any other
-    presence or value, or any other added key, is ``invalid``.
+    ``review`` is exactly the frozen pair beside the live invocation - the v1
+    pair, or the P4 pair that differs only in its distinct review contract;
+    ``recovery`` is that pair plus a well-formed ``recovery_of_review_run_id``.
+    Any other presence or value, or any other added key, is ``invalid``.
     """
     from .ids import is_valid_id
+    from .review.records import P4_PLANNING_CONTRACT
 
     extra = set(invocation) - _LIVE_INVOCATION_KEYS[operation]
     if not extra:
         return "legacy"
+    # The review family: the v1 contract, or the distinct P4 contract (G-6 Option M), each with the frozen
+    # publication marker. Which of the two a record runs under is compared exactly by the Roadmap Review owner
+    # before anything is opened (``roadmap_review._enter``); here it is only told apart from legacy and invalid.
     pair = (
-        invocation.get("review_contract") == _REVIEW_CONTRACT
+        invocation.get("review_contract") in (_REVIEW_CONTRACT, P4_PLANNING_CONTRACT)
         and invocation.get("publication_contract") == _PUBLICATION_CONTRACT
     )
     if pair and extra == {"review_contract", "publication_contract"}:
