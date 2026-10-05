@@ -164,6 +164,13 @@ class P5RelationTests(P4PlanningCase):
         request = review.read_task_input(str(adjudication_task["task_id"])).request_envelope
         families = sorted(item["family"] for item in request["prior_history"])
         self.assertEqual([paths.HISTORY_FINDINGS, paths.HISTORY_REPAIRS, paths.HISTORY_RUNS], families)
+        # the bound set is exactly the admitted set of the P5 predecessor (its Run stores the P5 identity), each
+        # at its exact stored digest, and recomputing it gives the same set
+        first = review.gate_chain(successor).generations[0]
+        self.assertEqual(request["prior_history"], p4.prior_history_references(
+            review, first.review_kind, first.target_identity, successor))
+        for item in request["prior_history"]:
+            self.assertEqual(item["digest"], review.history_digest(item["family"], item["id"]))
         self.assertEqual(p4.P5_ADJUDICATION_INSTRUCTION, request["instruction"])
         (relation_id,) = review.history_ids(paths.HISTORY_RELATIONS)
         relation = review.read_history(paths.HISTORY_RELATIONS, relation_id)

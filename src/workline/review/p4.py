@@ -3202,6 +3202,31 @@ def _history_run_of(family: str, found: Any) -> str:
     return str(found.review_run_id)
 
 
+def _require_p5_history_source(reader: Any, family: str, identifier: str, chain: Any) -> None:
+    """GAP-A at the prior-history boundary: a record is P5 prior history only if its Run stores the P5 identity.
+
+    Positively, from the Run's own generation-1 TaskInputs - the policy and the
+    history contract it stores (:func:`run_history_contract`), as
+    ``create._source_finding`` proves a P5 source - never from the history
+    file's presence or shape, the current default policy, or the record
+    validating against its immutable P1-P4 source: a P4-only Run's summary
+    written by hand validates there and is still no P5 history. A same-target
+    record of a Run that is not P5 by its stored identity, or whose stored
+    identity does not read, is ``review_p5_history_invalid``.
+    """
+    try:
+        contract = run_history_contract(reader, chain)
+    except StopError as exc:
+        raise history.stop(history.CODE_HISTORY_INVALID,
+                           f"the {family} history record {identifier} names Review Run {chain.review_run_id}, whose "
+                           f"stored policy does not read ({exc}); nothing is launched") from exc
+    if contract != history.HISTORY_CONTRACT:
+        raise history.stop(history.CODE_HISTORY_INVALID,
+                           f"the {family} history record {identifier} belongs to Review Run {chain.review_run_id}, "
+                           "which is not a P5 Run by the policy and history contract it stores; it is never P5 prior "
+                           "history, and nothing is launched")
+
+
 def prior_history_references(reader: Any, review_kind: str, target_identity: str,
                              current_run_id: str) -> list[dict[str, str]]:
     """GAP-C: the deterministic COMPLETE validated P5 prior-history reference set of one review kind and target.
@@ -3209,10 +3234,13 @@ def prior_history_references(reader: Any, review_kind: str, target_identity: str
     Every P5 Run / Finding / Repair summary whose Run is of ``review_kind`` and
     ``target_identity`` (other than the current Run), by family, identity and
     exact canonical digest, in a total order - never chat memory, a transcript
-    or a Candidate copy. A same-target history record that does not validate
-    against its immutable source makes the set incomplete: the P5 transition
-    that needs it STOPs (``review_p5_history_invalid``, GAP-B), and nothing
-    unvalidated is ever offered to the adjudicator.
+    or a Candidate copy. A same-target history record is admitted only when
+    its Run is P5 by the policy and history contract that Run stores
+    (:func:`_require_p5_history_source`) and the record validates against its
+    immutable source; anything short of both makes the set incomplete: the P5
+    transition that needs it STOPs (``review_p5_history_invalid``, GAP-B), and
+    nothing unadmitted or unvalidated is ever offered to the adjudicator. A
+    record of another review kind or target is no gate for this one.
     """
     checkers = {paths.HISTORY_RUNS: history.run_summary_problems,
                 paths.HISTORY_FINDINGS: history.finding_summary_problems,
@@ -3231,6 +3259,7 @@ def prior_history_references(reader: Any, review_kind: str, target_identity: str
             first = chain.generations[0]
             if (first.review_kind, first.target_identity) != (review_kind, target_identity):
                 continue
+            _require_p5_history_source(reader, family, identifier, chain)
             problems = checkers[family](reader, record)
             if problems:
                 raise history.stop(
