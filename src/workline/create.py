@@ -529,8 +529,213 @@ def direct_request_identity(spec: WorkSpec) -> dict[str, Any]:
     }
 
 
-def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_key: str | None = None) -> CreateResult:
-    """CREATE entrypoint for direct standalone invocation (Direct Work Operation context)."""
+# --------------------------------------------------------------------------- future Work provenance (P5 GAP-D, §28.13)
+#
+# An explicit, optional ``source_finding_id`` on a direct standalone CREATE, separate from the Work's semantic
+# content: P5 never creates or schedules a Work, and a CREATE without it is exactly the CREATE above. With it, the
+# one ``future_work_link`` relation ``finding_id -> work_id`` is persisted in the SAME canonical owner commit as the
+# Work, in this order (GAP-D (a)):
+#
+#   1  the exact P5 Finding summary and its adjudication validate in HEAD's committed Review state
+#      (:func:`_source_finding`), before the mutation is opened;
+#   2  one replay-stable ``review_relation`` ID is reserved (:func:`_reserve_future_work_link`);
+#   3  the relation path joins the Work's planned paths in the pre-effect dirty_overlap judgment (RB10 N2);
+#   4  Review committability, checkout capability and the immutable create are proven (:func:`_require_link_recordable`);
+#   5  the Work is created under the existing CREATE rules (:func:`register_works`);
+#   6  the relation is recorded and written (:func:`_record_future_work_link`) and committed by the same Git stage;
+#   7  the committed relation bytes are proven exactly (:func:`_prove_future_work_link`).
+#
+# The relation adds the Work to no completion set, creates no dependency in either direction, changes no selection
+# and no lifecycle, and schedules nothing: it is a Review history record only, never a Roadmap relation.
+
+#: The stage of a direct CREATE that records its future_work_link (only when a source is given).
+PROVENANCE_STAGE = "provenance"
+#: The public-safe rationale of every future_work_link CREATE records: provenance, never a causal claim.
+FUTURE_WORK_LINK_RATIONALE = "An explicit CREATE named this Finding as the source of the Work; provenance only."
+
+
+@dataclass(frozen=True)
+class _FutureWorkLink:
+    source_finding_id: str
+    relation_id: str
+    path: str
+
+
+def _require_source_finding_id(source_finding_id: object) -> None:
+    """Before the lock: an explicit source is exactly one ``review_finding`` ID, or nothing is done."""
+    from .review import history
+
+    if not isinstance(source_finding_id, str) or not is_valid_id(source_finding_id, "review_finding"):
+        raise history.stop(
+            history.CODE_HISTORY_INVALID,
+            f"source_finding_id {source_finding_id!r} names no P5 Finding (a review_finding ID); nothing was created",
+        )
+
+
+def _source_finding(store: ProjectStore, source_finding_id: str) -> Any:
+    """GAP-D step 1: the exact P5 Finding summary ``source_finding_id`` names, validated in HEAD's committed state.
+
+    Read through the clone-safe committed reader, never the working tree or the
+    runtime area: the strict summary reader, the summary's own source checks
+    against the canonical adjudication it binds (:func:`history.finding_summary_problems`),
+    a P5 Run by the policy and history contract it stores (GAP-A - never by
+    file presence or shape), and the stored bytes the canonical rendering of
+    the summary. Absent -> ``review_p5_history_missing``; anything else short
+    of that -> ``review_p5_history_invalid``. Nothing is opened, reserved or
+    written before this returns.
+    """
+    from . import gitcmd
+    from .errors import StopError
+    from .review import history, p4, serialize
+    from .review import paths as review_paths
+    from .review.committed import CommittedReviewStore
+
+    where = f"source Finding {source_finding_id}"
+    head = gitcmd.head_commit(store.root)
+    if head is None:
+        raise history.stop(history.CODE_HISTORY_MISSING, f"{where}: HEAD names no commit, so no P5 Finding is committed")
+    try:
+        reader = CommittedReviewStore(store.root, head)
+        if not reader.history_exists(review_paths.HISTORY_FINDINGS, source_finding_id):
+            raise history.stop(history.CODE_HISTORY_MISSING,
+                               f"{where} has no committed P5 Finding summary at HEAD; nothing was created")
+        summary = reader.finding_history(source_finding_id)
+        stored_digest = reader.history_digest(review_paths.HISTORY_FINDINGS, source_finding_id)
+        problems = history.finding_summary_problems(reader, summary)
+        chain = None if problems else reader.gate_chain(summary.review_run_id)
+        contract = None if chain is None else p4.run_history_contract(reader, chain)
+    except StopError as exc:
+        if exc.code in (history.CODE_HISTORY_MISSING, history.CODE_HISTORY_INVALID):
+            raise
+        raise history.stop(history.CODE_HISTORY_INVALID,
+                           f"{where} does not read as a canonical P5 Finding summary: {exc}") from exc
+    if problems:
+        missing = all(code == history.PROBLEM_MISSING for code, _ in problems)
+        raise history.stop(
+            history.CODE_HISTORY_MISSING if missing else history.CODE_HISTORY_INVALID,
+            f"{where} does not validate against its adjudication: " + "; ".join(message for _, message in problems),
+        )
+    if contract != history.HISTORY_CONTRACT:
+        raise history.stop(history.CODE_HISTORY_INVALID,
+                           f"{where} belongs to Review Run {summary.review_run_id}, which is not a P5 Run by the policy "
+                           "and history contract it stores; nothing was created")
+    if stored_digest != serialize.digest(summary.to_record()):
+        raise history.stop(history.CODE_HISTORY_INVALID, f"{where} is not stored as its canonical rendering")
+    return summary
+
+
+def _reserve_future_work_link(mutation: Mutation, source_finding_id: str) -> _FutureWorkLink:
+    """GAP-D step 2: the one ``review_relation`` ID, reserved once per mutation and returned unchanged on resume."""
+    from .review import history
+    from .review import paths as review_paths
+
+    relation_id = mutation.reserve_id(history.review_relation_key(source_finding_id, 1), "review_relation")
+    path = review_paths.history_relation_rel(relation_id)
+    if path not in mutation.scope.files:
+        mutation.extend_scope(files=[path])
+    return _FutureWorkLink(source_finding_id, relation_id, path)
+
+
+def _require_link_recordable(store: ProjectStore, link: _FutureWorkLink) -> None:
+    """GAP-D step 4, before the first effect: the relation can be created here, committed, and read from a clone.
+
+    The immutable Review create is supported on this platform; Git commits the
+    path (not ignored); and the checkout capability holds for it and for every
+    Review record HEAD holds, which its endpoints are read from.
+    """
+    from .review import checkout, fsafe, gate
+
+    fsafe.require_immutable_create()
+    gate.require_committable(store, [link.path])
+    checkout.require_checkout_capability(store, sorted({link.path, *checkout.committed_review_paths(store)}))
+
+
+def _record_future_work_link(mutation: Mutation, link: _FutureWorkLink, source: Any, work_id: str) -> str:
+    """GAP-D step 6: record and write the one future_work_link; its exact canonical text.
+
+    Built from the validated source summary (bound by its digest) and the Work
+    just registered; supported by the adjudication the summary is bound to. A
+    resumed mutation replays the text it recorded, and a recorded text the
+    validated source no longer builds is never written over (``review_p5_history_conflict``).
+    """
+    from .review import history, serialize
+
+    relation = history.future_work_link(
+        link.relation_id, source, work_id, status=history.CAUSAL_SUPPORTED, rationale=FUTURE_WORK_LINK_RATIONALE,
+        supporting_evidence_digests=[source.adjudication_digest],
+    )
+    content = serialize.canonical_text(relation.to_record())
+    if not mutation.has_stage(PROVENANCE_STAGE):
+        mutation.add_effects(PROVENANCE_STAGE, [Effect.create_file(link.path, content)])
+    elif [effect["payload"].get("content") for effect in mutation.stage_effects(PROVENANCE_STAGE)] != [content]:
+        raise history.reconcile(
+            f"mutation {mutation.id} recorded a future_work_link for {link.path} that the validated source "
+            f"Finding {link.source_finding_id} and Work {work_id} no longer build; nothing is written over: "
+            "reconcile required",
+            history.REASON_HISTORY_CONFLICT,
+        )
+    mutation.apply()
+    return content
+
+
+def _prove_future_work_link(store: ProjectStore, mutation: Mutation, link: _FutureWorkLink, work_id: str,
+                            content: str) -> None:
+    """GAP-D step 7: the commit the Git stage made holds exactly these relation bytes, and created the Work too.
+
+    The commit is the one the Git stage recorded it made (HEAD when Git could
+    not show one). Its parent holds neither the relation nor the Work, it holds
+    both, the relation bytes are exactly the recorded canonical text, and read
+    back from that commit alone the relation validates against the committed
+    Finding summary and Work it binds. Anything else STOPs before the
+    operation completes.
+    """
+    from . import gitcmd
+    from .errors import StopError
+    from .mutation import _MADE_COMMIT
+    from .review import history
+    from .review.committed import CommittedReviewStore
+
+    repo = store.root
+    made = [effect.get(_MADE_COMMIT) for effect in mutation.stage_effects("finalize") if effect.get("kind") == "git_commit"]
+    commit = made[0] if made and isinstance(made[0], str) else gitcmd.head_commit(repo)
+    work_path = ProjectStore.entity_rel_path("work", work_id)
+    problems: list[str] = []
+    parents = None if commit is None else gitcmd.commit_parents(repo, commit)
+    if commit is None or parents is None or len(parents) != 1:
+        problems.append("the Git stage's commit and its one parent cannot be shown")
+    else:
+        parent = parents[0]
+        if gitcmd.blob_at(repo, commit, link.path) != content.encode("utf-8"):
+            problems.append(f"commit {commit} does not hold exactly the recorded bytes at {link.path}")
+        if gitcmd.blob_at(repo, parent, link.path) is not None:
+            problems.append(f"{link.path} was already committed before commit {commit}")
+        if gitcmd.blob_at(repo, commit, work_path) is None or gitcmd.blob_at(repo, parent, work_path) is not None:
+            problems.append(f"commit {commit} does not create the Work {work_id} it links")
+        if not problems:
+            try:
+                reader = CommittedReviewStore(repo, commit)
+                problems += [message for _, message in history.relation_problems(
+                    reader, reader.relation_history(link.relation_id), work_ids={work_id})]
+            except StopError as exc:
+                problems.append(f"the committed relation does not read back: {exc}")
+    if problems:
+        raise history.stop(
+            history.CODE_HISTORY_INVALID,
+            f"the future_work_link {link.relation_id} of Work {work_id} is not proven in the CREATE commit: "
+            + "; ".join(problems),
+        )
+
+
+def create_standalone_work(
+    store: ProjectStore, spec: WorkSpec, *, invocation_key: str | None = None, source_finding_id: str | None = None
+) -> CreateResult:
+    """CREATE entrypoint for direct standalone invocation (Direct Work Operation context).
+
+    ``source_finding_id`` is the optional explicit future-Work provenance (P5
+    GAP-D): when given, CREATE persists one ``future_work_link`` relation from
+    that P5 Finding to the new Work in the same commit as the Work. Without it
+    nothing differs from a CREATE that never had the parameter.
+    """
     if not spec.standalone or spec.roadmap_id is not None:
         raise SpecViolation("direct CREATE only creates standalone Works (origin.type = standalone)")
     if spec.work_kind is not None:
@@ -538,13 +743,21 @@ def create_standalone_work(store: ProjectStore, spec: WorkSpec, *, invocation_ke
     # Before the execution lock, whose holder description names the Work (RB10 N3(b)): a caller value the
     # request cannot be read with, or UTF-8 cannot write, is refused here rather than escaping as a raw error.
     input_validation.require_work_spec(spec, "the Work")
+    if source_finding_id is not None:
+        _require_source_finding_id(source_finding_id)
     with project_operation(store, DIRECT_OWNER, {"name": spec.name}):
-        return _create_standalone_locked(store, spec, invocation_key)
+        return _create_standalone_locked(store, spec, invocation_key, source_finding_id)
 
 
-def _create_standalone_locked(store: ProjectStore, spec: WorkSpec, invocation_key: str | None) -> CreateResult:
+def _create_standalone_locked(
+    store: ProjectStore, spec: WorkSpec, invocation_key: str | None, source_finding_id: str | None = None
+) -> CreateResult:
     controller = MutationController(store)
     request = direct_request_identity(spec)
+    if source_finding_id is not None:
+        # The provenance is part of what this request decided (a resume under another source is another request),
+        # and is recorded beside the Work content, never inside it.
+        request = {**request, "source_finding_id": source_finding_id}
     slot = {"operation": DIRECT_OWNER, "name": spec.name, "key": invocation_key or spec.name}
     invocation = {**slot, "request": request}
     # Registration writes the Work, its Related edges and - only when the caller
@@ -565,24 +778,36 @@ def _create_standalone_locked(store: ProjectStore, spec: WorkSpec, invocation_ke
     input_validation.require_durable(invocation, "the direct CREATE request")
     if not pending:
         input_validation.require_work_text("work", spec, "the Work")
+    # GAP-D step 1: the explicit source is validated before the mutation exists (no record, no reservation).
+    source = None if source_finding_id is None else _source_finding(store, source_finding_id)
     destination = gitops.ensure_push_destination(store)
     mutation = controller.open(DIRECT_OWNER, invocation, scope)
     with abandon_on_stop(mutation):
         gitops.ensure_git_ready(store.root)
         gitops.record_preexisting_dirty(mutation, store.root)
+        link = None if source_finding_id is None else _reserve_future_work_link(mutation, source_finding_id)
         if not mutation.has_stage("register"):
             # The Work file, its derivation detail and ``related.yaml`` when it has Related - the exact paths this
             # registration writes, under the IDs it will use, reserved now - are checked against the changes that
             # were there before this operation, after its payload rules and before its first effect (RB10 N2).
             specs = {"work": spec}
             validate_work_specs(specs, ProjectView.load(store))
-            gitops.ensure_separable_before_effects(
-                mutation, planned_registration_paths(mutation, "register", specs, relation_count=0)
-            )
+            planned = planned_registration_paths(mutation, "register", specs, relation_count=0)
+            if link is not None:
+                planned = planned + [link.path]  # GAP-D step 3: the relation path is one of this CREATE's paths
+            gitops.ensure_separable_before_effects(mutation, planned)
+        if link is not None and not mutation.has_stage(PROVENANCE_STAGE):
+            _require_link_recordable(store, link)  # GAP-D step 4, before the first effect
         result = register_works(mutation, "register", {"work": spec})
+        linked = None if link is None else _record_future_work_link(mutation, link, source, result.work_ids["work"])
     work_id = result.work_ids["work"]
     message = f"chore(workline): create {ProjectView.load(store).works[work_id].display}"
-    gitops.finalize(mutation, "finalize", message, list(result.paths), destination=destination)
+    if link is None:
+        gitops.finalize(mutation, "finalize", message, list(result.paths), destination=destination)
+    else:
+        # GAP-D step 6: the Work and its future_work_link in the SAME commit; step 7: that commit proven.
+        gitops.finalize(mutation, "finalize", message, [*result.paths, link.path], destination=destination)
+        _prove_future_work_link(store, mutation, link, work_id, str(linked))
     _stop_on_problems(validate_structure(ProjectView.load(store)), "postcheck")
     mutation.complete()
     from . import gitcmd

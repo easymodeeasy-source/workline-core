@@ -68,6 +68,8 @@ pushする場合の宛先は `rules/git` のpush destinationに従う。mutation
 
 Direct standalone invocationでは `origin.type = standalone`。Phase Workのdirect creationをこの経路で推測して作らない。
 
+Direct standalone invocationは、Work意味とは別の任意のprovenance入力 `source_finding_id`（P5 Finding summaryのID）を受けることがある（Mutation / Gitのfuture Work provenance）。Work本文には入れない。
+
 Work nameと成立状態は、canonical writerが書きcanonical readerが読み戻した時に同じ値でなければならない。nameは1つのidentityであり、改行（LF・CR・CRLF、`str.splitlines` が行の区切りとする文字を含む）・前後の空白・見出しを含むnameは読み戻すと別のnameになる。成立状態の複数行textは保持するが（CRLF・単独CRはLFとして読まれる）、`## ` 見出しを足す・繰り返す・分けるtextは別のsection構造になる。direct standalone invocationとRoadmap（Phase entry・plan exclusionのreplan）は、そのような入力と、recovery recordが同じ値として保持できない値（lone surrogate、float、tuple、textでないkey等）を、mutationを開く・IDを予約するより前に `input_unrepresentable` で拒否する。STARTのcancel・plan exclusionのreplanも、そのような新Workのname・成立状態を、IDを予約するより前に同じく拒否する。escapeして書き換えることはしない。同じrequestの未完了mutationはそのrecordのまま継続する。
 
 ## Identity / format
@@ -233,7 +235,21 @@ direct standalone invocationは、最初のID予約より前に、決定内容�
 
 direct standalone invocationの予定write scopeは、`relations/related.yaml` と登録するWork自身とする。relation payloadを渡さずlifecycle eventも記録しないため、`relations/roadmap.yaml` と `events/events.jsonl` はこの経路では書き得ない。registration coreがRoadmap / STARTのmutationへ参加する場合のscopeは、その呼び出し元operationが宣言する。
 
-direct standalone invocationは、開始前からの未commit変更が、登録するWork本体とderivation detail（予約したIDの下）、Relatedがあれば `relations/related.yaml` と重なる場合、最初のeffectを記録する前に `dirty_overlap` でSTOPし、何も書かずmutationをabandonする（`rules/git` のCommit / push）。`relations/roadmap.yaml` はこの判定に含めない。
+direct standalone invocationは、開始前からの未commit変更が、登録するWork本体とderivation detail（予約したIDの下）、Relatedがあれば `relations/related.yaml`、`source_finding_id` を与えた場合はそのfuture_work_linkのrelation file（`.workline/review/history/relations/<予約したreview_relation ID>.yaml`）と重なる場合、最初のeffectを記録する前に `dirty_overlap` でSTOPし、何も書かずmutationをabandonする（`rules/git` のCommit / push）。`relations/roadmap.yaml` はこの判定に含めない。
+
+Future Work provenance is optional explicit CREATE input. P5 never schedules or creates Work automatically. When source_finding_id is supplied and valid, CREATE persists one future_work_link relation in the same canonical owner commit as the Work without changing Work progression or originating completion dependencies.
+
+direct standalone invocationは、Work意味（name・成立状態・Related・derivation detail）とは別の任意入力として、P5 Finding summaryのID `source_finding_id` を受ける（`create-work` CLIでは `--source-finding-id <finding ID>`、Python APIでは `create_standalone_work(..., source_finding_id=...)`）。与えた場合だけ、CREATEは次の順で行う。
+
+1. lockを取る前にIDの形（`review_finding` ID）を、mutationを開く前にHEADのcommit済みReview状態で、そのP5 Finding summary、それが束ねるcanonical adjudication、そのRunが保存したpolicy・history contractがP5であることを検証する。summaryやadjudicationが無ければ `review_p5_history_missing`、形が違う・adjudicationと一致しない・P5 Runでなければ `review_p5_history_invalid` でSTOPし、record・予約・writeは何も残らない。
+2. replay-stableな `review_relation` IDを1つ予約する（key `review-relation:<finding ID>:1`。同じmutationの再実行は同じIDを使う）。
+3. そのrelation fileのpathを、Work本体等と一緒に最初のeffectより前の `dirty_overlap` 判定に含める（上記）。
+4. 最初のeffectより前に、そのpathのReview committability（ignoreされない）、checkout capability（HEADのReview recordと共に）、immutable createを示す。
+5. 既存のCREATE規則でWorkを作る。
+6. `future_work_link`（`finding_id -> work_id`、status `supported`、supporting evidenceはsummaryが束ねるadjudicationのdigest）をcreate-onlyのReview recordとして記録・作成し、Work本体と同じcommit（`chore(workline): create ...`）でcommitする。
+7. そのcommitが正確なrelation bytesとWork本体を共に作ったこと（親commitはどちらも持たない）と、commitから読み戻したrelationが束ねるFinding summaryとWorkに一致することを示す。示せなければ `review_p5_history_invalid` でSTOPし、完了扱いにしない。
+
+このrelationはprovenanceだけであり、Workを元のPhase / Roadmapのcompletion集合に入れず、どちら向きのdependencyも作らず、selection・lifecycleを変えず、maintenanceをscheduleしない。Roadmap relationではない。`source_finding_id` はinvocationのrequestに決定内容として記録し、別のsourceでの再実行は別のrequestとして `reconcile_required` とする。記録済みのrelationと、検証したsourceから作るrelationが一致しない再開は、書き直さず `review_p5_history_conflict` のreconcile requiredとする。`source_finding_id` を与えないCREATEは、requestを含め従来と同じである。
 
 中央正本の物理writeはMutation Controller経由。
 
