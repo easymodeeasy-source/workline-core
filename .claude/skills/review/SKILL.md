@@ -335,7 +335,7 @@ planningのConsumptionはversion 2の `PlanningConsumption` で、Receipt、Run�
 
 - **expected physical projection**: Candidateの登録を、canonical Candidate snapshotから計算したW、Runのadapter、登録commitの親Pの正本だけから、writerのbuilderとplanned-write計算で作ったbytes（ledger全体を含む）。
 - **C-2(Kp)**（`review-v1-planning-proof-v1`）: Kpがこのplanning mutation自身のcommitであり、branch・親・系譜が記録どおりで、`git diff-tree` のdeltaがexpected physical projectionそのもの（path・transition・mode・byte）で、記録した登録effectもそれと一致し、committed-result loaderで読み直した意味がreviewしたCandidateと一致し、Pの上でcurrency（declared baseを先に）が保たれていること。
-- **C-2(Km)**: Kmがこのmutation自身のcommitで、Consumptionだけを加え、その親がKpまたはplanning-owned pathに触れないKpの子孫であり、committed planning proofが通ること。
+- **C-2(Km)**: Kmがこのmutation自身のcommitで、Consumptionだけを加え（v1 / P4-onlyのRun。P5 Runは保存したpolicyにより、consumed Run summaryとConsumptionの2つだけを加える）、その親がKpまたはplanning-owned pathに触れないKpの子孫であり、committed planning proofが通ること。
 - **committed planning proof**（`review-v1-planning-committed-proof-v1`）: 公開しようとするcommitの履歴に登録されたRunごとに、committed objectだけから（runtime record、note、remote、working treeを読まず、attributeを評価しない）、登録commit・Runのrecord・expected physical projection（CP5）・意味（CP6、declared baseのCP7を先に）・Consumption・metadata commitを証明する。attributeを評価しないのでcheckout capabilityを要しない。
 - 証明として扱わないもの: Consumptionやmetadata commitやnoteの存在、commit message、branchの位置、承認先（remote）の状態、Supersession、planning mutationの完了。同じ意味を別のbytesで持つ登録commitは、誰が作ったものでも証明されない。
 - `P2_PUBLICATION_GIT_MIN` より古いGitで拒否された公開は、登録が存在することを主張しない。push stageの形、publication barrierが評価される場所、2つのGit最小versionは `rules/git`（Commit / push、Push destination、Git versions）が所有し、このSkillはそれに従う。
@@ -405,7 +405,7 @@ record malformed、operation_contract   fail closed。どのeventもそのせい
 
 markerはeventの `operation_contract` である。markerが本当に無いことだけがlegacyであり、Review metadata（`review_receipt_id` / `review_run_id` / `review_generation`）をmarker無しで持つもの、未知のmarker、review-v1 markerでmetadataがちょうどその4つの正しい値でないものはinvalidで、legacyへ落とさない。totalityの対象はterminal event `work_completed` だけで、`work_started` / `work_target_added` / `work_resumed` / `work_target_removed` はどのindexでも対象外である。eventのmetadataはnon-normativeで、state導出に入らない。
 
-片側だけの状態（eventだけ、Consumptionだけ）は、pendingのreview-v1 Work STARTのmutationが、その2つを1つのdurableなterminal stageとして記録しており、欠けている方をそのmutationのreplayがまだ終えられる間だけ正当である。eventだけなら、記録したeventがそのものとして適用済みで、event logがそのmutationの書いたとおりのままであり、Consumptionのcreateが未適用であること。Consumptionだけなら、そのmutationが自分で書いたbytesのConsumptionがあり、event logがそのmutationの記録した、stageの最初のeventを書く直前の内容のままであること。fileの内容から意図を推測しない。それ以外のeventだけ・Consumptionだけ・重複は不正で、`reconcile required` として人が直す。Projectのvalidationはこれらを `review_activation_prefix_mismatch` / `review_completion_marker_invalid` / `review_completion_marker_contradiction` / `review_completion_unconsumed` / `review_consumption_unbound` として報告する。
+P5 Runのterminal stageは、Runが保存したhistory contractにより、consumed Run summaryのcreateを先頭に同じ3つのeffectを続ける1つのdurableな単位であり、片側の判定はeventとConsumptionについて同じである。片側だけの状態（eventだけ、Consumptionだけ）は、pendingのreview-v1 Work STARTのmutationが、その2つを1つのdurableなterminal stageとして記録しており、欠けている方をそのmutationのreplayがまだ終えられる間だけ正当である。eventだけなら、記録したeventがそのものとして適用済みで、event logがそのmutationの書いたとおりのままであり、Consumptionのcreateが未適用であること。Consumptionだけなら、そのmutationが自分で書いたbytesのConsumptionがあり、event logがそのmutationの記録した、stageの最初のeventを書く直前の内容のままであること。fileの内容から意図を推測しない。それ以外のeventだけ・Consumptionだけ・重複は不正で、`reconcile required` として人が直す。Projectのvalidationはこれらを `review_activation_prefix_mismatch` / `review_completion_marker_invalid` / `review_completion_marker_contradiction` / `review_completion_unconsumed` / `review_consumption_unbound` として報告する。
 
 移行はしない。既存のEventを書き換えず、markerを足さず、完了したWorkを開き直さず、既存のConsumptionを書き換えず、Work単位のactivationを作らず、pendingのlegacy STARTを変換せず、過去のWorkにReview recordを作らない。activationより前のEventの意味は何も変わらない。activationはreview-v1を選ばない。
 
@@ -708,6 +708,175 @@ review_contracts:
   - review-v1-planning-p4-v1
   - review-v1-work-p4-v1
 schema: review-p4-policy
+seal_generation: 5
+severities:
+  - HIGH
+  - MID
+  - LOW
+strategy_rule: two consecutive supported B/C failures on one semantic surface require STRATEGY_CHANGE
+version: 1
+work_creation_rule: LOW and Improvement never create Work automatically
+```
+
+## P5 Review History（durable Review history / BL-005）
+
+P5は、P4-capableなRunにだけ、Reviewの事実をclone安全な不変historyとして残す。historyは不変のP1-P4 record（CandidateSnapshot、TaskInput、gate、Receipt、Consumption、Supersession、raw report、adjudication、Repair Batch、Repair Result）への検証済みprojection / referenceであり、lifecycleの正本ではない。scheduler・queue・第二のRoadmap・自動Work生成器・AI memoryでもない。共通の意味は `workline.review.history`（inert）と `workline.review.p4` のP5 owner material（inert）が持ち、書き込みは各sourceの事実を永続させる同じtransitionで、そのoperation owner（Roadmap / START）だけが行う。
+
+P5 capability is an explicit per-Run stored Review policy/history-contract property within the P4-capable owner family. New first Runs use the P5-capable policy after P5 activation; a cycle keeps the policy/history family of its first Run. Existing P4-only Runs are never upgraded by file presence, current code, or shape inference.
+
+識別子: history contract `review-v1-history-v1`、P5 Effective Policy `review-v1-p5-policy-v1`（P4と同じowner contract `review-v1-planning-p4-v1` / `review-v1-work-p4-v1` の中の、Runごとに保存されるpolicy。新しいowner markerもselectorも無い）、P5 adjudication instruction `review-v1-p5-adjudication-instruction-v1`。P5 requestは `policy_id` と `history_contract` を明示し、discovery requestはそのgeneration 1が書くset-aside summaryとHuman Decision Evidenceをidentityとdigestで束ねる。P4-onlyのrequest / TaskInput / Context / Receiptのbytesは変えない。currencyは常にそのRunが保存したpolicyで判定し、現在のdefaultと比べない。pendingのowner mutationでまだRunが無いものだけが、最初のRunを現在のP5 defaultで作る。
+
+### 不変のhistory layout
+
+```text
+.workline/review/history/
+  runs/<review_run_id>.yaml          Run summary（Runごとにただ一つ、最終dispositionの時に一度だけ）
+  findings/<finding_id>.yaml         Finding summary（正規化Findingごとに一つ）
+  repairs/<repair_batch_id>.yaml     Repair summary（成功した修理ごとに一つ）
+  relations/<relation_id>.yaml       後の / cross-runのrelation（ID kind `rhr`）
+  human-decisions/<decision_id>.yaml Human Decision Evidence（影響Runごとに一つ、ID kind `rhd`）
+```
+
+すべてimmutable create-only・strict schema・canonical bytes・filename == record identityで、可変の「現在のhistory」fileもindexも持たない。予約keyは `review-relation:<run>:<決定的な序数>` と `review-decision:<影響Run>`（`review-run:` では始まらない）。
+
+History namespace structure is validated by the shared Review readers. Cross-source history semantics are validated separately. A P5 history defect blocks the P5 transition whose stored contract requires that history; it does not become a new lifecycle gate for unrelated pre-P5 or P4-only operations.
+
+### 書く境界（ownerの責任）
+
+```text
+G1 accept       set-asideする前任のうち、P5で最終summaryの無いRunの set_aside summary
+                + 影響HUMAN_WAIT RunごとのHuman Decision Evidence（外部launchの前にcommit）
+G2 settle       discovery taskがfailedでsettleする時: not_authorized Run summary（同じG2）
+G4 settle       Finding summary全部 + 受理したrelation + HUMAN_WAITならRun summary（同じG4）
+G6 settle       Repair summary + repaired_to_next_candidate Run summary（同じG6）
+G6 invalidate   invalidated Run summary（同じG6、Supersessionと一緒）
+Consumption     consumed Run summaryを先に、同じstageでConsumption（同じowner commit）
+```
+
+A P5 Run whose canonical G2 settlement makes discovery non-authorizing receives its immutable not_authorized Run summary in that same G2 transition.
+
+Run summaryは一度だけ書き、authorizedからconsumed / invalidatedへ書き換えない。Receipt発行の時点では書かない。planningのKmはP5 RunではRun summaryとConsumptionの2つを加え、WorkのterminalはP5 RunではRun summaryのcreateを先頭に、同じ3つのeffect（2つのevent、Consumption）を続ける1つのdurableなstageである。どちらもsourceのConsumptionに対してcommit後に証明する。v1 / P4-onlyの形は変えない。
+
+`authorized` and `historical_escape` remain reserved Run-disposition vocabulary values, but P5 writes neither until a canonical source transition exists that can prove that final disposition. Downstream escape is represented by an immutable relation, never by rewriting a prior Run verdict.
+
+### 必要なhistoryのgate（P5 Runだけ）
+
+保存されたcontractがhistoryを要求するP5 Runだけが、次を越える前に `require_history_ready` を通す: G4はFinding summaryが全部canonicalであること、HUMAN_WAITはそのRun summary、repairしたG6はRepair summaryとrepaired summary、Human decisionの下での後継launchはHuman Decision Evidence、通常のConsumptionは同じtransitionのconsumed Run summary。欠けていれば `review_p5_history_missing`、sourceと合わなければ `review_p5_history_invalid` で何も進めない。pre-P5（v1 / P3 / P4-only）のRunは `not_required_by_contract` で、このgateを持たない。backfillはしない: 古いcommit・chat・memoryからhistoryを合成せず、無いevidenceは無いままにする。
+
+### Finding / Repair / causality / relation
+
+Finding summaryはcanonical P4 adjudicationのFindingから正確に写し（category・severity・semantic surface・disposition・A/B/C）、unsupported / HUMAN / dismissedのclaimからは作らない。本文はP4がpublic-safeとしてcanonical化した文だけである。Repair summaryはRepair BatchとRepair Resultから写し、時間的な隣接を因果としない。因果 / 関係のstatusは `supported`・`unresolved`・`insufficient_evidence` で、`supported` だけがsupporting evidence digestを持って確定した再発 / 因果として数えられる。不明は不明のまま残す。
+
+A P5-capable adjudication receives a deterministic validated prior-history reference set for the same target/review kind and may return structured cross-run relation claims. Accepted relations are immutable new G4 facts; they never rewrite prior Findings or Runs.
+
+relation recordは端点のrecordを書き換えない。Finding summaryの `relation_ids` は同じG4で受理したrelationだけを束ね、後のrelationで追記しない。LOW Problem・Improvementはどのseverityでも自動でWorkを作らない。将来Workとのprovenance link（`future_work_link`）は明示のCREATE入力からだけ作る（`skills/create` のfuture Work provenance）。Future Work provenance is optional explicit CREATE input. P5 never schedules or creates Work automatically. When source_finding_id is supplied and valid, CREATE persists one future_work_link relation in the same canonical owner commit as the Work without changing Work progression or originating completion dependencies.
+
+### Human Decision Evidence
+
+Human Decision Evidence explicitly identifies the prior HUMAN_WAIT Run and candidate affected by the decision. The owner validates that exact canonical G4 HUMAN state, sets that Run aside as `human_decision`, persists one immutable evidence record before the resumed external Review launch, and separately proves the current canonical requirement/authority. Evidence never substitutes for requirement authority.
+
+P5のcycleをHuman decisionの下で再開するには、`p4.HumanDecision` に加えて、P4 request bytesに入らない別の明示入力 `p4.DecisionEvidence`（影響Run・Candidate・decision identity / disposition・HUMAN entry / coverage gap・public-safeな問いと決定の要約・requirement authority identity・action class・source / effect digest）が要る。無ければ `review_p5_history_missing`、名指すRunが正当なHUMAN_WAITでない・再開されない・P4-onlyなら `review_p5_decision_evidence_invalid`、`requirement_changed` なのにcanonical authorityが変わっていなければ `review_p5_authority_mismatch` で、どれも何も予約・記録・launchする前に止まる。P4-onlyのcycleは従来どおり `p4.HumanDecision` だけで再開する。
+
+### H-3
+
+P5 recordはstructuredでpublic-safeである。chain-of-thought・hidden reasoning・raw model / chat transcript・secret / credential・自由な追加map・不要な個人情報 / local path / machine識別子を持つfieldは無い。写すのはP4がcanonical化したpublic-safeな文と、明示の構造化P5入力だけで、危険な文は別の主張へ書き換えず拒否する。Work Candidateのpayloadはhistoryへcopyせずdigestでだけ参照する。P1-P4のreconstruction materialは削らず弱めない。
+
+P5のSTOP code: `review_p5_history_missing`、`review_p5_history_invalid`、`review_p5_disposition_unsupported`、`review_p5_authority_mismatch`、`review_p5_decision_evidence_invalid`。P5のreconcile reason: `review_p5_history_conflict`。
+
+## P5 Review Policy
+
+P5のEffective Policyは次の静的recordそのものである（Workline実装の定数 `workline.review.p4.P5_POLICY_RECORD` と一致しなければならない）。
+
+```yaml
+adjudication:
+  contract: review-v1-p4-adjudication-v1
+  instruction: review-v1-p5-adjudication-instruction-v1
+  merge_rule: "same substantive issue, same semantic responsibility, one repair closes all; uncertain stays separate"
+  order:
+    - unsupported
+    - HUMAN
+    - Problem
+    - Improvement
+    - dismissed_non_actionable
+  prior_history_rule: "a deterministic complete set of validated P5 Run / Finding / Repair history references of the same review kind and target, by digest; no chat memory, transcript or Candidate copy"
+  relation_rule: "structured cross-run relation claims (type, source Finding, prior target, surface, status, evidence digests, public-safe rationale); only supported is confirmed"
+  severity_rule: "the strongest severity the adjudication supports; the reviewer's severity is input only"
+  slot: p4-adjudicator
+  task_kind: p4-adjudication-v1
+blocking_rule: "Problem HIGH or MID, and every C_REPAIR_INDUCED Problem, is a blocking current-cycle obligation"
+categories:
+  - Problem
+  - Improvement
+convergence_rule: "unresolved blocking review obligations = 0 and required coverage and Evidence are current"
+discovery:
+  history: "fresh: no prior Finding or Repair history"
+  instruction: review-v1-p4-discovery-instruction-v1
+  report_rule: H-3 public-safe structured claims plus an explicit coverage declaration
+  slot_rule: "one required task per viewpoint the P4 selector binds; at least one"
+  task_kind: p4-discovery-v1
+dispositions:
+  - repair_required
+  - repaired_current_cycle
+  - retained_history_only
+  - future_work_candidate
+  - no_action_after_adjudication
+evidence_reuse_rule: "positive proof under the dependency vocabulary only; a report, adjudication or Receipt is never reused"
+history:
+  authority_rule: "history is a validated projection and reference layer, never lifecycle truth, a scheduler or a Work generator"
+  contract: review-v1-history-v1
+  family_rule: "a cycle keeps the policy and history contract of its first Run; an existing Run is read only from its own stored identity and is never upgraded"
+  finding_rule: "one Finding summary per normalized Finding, in the G4 that persists the adjudication"
+  human_decision_rule: "one Human Decision Evidence record per affected HUMAN_WAIT Run, in the successor G1 before any external launch; never requirement authority"
+  relation_rule: accepted relations are immutable new G4 facts and never rewrite an endpoint
+  repair_rule: "the Repair summary and the repaired Run summary, in the G6 that persists the Repair Result"
+  sanitation_rule: "structured public-safe fields only: no chain-of-thought, transcript, secret, free map or Candidate payload"
+  summary_rule: "one immutable Run summary, written in the transition that makes the Run's durable disposition final; the two reserved dispositions no transition proves are never written"
+human_rule: "a required requirement decision is HUMAN_WAIT at generation 4; no repair guesses it"
+impact_classes:
+  - LOCAL
+  - SHARED
+  - CONTRACT
+  - FOUNDATION
+improvement_rule: Improvement of any severity is non-blocking
+last_generation: 6
+low_rule: Problem LOW is non-blocking only while the current completion objective still holds
+outcomes:
+  - unsupported
+  - HUMAN
+  - Problem
+  - Improvement
+  - dismissed_non_actionable
+policy_id: review-v1-p5-policy-v1
+relations:
+  - A_NEW
+  - B_RECURRENCE
+  - C_REPAIR_INDUCED
+repair:
+  batch_rule: one Repair Batch per Candidate generation holding every decidable blocking Problem
+  instruction: review-v1-p4-repair-instruction-v1
+  proposal_rule: "a complete repaired Candidate proposal; the owner alone adopts it"
+  slot: p4-repair
+  task_kind: p4-repair-v1
+reverification_minimums:
+  CONTRACT:
+    - adjacent_eligibility
+    - contract_roundtrip
+    - failure_interruption_resume
+    - writers_readers
+  FOUNDATION:
+    - broad_integration
+    - full_suite
+  LOCAL:
+    - direct_consumers
+    - focused_tests
+  SHARED:
+    - focused_tests
+    - integration_checks
+    - representative_callers
+review_contracts:
+  - review-v1-planning-p4-v1
+  - review-v1-work-p4-v1
+schema: review-p5-policy
 seal_generation: 5
 severities:
   - HIGH

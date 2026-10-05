@@ -130,6 +130,7 @@ def review_problems(review: ReviewStore) -> list[ReviewProblem]:
     problems.extend(_task_inputs(review))
     problems.extend(_provenance(review, chains))
     problems.extend(_p4_records(review, chains))
+    problems.extend(_history_records(review))
     problems.extend(_activation(review))
     return problems
 
@@ -139,7 +140,11 @@ def _problem(exc: ValidationError) -> ReviewProblem:
 
 
 def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
-    """Only the known directories (P1's seven, P4's four), each a plain directory - read without following."""
+    """Only the known directories (P1's seven, P4's four, P5's history), each a plain directory - read without following.
+
+    ``history/`` is the one area two levels deep (§28.3): it holds exactly the
+    five history family directories, each plain, and nothing else.
+    """
     try:
         found = review.entries(paths.REVIEW_DIR) or []
     except ValidationError as exc:
@@ -155,6 +160,29 @@ def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
         elif not entry.is_dir:
             problems.append(
                 ReviewProblem("review_namespace_invalid", f"{paths.REVIEW_DIR}/{entry.name} is a file where a directory belongs")
+            )
+        elif entry.name == "history":
+            problems.extend(_history_shape(review))
+    return problems
+
+
+def _history_shape(review: ReviewStore) -> list[ReviewProblem]:
+    """``history/`` holds only the five family directories, each a plain directory - read without following."""
+    try:
+        found = review.entries(paths.HISTORY_DIR) or []
+    except ValidationError as exc:
+        return [_problem(exc)]
+    problems: list[ReviewProblem] = []
+    for entry in found:
+        if entry.name not in paths.HISTORY_FAMILIES:
+            problems.append(ReviewProblem("review_namespace_invalid", f"{paths.HISTORY_DIR} holds unknown entry {entry.name}"))
+        elif entry.is_indirection:
+            problems.append(
+                ReviewProblem("review_containment", f"{paths.HISTORY_DIR}/{entry.name} is a symlink, junction or other reparse point")
+            )
+        elif not entry.is_dir:
+            problems.append(
+                ReviewProblem("review_namespace_invalid", f"{paths.HISTORY_DIR}/{entry.name} is a file where a directory belongs")
             )
     return problems
 
@@ -649,6 +677,23 @@ def _p4_chain(
     return problems
 
 
+def _history_records(review: ReviewStore) -> list[ReviewProblem]:
+    """Every P5 history record, referenced or not, is structurally valid (§28.17 shape, schema, identity).
+
+    Structural only: each family directory is enumerated (no indirection, no
+    nested directory, no non-record entry, a filename that is the family's
+    identity kind) and each record is read through its strict reader
+    (canonical bytes, exact schema and version, filename == identity inside).
+    Whether a summary agrees with its immutable source is
+    :func:`workline.review.history.history_problems`, which is deliberately
+    not part of this pass: a broken history record never changes lifecycle
+    truth (§28.17). A Project with no history namespace has nothing here.
+    """
+    from . import history
+
+    return [ReviewProblem(code, message) for code, message in history.load_history(review).problems]
+
+
 def activation_problems(store: ProjectStore, review: ReviewStore) -> list[ReviewProblem]:
     """P3 F1 §10 over this Project's working tree: the activation boundary, and review-v1 totality after it.
 
@@ -886,7 +931,7 @@ def _recorded_terminals(store: ProjectStore) -> list[Any]:
         pending = MutationController(store).list_pending()
     except StopError:
         return []
-    return [found for found in (recorded_terminal(record) for record in pending) if found is not None]
+    return [found for found in (recorded_terminal(record, store) for record in pending) if found is not None]
 
 
 def _stored(review: ReviewStore, relative: str) -> bytes | None | bool:

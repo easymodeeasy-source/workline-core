@@ -270,6 +270,17 @@ class RepairBranchTests(P4PlanningCase):
 
 
 class HumanWaitTests(P4PlanningCase):
+    def setUp(self) -> None:
+        # RB4 (Orchestrator decision on the P5-default STOP): these assertions are about a P4-ONLY cycle, which a
+        # fresh Run no longer is (GAP-A option 3); the test-only seam makes its first Run P4-only exactly as pre-P5
+        # code wrote it. The P5 twin, which needs the evidence input, is tests/test_review_p5_human_decisions.py.
+        super().setUp()
+        from p5_helpers import p4_only_cycle
+
+        seam = p4_only_cycle()
+        seam.__enter__()
+        self.addCleanup(seam.__exit__, None, None, None)
+
     def test_human_wait_stops_at_g4_and_a_decision_starts_a_new_run(self) -> None:
         store = self.planning_project()
         result = self.reviewed_p4(store, p4_review(Discovery((p4.P4Claim("HIGH", "human", "which scope?"),))))

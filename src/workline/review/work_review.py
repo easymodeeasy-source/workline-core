@@ -1197,6 +1197,10 @@ class WorkReviewP4:
     repair: p4.ActorBinding
     human_decision: p4.HumanDecision | None = None
     contract: str = P4_CONTRACT
+    #: P5 (§28.14, GAP-G): the separate explicit Human-decision evidence input of the waiting Run this START
+    #: resumes (its ``affected_review_run_id`` must be exactly that P4-R7 waiting Run). Never part of P4
+    #: request bytes or START slot identity; a P4-only cycle takes none.
+    decision_evidence: tuple[p4.DecisionEvidence, ...] = ()
 
 
 def validate_work_review_p4(review: object) -> WorkReviewP4:
@@ -1207,6 +1211,7 @@ def validate_work_review_p4(review: object) -> WorkReviewP4:
     if review.contract != P4_CONTRACT:
         problems.append(f"contract {review.contract!r} is not {P4_CONTRACT!r}")
     problems.extend(p4.binding_problems(review.discovery, review.adjudicator, review.repair, review.human_decision))
+    problems.extend(p4.decision_evidence_problems(review.decision_evidence, review.human_decision))
     if problems:
         raise ValidationError("invalid WorkReviewP4: " + "; ".join(problems), code="review_contract_invalid")
     return review
@@ -1216,20 +1221,26 @@ def is_p4(review: object) -> bool:
     return type(review) is WorkReviewP4
 
 
-def context_record_p4(work_context_record: Mapping[str, Any]) -> dict[str, Any]:
-    """The P4 Work Context: the exact Work Context v2, bound together with the P4 contract and Policy."""
+def context_record_p4(work_context_record: Mapping[str, Any], policy_id: str = p4.POLICY_ID) -> dict[str, Any]:
+    """The P4 Work Context: the exact Work Context v2, bound together with the P4 contract and the Run's Policy.
+
+    ``policy_id`` is the Run's family policy (GAP-A): a P4-only Run's Context is
+    byte for byte what it always was; a P5 Run's names the P5 policy.
+    """
     work_context.require_context(work_context_record)
+    if policy_id not in p4.POLICY_IDS:
+        raise ValidationError(f"not a policy of the P4-capable family: {policy_id!r}", code="review_contract_invalid")
     return serialize.canonical_data({
         serialize.SCHEMA_KEY: SCHEMA_P4_CONTEXT, serialize.VERSION_KEY: RECORD_VERSION,
-        "review_contract": P4_CONTRACT, "policy_id": p4.POLICY_ID, "work_context": dict(work_context_record),
+        "review_contract": P4_CONTRACT, "policy_id": policy_id, "work_context": dict(work_context_record),
     })
 
 
 def inner_context(record: Mapping[str, Any]) -> dict[str, Any]:
-    """The Work Context v2 a P4 Work Context binds; anything else is refused."""
+    """The Work Context v2 a P4-capable Work Context binds; anything else is refused."""
     if not isinstance(record, Mapping) or record.get(serialize.SCHEMA_KEY) != SCHEMA_P4_CONTEXT \
             or record.get(serialize.VERSION_KEY) != RECORD_VERSION or set(record) != set(P4_CONTEXT_FIELDS) \
-            or record.get("review_contract") != P4_CONTRACT or record.get("policy_id") != p4.POLICY_ID:
+            or record.get("review_contract") != P4_CONTRACT or record.get("policy_id") not in p4.POLICY_IDS:
         raise ValidationError("the P4 Work Context is not the P4 contract's own record", code="review_record_invalid")
     inner = dict(record["work_context"])
     work_context.require_context(inner)
@@ -1333,6 +1344,11 @@ def task_input_problems_p4(task_input: records.TaskInput, snapshot_material: Map
                 problems.append(str(exc))
     if serialize.digest(dict(snapshot_material).get("candidate") or {}) != run_candidate_hash:
         problems.append("the stored snapshot's Candidate does not digest to the Run's candidate_hash")
-    if p4.policy_named(envelope.get("policy_id")) is None or task_input.effective_policy_hash != p4.policy_hash():
+    # the Run's own stored family policy (GAP-A), never the current default
+    policy = envelope.get("policy_id")
+    if p4.policy_named(policy) is None or task_input.effective_policy_hash != p4.policy_hash(str(policy)):
         problems.append("the request envelope names no policy whose digest is the P4 Effective Policy")
+    elif envelope.get(serialize.SCHEMA_KEY) == p4.SCHEMA_DISCOVERY_REQUEST and isinstance(envelope.get("context"), dict) \
+            and envelope["context"].get("policy_id") != policy:
+        problems.append("the request envelope's Context binds another policy than the request")
     return problems

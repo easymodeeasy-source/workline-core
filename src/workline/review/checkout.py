@@ -304,6 +304,9 @@ def require_namespace_readable(store: ProjectStore) -> None:
             review.read_repair_batch(repair_batch_id)
         for repair_batch_id in review.repair_result_ids():
             review.read_repair_result(repair_batch_id)
+        for family in paths.HISTORY_FAMILIES:
+            for identifier in review.history_ids(family):
+                review.read_history(family, identifier)
         review.read_activation()
     except ValidationError as exc:
         raise StopError(

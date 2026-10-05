@@ -493,6 +493,12 @@ def _read_every_record(reader: ResultingTreeReviewStore, record_paths: Sequence[
             reader.read_repair_batch(stem)
         elif area == "repair-results":
             reader.read_repair_result(stem)
+        elif area == "history":
+            # The one two-level area (§28.3): exactly ``history/<family>/<id>.yaml``, read by its family's reader.
+            family, _, identifier = stem.partition("/")
+            if family not in paths.HISTORY_FAMILIES or not identifier or "/" in identifier:
+                raise _unsafe(f"the resulting tree holds {relative}, which is not a canonical Review history record")
+            reader.read_history(family, identifier)
         else:
             # Never skipped: an area this reader does not read is an area it cannot prove (P-12).
             raise _unsafe(f"the resulting tree holds {relative}, in a Review area no strict reader reads")

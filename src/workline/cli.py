@@ -102,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--obey", action="append")
     create.add_argument("--realizes", action="append")
     create.add_argument("--must-update", action="append")
+    create.add_argument("--source-finding-id")
 
     args = parser.parse_args(argv)
 
@@ -177,7 +178,13 @@ def main(argv: list[str] | None = None) -> int:
                 + _related(args.must_update, "must_update")
             )
             spec = WorkSpec(args.name, args.desired_state, related=tuple(related))
-            result = create_standalone_work(ProjectStore(Path(args.project_root)), spec)
+            if args.source_finding_id is None:
+                result = create_standalone_work(ProjectStore(Path(args.project_root)), spec)
+            else:
+                # explicit future-Work provenance (P5 GAP-D): one future_work_link in the CREATE commit
+                result = create_standalone_work(
+                    ProjectStore(Path(args.project_root)), spec, source_finding_id=args.source_finding_id
+                )
             print(f"create-work: {result.work_id} head={result.head}")
             return 0
     except StopError as exc:

@@ -1691,8 +1691,34 @@ def _planning_publication(
         effect["payload"].get("path") for effect in effects
         if effect.get("stage") == _STAGE_CONSUMPTION and effect.get("kind") == "create_file"
     ]
+    written = list(consumption)
+    invocation = mutation_record.get("invocation")
+    if isinstance(invocation, dict) and invocation.get("review_contract") == _P4_REVIEW_CONTRACT:
+        # RB4 / P5 (§28.6, GAP-A option 3), within the durable P4-family contract only: the Consumption stage may
+        # also carry exactly one Run summary at .workline/review/history/runs/<review_run id>.yaml, and Km both -
+        # but only for a Run positively proven P5-capable (OD-2). A v1 stage is read as always.
+        from .review import paths as review_paths
+
+        runs = f"{review_paths.HISTORY_DIR}/{review_paths.HISTORY_RUNS}/"
+        summaries = [path for path in written if isinstance(path, str) and path.startswith(runs)
+                     and path.endswith(".yaml") and is_valid_id(path[len(runs):-len(".yaml")], "review_run")]
+        if summaries:
+            consumption = [path for path in written if isinstance(path, str)
+                           and path.startswith(review_paths.CONSUMPTIONS_DIR + "/")]
+            if len(summaries) != 1 or sorted(written) != sorted(consumption + summaries):
+                consumption = []
+            elif len(consumption) == 1:
+                # OD-2: the family marker is no proof of P5. The Run the summary names must be proven P5-capable
+                # from its canonical stored Review identity (its stored policy and history contract) in Km's own
+                # tree, by the planning owner's proof - else the summary + Consumption shape is not published
+                from .roadmap_review import p5_publication_problem
+
+                problem = p5_publication_problem(repo, commit, summaries[0], consumption[0])
+                if problem is not None:
+                    return _Refused(f"{commit} carries a Run summary beside the planning Consumption, and no P5-capable "
+                                    f"Run is proven for it: {problem}", invalid)
     changed = gitcmd.commit_changes(repo, commit)
-    if changed is None or len(consumption) != 1 or not set(changed) <= set(consumption):
+    if changed is None or len(consumption) != 1 or not set(changed) <= set(written):
         return _Refused(f"Git does not show {commit} as a commit of the planning Consumption alone", invalid)
     tip = gitcmd.branch_commit(repo, ref)
     if tip is None or gitcmd.descends_from(repo, tip, commit) is not True:

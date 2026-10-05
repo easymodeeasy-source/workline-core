@@ -25,9 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path, PurePosixPath
+import re
 from typing import Any, Callable
 
 from ..errors import StopError, ValidationError
+from ..ids import is_valid_id
 from . import p4, records, serialize
 
 # --------------------------------------------------------------------------- static contract identifiers
@@ -474,6 +476,69 @@ def request_envelope(
     })
 
 
+#: Every field :func:`request_envelope` writes, and nothing else.
+_REQUEST_FIELDS = frozenset({
+    serialize.SCHEMA_KEY, serialize.VERSION_KEY, "review_kind", "policy_id", "instruction", "candidate", "context",
+    "set_aside_runs",
+})
+#: A stable set-aside reason identity: recovery's classification codes and the stale reasons of the currency order.
+_SET_ASIDE_REASON = re.compile(r"[a-z0-9][a-z0-9_.:-]*\Z")
+
+
+def _request_invalid(message: str) -> ValidationError:
+    return ValidationError(f"the planning review request is not valid: {message}", code="review_record_invalid")
+
+
+def request_set_aside(envelope: object, *, review_run_id: str | None = None) -> list[dict[str, str]]:
+    """The Runs a stored planning request sets aside: its exact ``set_aside_runs``, read fail-closed.
+
+    The strict reader of what :func:`request_envelope` wrote. It is additive:
+    recovery's own reading of the list (``recovery._planning_named``) is not
+    changed by it. Nothing is normalized; anything the writer never writes is
+    refused:
+
+    ```text
+    record   a review-planning-request of version 1, a planning review kind, exactly the writer's fields
+    list     each item exactly review_run_id (a review_run id) and reason (a stable reason identity);
+             no Run twice, never the request's own Run ``review_run_id``, already in canonical order
+    ```
+
+    The messages name field names and identities only, never a stored value.
+    """
+    if not isinstance(envelope, dict) or envelope.get(serialize.SCHEMA_KEY) != SCHEMA_REQUEST:
+        raise _request_invalid("it is not a review-planning-request record")
+    if envelope.get(serialize.VERSION_KEY) != RECORD_VERSION:
+        raise _request_invalid(f"its version is not {RECORD_VERSION}")
+    if set(envelope) != _REQUEST_FIELDS:
+        raise _request_invalid(
+            f"it carries exactly {sorted(_REQUEST_FIELDS)}, not {sorted(str(key) for key in envelope)}"
+        )
+    if envelope.get("review_kind") not in PLANNING_KINDS:
+        raise _request_invalid("its review_kind is not a planning review kind")
+    items = envelope["set_aside_runs"]
+    if not isinstance(items, list):
+        raise _request_invalid("set_aside_runs is not a list")
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or set(item) != {"review_run_id", "reason"}:
+            raise _request_invalid(f"set_aside_runs[{index}] is not exactly review_run_id and reason")
+        run_id, reason = item["review_run_id"], item["reason"]
+        if not isinstance(run_id, str) or not is_valid_id(run_id, "review_run"):
+            raise _request_invalid(f"set_aside_runs[{index}] names no review_run id")
+        if review_run_id is not None and run_id == review_run_id:
+            raise _request_invalid(f"set_aside_runs[{index}] names the request's own Review Run {run_id}")
+        if run_id in seen:
+            raise _request_invalid(f"set_aside_runs names Review Run {run_id} twice")
+        if not isinstance(reason, str) or _SET_ASIDE_REASON.match(reason) is None:
+            raise _request_invalid(f"set_aside_runs[{index}] has no stable reason identity")
+        seen.add(run_id)
+        found.append({"review_run_id": run_id, "reason": reason})
+    if found != sorted(found, key=lambda item: item["review_run_id"]):
+        raise _request_invalid("set_aside_runs is not in its canonical order")
+    return found
+
+
 def task_input_for(
     *,
     task_id: str,
@@ -778,6 +843,10 @@ class PlanningReviewP4:
     repair: p4.ActorBinding
     human_decision: p4.HumanDecision | None = None
     contract: str = P4_CONTRACT
+    #: P5 (§28.14, GAP-G): the separate explicit Human-decision evidence input, one per affected HUMAN_WAIT
+    #: Run this invocation resumes. Never part of P4 request bytes, never slot identity; a P4-only cycle
+    #: takes none, and a P5 cycle resumed under a Human decision cannot launch without it.
+    decision_evidence: tuple[p4.DecisionEvidence, ...] = ()
 
 
 def validate_planning_review_p4(review: object) -> PlanningReviewP4:
@@ -790,6 +859,7 @@ def validate_planning_review_p4(review: object) -> PlanningReviewP4:
     if review.contract != P4_CONTRACT:
         problems.append(f"contract {review.contract!r} is not {P4_CONTRACT!r}")
     problems.extend(p4.binding_problems(review.discovery, review.adjudicator, review.repair, review.human_decision))
+    problems.extend(p4.decision_evidence_problems(review.decision_evidence, review.human_decision))
     if problems:
         raise ValidationError("invalid PlanningReviewP4: " + "; ".join(problems), code="review_contract_invalid")
     return review
@@ -894,6 +964,9 @@ def task_input_problems_p4(task_input: records.TaskInput, snapshot_material: dic
             problems.append("the request envelope's context does not digest to the Run's review_context_hash")
     if serialize.digest(snapshot_material) != run_candidate_hash:
         problems.append("the stored snapshot's material does not digest to the Run's candidate_hash")
-    if p4.policy_named(envelope.get("policy_id")) is None or task_input.effective_policy_hash != p4.policy_hash():
+    # the Run's own stored family policy (GAP-A): a P4-only TaskInput is checked against the P4 policy exactly
+    # as before, a P5 one against the P5 policy - never against the current default
+    policy = envelope.get("policy_id")
+    if p4.policy_named(policy) is None or task_input.effective_policy_hash != p4.policy_hash(str(policy)):
         problems.append("the request envelope names no policy whose digest is the P4 Effective Policy")
     return problems

@@ -35,7 +35,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
-from . import closure, records, serialize
+from . import closure, history, paths, records, serialize
 from .records import (
     AUTHORIZATION_READY,
     DISPOSITION_FUTURE_WORK_CANDIDATE,
@@ -98,6 +98,20 @@ ADJUDICATION_INSTRUCTION = "review-v1-p4-adjudication-instruction-v1"
 REPAIR_INSTRUCTION = "review-v1-p4-repair-instruction-v1"
 ADJUDICATION_CONTRACT = "review-v1-p4-adjudication-v1"
 
+#: P5 (§28.2, GAP-A option 3): the P5-capable Effective Policy of the same P4-capable owner family. P5
+#: capability is an explicit per-Run stored Review policy/history-contract property within the P4-capable
+#: owner family: a NEW first Run binds :data:`DEFAULT_POLICY_ID`, a cycle keeps the policy of its first Run,
+#: and an existing Run is read only from the policy its own TaskInputs name - never upgraded by file
+#: presence, current code or shape inference. No owner marker and no selector type changes for it.
+P5_POLICY_ID = history.P5_POLICY_ID
+#: The P5 adjudication instruction (GAP-C): the P4 instruction plus the deterministic validated
+#: prior-history reference set and the structured cross-run relation claims. It lives in the P5 policy.
+P5_ADJUDICATION_INSTRUCTION = "review-v1-p5-adjudication-instruction-v1"
+#: The policy family a P4-capable owner dispatches on, oldest first.
+POLICY_IDS = (POLICY_ID, P5_POLICY_ID)
+#: What a NEW first Run of a P4-capable owner binds (GAP-A items 2 and 7).
+DEFAULT_POLICY_ID = P5_POLICY_ID
+
 TASK_KIND_DISCOVERY = "p4-discovery-v1"
 TASK_KIND_ADJUDICATION = "p4-adjudication-v1"
 TASK_KIND_REPAIR = "p4-repair-v1"
@@ -105,6 +119,7 @@ SLOT_ADJUDICATOR = "p4-adjudicator"
 SLOT_REPAIR = "p4-repair"
 
 SCHEMA_POLICY = "review-p4-policy"
+SCHEMA_P5_POLICY = "review-p5-policy"
 SCHEMA_DISCOVERY_REQUEST = "review-p4-discovery-request"
 SCHEMA_ADJUDICATION_REQUEST = "review-p4-adjudication-request"
 SCHEMA_REPAIR_REQUEST = "review-p4-repair-request"
@@ -420,6 +435,30 @@ class P4CoverageGap:
 
 
 @dataclass(frozen=True)
+class P5RelationClaim:
+    """One structured cross-run relation claim a P5 adjudication returns (GAP-C).
+
+    The source is the current Run's Finding the raw claim ``(source_task_id,
+    source_claim_index)`` became; the target is one record of the bound
+    prior-history reference set (``target_family`` runs / findings / repairs).
+    The status is ``supported``, ``unresolved`` or ``insufficient_evidence``;
+    only ``supported`` is ever confirmed, and it needs at least one supporting
+    Evidence digest. The rationale is one public-safe line - never reasoning or
+    a transcript.
+    """
+
+    relation_type: str
+    source_task_id: str
+    source_claim_index: int
+    target_family: str
+    target_id: str
+    status: str
+    rationale: str
+    semantic_surface: str | None = None
+    supporting_evidence_digests: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class P4AdjudicationReturn:
     task_id: str
     adjudicator_identity: str
@@ -430,6 +469,9 @@ class P4AdjudicationReturn:
     #: Present when a repair follows: what it is for, and - when STRATEGY_CHANGE is required - which class.
     repair_purpose: str | None = None
     strategy_change_class: str | None = None
+    #: P5 only (GAP-C): structured cross-run relation claims against the bound prior-history references. A
+    #: P4-only adjudication returns none; its normalization never reads this field.
+    relation_claims: tuple[P5RelationClaim, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -448,6 +490,8 @@ class P4AdjudicationTask:
     prior_findings: tuple[dict[str, Any], ...]
     prior_repair_batch: dict[str, Any] | None
     prior_repair_result: dict[str, Any] | None
+    #: P5 only (GAP-C): the bound validated prior-history references with their stored records.
+    prior_history: tuple[dict[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -573,17 +617,81 @@ POLICY_RECORD: dict[str, Any] = {
 }
 
 
-def policy_record() -> dict[str, Any]:
-    return serialize.canonical_data(POLICY_RECORD)
+#: The P5-capable Effective Policy (§28.2, GAP-A option 3): the P4 policy's every rule unchanged, the P5
+#: adjudication instruction (GAP-C), and the durable history contract its Runs bind. ``skills/review``
+#: declares it verbatim under its own heading, after the P4 block.
+P5_POLICY_RECORD: dict[str, Any] = {
+    **{key: value for key, value in POLICY_RECORD.items() if key not in (serialize.SCHEMA_KEY, "policy_id")},
+    serialize.SCHEMA_KEY: SCHEMA_P5_POLICY,
+    "policy_id": P5_POLICY_ID,
+    "adjudication": {
+        **POLICY_RECORD["adjudication"],
+        "instruction": P5_ADJUDICATION_INSTRUCTION,
+        "prior_history_rule": "a deterministic complete set of validated P5 Run / Finding / Repair history references "
+                              "of the same review kind and target, by digest; no chat memory, transcript or Candidate copy",
+        "relation_rule": "structured cross-run relation claims (type, source Finding, prior target, surface, status, "
+                         "evidence digests, public-safe rationale); only supported is confirmed",
+    },
+    "history": {
+        "contract": history.HISTORY_CONTRACT,
+        "family_rule": "a cycle keeps the policy and history contract of its first Run; an existing Run is read only "
+                       "from its own stored identity and is never upgraded",
+        "authority_rule": "history is a validated projection and reference layer, never lifecycle truth, a scheduler "
+                          "or a Work generator",
+        "summary_rule": "one immutable Run summary, written in the transition that makes the Run's durable "
+                        "disposition final; the two reserved dispositions no transition proves are never written",
+        "finding_rule": "one Finding summary per normalized Finding, in the G4 that persists the adjudication",
+        "repair_rule": "the Repair summary and the repaired Run summary, in the G6 that persists the Repair Result",
+        "relation_rule": "accepted relations are immutable new G4 facts and never rewrite an endpoint",
+        "human_decision_rule": "one Human Decision Evidence record per affected HUMAN_WAIT Run, in the successor G1 "
+                               "before any external launch; never requirement authority",
+        "sanitation_rule": "structured public-safe fields only: no chain-of-thought, transcript, secret, free map "
+                           "or Candidate payload",
+    },
+}
+
+#: Every policy of the P4-capable family, by its identity.
+POLICY_RECORDS: Mapping[str, dict[str, Any]] = {POLICY_ID: POLICY_RECORD, P5_POLICY_ID: P5_POLICY_RECORD}
 
 
-def policy_hash() -> str:
-    return serialize.digest(policy_record())
+def _require_policy(policy_id: object) -> str:
+    if policy_id not in POLICY_RECORDS:
+        raise ValidationError(f"not a policy of the P4-capable family: {policy_id!r}", code="review_contract_invalid")
+    return str(policy_id)
+
+
+def policy_record(policy_id: str = POLICY_ID) -> dict[str, Any]:
+    """The canonical record of the family policy ``policy_id`` (P4 when none is named)."""
+    return serialize.canonical_data(POLICY_RECORDS[_require_policy(policy_id)])
+
+
+def policy_hash(policy_id: str = POLICY_ID) -> str:
+    """The Effective Policy digest of the family policy ``policy_id`` (P4 when none is named)."""
+    return serialize.digest(policy_record(policy_id))
 
 
 def policy_named(policy_id: object) -> dict[str, Any] | None:
-    record = policy_record()
-    return record if policy_id == record["policy_id"] else None
+    """The canonical record of the family policy a request names, or ``None`` when it names none of the family."""
+    return policy_record(str(policy_id)) if policy_id in POLICY_RECORDS else None
+
+
+def new_run_policy() -> str:
+    """The family policy a NEW first Run of a cycle binds: the current P5-capable default (GAP-A item 7).
+
+    Only a first Run with no predecessor in its cycle takes it; a repair or
+    Human-decision successor keeps its cycle's stored policy, and an existing
+    Run is read only from its own stored identity.
+    """
+    return DEFAULT_POLICY_ID
+
+
+def history_contract_of_policy(policy_id: str) -> str | None:
+    """The durable history contract a family policy binds: none for P4, :data:`history.HISTORY_CONTRACT` for P5."""
+    return history.HISTORY_CONTRACT if _require_policy(policy_id) == P5_POLICY_ID else None
+
+
+def adjudication_instruction_of(policy_id: str) -> str:
+    return str(POLICY_RECORDS[_require_policy(policy_id)]["adjudication"]["instruction"])
 
 
 #: The verification identities each impact class requires at least (§12.14 / §27.19).
@@ -643,24 +751,40 @@ def discovery_request(
     set_aside_runs: Iterable[Mapping[str, Any]],
     human_decision: HumanDecision | None,
     evidence_ids: Sequence[str] = (),
+    policy_id: str = POLICY_ID,
+    set_aside_summaries: Iterable[Mapping[str, Any]] = (),
+    decision_evidence: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """The P4 discovery request: what one discovery actor is asked, with the P4 contract bound explicitly.
 
     Discovery is fresh: it carries the successor linkage identities a recovery
     needs, never prior Finding or Repair content (§12.2). ``evidence_ids`` are
     the Evidence identities available to the task (§27.8).
+
+    ``policy_id`` is the Run's family policy, given explicitly by the owner. A
+    P4-only request is byte for byte what it always was. A P5 request also
+    binds the history contract (§28.2) and the history records its generation 1
+    writes (P-5): the ``set_aside`` Run summaries of the predecessors it sets
+    aside, and the Human Decision Evidence it persists before any launch
+    (§28.14) - each by identity and exact digest, so what generation 1 owns is
+    read from this canonical request, never from file presence.
     """
     if review_contract not in CONTRACTS:
         raise ValidationError(f"not a P4 contract: {review_contract!r}", code="review_contract_invalid")
     if (candidate_generation == 1) != (succession is None):
         raise ValidationError("candidate generation 1 has no succession, and every later one has exactly one",
                               code="review_record_invalid")
-    return serialize.canonical_data({
+    summaries = sorted(({"review_run_id": str(item["review_run_id"]), "digest": str(item["digest"])}
+                        for item in set_aside_summaries), key=lambda item: item["review_run_id"])
+    decisions = sorted(({"review_decision_id": str(item["review_decision_id"]),
+                         "affected_review_run_id": str(item["affected_review_run_id"]), "digest": str(item["digest"])}
+                        for item in decision_evidence), key=lambda item: item["review_decision_id"])
+    record: dict[str, Any] = {
         serialize.SCHEMA_KEY: SCHEMA_DISCOVERY_REQUEST,
         serialize.VERSION_KEY: RECORD_VERSION,
         "review_contract": review_contract,
         "review_kind": review_kind,
-        "policy_id": POLICY_ID,
+        "policy_id": _require_policy(policy_id),
         "instruction": DISCOVERY_INSTRUCTION,
         "viewpoint": viewpoint,
         "candidate": candidate,
@@ -671,7 +795,18 @@ def discovery_request(
         "set_aside_runs": _set_aside(set_aside_runs),
         "human_decision": None if human_decision is None else human_decision.to_record(),
         "evidence_ids": sorted(set(evidence_ids)),
+    }
+    if policy_id == POLICY_ID:
+        if summaries or decisions:
+            raise ValidationError("a P4-only Run binds no history; it writes no summary or Human Decision Evidence",
+                                  code="review_record_invalid")
+        return serialize.canonical_data(record)
+    record.update({
+        history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT,
+        "set_aside_summaries": summaries,
+        "decision_evidence": decisions,
     })
+    return serialize.canonical_data(record)
 
 
 def adjudication_request(
@@ -686,15 +821,27 @@ def adjudication_request(
     reports: Sequence[Mapping[str, Any]],
     prior: Mapping[str, Any],
     evidence_ids: Sequence[str],
+    policy_id: str = POLICY_ID,
+    prior_history: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
-    """The adjudication request, built from canonical material only (§12.7 / §27.10)."""
-    return serialize.canonical_data({
+    """The adjudication request, built from canonical material only (§12.7 / §27.10).
+
+    A P4-only request is byte for byte what it always was. A P5 request binds
+    the history contract, the P5 adjudication instruction, and the
+    deterministic complete validated prior-history reference set of the same
+    review kind and target, by family, identity and digest (GAP-C).
+    """
+    references = sorted(
+        ({"family": str(item["family"]), "id": str(item["id"]), "digest": str(item["digest"])} for item in prior_history),
+        key=lambda item: (item["family"], item["id"]),
+    )
+    record: dict[str, Any] = {
         serialize.SCHEMA_KEY: SCHEMA_ADJUDICATION_REQUEST,
         serialize.VERSION_KEY: RECORD_VERSION,
         "review_contract": review_contract,
         "review_kind": review_kind,
-        "policy_id": POLICY_ID,
-        "instruction": ADJUDICATION_INSTRUCTION,
+        "policy_id": _require_policy(policy_id),
+        "instruction": adjudication_instruction_of(policy_id),
         "adjudication_contract": ADJUDICATION_CONTRACT,
         "review_run_id": review_run_id,
         "candidate_hash": candidate_hash,
@@ -704,7 +851,13 @@ def adjudication_request(
         "reports": [{"task_id": str(item["task_id"]), "result_digest": str(item["result_digest"])} for item in reports],
         "prior": dict(prior),
         "evidence_ids": sorted(set(evidence_ids)),
-    })
+    }
+    if policy_id == POLICY_ID:
+        if references:
+            raise ValidationError("a P4-only adjudication binds no prior history", code="review_record_invalid")
+        return serialize.canonical_data(record)
+    record.update({history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT, "prior_history": references})
+    return serialize.canonical_data(record)
 
 
 def repair_request(
@@ -720,14 +873,18 @@ def repair_request(
     allowed_result_surface: Sequence[str],
     strategy: str,
     evidence_constraints: Sequence[str],
+    policy_id: str = POLICY_ID,
 ) -> dict[str, Any]:
-    """The ReviewRepairRequest, built from canonical material only (§12.9 / §27.15)."""
-    return serialize.canonical_data({
+    """The ReviewRepairRequest, built from canonical material only (§12.9 / §27.15).
+
+    A P4-only request is byte for byte what it always was; a P5 one also binds the history contract.
+    """
+    record: dict[str, Any] = {
         serialize.SCHEMA_KEY: SCHEMA_REPAIR_REQUEST,
         serialize.VERSION_KEY: RECORD_VERSION,
         "review_contract": review_contract,
         "review_kind": review_kind,
-        "policy_id": POLICY_ID,
+        "policy_id": _require_policy(policy_id),
         "instruction": REPAIR_INSTRUCTION,
         "review_run_id": review_run_id,
         "candidate_hash": candidate_hash,
@@ -738,7 +895,31 @@ def repair_request(
         "allowed_result_surface": sorted(set(allowed_result_surface)),
         "strategy": strategy,
         "evidence_constraints": sorted(set(evidence_constraints)),
-    })
+    }
+    if policy_id == POLICY_ID:
+        return serialize.canonical_data(record)
+    record[history.HISTORY_CONTRACT_KEY] = history.HISTORY_CONTRACT
+    return serialize.canonical_data(record)
+
+
+def policy_of_envelope(envelope: object) -> str | None:
+    """The family policy a request envelope explicitly binds, or ``None`` when it is not a P4-capable request.
+
+    Explicit persisted identity only (§28.2, GAP-A): the ``policy_id`` the
+    request names. A P4 request is read exactly as before; a P5 request is one
+    only when it also binds the history contract this build implements -
+    never because of a history directory, a record shape or a generation count.
+    """
+    if not isinstance(envelope, dict) or envelope.get(serialize.SCHEMA_KEY) not in REQUEST_SCHEMAS:
+        return None
+    if envelope.get(serialize.VERSION_KEY) != RECORD_VERSION:
+        return None
+    policy = envelope.get("policy_id")
+    if policy == POLICY_ID:
+        return POLICY_ID
+    if policy == P5_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT:
+        return P5_POLICY_ID
+    return None
 
 
 def contract_of_envelope(envelope: object) -> str | None:
@@ -746,14 +927,48 @@ def contract_of_envelope(envelope: object) -> str | None:
 
     Explicit persisted identity only (§27.3): never inferred from a generation
     count or a record shape. A v1 envelope names no ``review_contract`` and is
-    never read as P4.
+    never read as P4. Both policies of the P4-capable family (P4, P5) bind the
+    same owner contract (GAP-A): which one a Run is is :func:`policy_of_envelope`'s.
     """
-    if not isinstance(envelope, dict) or envelope.get(serialize.SCHEMA_KEY) not in REQUEST_SCHEMAS:
+    if policy_of_envelope(envelope) is None:
         return None
-    if envelope.get(serialize.VERSION_KEY) != RECORD_VERSION or envelope.get("policy_id") != POLICY_ID:
-        return None
-    contract = envelope.get("review_contract")
+    contract = envelope.get("review_contract")  # type: ignore[union-attr]
     return contract if contract in CONTRACTS else None
+
+
+def policy_of_task_input(task_input: records.TaskInput) -> str | None:
+    """The family policy of a stored P4-capable TaskInput, or ``None`` when it is not one."""
+    if contract_of_task_input(task_input) is None:
+        return None
+    return policy_of_envelope(task_input.request_envelope)
+
+
+def run_policies(reader: Any, chain: Any) -> set[str | None]:
+    """The family policies a Run's generation-1 TaskInputs bind (one, for a well-formed P4-capable Run)."""
+    return {policy_of_task_input(reader.read_task_input(str(task["task_id"])))
+            for task in chain.generations[0].accepted_tasks}
+
+
+def run_policy(reader: Any, chain: Any) -> str:
+    """The one family policy a P4-capable Run stores - the policy its own currency and history dispatch on.
+
+    Read only from the Run's own generation-1 TaskInputs: a Run that binds none
+    or several is refused, never guessed (GAP-A item 6).
+    """
+    try:
+        found = run_policies(reader, chain)
+    except ValidationError as exc:
+        raise reconcile(f"Review Run {chain.review_run_id}'s task inputs do not read: {exc}",
+                        REASON_CONTRACT_MISMATCH) from exc
+    if len(found) != 1 or None in found:
+        raise reconcile(f"Review Run {chain.review_run_id} binds the policies {sorted(str(p) for p in found)}, not one "
+                        "policy of the P4-capable family", REASON_CONTRACT_MISMATCH)
+    return str(found.pop())
+
+
+def run_history_contract(reader: Any, chain: Any) -> str | None:
+    """The durable history contract a P4-capable Run stores: ``None`` for a P4-only Run (pre-P5)."""
+    return history_contract_of_policy(run_policy(reader, chain))
 
 
 def contract_of_task_input(task_input: records.TaskInput) -> str | None:
@@ -781,8 +996,14 @@ def task_input(
     candidate_material_digest: str,
     review_context_hash: str,
     accepted_generation: int,
+    policy_id: str = POLICY_ID,
 ) -> records.TaskInput:
-    """The P1 TaskInput of one P4 task (snapshot reconstruction; the Candidate snapshot is the material)."""
+    """The P1 TaskInput of one P4 task (snapshot reconstruction; the Candidate snapshot is the material).
+
+    ``policy_id`` is the Run's family policy, the one its request names.
+    """
+    if policy_of_envelope(envelope) not in (None, policy_id):
+        raise ValidationError("a task input binds the policy its request names", code="review_record_invalid")
     return records.TaskInput(
         task_id=task_id,
         task_slot=task_slot,
@@ -795,7 +1016,7 @@ def task_input(
         reconstruction_mode=records.RECONSTRUCTION_SNAPSHOT,
         candidate_material_digest=candidate_material_digest,
         review_context_hash=review_context_hash,
-        effective_policy_hash=policy_hash(),
+        effective_policy_hash=policy_hash(policy_id),
         accepted_generation=accepted_generation,
     )
 
@@ -1366,8 +1587,13 @@ def adjudication(
     descriptor: Mapping[str, Any],
     reports: Sequence[tuple[str, str, Mapping[str, Any]]],
     prior: PriorCycle | None,
+    policy_id: str = POLICY_ID,
 ) -> records.P4Adjudication:
-    """The canonical adjudication record, with the reserved Finding IDs in canonical Finding order."""
+    """The canonical adjudication record, with the reserved Finding IDs in canonical Finding order.
+
+    Its ``instruction`` is the Run's family policy's adjudication instruction:
+    a P4-only adjudication is byte for byte what it always was.
+    """
     if len(finding_ids) != len(normalized.drafts):
         raise ValidationError("one reserved Finding ID per normalized Finding", code="review_record_invalid")
     by_source: dict[tuple[str, str, int], str] = {}
@@ -1398,7 +1624,7 @@ def adjudication(
         "review_context_hash": gate_record.review_context_hash,
         "effective_policy_hash": gate_record.effective_policy_hash,
         "review_contract": review_contract, "adjudication_contract": ADJUDICATION_CONTRACT,
-        "instruction": ADJUDICATION_INSTRUCTION, "task_id": str(descriptor["task_id"]),
+        "instruction": adjudication_instruction_of(policy_id), "task_id": str(descriptor["task_id"]),
         "adjudicator_identity": str(descriptor["reviewer_identity"]),
         "adjudicator_version": str(descriptor["reviewer_version"]),
         "reports": [{"task_id": t, "result_digest": d} for t, d, _ in reports],
@@ -1904,6 +2130,86 @@ def convergence_of(found: records.P4Adjudication, prior_result: records.P4Repair
     )
 
 
+def blocking_obligations(reader: Any, review_run_id: str, chain: Any) -> int | None:
+    """The current blocking-obligation count of P4 Run ``review_run_id``; ``None`` while no adjudication binds one.
+
+    The one reading of a P4 Run's blocking obligations for read-only
+    diagnostics (``review/status.py``; §9.7, §29.18). Inert, and it reads only
+    through ``reader`` (a read-only Review reader with the ReviewStore read
+    methods). It is additive: no owner, recovery adapter, validator or
+    publication rule calls it.
+
+    ```text
+    generations 1-3   None: no canonical adjudication exists yet - never 0
+    generation 4 on   the adjudication generation 4 binds by digest, and the obligations it binds
+                      (obligations_record), both carried unchanged by every later generation; the
+                      adjudication is this Run's (kind, target, operation, Candidate, contract) and
+                      consistent in itself (adjudication_problems), and generation 5 follows its
+                      outcome: a seal only after AUTHORIZATION_READY, a repair only after REPAIR_REQUIRED
+    the count         every Problem the cycle's one Repair Batch holds (repair_finding_ids: each
+                      blocking Problem - HIGH, MID, repair-induced - and each LOW deliberately repaired
+                      in this cycle), plus every unresolved HUMAN decision (_human_count: a HUMAN claim,
+                      a HUMAN or targeted-check coverage gap - each once, so a gap is never counted
+                      twice); zero exactly when the outcome is AUTHORIZATION_READY (§12.18, §27.11)
+    never counted     a LOW kept as history, future work or no action; an Improvement; a raw report
+                      or claim; the generation number
+    ```
+
+    Anything short of that raises :class:`ValidationError` naming identities
+    only, never a stored value: ``review_gate_chain`` (not a P4 chain),
+    ``review_record_conflict`` (a binding or identity the records contradict),
+    ``review_record_invalid`` (an adjudication not consistent in itself), or
+    the reader's own code when a record does not read.
+    """
+    where = f"the blocking obligations of P4 Review Run {review_run_id}"
+    try:
+        if chain_problems(chain):
+            raise ValidationError(f"{where}: its gate chain is not a P4 chain", code="review_gate_chain")
+        if len(chain.generations) < ADJUDICATION_SETTLE_GENERATION:
+            return None
+        first, fourth = chain.generations[0], chain.generation(ADJUDICATION_SETTLE_GENERATION)
+        bound = (fourth.adjudication_digest, fourth.obligation_digest)
+        if any((later.adjudication_digest, later.obligation_digest) != bound
+               for later in chain.generations[ADJUDICATION_SETTLE_GENERATION:]):
+            raise ValidationError(f"{where}: a later generation binds other obligations than generation 4",
+                                  code="review_record_conflict")
+        try:
+            found = reader.read_adjudication(review_run_id)
+            stored = reader.adjudication_digest(review_run_id)
+            contracts = run_contracts(reader, chain)
+        except ValidationError as exc:
+            raise ValidationError(f"{where}: its stored adjudication or a generation 1 task input does not read",
+                                  code=exc.code) from exc
+        if fourth.adjudication_digest != stored:
+            raise ValidationError(f"{where}: generation 4 does not bind its stored adjudication",
+                                  code="review_record_conflict")
+        if fourth.obligation_digest != serialize.digest(obligations_record(found)):
+            raise ValidationError(f"{where}: generation 4 does not bind its adjudication's obligations",
+                                  code="review_record_conflict")
+        if (found.review_kind, found.target_identity, found.operation_identity, found.candidate_hash) != (
+            first.review_kind, first.target_identity, first.operation_identity, first.candidate_hash
+        ) or contracts != {found.review_contract}:
+            raise ValidationError(f"{where}: its adjudication is not of this Run's Candidate and contract",
+                                  code="review_record_conflict")
+        if adjudication_problems(found):
+            raise ValidationError(f"{where}: its adjudication is not consistent in itself",
+                                  code="review_record_invalid")
+        follows = {SHAPE_SEAL: AUTHORIZATION_READY, SHAPE_REPAIR: REPAIR_REQUIRED}.get(shape_of(chain), found.outcome)
+        if found.outcome != follows:
+            raise ValidationError(f"{where}: generation 5 does not follow its adjudication's outcome",
+                                  code="review_record_conflict")
+        included, _ = repair_finding_ids(found)
+        count = len(included) + _human_count(found.entries, found.coverage_gaps)
+        if (count == 0) != (found.outcome == AUTHORIZATION_READY):
+            raise ValidationError(f"{where}: its obligations and its outcome disagree", code="review_record_invalid")
+        return count
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        raise ValidationError(
+            f"{where}: its records do not read as the P4 owner writes them ({type(exc).__name__})",
+            code="review_record_invalid",
+        ) from exc
+
+
 # --------------------------------------------------------------------------- verification-only Integration (§12.20, §27.25)
 
 @dataclass(frozen=True)
@@ -2139,6 +2445,205 @@ def named_by_successor(reader: Any, predecessor_id: str) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------- the Runs a P4 request sets aside (read-only)
+
+#: The four identities a successor request's ``succession`` carries (:func:`succession_record`).
+_SUCCESSION_FIELDS = frozenset({
+    "predecessor_review_run_id", "predecessor_candidate_hash", "repair_batch_id", "repair_result_digest",
+})
+#: A stable set-aside reason identity: an owner's (``p4_repaired``, ``human_decision``) or one of recovery's codes.
+_SET_ASIDE_REASON = re.compile(r"[a-z0-9][a-z0-9_.:-]*\Z")
+
+
+def _set_aside_refused(review_run_id: str, message: str, code: str = "review_record_invalid") -> ValidationError:
+    return ValidationError(f"the set-aside linkage of P4 Review Run {review_run_id} is not valid: {message}", code=code)
+
+
+def _request_linkage(envelope: object, review_run_id: str) -> tuple[list[dict[str, str]], Any, Any]:
+    """One stored P4 discovery request's set-aside linkage, fail-closed: ``(set_aside_runs, succession, decision)``.
+
+    Exactly what :func:`discovery_request` writes for it, and nothing it never
+    writes: an explicit P4 discovery request (:func:`contract_of_envelope`);
+    ``candidate_generation`` a positive integer, generation 1 with no
+    ``succession`` and every later one with exactly its four identities,
+    never naming the request's own Run as predecessor; ``human_decision`` None
+    or exactly a :class:`HumanDecision` record; ``set_aside_runs`` a list of
+    exactly ``review_run_id`` (a review_run id) and ``reason`` (a stable reason
+    identity), no Run twice, never the request's own Run, already in canonical
+    order. The two owner linkages it carries are whole: a successor request
+    names exactly its predecessor, set aside as repaired (:func:`linkage_problems`),
+    and a Run is named set aside by a Human decision only beside the decision.
+    """
+    if contract_of_envelope(envelope) is None or not isinstance(envelope, dict) \
+            or envelope.get(serialize.SCHEMA_KEY) != SCHEMA_DISCOVERY_REQUEST:
+        raise _set_aside_refused(review_run_id, "its request is not a P4 discovery request")
+    missing = [name for name in ("candidate_generation", "succession", "set_aside_runs", "human_decision")
+               if name not in envelope]
+    if missing:
+        raise _set_aside_refused(review_run_id, f"its request carries no {', '.join(missing)}")
+    generation, succession = envelope["candidate_generation"], envelope["succession"]
+    decision, items = envelope["human_decision"], envelope["set_aside_runs"]
+    if type(generation) is not int or generation < 1:
+        raise _set_aside_refused(review_run_id, "candidate_generation is not a positive integer")
+    if (generation == 1) != (succession is None):
+        raise _set_aside_refused(review_run_id, "candidate generation 1 has no succession, and every later one has one")
+    if succession is not None:
+        if not isinstance(succession, dict) or set(succession) != _SUCCESSION_FIELDS or not all(
+            isinstance(value, str) and value for value in succession.values()
+        ):
+            raise _set_aside_refused(review_run_id, "succession is not exactly the four successor identities")
+        if not is_valid_id(succession["predecessor_review_run_id"], "review_run") \
+                or succession["predecessor_review_run_id"] == review_run_id:
+            raise _set_aside_refused(review_run_id, "succession names no other review_run as its predecessor")
+    if decision is not None and (
+        not isinstance(decision, dict)
+        or set(decision) != {serialize.SCHEMA_KEY, serialize.VERSION_KEY, "decision_id", "disposition"}
+        or decision[serialize.SCHEMA_KEY] != SCHEMA_HUMAN_DECISION or decision[serialize.VERSION_KEY] != RECORD_VERSION
+        or human_decision_problems(HumanDecision(decision["decision_id"], decision["disposition"]))
+    ):
+        raise _set_aside_refused(review_run_id, "human_decision is not a Human-decision record")
+    if not isinstance(items, list):
+        raise _set_aside_refused(review_run_id, "set_aside_runs is not a list")
+    found: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or set(item) != {"review_run_id", "reason"}:
+            raise _set_aside_refused(review_run_id, f"set_aside_runs[{index}] is not exactly review_run_id and reason")
+        run_id, reason = item["review_run_id"], item["reason"]
+        if not isinstance(run_id, str) or not is_valid_id(run_id, "review_run"):
+            raise _set_aside_refused(review_run_id, f"set_aside_runs[{index}] names no review_run id")
+        if run_id == review_run_id:
+            raise _set_aside_refused(review_run_id, f"set_aside_runs[{index}] names the request's own Review Run")
+        if run_id in seen:
+            raise _set_aside_refused(review_run_id, f"set_aside_runs names Review Run {run_id} twice")
+        if not isinstance(reason, str) or _SET_ASIDE_REASON.match(reason) is None:
+            raise _set_aside_refused(review_run_id, f"set_aside_runs[{index}] has no stable reason identity")
+        seen.add(run_id)
+        found.append({"review_run_id": run_id, "reason": reason})
+    if found != sorted(found, key=lambda item: item["review_run_id"]):
+        raise _set_aside_refused(review_run_id, "set_aside_runs is not in its canonical order")
+    if succession is not None and found != [
+        {"review_run_id": succession["predecessor_review_run_id"], "reason": SET_ASIDE_REPAIRED}
+    ]:
+        raise _set_aside_refused(review_run_id, "a successor request names exactly its predecessor, set aside as repaired")
+    if decision is None and any(item["reason"] == SET_ASIDE_HUMAN_DECISION for item in found):
+        raise _set_aside_refused(review_run_id, "a Run is named set aside by a Human decision the request does not bind")
+    return found, succession, decision
+
+
+def _waits_for_another_decision(reader: Any, chain: Any, contract: str, decision: Any) -> bool:
+    """Whether ``chain`` is a P4 Run of ``contract`` waiting at G4 HUMAN_WAIT, its own request binding not ``decision``.
+
+    The canonical wait (§27.13, G-4): the P4 shape, generation 4 the last, its
+    stored adjudication the one generation 4 binds, with the HUMAN_WAIT
+    outcome. A decision the waiting Run's own request already carries exits no
+    wait (``start_review._p4_bind_decision``, ``recovery._classify_planning_p4``).
+    """
+    try:
+        if chain_problems(chain) or run_contracts(reader, chain) != {contract}:
+            return False
+        if len(chain.generations) != ADJUDICATION_SETTLE_GENERATION:
+            return False
+        if chain.latest.adjudication_digest != reader.adjudication_digest(chain.review_run_id):
+            return False
+        if reader.read_adjudication(chain.review_run_id).outcome != HUMAN_WAIT:
+            return False
+        own = _successor_envelope(reader, chain)
+        return own is not None and own.get("human_decision") != decision
+    except (ValidationError, KeyError, TypeError, ValueError):
+        return False
+
+
+def set_aside_named(reader: Any, review_run_id: str, chain: Any) -> list[dict[str, str]]:
+    """The Runs P4 Run ``review_run_id``'s stored request sets aside, each positively linked (§27.13, §27.21, G-2, G-4).
+
+    The one reader of a stored P4 discovery request's set-aside linkage, for
+    read-only diagnostics (``review/status.py``). Inert, and it reads only
+    through ``reader`` (a read-only Review reader with the ReviewStore read
+    methods). It is additive: no owner, recovery adapter, validator or
+    publication rule calls it, and :func:`proven_successor` is reused as it is.
+
+    1. generation 1 accepts discovery tasks only; each stored TaskInput is the
+       one its accepted descriptor binds (``task_input_digest``), all of one
+       P4 contract;
+    2. every discovery request reads (:func:`_request_linkage`), and all carry
+       one and the same linkage;
+    3. each named Run whose own chain reads, by the reason it is named with:
+
+       ``p4_repaired``      :func:`proven_successor` proves a successor
+                            replaces it - this Run, when this request's
+                            ``succession`` names it (G-2);
+       ``human_decision``   a P4 Run of this contract waiting at G4 HUMAN_WAIT
+                            whose own request binds another decision (G-4);
+       any other reason     recovery's classification, as the owner recorded
+                            it in the request; never re-derived here.
+
+       A named Run whose own chain does not read is not judged here (its own
+       reader reports it, and nothing sets it aside).
+
+    Anything short of that raises :class:`ValidationError`:
+    ``review_record_invalid`` (the request is not what the writer writes),
+    ``review_provenance_conflict`` (a TaskInput is not the accepted one),
+    ``review_record_conflict`` (more than one contract), ``review_p4_linkage_invalid``
+    (a named Run the canonical records do not prove set aside), or the
+    reader's own error. Nothing is inferred from age, ID or file order, a
+    generation count or a successor reservation.
+    """
+    try:
+        first = chain.generations[0]
+        discovery = discovery_tasks(chain)
+        if not discovery or len(discovery) != len(first.accepted_tasks):
+            raise _set_aside_refused(review_run_id, "generation 1 does not accept discovery tasks only")
+        contracts: set[str | None] = set()
+        linkage: tuple[list[dict[str, str]], Any, Any] | None = None
+        for task in discovery:
+            task_id = str(task["task_id"])
+            found = reader.read_task_input(task_id)
+            if reader.task_input_digest(task_id) != task["task_input_digest"]:
+                raise _set_aside_refused(
+                    review_run_id, f"the stored task input {task_id} is not the one generation 1 accepted",
+                    "review_provenance_conflict",
+                )
+            contracts.add(contract_of_task_input(found))
+            read = _request_linkage(found.request_envelope, review_run_id)
+            if linkage is not None and read != linkage:
+                raise _set_aside_refused(review_run_id, "its discovery requests do not carry one set-aside linkage")
+            linkage = read
+        if len(contracts) != 1 or None in contracts or linkage is None:
+            raise _set_aside_refused(review_run_id, "its discovery task inputs do not bind one P4 contract",
+                                     "review_record_conflict")
+        named, succession, decision = linkage
+        contract = str(next(iter(contracts)))
+        for item in named:
+            other_id, reason = item["review_run_id"], item["reason"]
+            if reason not in (SET_ASIDE_REPAIRED, SET_ASIDE_HUMAN_DECISION):
+                continue
+            try:
+                other = reader.gate_chain(other_id)
+            except ValidationError:
+                continue
+            if other is None:
+                continue
+            if reason == SET_ASIDE_REPAIRED:
+                replaced_by = proven_successor(reader, other_id, other)
+                if replaced_by is None or (succession is not None and replaced_by != review_run_id):
+                    raise _set_aside_refused(
+                        review_run_id, f"Review Run {other_id} is named set aside as repaired, and the canonical "
+                        "records prove no successor replacing it" + (" by this Run" if succession is not None else ""),
+                        REASON_LINKAGE_INVALID,
+                    )
+            elif not _waits_for_another_decision(reader, other, contract, decision):
+                raise _set_aside_refused(
+                    review_run_id, f"Review Run {other_id} is named set aside by a Human decision, and it does not "
+                    "wait at G4 HUMAN_WAIT under this contract for another decision", REASON_LINKAGE_INVALID,
+                )
+        return named
+    except (KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        raise _set_aside_refused(
+            review_run_id, f"its records do not read as the P4 owner writes them ({type(exc).__name__})"
+        ) from exc
+
+
 def proven_successor(reader: Any, predecessor_id: str, chain: Any) -> str | None:
     """The one successor Run that positively replaces a P4 predecessor, or ``None`` (G-2, §27.21).
 
@@ -2191,7 +2696,9 @@ def proven_successor(reader: Any, predecessor_id: str, chain: Any) -> str | None
                 snapshot_hash=successor_first.candidate_hash if reader.candidate_snapshot_exists(successor_first.candidate_hash) else None,
                 successor_envelope=envelope, repair_result_digest=result_digest,
             )
-            if problems or run_contracts(reader, other) != contracts or (
+            # a successor stays in its cycle's policy family (GAP-A item 5): another family is never a proof
+            if problems or run_contracts(reader, other) != contracts \
+                    or run_policies(reader, other) != run_policies(reader, chain) or (
                 successor_first.operation_identity, successor_first.target_identity, successor_first.review_kind
             ) != (first.operation_identity, first.target_identity, first.review_kind):
                 return None  # a contradictory successor: never a proof
@@ -2208,3 +2715,689 @@ def proven_successor(reader: Any, predecessor_id: str, chain: Any) -> str | None
 def run_contracts(reader: Any, chain: Any) -> set[str | None]:
     return {contract_of_task_input(reader.read_task_input(str(task["task_id"])))
             for task in chain.generations[0].accepted_tasks}
+
+
+# =========================================================================== P5 owner material (§13 / §28, GAP-A ... GAP-G)
+#
+# Inert, as the rest of this module is: pure functions over a read-only Review
+# reader that the two operation owners call at the transitions that make each
+# history source fact durable. Nothing here writes, reserves or decides
+# lifecycle; nothing here runs for a P4-only Run, whose policy binds no history
+# contract (GAP-A, §28.20 ``not_required_by_contract``).
+
+
+def run_candidate_generation(reader: Any, chain: Any) -> int | None:
+    """The candidate generation the Run's own generation-1 request binds, or ``None`` when it binds none."""
+    first = chain.generations[0]
+    if not first.accepted_tasks:
+        return None
+    found = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope.get("candidate_generation")
+    return found if type(found) is int else None
+
+
+def run_repair_batch_id(reader: Any, chain: Any) -> str | None:
+    """The Repair Batch a Run entered repair with, read from its repair TaskInput's request; ``None`` without one."""
+    repair = repair_task(chain)
+    if repair is None:
+        return None
+    found = reader.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id")
+    return None if found is None else str(found)
+
+
+def last_receipt_id(chain: Any) -> str | None:
+    issued = [generation.receipt_id for generation in chain.generations if generation.receipt_id]
+    return str(issued[-1]) if issued else None
+
+
+def own_summary_disposition(reader: Any, chain: Any) -> str | None:
+    """The Run summary disposition the Run's OWN chain transition made final, or ``None`` (§28.5).
+
+    ```text
+    G2 settling a task failed     not_authorized   (GAP-E: that G2 settlement)
+    G4 HUMAN_WAIT                 human_wait       (that G4)
+    G6 repair settled             repaired         (that G6)
+    G6 invalidation of the seal   invalidated      (that G6)
+    ```
+
+    Read from the canonical chain and adjudication only. A Consumption makes a
+    sealed Run ``consumed`` in its owner's Consumption transition
+    (:func:`final_disposition`); a set-aside summary is written by the Run that
+    sets it aside. Nothing else is final, so nothing else has a summary yet.
+    """
+    latest = chain.latest
+    if latest.generation == DISCOVERY_SETTLE_GENERATION and any(
+        task["status"] != records.TASK_SETTLED_OK for task in latest.settled_tasks
+    ):
+        return history.DISPOSITION_NOT_AUTHORIZED
+    if latest.generation == ADJUDICATION_SETTLE_GENERATION and reader.adjudication_exists(chain.review_run_id) \
+            and reader.read_adjudication(chain.review_run_id).outcome == HUMAN_WAIT:
+        return history.DISPOSITION_HUMAN_WAIT
+    if latest.generation == LAST_GENERATION:
+        return history.DISPOSITION_REPAIRED if shape_of(chain) == SHAPE_REPAIR else history.DISPOSITION_INVALIDATED
+    return None
+
+
+def final_disposition(reader: Any, chain: Any) -> str | None:
+    """The Run's final durable disposition its canonical sources show: its own, or ``consumed``; else ``None``."""
+    own = own_summary_disposition(reader, chain)
+    if own is not None:
+        return own
+    receipt_id = last_receipt_id(chain)
+    if receipt_id is not None and reader.consumption_by_receipt().get(receipt_id) is not None:
+        return history.DISPOSITION_CONSUMED
+    return None
+
+
+def bound_adjudication(reader: Any, chain: Any) -> records.P4Adjudication | None:
+    """The adjudication the Run's own chain settled, or ``None`` when it settled none."""
+    if not reader.adjudication_exists(chain.review_run_id):
+        return None
+    digest = reader.adjudication_digest(chain.review_run_id)
+    if not any(found.adjudication_digest == digest for found in chain.generations):
+        return None
+    return reader.read_adjudication(chain.review_run_id)
+
+
+def set_aside_summaries(reader: Any, set_aside: Iterable[Mapping[str, Any]]) -> tuple[history.RunSummary, ...]:
+    """The ``set_aside`` Run summaries a P5 setter's generation 1 writes (§28.5, P-6).
+
+    One for each predecessor it sets aside that is itself a P5 Run, has no
+    final summary yet, and was not already set aside by another Run's request
+    (whose own generation 1 made the set-aside canonical). Built from each
+    predecessor's immutable records only, so a replay builds the same bytes.
+    """
+    found: list[history.RunSummary] = []
+    for item in sorted(set_aside, key=lambda entry: str(entry["review_run_id"])):
+        run_id = str(item["review_run_id"])
+        if item.get("reason") == "set_aside":
+            continue
+        chain = reader.gate_chain(run_id)
+        if chain is None:
+            continue
+        contracts = run_contracts(reader, chain)
+        if len(contracts) != 1 or None in contracts:
+            continue
+        if run_policy(reader, chain) != P5_POLICY_ID or final_disposition(reader, chain) is not None:
+            continue
+        found.append(history.set_aside_run_summary(
+            chain.latest, candidate_generation=run_candidate_generation(reader, chain),
+            adjudication=bound_adjudication(reader, chain), repair_batch_id=run_repair_batch_id(reader, chain),
+            receipt_id=last_receipt_id(chain),
+        ))
+    return tuple(found)
+
+
+@dataclass(frozen=True)
+class HistoryWrites:
+    """What a P5 Run's generation 1 writes besides its own records, bound into its requests (P-5)."""
+
+    summaries: tuple[history.RunSummary, ...] = ()
+    decisions: tuple[history.HumanDecisionEvidence, ...] = ()
+
+    def summary_bindings(self) -> list[dict[str, str]]:
+        return [{"review_run_id": item.review_run_id, "digest": serialize.digest(item.to_record())}
+                for item in self.summaries]
+
+    def decision_bindings(self) -> list[dict[str, str]]:
+        return [{"review_decision_id": item.review_decision_id, "affected_review_run_id": item.affected_review_run_id,
+                 "digest": serialize.digest(item.to_record())} for item in self.decisions]
+
+    def extra(self) -> list[tuple[str, dict[str, Any]]]:
+        return ([(paths.history_run_rel(item.review_run_id), item.to_record()) for item in self.summaries]
+                + [(paths.history_decision_rel(item.review_decision_id), item.to_record()) for item in self.decisions])
+
+    def paths(self) -> list[str]:
+        return [path for path, _ in self.extra()]
+
+
+def first_generation_history_paths(envelope: Mapping[str, Any]) -> list[str]:
+    """The history paths a P5 Run's generation 1 wrote, read from its canonical discovery request (P-5)."""
+    found = [paths.history_run_rel(str(item["review_run_id"])) for item in envelope.get("set_aside_summaries") or []]
+    found += [paths.history_decision_rel(str(item["review_decision_id"]))
+              for item in envelope.get("decision_evidence") or []]
+    return found
+
+
+def run_history_paths(reader: Any, review_run_id: str, chain: Any) -> list[str]:
+    """Every history path a P5 Run's own generations wrote, derived from canonical records (P-5); none for P4-only.
+
+    Never from file presence: generation 1's set-aside summaries and Human
+    Decision Evidence from its discovery request; generation 2 / 4 / 6's own
+    Run summary from the chain's own final disposition; G4's Finding summaries
+    from the adjudication and their same-G4 relations from those summaries;
+    G6's Repair summary from the repair request. The Consumption-bound summary
+    is the Consumption transition's, never a generation's.
+    """
+    first = chain.generations[0]
+    if not first.accepted_tasks or run_policy(reader, chain) != P5_POLICY_ID:
+        return []
+    envelope = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
+    found = first_generation_history_paths(envelope)
+    if own_summary_disposition(reader, chain) is not None:
+        found.append(paths.history_run_rel(review_run_id))
+    if len(chain.generations) >= ADJUDICATION_SETTLE_GENERATION and reader.adjudication_exists(review_run_id):
+        for item in reader.read_adjudication(review_run_id).findings:
+            finding_id = str(item["finding_id"])
+            found.append(paths.history_finding_rel(finding_id))
+            if reader.history_exists(paths.HISTORY_FINDINGS, finding_id):
+                summary = reader.read_history(paths.HISTORY_FINDINGS, finding_id)
+                found += [paths.history_relation_rel(relation_id) for relation_id in summary.relation_ids]
+    if shape_of(chain) == SHAPE_REPAIR and len(chain.generations) == REPAIR_SETTLE_GENERATION:
+        batch_id = run_repair_batch_id(reader, chain)
+        if batch_id is not None:
+            found.append(paths.history_repair_rel(batch_id))
+    return found
+
+
+def recovered_history_bindings(reader: Any, review_run_id: str, chain: Any) -> list[tuple[str, str, str]]:
+    """``(key, id, kind)`` of every history ID a P5 Run's generations hold, from its canonical records (§28.4).
+
+    The ``review_decision`` IDs its generation 1 bound (keyed by the affected
+    Run) and the ``review_relation`` IDs its G4 accepted (keyed by the owner's
+    deterministic order: source Finding position, type, target), so a resumed
+    Run re-reserves none of them. None for a P4-only Run.
+    """
+    first = chain.generations[0]
+    if not first.accepted_tasks or run_policy(reader, chain) != P5_POLICY_ID:
+        return []
+    envelope = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
+    found = [(history.review_decision_key(str(item["affected_review_run_id"])), str(item["review_decision_id"]),
+              "review_decision") for item in envelope.get("decision_evidence") or []]
+    if len(chain.generations) < ADJUDICATION_SETTLE_GENERATION or not reader.adjudication_exists(review_run_id):
+        return found
+    families = {kind: family for family, kind in REFERENCE_KINDS.items()}
+    ordered: list[tuple[tuple[Any, ...], str]] = []
+    for position, item in enumerate(reader.read_adjudication(review_run_id).findings):
+        finding_id = str(item["finding_id"])
+        if not reader.history_exists(paths.HISTORY_FINDINGS, finding_id):
+            continue
+        for relation_id in reader.read_history(paths.HISTORY_FINDINGS, finding_id).relation_ids:
+            relation = reader.read_history(paths.HISTORY_RELATIONS, relation_id)
+            ordered.append(((position, relation.relation_type, finding_id, families.get(relation.target.kind, ""),
+                             relation.target.id), relation_id))
+    for ordinal, (_, relation_id) in enumerate(sorted(ordered), start=1):
+        found.append((history.review_relation_key(review_run_id, ordinal), relation_id, "review_relation"))
+    return found
+
+
+# --------------------------------------------------------------------------- Human Decision Evidence input (GAP-G)
+
+
+@dataclass(frozen=True)
+class DecisionEvidence:
+    """The separate explicit P5 Human-decision evidence input (§28.14, GAP-G): never part of P4 request bytes.
+
+    It names the exact affected HUMAN_WAIT Run and Candidate, repeats the G-4
+    decision identity and disposition (which must agree with the invocation's
+    :class:`HumanDecision`), names the exact HUMAN adjudication entries / coverage
+    gaps it answers, and carries the two public-safe summaries, the canonical
+    requirement / authority identity, the resulting action class and the source
+    / effect digests. The owner proves every part against canonical records
+    before any effect, and persists it as one immutable Human Decision Evidence
+    record per affected Run before the resumed external Review launch. It is
+    evidence that the decision occurred, never the requirement authority.
+    """
+
+    affected_review_run_id: str
+    affected_candidate_hash: str
+    decision_id: str
+    decision_disposition: str
+    affected_entries: tuple[Mapping[str, Any], ...]
+    question_summary: str
+    decision_summary: str
+    authority_identity: str
+    action_class: str
+    source_digests: tuple[str, ...]
+    affected_coverage_gaps: tuple[Mapping[str, Any], ...] = ()
+    effect_digests: tuple[str, ...] = ()
+
+
+def decision_evidence_problems(evidence: object, human_decision: object) -> list[str]:
+    """What makes the P5 evidence input of a selector invalid, before the lock and before any Project state is read."""
+    if evidence == ():
+        return []
+    if not isinstance(evidence, tuple):
+        return ["decision_evidence must be a tuple of DecisionEvidence"]
+    problems: list[str] = []
+    if type(human_decision) is not HumanDecision:
+        problems.append("Human Decision Evidence is supplied without the Human decision it is evidence of")
+    affected: set[str] = set()
+    for item in evidence:
+        if type(item) is not DecisionEvidence:
+            problems.append(f"a decision evidence input is {type(item).__name__}, not a DecisionEvidence")
+            continue
+        where = f"the decision evidence for {item.affected_review_run_id!r}"
+        if not isinstance(item.affected_review_run_id, str) or not is_valid_id(item.affected_review_run_id, "review_run"):
+            problems.append(f"{where} names no review_run")
+        elif item.affected_review_run_id in affected:
+            problems.append(f"{where} is given twice; one Human Decision Evidence per affected Run")
+        else:
+            affected.add(item.affected_review_run_id)
+        if type(human_decision) is HumanDecision and (item.decision_id, item.decision_disposition) != (
+            human_decision.decision_id, human_decision.disposition
+        ):
+            problems.append(f"{where} names decision {item.decision_id!r} {item.decision_disposition!r}, and the "
+                            f"invocation's Human decision is {human_decision.decision_id!r} "
+                            f"{human_decision.disposition!r}")
+        for name in ("question_summary", "decision_summary"):
+            problem = history.summary_problem(getattr(item, name))
+            if problem is not None:
+                problems.append(f"{where} {name} is not public-safe history text: {problem}")
+        if item.action_class != history.DECISION_ACTIONS.get(item.decision_disposition):
+            problems.append(f"{where} action class {item.action_class!r} is not the one of its disposition")
+        for name in ("affected_entries", "affected_coverage_gaps", "source_digests", "effect_digests"):
+            if not isinstance(getattr(item, name), tuple):
+                problems.append(f"{where} {name} is not a tuple")
+    return problems
+
+
+def requirement_authority_identity(requirement: Mapping[str, Any]) -> str:
+    """The canonical requirement / authority identity a requirement record names (§13.11, GAP-G).
+
+    ``work:<work_id>`` for a Work body, ``phase:<phase_id>`` for a Phase entry,
+    ``<review_kind>:request`` for a planning request.
+    """
+    authority = requirement.get("authority") or {}
+    if authority.get("work_id"):
+        return f"work:{authority['work_id']}"
+    if authority.get("phase_id"):
+        return f"phase:{authority['phase_id']}"
+    return f"{requirement.get('review_kind')}:request"
+
+
+def _evidence_stop(message: str) -> StopError:
+    return history.stop(history.CODE_DECISION_EVIDENCE_INVALID, f"{message}; nothing is reserved, written or launched")
+
+
+def decision_evidence_record(
+    reader: Any,
+    evidence: DecisionEvidence,
+    review_decision_id: str,
+    *,
+    review_kind: str,
+    target_identity: str | None,
+    current_requirement: Mapping[str, Any],
+) -> history.HumanDecisionEvidence:
+    """GAP-G proofs 1-7 of one evidence input against canonical records, then its one immutable record.
+
+    1 the affected Run exists; 2 it reached a real G4 HUMAN_WAIT its chain
+    settled; 3 the candidate hash matches exactly; 4 the review kind (and, where
+    the target is stable, the target) is compatible; 5 the decision identity
+    and disposition agree with the Human decision input (checked before the
+    lock); 6 a ``requirement_changed`` decision is reflected by the current
+    canonical authority - else ``review_p5_authority_mismatch``; 7 a
+    ``requirement_confirmed`` one may leave the authority bytes unchanged. The
+    source / effect digests must name exactly those canonical facts. Proof 8 -
+    that this continuation sets exactly the affected Run aside as
+    ``human_decision`` - is the owner's. Every failure STOPs before any effect;
+    no detached record is ever built.
+    """
+    run_id = evidence.affected_review_run_id
+    chain = reader.gate_chain(run_id)
+    if chain is None:
+        raise _evidence_stop(f"the affected Review Run {run_id} does not exist")
+    if run_policy(reader, chain) != P5_POLICY_ID:
+        raise _evidence_stop(f"the affected Review Run {run_id} is not a P5 Run; a P4-only cycle binds no history")
+    adjudication = bound_adjudication(reader, chain)
+    if chain.latest.generation != ADJUDICATION_SETTLE_GENERATION or adjudication is None \
+            or adjudication.outcome != HUMAN_WAIT:
+        raise _evidence_stop(f"the affected Review Run {run_id} did not reach a G4 HUMAN_WAIT")
+    first = chain.generations[0]
+    if first.candidate_hash != evidence.affected_candidate_hash:
+        raise _evidence_stop(f"the affected Candidate {evidence.affected_candidate_hash} is not Run {run_id}'s")
+    if first.review_kind != review_kind or (target_identity is not None and first.target_identity != target_identity):
+        raise _evidence_stop(f"the affected Review Run {run_id} is not of this review kind and target")
+    envelope = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
+    old = envelope.get("requirement") or {}
+    expected_identity = requirement_authority_identity(current_requirement)
+    if evidence.authority_identity != expected_identity or requirement_authority_identity(old) != expected_identity:
+        raise _evidence_stop(f"the authority identity {evidence.authority_identity!r} is not the canonical requirement "
+                             f"authority {expected_identity!r} of the affected Run and of this invocation")
+    adjudication_digest = serialize.digest(adjudication.to_record())
+    old_digest, new_digest = serialize.digest(dict(old)), serialize.digest(dict(current_requirement))
+    if evidence.decision_disposition == history.DECISION_REQUIREMENT_CHANGED:
+        if old_digest == new_digest:
+            raise history.stop(
+                history.CODE_AUTHORITY_MISMATCH,
+                f"Human decision {evidence.decision_id!r} changes the requirement of Run {run_id}, and the canonical "
+                "authority still holds the requirement that Run was reviewed against; the decision is never read as "
+                "the requirement: nothing is reserved, written or launched",
+            )
+        if set(evidence.effect_digests) != {new_digest}:
+            raise _evidence_stop("a requirement_changed decision binds exactly the current requirement authority "
+                                 "digest as its effect")
+    elif not set(evidence.effect_digests) <= {new_digest} or (evidence.effect_digests and old_digest == new_digest):
+        raise _evidence_stop("a requirement_confirmed decision binds no effect, or exactly a changed current authority")
+    if adjudication_digest not in evidence.source_digests \
+            or not set(evidence.source_digests) <= {adjudication_digest, old_digest}:
+        raise _evidence_stop("the source digests are not the affected adjudication (and its reviewed requirement)")
+    try:
+        return history.human_decision_evidence(
+            review_decision_id, adjudication, decision_id=evidence.decision_id,
+            decision_disposition=evidence.decision_disposition, affected_entries=evidence.affected_entries,
+            affected_coverage_gaps=evidence.affected_coverage_gaps, question_summary=evidence.question_summary,
+            decision_summary=evidence.decision_summary, authority_identity=evidence.authority_identity,
+            action_class=evidence.action_class, source_digests=evidence.source_digests,
+            effect_digests=evidence.effect_digests,
+        )
+    except (ValidationError, KeyError, TypeError) as exc:
+        raise _evidence_stop(f"the decision evidence for Run {run_id} does not hold: {exc}") from exc
+
+
+#: A well-formed ``review_decision`` identity no reservation ever returns (its ULID part is all zero): the
+#: owner proves an evidence input with it BEFORE reserving anything, then builds the record under the real one.
+PROBE_DECISION_ID = "rhd_" + "0" * 26
+
+
+def prove_decision_evidence(reader: Any, evidence: DecisionEvidence, *, review_kind: str, target_identity: str | None,
+                            current_requirement: Mapping[str, Any]) -> None:
+    """GAP-G proofs 1-7 of one evidence input, before any reservation or other effect (STOP on any failure)."""
+    decision_evidence_record(reader, evidence, PROBE_DECISION_ID, review_kind=review_kind,
+                             target_identity=target_identity, current_requirement=current_requirement)
+
+
+def resumed_elsewhere(reader: Any, review_run_id: str) -> bool:
+    """Whether a stored Human Decision Evidence record already names ``review_run_id`` as its affected Run."""
+    for identifier in reader.human_decision_history_ids():
+        if reader.read_history(paths.HISTORY_HUMAN_DECISIONS, identifier).affected_review_run_id == review_run_id:
+            return True
+    return False
+
+
+def require_first_generation_history(reader: Any, review_run_id: str, envelope: Mapping[str, Any]) -> None:
+    """Before a P5 Run's first external launch: what its generation 1 bound is canonical, exactly as bound (§28.18).
+
+    Every set-aside summary and Human Decision Evidence the discovery request
+    binds is stored with exactly the bound digest; every P5 HUMAN_WAIT Run the
+    request resumes under a Human decision has its evidence bound, and that
+    evidence validates against its source (``successor_launch``). A P4-only
+    request binds nothing and passes by its explicit contract.
+    """
+    if policy_of_envelope(envelope) != P5_POLICY_ID:
+        return
+    bound: list[tuple[str, str, str]] = [
+        (paths.HISTORY_RUNS, str(item["review_run_id"]), str(item["digest"]))
+        for item in envelope.get("set_aside_summaries") or []
+    ] + [
+        (paths.HISTORY_HUMAN_DECISIONS, str(item["review_decision_id"]), str(item["digest"]))
+        for item in envelope.get("decision_evidence") or []
+    ]
+    for family, identifier, digest in bound:
+        if not reader.history_exists(family, identifier):
+            raise history.stop(history.CODE_HISTORY_MISSING,
+                               f"the {family} history record {identifier} Review Run {review_run_id}'s generation 1 "
+                               "binds is not canonical; nothing is launched")
+        if reader.history_digest(family, identifier) != digest:
+            raise history.stop(history.CODE_HISTORY_INVALID,
+                               f"the {family} history record {identifier} is not the one Review Run {review_run_id}'s "
+                               "generation 1 binds; nothing is launched")
+    covered = {str(item["affected_review_run_id"]): str(item["review_decision_id"])
+               for item in envelope.get("decision_evidence") or []}
+    for run_id in human_decision_resumes(envelope.get("set_aside_runs") or []):
+        chain = reader.gate_chain(run_id)
+        if chain is not None and run_policy(reader, chain) == P5_POLICY_ID and run_id not in covered:
+            raise history.stop(history.CODE_HISTORY_MISSING,
+                               f"Review Run {review_run_id} resumes P5 Run {run_id} under a Human decision and binds no "
+                               "Human Decision Evidence for it; nothing is launched")
+    if covered:
+        history.require_history_ready(reader, review_run_id, history.BOUNDARY_SUCCESSOR_LAUNCH,
+                                      history_contract=history.HISTORY_CONTRACT,
+                                      review_decision_ids=sorted(covered.values()))
+
+
+def human_decision_resumes(set_aside: Iterable[Mapping[str, Any]]) -> list[str]:
+    """The Runs a continuation sets aside as ``human_decision`` - the Runs it resumes under a Human decision."""
+    return sorted(str(item["review_run_id"]) for item in set_aside if item.get("reason") == SET_ASIDE_HUMAN_DECISION)
+
+
+def require_decision_evidence_cover(reader: Any, set_aside: Iterable[Mapping[str, Any]],
+                                    evidence: Sequence[DecisionEvidence]) -> None:
+    """GAP-G / §28.18: every P5 Run resumed under a Human decision has its evidence input, and no evidence is detached.
+
+    A P4-only HUMAN_WAIT Run resumes exactly as before (no evidence); a P5 one
+    without its evidence is ``review_p5_history_missing``; evidence naming a Run
+    this continuation does not set aside as ``human_decision`` is refused.
+    Both before any effect.
+    """
+    resumed = human_decision_resumes(set_aside)
+    named = {item.affected_review_run_id for item in evidence}
+    detached = sorted(named - set(resumed))
+    if detached:
+        raise _evidence_stop(f"Human Decision Evidence names {detached}, which this continuation does not set aside "
+                             "as human_decision; a detached record is never created")
+    for run_id in sorted(named):
+        chain = reader.gate_chain(run_id)
+        if chain is None or run_policies(reader, chain) != {P5_POLICY_ID}:
+            raise _evidence_stop(f"Human Decision Evidence names Review Run {run_id}, which is not a P5 Run; a P4-only "
+                                 "cycle binds no history and resumes with the Human decision alone")
+        if resumed_elsewhere(reader, run_id):
+            raise _evidence_stop(f"Review Run {run_id} already has its Human Decision Evidence; one record per "
+                                 "affected Run")
+    for run_id in resumed:
+        chain = reader.gate_chain(run_id)
+        if chain is None or run_policies(reader, chain) != {P5_POLICY_ID}:
+            continue
+        if run_id not in named:
+            raise history.stop(
+                history.CODE_HISTORY_MISSING,
+                f"Review Run {run_id} is a P5 HUMAN_WAIT Run resumed under a Human decision, and this invocation "
+                "carries no Human Decision Evidence input for it (§28.18: no successor launch before it is "
+                "canonical); nothing is reserved, written or launched",
+            )
+
+
+# --------------------------------------------------------------------------- cross-run relations (GAP-C)
+
+#: The history families a prior-history reference may name, and the relation endpoint kind each one is.
+REFERENCE_KINDS: Mapping[str, str] = {
+    paths.HISTORY_RUNS: history.ENDPOINT_RUN,
+    paths.HISTORY_FINDINGS: history.ENDPOINT_FINDING,
+    paths.HISTORY_REPAIRS: history.ENDPOINT_REPAIR,
+}
+
+
+def _history_run_of(family: str, found: Any) -> str:
+    if family == paths.HISTORY_REPAIRS:
+        return str(found.source_review_run_id)
+    return str(found.review_run_id)
+
+
+def prior_history_references(reader: Any, review_kind: str, target_identity: str,
+                             current_run_id: str) -> list[dict[str, str]]:
+    """GAP-C: the deterministic COMPLETE validated P5 prior-history reference set of one review kind and target.
+
+    Every P5 Run / Finding / Repair summary whose Run is of ``review_kind`` and
+    ``target_identity`` (other than the current Run), by family, identity and
+    exact canonical digest, in a total order - never chat memory, a transcript
+    or a Candidate copy. A same-target history record that does not validate
+    against its immutable source makes the set incomplete: the P5 transition
+    that needs it STOPs (``review_p5_history_invalid``, GAP-B), and nothing
+    unvalidated is ever offered to the adjudicator.
+    """
+    checkers = {paths.HISTORY_RUNS: history.run_summary_problems,
+                paths.HISTORY_FINDINGS: history.finding_summary_problems,
+                paths.HISTORY_REPAIRS: history.repair_summary_problems}
+    found: list[dict[str, str]] = []
+    for family in REFERENCE_KINDS:
+        for identifier in reader.history_ids(family):
+            record = reader.read_history(family, identifier)
+            run_id = _history_run_of(family, record)
+            if run_id == current_run_id:
+                continue
+            chain = reader.gate_chain(run_id)
+            if chain is None:
+                raise history.stop(history.CODE_HISTORY_INVALID,
+                                   f"the {family} history record {identifier} names Run {run_id}, which has no chain")
+            first = chain.generations[0]
+            if (first.review_kind, first.target_identity) != (review_kind, target_identity):
+                continue
+            problems = checkers[family](reader, record)
+            if problems:
+                raise history.stop(
+                    history.CODE_HISTORY_INVALID,
+                    f"the prior history of {review_kind} {target_identity} is not complete and validated: "
+                    + "; ".join(message for _, message in problems) + "; nothing is launched",
+                )
+            found.append({"family": family, "id": identifier, "digest": reader.history_digest(family, identifier)})
+    return sorted(found, key=lambda item: (item["family"], item["id"]))
+
+
+def prior_history_records(reader: Any, references: Iterable[Mapping[str, Any]]) -> tuple[dict[str, Any], ...]:
+    """The referenced history records exactly as stored, for the adjudicator to read (public-safe P5 records only)."""
+    found = []
+    for item in references:
+        family, identifier = str(item["family"]), str(item["id"])
+        if reader.history_digest(family, identifier) != item["digest"]:
+            raise history.stop(history.CODE_HISTORY_INVALID,
+                               f"the referenced {family} history record {identifier} is not the bound one")
+        found.append({"family": family, "id": identifier, "digest": str(item["digest"]),
+                      "record": reader.read_history(family, identifier).to_record()})
+    return tuple(found)
+
+
+@dataclass(frozen=True)
+class RelationDraft:
+    """A validated relation claim, in the owner's deterministic order, before its relation ID is reserved."""
+
+    claim: "P5RelationClaim"
+    finding_id: str
+    order_key: tuple[Any, ...]
+
+
+def _relation_invalid(message: str) -> StopError:
+    return stop(CODE_ADJUDICATION_INVALID, f"the adjudication's relation claims are invalid: {message}; nothing is settled")
+
+
+def relation_drafts(returned: P4AdjudicationReturn, found: records.P4Adjudication,
+                    references: Sequence[Mapping[str, Any]], *, policy_id: str) -> tuple[RelationDraft, ...]:
+    """Validate a return's relation claims against the adjudication and the bound references (GAP-C).
+
+    A P4-only adjudication returns none (anything else is refused, its
+    normalization unchanged). Each P5 claim's source must be a claim the
+    adjudication made a Finding of, its target one bound reference, and no two
+    claims may say one logical relation. The order is the owner's: the source
+    Finding's canonical position, then the type and target - never the return
+    order. Type / endpoint / status / evidence / rationale are validated by the
+    history core when the record is built.
+    """
+    claims = returned.relation_claims
+    if not isinstance(claims, tuple):
+        raise _relation_invalid("relation_claims is not a tuple")
+    if policy_id != P5_POLICY_ID:
+        if claims:
+            raise _relation_invalid("a P4-only adjudication returns no cross-run relation claim")
+        return ()
+    by_source: dict[tuple[str, int], tuple[int, str]] = {}
+    for position, finding in enumerate(found.findings):
+        for source in finding["sources"]:
+            by_source[(str(source["task_id"]), int(source["claim_index"]))] = (position, str(finding["finding_id"]))
+    bound = {(str(item["family"]), str(item["id"])) for item in references}
+    drafts: list[RelationDraft] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for claim in claims:
+        if type(claim) is not P5RelationClaim:
+            raise _relation_invalid(f"a claim is {type(claim).__name__}, not a P5RelationClaim")
+        target = by_source.get((claim.source_task_id, claim.source_claim_index))
+        if target is None:
+            raise _relation_invalid(f"claim {claim.source_claim_index} of {claim.source_task_id!r} is no Finding of this "
+                                    "adjudication; a relation starts at the later Finding that made it knowable")
+        if (claim.target_family, claim.target_id) not in bound:
+            raise _relation_invalid(f"{claim.target_family} {claim.target_id!r} is not in the bound validated "
+                                    "prior-history reference set")
+        position, finding_id = target
+        key = (str(claim.relation_type), finding_id, claim.target_family, claim.target_id)
+        if key in seen:
+            raise _relation_invalid(f"two claims say one {claim.relation_type} from {finding_id} to {claim.target_id}")
+        seen.add(key)
+        drafts.append(RelationDraft(claim, finding_id, (position,) + key))
+    return tuple(sorted(drafts, key=lambda draft: draft.order_key))
+
+
+def relation_record(draft: RelationDraft, relation_id: str, source: history.FindingSummary,
+                    references: Sequence[Mapping[str, Any]]) -> history.Relation:
+    """One accepted relation record (an immutable new G4 fact), validated through the history core."""
+    claim = draft.claim
+    digest = next(str(item["digest"]) for item in references
+                  if (item["family"], item["id"]) == (claim.target_family, claim.target_id))
+    try:
+        return history.relation(
+            relation_id, claim.relation_type,
+            history.endpoint(history.ENDPOINT_FINDING, source.finding_id, basis=history.BASIS_HISTORY,
+                             digest=serialize.digest(source.to_record())),
+            history.endpoint(REFERENCE_KINDS[claim.target_family], claim.target_id, basis=history.BASIS_HISTORY,
+                             digest=digest),
+            status=claim.status, rationale=claim.rationale, semantic_surface=claim.semantic_surface,
+            supporting_evidence_digests=claim.supporting_evidence_digests,
+        )
+    except (ValidationError, KeyError, TypeError) as exc:
+        raise _relation_invalid(str(exc)) from exc
+
+
+@dataclass(frozen=True)
+class G4History:
+    """What a P5 G4 writes beside its adjudication: the Finding summaries, the relations, a HUMAN_WAIT summary."""
+
+    findings: tuple[history.FindingSummary, ...]
+    relations: tuple[history.Relation, ...]
+    run_summary: history.RunSummary | None
+
+    def extra(self) -> list[tuple[str, dict[str, Any]]]:
+        found = [(paths.history_finding_rel(item.finding_id), item.to_record()) for item in self.findings]
+        found += [(paths.history_relation_rel(item.relation_id), item.to_record()) for item in self.relations]
+        if self.run_summary is not None:
+            found.append((paths.history_run_rel(self.run_summary.review_run_id), self.run_summary.to_record()))
+        return found
+
+
+def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration, drafts: Sequence[RelationDraft],
+               relation_ids: Sequence[str], references: Sequence[Mapping[str, Any]]) -> G4History:
+    """§28.8 / §28.12 / §28.5: the Finding summaries, the accepted relations and (HUMAN_WAIT) the Run summary of one G4."""
+    if len(relation_ids) != len(drafts):
+        raise ValidationError("one reserved relation ID per accepted relation claim", code="review_record_invalid")
+    owned: dict[str, list[str]] = {}
+    for draft, relation_id in zip(drafts, relation_ids):
+        owned.setdefault(draft.finding_id, []).append(relation_id)
+    summaries = tuple(
+        history.finding_summary(found, str(item["finding_id"]), relation_ids=owned.get(str(item["finding_id"]), ()))
+        for item in found.findings
+    )
+    by_id = {item.finding_id: item for item in summaries}
+    relations = tuple(relation_record(draft, relation_id, by_id[draft.finding_id], references)
+                      for draft, relation_id in zip(drafts, relation_ids))
+    summary = None
+    if found.outcome == HUMAN_WAIT:
+        summary = history.run_summary(gate_four, durable_disposition=history.DISPOSITION_HUMAN_WAIT,
+                                      candidate_generation=found.candidate_generation, adjudication=found)
+    return G4History(summaries, relations, summary)
+
+
+def g6_history(adjudication: records.P4Adjudication, batch: records.P4RepairBatch, result: records.P4RepairResult,
+               gate_six: records.GateGeneration, *, source_candidate_material_digest: str) -> list[tuple[str, dict[str, Any]]]:
+    """§28.9: the Repair summary and the source Run's ``repaired_to_next_candidate`` summary of one repair G6."""
+    repair = history.repair_summary(adjudication, batch, result,
+                                    source_candidate_material_digest=source_candidate_material_digest)
+    summary = history.run_summary(gate_six, durable_disposition=history.DISPOSITION_REPAIRED,
+                                  candidate_generation=adjudication.candidate_generation, adjudication=adjudication,
+                                  repair_batch_id=batch.repair_batch_id)
+    return [(paths.history_repair_rel(batch.repair_batch_id), repair.to_record()),
+            (paths.history_run_rel(summary.review_run_id), summary.to_record())]
+
+
+def invalidated_history(reader: Any, chain: Any, gate_six: records.GateGeneration,
+                        superseded_receipt_id: str) -> list[tuple[str, dict[str, Any]]]:
+    """§28.5: the ``invalidated`` Run summary of a G6 invalidation, in that same G6 (G-3)."""
+    adjudication = bound_adjudication(reader, chain)
+    summary = history.run_summary(gate_six, durable_disposition=history.DISPOSITION_INVALIDATED,
+                                  candidate_generation=run_candidate_generation(reader, chain),
+                                  adjudication=adjudication, receipt_id=superseded_receipt_id)
+    return [(paths.history_run_rel(summary.review_run_id), summary.to_record())]
+
+
+def not_authorized_history(gate_two: records.GateGeneration, candidate_generation: int | None
+                           ) -> list[tuple[str, dict[str, Any]]]:
+    """GAP-E: the ``not_authorized`` Run summary, in the same G2 settlement that makes discovery non-authorizing."""
+    if not any(task["status"] != records.TASK_SETTLED_OK for task in gate_two.settled_tasks):
+        return []
+    summary = history.run_summary(gate_two, durable_disposition=history.DISPOSITION_NOT_AUTHORIZED,
+                                  candidate_generation=candidate_generation)
+    return [(paths.history_run_rel(summary.review_run_id), summary.to_record())]

@@ -666,6 +666,10 @@ def p4_record_paths(review: ReviewStore, review_run_id: str, chain: GateChain) -
     for generation in chain.generations:
         if generation.receipt_id:
             found += [paths.receipt_rel(generation.receipt_id), paths.supersession_rel(generation.receipt_id)]
+    # P5 (P-5): the history the Run's own generations wrote, derived from its canonical records, never from file
+    # presence - generation 1's set-aside summaries and Human Decision Evidence, its own G2 / G4 / G6 Run summary,
+    # G4's Finding summaries and relations, G6's Repair summary. None for a P4-only Run.
+    found += p4.run_history_paths(review, review_run_id, chain)
     return found
 
 
@@ -678,10 +682,12 @@ def _clean_p4_run(
         raise _incomplete(f"P4 Review Run {review_run_id} is not a P4 shape: " + "; ".join(problems))
     receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
     try:
-        record_paths = p4_record_paths(review, review_run_id, chain) + _consumption_paths_of(
-            store, review, head, {str(item) for item in receipt_ids}
-        )
-    except ValidationError as exc:
+        consumptions = _consumption_paths_of(store, review, head, {str(item) for item in receipt_ids})
+        record_paths = p4_record_paths(review, review_run_id, chain) + consumptions
+        if consumptions and p4.run_policy(review, chain) == p4.P5_POLICY_ID:
+            # §28.6: a consumed P5 Run's summary is made canonical by the same transition as its Consumption
+            record_paths.append(paths.history_run_rel(review_run_id))
+    except (ValidationError, ReconcileRequired) as exc:
         raise _incomplete(f"the records of P4 Review Run {review_run_id} do not read: {exc}") from exc
     _require_clean_paths(store, review, head, review_run_id, record_paths)
     wanted = [relative for relative in record_paths if not relative.startswith(paths.run_dir(review_run_id) + "/")

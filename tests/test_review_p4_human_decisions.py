@@ -32,6 +32,14 @@ def human() -> tuple[p4.P4Claim, ...]:
 class HumanDecisionCase(P4WorkCase):
     def setUp(self) -> None:
         super().setUp()
+        # RB4 (Orchestrator decision on the P5-default STOP): every Run these tests create belongs to an explicitly
+        # P4-ONLY cycle (the test-only seam; GAP-A item 5 keeps a cycle's first-Run family), so a resume with only
+        # p4.HumanDecision is proven unchanged. The P5 twins live in tests/test_review_p5_human_decisions.py.
+        from p5_helpers import p4_only_cycle
+
+        seam = p4_only_cycle()
+        seam.__enter__()
+        self.addCleanup(seam.__exit__, None, None, None)
         self.executor = self.completing(write={"out.txt": b"out\n"}, message="feat: out")
 
     def start_p4(self, discovery: Discovery, decision: p4.HumanDecision | None = None) -> Any:

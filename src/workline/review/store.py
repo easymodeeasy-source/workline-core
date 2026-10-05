@@ -41,7 +41,7 @@ from typing import Any, Callable
 from ..errors import ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
-from . import fsafe, paths, records, serialize
+from . import fsafe, history, paths, records, serialize
 from .records import (
     CandidateSnapshot,
     Consumption,
@@ -790,6 +790,75 @@ class ReviewStore:
     def repair_result_ids(self) -> tuple[str, ...]:
         # A Repair Result is named after the Repair Batch it settles.
         return self._ids_in(paths.REPAIR_RESULTS_DIR, "review_repair_batch")
+
+    # P5 durable history (§28.16) ----------------------------------------------
+    #
+    # Narrow readers over the five history families. The parsers live in
+    # :mod:`workline.review.history`; every read takes the same canonical path
+    # safety, canonical-bytes boundary and schema round-trip as every other
+    # Review record, and the filename must be the identity inside the record.
+    # Read-only: nothing here writes, indexes or caches history.
+
+    def read_history(self, family: str, identifier: str) -> Any:
+        """One history record of ``family``, by the identity its filename names."""
+        found, _ = self._read_history(family, identifier)
+        return found
+
+    def _read_history(self, family: str, identifier: str) -> tuple[Any, str]:
+        relative = paths.history_rel(family, identifier)
+        found, text = self._read_record(
+            relative, f"Review history {relative}",
+            lambda record, described: history.parse_history(family, record, described),
+        )
+        declared = history.record_identity(family, found)
+        if declared != identifier:
+            raise ValidationError(
+                f"Review history {relative} declares {declared}, not the identity its filename names",
+                code="review_record_invalid",
+            )
+        return found, text
+
+    def history_exists(self, family: str, identifier: str) -> bool:
+        return self.read_bytes(paths.history_rel(family, identifier)) is not None
+
+    def history_digest(self, family: str, identifier: str) -> str:
+        """The canonical digest of one stored history record, over the exact bytes the reader accepted."""
+        _, text = self._read_history(family, identifier)
+        return serialize.digest_of_text(text)
+
+    def history_ids(self, family: str) -> tuple[str, ...]:
+        """Every history record of ``family``, by identity; an absent family (or namespace) holds none."""
+        return self._ids_in(paths.history_family_dir(family), paths.HISTORY_FAMILY_KINDS[family])
+
+    def run_history(self, review_run_id: str) -> Any:
+        return self.read_history(paths.HISTORY_RUNS, review_run_id)
+
+    def finding_history(self, finding_id: str) -> Any:
+        return self.read_history(paths.HISTORY_FINDINGS, finding_id)
+
+    def repair_history(self, repair_batch_id: str) -> Any:
+        return self.read_history(paths.HISTORY_REPAIRS, repair_batch_id)
+
+    def relation_history(self, relation_id: str) -> Any:
+        return self.read_history(paths.HISTORY_RELATIONS, relation_id)
+
+    def human_decision_history(self, decision_id: str) -> Any:
+        return self.read_history(paths.HISTORY_HUMAN_DECISIONS, decision_id)
+
+    def run_history_ids(self) -> tuple[str, ...]:
+        return self.history_ids(paths.HISTORY_RUNS)
+
+    def finding_history_ids(self) -> tuple[str, ...]:
+        return self.history_ids(paths.HISTORY_FINDINGS)
+
+    def repair_history_ids(self) -> tuple[str, ...]:
+        return self.history_ids(paths.HISTORY_REPAIRS)
+
+    def relation_history_ids(self) -> tuple[str, ...]:
+        return self.history_ids(paths.HISTORY_RELATIONS)
+
+    def human_decision_history_ids(self) -> tuple[str, ...]:
+        return self.history_ids(paths.HISTORY_HUMAN_DECISIONS)
 
     # activation -------------------------------------------------------------
     def activation_exists(self) -> bool:

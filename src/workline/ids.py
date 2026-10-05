@@ -37,11 +37,18 @@ PREFIXES = {
     # owner-mutation reservations too, so a replay reserves the same identity.
     "review_finding": "rfd",
     "review_repair_batch": "rrb",
+    # P5 (§28.4): the only genuinely new durable history facts - a later or
+    # cross-run relation, and Human Decision Evidence - get their own Review
+    # kinds, never the Project-domain ``relation`` kind, and prefixes that
+    # cannot be read as ``rel_`` or ``rr_``. Run / Finding / Repair history
+    # reuses the identity of its immutable source record and allocates nothing.
+    "review_relation": "rhr",
+    "review_decision": "rhd",
 }
 
-# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_`` are
-# read as themselves rather than as the Roadmap prefix ``r`` followed by text.
-_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
+# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_``/``rhr_``/``rhd_``
+# are read as themselves rather than as the Roadmap prefix ``r`` followed by text.
+_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
 
 
 def new_ulid(now_ms: int | None = None) -> str:

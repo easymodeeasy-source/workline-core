@@ -41,6 +41,24 @@ REPORTS_DIR = f"{REVIEW_DIR}/reports"
 ADJUDICATIONS_DIR = f"{REVIEW_DIR}/adjudications"
 REPAIR_BATCHES_DIR = f"{REVIEW_DIR}/repair-batches"
 REPAIR_RESULTS_DIR = f"{REVIEW_DIR}/repair-results"
+#: The P5 durable history namespace (§13.3 / §28.3): five immutable create-only record families, each
+#: one level below it, and nothing else - no index, no cache, no mutable "current history" file.
+HISTORY_DIR = f"{REVIEW_DIR}/history"
+HISTORY_RUNS = "runs"
+HISTORY_FINDINGS = "findings"
+HISTORY_REPAIRS = "repairs"
+HISTORY_RELATIONS = "relations"
+HISTORY_HUMAN_DECISIONS = "human-decisions"
+HISTORY_FAMILIES = (HISTORY_RUNS, HISTORY_FINDINGS, HISTORY_REPAIRS, HISTORY_RELATIONS, HISTORY_HUMAN_DECISIONS)
+#: The identity kind a history record of each family is named by (§28.4): Run / Finding / Repair history
+#: reuses its immutable source record's stable ID; only relations and Human Decision Evidence allocate one.
+HISTORY_FAMILY_KINDS = {
+    HISTORY_RUNS: "review_run",
+    HISTORY_FINDINGS: "review_finding",
+    HISTORY_REPAIRS: "review_repair_batch",
+    HISTORY_RELATIONS: "review_relation",
+    HISTORY_HUMAN_DECISIONS: "review_decision",
+}
 
 #: The ephemeral Review area. Never canonical truth, never evidence, never the
 #: only material an accepted task can be reconstructed from (``R1`` §3).
@@ -95,6 +113,7 @@ REVIEW_SUBDIRS = (
     "adjudications",
     "repair-batches",
     "repair-results",
+    "history",
 )
 
 #: Gate generation files are zero-padded to this width.
@@ -194,6 +213,45 @@ def repair_result_rel(repair_batch_id: str) -> str:
     return f"{REPAIR_RESULTS_DIR}/{repair_batch_id}.yaml"
 
 
+def history_family_dir(family: str) -> str:
+    """The directory of one P5 history record family."""
+    if family not in HISTORY_FAMILIES:
+        raise ValidationError(f"not a Review history family: {family!r}", code="review_record_invalid")
+    return f"{HISTORY_DIR}/{family}"
+
+
+def history_rel(family: str, identifier: str) -> str:
+    """``history/<family>/<identifier>.yaml``, the identifier being of the family's own identity kind."""
+    directory = history_family_dir(family)
+    _require_id(identifier, HISTORY_FAMILY_KINDS[family])
+    return f"{directory}/{identifier}.yaml"
+
+
+def history_run_rel(review_run_id: str) -> str:
+    """The one Run summary of ``review_run_id``."""
+    return history_rel(HISTORY_RUNS, review_run_id)
+
+
+def history_finding_rel(finding_id: str) -> str:
+    """The one Finding summary of the P4 Finding ``finding_id``."""
+    return history_rel(HISTORY_FINDINGS, finding_id)
+
+
+def history_repair_rel(repair_batch_id: str) -> str:
+    """The one Repair summary of the P4 Repair Batch ``repair_batch_id``."""
+    return history_rel(HISTORY_REPAIRS, repair_batch_id)
+
+
+def history_relation_rel(relation_id: str) -> str:
+    """One later / cross-run relation record."""
+    return history_rel(HISTORY_RELATIONS, relation_id)
+
+
+def history_decision_rel(decision_id: str) -> str:
+    """One Human Decision Evidence record."""
+    return history_rel(HISTORY_HUMAN_DECISIONS, decision_id)
+
+
 def is_review_path(relative: str) -> bool:
     """Whether ``relative`` is inside the canonical Review namespace."""
     return isinstance(relative, str) and relative.startswith(REVIEW_DIR + "/")
@@ -241,5 +299,8 @@ def require_review_record_path(relative: str) -> None:
     if below[0] == "gates" and len(below) == 3:
         return
     if below[0] in _FLAT_RECORD_DIRS and len(below) == 2:
+        return
+    # P5 history is the one two-level area: exactly ``history/<family>/<id>.yaml`` (§28.3).
+    if below[0] == "history" and len(below) == 3 and below[1] in HISTORY_FAMILIES:
         return
     raise ValidationError(f"not a canonical Review record location: {relative!r}", code="review_containment")

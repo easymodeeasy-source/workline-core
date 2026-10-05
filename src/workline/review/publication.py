@@ -31,7 +31,7 @@ from .. import gitcmd
 from ..committed_view import CommittedReadError
 from ..errors import StopError, ValidationError
 from ..store import ProjectStore
-from . import committed, p4, paths, planning, records, serialize
+from . import committed, history, p4, paths, planning, records, serialize
 
 #: The directory whose history the fast path reads.
 FAST_PATH_DIRECTORY = f"{paths.CANDIDATE_SNAPSHOTS_DIR}/"
@@ -378,7 +378,7 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
              f"{km}'s parent does not descend from the registration commit")
     if p4_run:
         owned = rr.p4_planning_owned_paths(
-            rr._Run(review_run_id, task_id, receipt_id, consumption.consumption_id), chain, material
+            rr._Run(review_run_id, task_id, receipt_id, consumption.consumption_id), chain, material, at_parent
         )
     else:
         owned = rr.planning_owned_paths(review_run_id, material, task_id, receipt_id, consumption.consumption_id)
@@ -389,13 +389,28 @@ def _prove(repo: Path, commit: str, run: RegisteredRun, progress: list[str]) -> 
              "CP11", "the Consumption the metadata commit added is not the one the published commit holds")
 
     progress.append("CP12")
-    # CP12 - the metadata commit carries the Consumption alone
+    # CP12 - the metadata commit carries the Consumption alone (v1 / P4-only, byte for byte as frozen); a P5 Run -
+    # by the policy its own committed TaskInputs store (GAP-A, §28.6) - carries its Run summary and the Consumption
     delta = gitcmd.commit_delta(repo, q, km)
-    _require(
-        delta is not None and len(delta) == 1 and delta[0].path == consumption_path and delta[0].status == "A"
-        and delta[0].new_mode == "100644",
-        "CP12", "the metadata commit is not exactly the added Consumption",
-    )
+    history_contract = _guard("CP12", lambda: p4.run_history_contract(at_parent, chain)) if p4_run else None
+    if history_contract is None:
+        _require(
+            delta is not None and len(delta) == 1 and delta[0].path == consumption_path and delta[0].status == "A"
+            and delta[0].new_mode == "100644",
+            "CP12", "the metadata commit is not exactly the added Consumption",
+        )
+    else:
+        summary_path = paths.history_run_rel(review_run_id)
+        _require(
+            delta is not None and sorted(item.path for item in delta) == sorted([consumption_path, summary_path])
+            and all(item.status == "A" and item.new_mode == "100644" for item in delta),
+            "CP12", "the metadata commit is not exactly the added Run summary and Consumption",
+        )
+        summary = _guard("CP12", lambda: at_km.read_history(paths.HISTORY_RUNS, review_run_id))
+        problems = _guard("CP12", lambda: history.run_summary_problems(at_km, summary))
+        _require(not problems and summary.durable_disposition == history.DISPOSITION_CONSUMED
+                 and summary.consumption_id == consumption.consumption_id,
+                 "CP12", "the Run summary does not validate against the exact Consumption")
 
     progress.append("CP13")
     # CP13 - the metadata commit's tree still holds the Run and the registration as proven
