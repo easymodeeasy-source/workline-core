@@ -79,13 +79,15 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
             )
     # P6 (ORCH-RB6-1): every policy commit (Kp) of the history is proven too. A Workline Kp always follows its
     # Policy Review Run's Candidate snapshot, so the unchanged snapshot fast path already reaches here; a legacy-only
-    # push still pays exactly its one fast-path read. One history read lists every policy change and its adders.
+    # push still pays exactly its one fast-path read. One history read lists every policy change and its adders;
+    # what every change's proof reads alike at C is read once, and only when there is a change (ORCH-RB6-1-N2).
     try:
         adders = policy_change_adders(Path(repo), commit)
     except (ValidationError, StopError, CommittedReadError) as exc:
         return f"the policy changes of {commit}'s history cannot be read ({exc})"
+    shared = _PolicyReads(Path(repo), commit)
     for change_path in sorted(adders):
-        failed = committed_policy_proof(Path(repo), commit, change_path, adders[change_path])
+        failed = committed_policy_proof(Path(repo), commit, change_path, adders[change_path], shared)
         if failed is not None:
             item, detail = failed
             return f"the policy commit adding {change_path} is not proven for {commit}: {item} fails ({detail})"
@@ -109,8 +111,64 @@ def policy_change_adders(repo: Path, commit: str) -> dict[str, list[str]]:
     return found
 
 
-def committed_policy_proof(repo: Path, commit: str, change_path: str,
-                           adders: list[str] | None = None) -> tuple[str, str] | None:
+class _PolicyReads:
+    """What the proof of every policy commit at one pushed commit C reads alike, each read once (ORCH-RB6-1-N2).
+
+    Nothing is read before it is asked for: a history without a policy change
+    reads none of it. The Consumptions are those C holds and those any commit
+    of C's history added, as that commit added them - one later deleted or
+    reverted included (ORCH-RB6-1 R5 case D: a Km anywhere in the history is
+    proven). A blob that does not hold an ID's bytes cannot be a record naming
+    that ID - the reader accepts only canonical bytes, which spell every ID
+    literally - so an added blob is parsed only when it mentions an ID the
+    proof asks about; every blob that does must read.
+    """
+
+    def __init__(self, repo: Path, commit: str) -> None:
+        self.repo = repo
+        self.commit = commit
+        self._at_commit: committed.CommittedReviewStore | None = None
+        self._held: list[tuple[str, Any]] | None = None
+        self._added: list[tuple[str, list[str]]] | None = None
+        self._parsed: dict[tuple[str, str], Any] = {}
+
+    def at_commit(self) -> committed.CommittedReviewStore:
+        if self._at_commit is None:
+            self._at_commit = committed.CommittedReviewStore(self.repo, self.commit)
+        return self._at_commit
+
+    def consumption_adds(self) -> list[tuple[str, list[str]]]:
+        """One add-history read of the Consumption directory of C's history: (adding commit, added paths)."""
+        if self._added is None:
+            self._added = committed.added_in_history(self.repo, self.commit, [paths.CONSUMPTIONS_DIR])
+        return self._added
+
+    def consumptions_mentioning(self, ids: "tuple[str, ...]") -> list[tuple[str, Any]]:
+        """``(path, Consumption)``: every one C holds, and every one a commit of C's history added that mentions one
+        of ``ids``."""
+        if self._held is None:
+            self._held = [(paths.consumption_rel(found.consumption_id), found) for found in self.at_commit().consumptions()]
+        found = list(self._held)
+        needles = [identifier.encode("utf-8") for identifier in ids]
+        for adding, names in self.consumption_adds():
+            for name in names:
+                if not name.startswith(paths.CONSUMPTIONS_DIR + "/"):
+                    continue
+                raw = gitcmd.blob_at(self.repo, adding, name)
+                if raw is None:
+                    raise ValidationError(f"Git cannot read the Consumption {name} {adding} added",
+                                          code="review_record_invalid")
+                if not any(needle in raw for needle in needles):
+                    continue
+                if (adding, name) not in self._parsed:
+                    self._parsed[(adding, name)], _ = committed.parse_record(
+                        raw, f"{name} at {adding}", records.consumption_from_record)
+                found.append((name, self._parsed[(adding, name)]))
+        return found
+
+
+def committed_policy_proof(repo: Path, commit: str, change_path: str, adders: list[str] | None = None,
+                           shared: "_PolicyReads | None" = None) -> tuple[str, str] | None:
     """The committed proof of one policy commit (Kp) at ``commit``, from committed objects alone; ``(item, detail)``
     of the first item that fails, ``None`` when every item holds.
 
@@ -129,17 +187,23 @@ def committed_policy_proof(repo: Path, commit: str, change_path: str,
          adjudication -> seal, every accepted task's provenance, generation 5 bound field by field to its Receipt
          and to the Policy Change stage, the G1 Candidate the snapshot's
     PK7  no invalidation or Supersession of the Receipt in the history, and no Consumption of it at Kp
-    PK8  a Consumption of the Receipt the pushed commit holds is the one v3 Policy Consumption, bound to the Receipt,
-         the Run, the change, Kp and P (absent: Kp alone is published, as its own owner publishes it, §30.20)
+    PK8  a Consumption of the Receipt that the pushed commit holds or any commit of its history added (one a later
+         commit deleted or reverted included) is the one v3 Policy Consumption at its own path, bound to the Receipt
+         and the Run, every persisted claim recomputed from Kp and P (change, Kp, P, before / after Profile versions
+         and digests, baseline digest, normalized projection hash, policy delta digest), and no other Policy
+         Consumption names the change or Kp (absent everywhere: Kp alone is published, as its own owner publishes
+         it, §30.20)
     PK9  its metadata commit Km: the one commit adding it, on Kp's clean descendant, exactly the consumed Run summary
-         and the Consumption, the summary valid for that Consumption, Kp's change record and Profile unchanged
+         and the Consumption, the summary valid for that Consumption, Kp's change record and Profile unchanged, and
+         the pushed commit holds at that path the Km's Consumption or nothing
     ```
 
     Anything that cannot be read or answered is no proof: the item in progress fails (ORCH-RB6-1-R10).
+    ``shared`` is what every change's proof at ``commit`` reads alike (:class:`_PolicyReads`).
     """
     progress = ["PK1"]
     try:
-        _prove_policy(repo, commit, change_path, adders, progress)
+        _prove_policy(repo, commit, change_path, adders, shared or _PolicyReads(Path(repo), commit), progress)
     except _Fail as failed:
         return failed.item, failed.detail
     except Exception as exc:  # anything unanswerable is no proof: the item under evaluation fails
@@ -147,7 +211,8 @@ def committed_policy_proof(repo: Path, commit: str, change_path: str,
     return None
 
 
-def _prove_policy(repo: Path, commit: str, change_path: str, adders: list[str] | None, progress: list[str]) -> None:
+def _prove_policy(repo: Path, commit: str, change_path: str, adders: list[str] | None, shared: _PolicyReads,
+                  progress: list[str]) -> None:
     from . import policy
     from .validate import GATE_RECEIPT_BINDING, RECEIPT_CONSUMPTION_BINDING
 
@@ -222,31 +287,56 @@ def _prove_policy(repo: Path, commit: str, change_path: str, adders: list[str] |
              f"{kp} holds a Consumption of its own Receipt")
 
     progress.append("PK8")
-    at_commit = _guard("PK8", lambda: committed.CommittedReviewStore(repo, commit))
-    naming = [found for found in _guard("PK8", at_commit.consumptions) if found.receipt_id == receipt_id]
+    # ORCH-RB6-1 R5 case D: the Consumptions of the Receipt C holds AND every one a commit of C's history added (one
+    # a later commit deleted or reverted included), so a Km anywhere in the pushed history is proven
+    mentioned = _guard("PK8", lambda: shared.consumptions_mentioning((receipt_id, change_id, kp)))
+    naming: dict[tuple[str, bytes], Any] = {}
+    for path, found in mentioned:
+        if found.receipt_id == receipt_id:
+            naming.setdefault((path, serialize.canonical_bytes(found.to_record())), found)
     if not naming:
-        return  # Kp alone, proven: what its own owner publishes before its Consumption (§30.20)
-    _require(len(naming) == 1, "PK8", f"{commit} holds {len(naming)} Consumptions of the Receipt")
-    consumption = naming[0]
+        return  # Kp alone, proven: no Consumption of its Receipt anywhere (§30.20, what its own owner publishes)
+    _require(len(naming) == 1, "PK8", f"{commit} and its history hold {len(naming)} Consumptions of the Receipt")
+    [((consumption_path, consumption_bytes), consumption)] = naming.items()
     _require(isinstance(consumption, records.PolicyConsumption), "PK8", "the Consumption is not a Policy Consumption")
+    _require(consumption_path == paths.consumption_rel(consumption.consumption_id), "PK8",
+             f"the Consumption at {consumption_path} is not stored at its own path")
     for name in RECEIPT_CONSUMPTION_BINDING:
         _require(getattr(receipt, name) == getattr(consumption, name), "PK8",
                  f"the Consumption's {name} is not the Receipt's")
     persisted = consumption.persisted_policy
-    _require(
-        persisted.get("policy_change_id") == change_id and persisted.get("policy_commit") == kp
-        and persisted.get("policy_parent") == parent
-        and persisted.get("after_profile_digest") == change["after_profile_digest"]
-        and persisted.get("before_profile_digest") == change["before_profile_digest"]
-        and persisted.get("global_baseline_digest") == change["global_baseline_digest"]
-        and isinstance(persisted.get("branch"), str) and persisted["branch"].startswith("refs/heads/"),
-        "PK8", "the Consumption's persisted policy does not bind the change, its policy commit and its parent")
+    # ORCH-RB6-1-N4: every persisted claim a committed object decides is recomputed from Kp and P, as the owner made it
+    # (``project_policy._consumption_record``); the loader identity is the consuming runtime's, never a committed fact
+    after = _guard("PK8", lambda: policy.ProjectProfile.from_record(dict(candidate["after_profile"]),
+                                                                    "the reviewed after Profile"))
+    projection = _guard("PK8", lambda: policy.projection_hash(after, policy.bound_global_settings(change["global_baseline"])))
+    delta_record = {
+        "parent": parent, "commit": kp,
+        "entries": [{"path": item.path, "status": item.status, "mode": item.new_mode, "blob": item.new_blob}
+                    for item in sorted(delta, key=lambda entry: entry.path)],
+    }
+    claims = {
+        "policy_change_id": change_id, "policy_commit": kp, "policy_parent": parent,
+        "before_profile_version": candidate["before_profile"]["profile_version"],
+        "before_profile_digest": change["before_profile_digest"],
+        "after_profile_version": after.profile_version, "after_profile_digest": change["after_profile_digest"],
+        "global_baseline_digest": change["global_baseline_digest"], "normalized_projection_hash": projection,
+        "policy_delta_digest": serialize.digest(delta_record),
+    }
+    for name, value in claims.items():
+        _require(persisted.get(name) == value, "PK8", f"the Consumption's persisted {name} is not what Kp and its "
+                                                      "parent prove")
+    _require(isinstance(persisted.get("branch"), str) and persisted["branch"].startswith("refs/heads/"), "PK8",
+             "the Consumption's persisted branch is not a full branch ref")
+    others = [path for path, found in mentioned if isinstance(found, records.PolicyConsumption)
+              and (found.persisted_policy.get("policy_change_id") == change_id or found.policy_commit == kp)
+              and (path, serialize.canonical_bytes(found.to_record())) != (consumption_path, consumption_bytes)]
+    _require(not others, "PK8", f"another Policy Consumption ({', '.join(sorted(set(others)))}) names the change or "
+                                "its policy commit")
 
     progress.append("PK9")
-    consumption_path = paths.consumption_rel(consumption.consumption_id)
     summary_path = paths.history_run_rel(review_run_id)
-    metadata = [listed for listed, names in _guard("PK9", lambda: committed.added_in_history(repo, commit, [consumption_path]))
-                if consumption_path in names]
+    metadata = [listed for listed, names in _guard("PK9", shared.consumption_adds) if consumption_path in names]
     _require(len(metadata) == 1, "PK9", f"{len(metadata)} commits add the Consumption")
     km = metadata[0]
     km_parents = gitcmd.commit_parents(repo, km) or []
@@ -260,8 +350,12 @@ def _prove_policy(repo: Path, commit: str, change_path: str, adders: list[str] |
              and all(item.status == "A" and item.new_mode == "100644" for item in km_delta),
              "PK9", "the metadata commit is not exactly the added Run summary and Consumption")
     at_km = _guard("PK9", lambda: committed.CommittedReviewStore(repo, km))
-    _require(at_km.blob_id(consumption_path) == at_commit.blob_id(consumption_path), "PK9",
-             "the Consumption the metadata commit added is not the one the published commit holds")
+    added = at_km.blob_id(consumption_path)
+    held = _guard("PK9", lambda: shared.at_commit().blob_id(consumption_path))
+    _require(added is not None and held in (None, added)
+             and _guard("PK9", lambda: at_km.read_bytes(consumption_path)) == consumption_bytes, "PK9",
+             "the Consumption the metadata commit added is not the proven one, or the published commit holds another "
+             "at its path")
     summary = _guard("PK9", lambda: at_km.read_history(paths.HISTORY_RUNS, review_run_id))
     problems = _guard("PK9", lambda: history.run_summary_problems(at_km, summary))
     _require(not problems and summary.durable_disposition == history.DISPOSITION_CONSUMED
