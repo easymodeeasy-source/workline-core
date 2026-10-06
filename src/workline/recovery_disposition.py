@@ -494,13 +494,30 @@ def review_run_target_state(store: ProjectStore, review_run_id: str, review: Any
 
 
 def review_run_problem(review: Any, found: Disposition) -> str | None:
-    """Why a Review Run disposition does not hold against the Run as its records are now; ``None`` when it does."""
+    """Why a Review Run disposition does not hold against the Run as its records are now; ``None`` when it does.
+
+    Positive admission first: only a Work Review Run is a disposition target -
+    the one kind :func:`_review_run_eligibility` lets the operation dispose
+    (``recovery.disposition_outcome`` leaves every other kind ``unresolved``).
+    Proven from the Run's own canonical generation-1 ``review_kind``, never from
+    the record, its file name or a caller; a structurally canonical record for a
+    Planning (or any other) Run, which the operation never creates, holds
+    nothing (``invalid``) for every reader.
+    """
+    from .review import work_review
+
     if found.target_kind != KIND_REVIEW_RUN:
         return f"{found.path} does not target a Review Run"
     try:
         chain = review.gate_chain(found.target_id)
         if chain is None:
             return f"{found.path} targets Review Run {found.target_id}, which this Project does not hold"
+        kind = chain.generations[0].review_kind
+        if kind != work_review.REVIEW_KIND:
+            return (
+                f"{found.path} targets Review Run {found.target_id}, a {kind} Run; a Human recovery disposition is "
+                f"admissible only for a {work_review.REVIEW_KIND} Run, so it holds nothing"
+            )
         receipt = current_receipt(review, chain)
         if receipt is not None:
             return (
@@ -508,7 +525,7 @@ def review_run_problem(review: Any, found: Disposition) -> str | None:
                 "disposition never sets aside (its invalidation is Supersession's)"
             )
         digest = review_run_state_digest(review, found.target_id)
-    except (ValidationError, KeyError, TypeError, ValueError, AttributeError) as exc:
+    except (ValidationError, KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
         return f"the records of Review Run {found.target_id} cannot be witnessed: {exc}"
     if digest != found.target_state_digest:
         return f"the records of Review Run {found.target_id} are no longer the exact state {found.path} binds"
