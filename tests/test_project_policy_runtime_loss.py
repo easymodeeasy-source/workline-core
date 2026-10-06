@@ -37,6 +37,12 @@ from workline.review import paths, policy, publication, serialize
 
 
 class _RuntimeLoss(PolicyCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # The one request every crash and retry of a test uses: its evidence references are read once, so a Run
+        # summary a crashed Run wrote (G2 not_authorized, G4 human_wait) never turns the retry into another request.
+        self.first = self.request()
+
     def lose_runtime(self) -> None:
         rmtree(self.root / ".workline" / "runtime")
 
@@ -54,7 +60,7 @@ class _RuntimeLoss(PolicyCase):
                          ) -> project_policy.PolicyChangeResult:
         candidate = self.snapshot_candidate(run_id)
         receipts = self.policy_receipts()
-        result = self.applied(review=review)
+        result = self.applied(self.first, review)
         self.assertEqual((run_id, candidate["policy_change_id"]), (result.review_run_id, result.policy_change_id),
                          "the earlier Run is resumed with its canonical IDs, never replaced")
         self.assertEqual([run_id], self.policy_runs())
@@ -78,7 +84,7 @@ class _RuntimeLoss(PolicyCase):
 
     def crashed_at(self, step: str, review: project_policy.PolicyReview | None = None) -> str:
         with crash_at(project_policy, step), self.assertRaises(Crash):
-            self.change(review=review)
+            self.change(self.first, review)
         (run_id,) = self.policy_runs()
         return run_id
 
@@ -124,20 +130,20 @@ class LocalRecoveryTests(_RuntimeLoss):
         run_id = self.crashed_at("_launch_discovery")
         self.lose_runtime()
         with crash_at(project_policy, "bind_policy_recovery", after=True), self.assertRaises(Crash):
-            self.change()
+            self.change(self.first)
         (pending,) = self.policy_pending()
         self.assertIn(run_id, pending["reserved_ids"].values())
         self.assert_recovered(run_id)
 
     def test_after_km_the_consumed_run_is_settled_and_nothing_is_duplicated(self) -> None:
         with after_effect("git_commit", project_policy.STAGE_KM), self.assertRaises(Interrupted):
-            self.change()
+            self.change(self.first)
         self.assertEqual(1, len(self.policy_consumptions()))
         self.lose_runtime()
         before = self.canonical()
         # settled: the same request is a fresh freeze against the moved Profile (two reviewers now), changing nothing
         with self.assertRaises(StopError) as raised:
-            self.change(review=two_reviewers())
+            self.change(self.first, two_reviewers())
         self.assertEqual(policy.CODE_DIRECTION_INVALID, raised.exception.code)
         self.assertEqual(before, self.canonical())
         self.assertEqual([], self.policy_pending())
@@ -146,7 +152,7 @@ class LocalRecoveryTests(_RuntimeLoss):
         declined = self.crashed_at("_finish", policy_review(Discovery(status="declined")))
         self.assertEqual(2, self.review_store.gate_chain(declined).latest.generation)
         self.lose_runtime()
-        result = self.applied()
+        result = self.applied(self.first)
         self.assertNotEqual(declined, result.review_run_id)
         self.assertEqual(sorted([declined, result.review_run_id]), sorted(self.policy_runs()))
         self.assertEqual([], self.problems())
@@ -159,7 +165,7 @@ class HumanWaitSetAsideTests(_RuntimeLoss):
         waiting = self.crashed_at("_finish", policy_review(Discovery(claim("human", "MID"))))
         self.assertEqual(4, self.review_store.gate_chain(waiting).latest.generation)
         self.lose_runtime()
-        result = self.applied()
+        result = self.applied(self.first)
         self.assertNotEqual(waiting, result.review_run_id)
 
 
@@ -174,7 +180,7 @@ class StaleRecoveryTests(_RuntimeLoss):
         other = self.applied(self.request(after=3))  # another request moves the Profile
         before = self.canonical()
         with self.assertRaises(StopError) as raised:
-            self.change()  # the stale request, with its usual reviewers
+            self.change(self.first)  # the stale request, with its usual reviewers
         self.assertEqual(policy.CODE_BEFORE_STATE_CONFLICT, raised.exception.code)
         self.assertEqual(before, self.canonical())
         self.assertEqual([], self.policy_pending(), "no pending mutation holds the Profile scope")
@@ -197,7 +203,7 @@ class StrandedKpTests(_RuntimeLoss):
 
     def stranded(self) -> str:
         with after_effect("git_commit", project_policy.STAGE_KP), self.assertRaises(Interrupted):
-            self.change()
+            self.change(self.first)
         (kp,) = self.commits_with(KP_SUBJECT)
         self.lose_runtime()
         return kp
@@ -215,7 +221,7 @@ class StrandedKpTests(_RuntimeLoss):
         change_path = paths.policy_change_rel(change_id)
         self.git("revert", "--no-edit", kp)
         self.assertIsNone(self.profile_bytes())
-        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.request())
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first)
         self.assertEqual({change_path: [kp]}, {path: found for path, found in
                                                publication.policy_change_adders(self.root, self.commit_of()).items()},
                          "the change record is never added twice")
@@ -233,14 +239,14 @@ class MalformedTests(_RuntimeLoss):
     def assert_incomplete(self) -> None:
         before = self.canonical()
         with self.assertRaises(ReconcileRequired) as raised:
-            self.change()
+            self.change(self.first)
         self.assertEqual("review_recovery_incomplete", raised.exception.reason)
         self.assertEqual(before, self.canonical())
         self.assertEqual([], self.policy_pending())
 
     def test_an_uncommitted_generation_is_incomplete(self) -> None:
         with before_effect("git_commit", project_policy.STAGE_GENERATION_COMMIT), self.assertRaises(Interrupted):
-            self.change()
+            self.change(self.first)
         (run_id,) = self.policy_runs()
         self.assertIn(paths.gate_rel(run_id, 1), "\n".join(self.dirty()))
         self.lose_runtime()
@@ -285,7 +291,7 @@ class MalformedTests(_RuntimeLoss):
         self.git("commit", "-q", "-m", "docs: a hand-made twin Run")
         before = self.canonical()
         with self.assertRaises(ReconcileRequired) as raised:
-            self.change()
+            self.change(self.first)
         self.assertEqual("review_recovery_ambiguous", raised.exception.reason)
         self.assertEqual(before, self.canonical(), "no Run is chosen by age, ID or position, and nothing is written")
         self.assertEqual([], self.policy_pending())
@@ -305,10 +311,10 @@ class RemoteRuntimeLossTests(_RuntimeLoss):
 
     def test_after_kp_nothing_is_published_by_the_refused_retry(self) -> None:
         with after_effect("git_commit", project_policy.STAGE_KP), self.assertRaises(Interrupted):
-            self.change()
+            self.change(self.first)
         pushes = self.pushes()
         self.lose_runtime()
-        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.request())
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first)
         self.assertEqual(pushes, self.pushes(), "no publication beside the unrecovered policy commit")
 
 
