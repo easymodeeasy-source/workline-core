@@ -991,7 +991,13 @@ class RecoveryContractTests(RecoveryTestCase):
         )
         commands = set(re.findall(r'add_parser\(\s*"([^"]+)"', inspect.getsource(cli)))
         self.assertIn("project-start", commands)
-        self.assertEqual({c for c in commands if re.search(r"clean|prune|purge|repair|reconcile|abandon|retry|recover", c)}, set())
+        # Exactly one exemption: the frozen Human-confirmed recovery disposition maintenance CLI of
+        # WORKLINE_COMPLETION_SPRINT.md §35.4 (RB10 N4), which is no cleanup or retry of Project開始.
+        self.assertEqual(
+            {c for c in commands - {"dispose-recovery"}
+             if re.search(r"clean|prune|purge|repair|reconcile|abandon|retry|recover", c)},
+            set(),
+        )
         self.assertEqual(
             list(inspect.signature(ps.project_start).parameters),
             ["project_root", "workline_root", "expected_push_url", "push_remote"],

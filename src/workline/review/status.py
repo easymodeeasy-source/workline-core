@@ -69,6 +69,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..errors import StopError, ValidationError
+from ..recovery_disposition import STATE_EFFECTIVE, namespace_present, review_run_target_state
 from ..store import ProjectStore
 from . import activation as work_activation
 from . import p4, planning, work_review
@@ -91,6 +92,9 @@ RUN_SET_ASIDE = "set_aside"
 RUN_CONSUMED = "consumed"
 RUN_INVALID = "invalid"
 RUN_STATES = (RUN_OPEN, RUN_SEALED, RUN_INVALIDATED, RUN_SET_ASIDE, RUN_CONSUMED, RUN_INVALID)
+#: What set a ``set_aside`` Run aside (additive detail, RB10 N4 §35.17): one meaning, two sources.
+SET_ASIDE_SOURCE_SUCCESSOR = "successor_request"
+SET_ASIDE_SOURCE_HUMAN = "human_disposition"
 
 #: A count or summary the Run's Review contract does not give: a v1 Run has no obligation count.
 NOT_AVAILABLE_BY_CONTRACT = "not_available_by_contract"
@@ -182,6 +186,8 @@ def _run_entry(review_run_id: str) -> dict[str, Any]:
         "consumption": {"status": "none", "consumption_id": None, "reason": None},
         "blocking_obligations": {"status": NOT_AVAILABLE_BY_CONTRACT, "count": None},
         "reason": None,
+        # what set the Run aside, when it is set_aside: a successor's request, or an explicit Human disposition
+        "set_aside_source": None,
     }
 
 
@@ -248,6 +254,7 @@ def _runs(review: ReviewStore) -> tuple[list[dict[str, Any]], dict[str, str] | N
             continue
         whole[review_run_id] = chain
     _project_set_aside(review, runs, firsts, whole)
+    _project_human_dispositions(review, runs)
     _project_obligations(review, runs, firsts, obligations)
     return runs, None
 
@@ -464,6 +471,27 @@ def _project_set_aside(
             entry = entries[other]
             if entry["state"] == RUN_OPEN or (entry["state"] == RUN_SEALED and entry["consumption"]["status"] == "none"):
                 entry["state"] = RUN_SET_ASIDE
+                entry["set_aside_source"] = SET_ASIDE_SOURCE_SUCCESSOR
+
+
+def _project_human_dispositions(review: ReviewStore, runs: list[dict[str, Any]]) -> None:
+    """RB10 N4 §35.17: a Run a valid committed Human disposition sets aside is ``set_aside``, by ``human_disposition``.
+
+    The existing state and nothing new: the same precedence as a successor's
+    set-aside (an ``invalid``, ``invalidated`` or ``consumed`` Run stays so),
+    read by recovery authority's own reader, which holds the disposition to
+    the Run's exact recovery witness (:func:`workline.recovery_disposition.review_run_target_state`).
+    Receipt and Consumption stay as they are reported.
+    """
+    if not namespace_present(review.store):
+        return
+    for entry in runs:
+        if not (entry["state"] in (RUN_OPEN, RUN_SET_ASIDE)
+                or (entry["state"] == RUN_SEALED and entry["consumption"]["status"] == "none")):
+            continue
+        if review_run_target_state(review.store, entry["review_run_id"], review).state == STATE_EFFECTIVE:
+            entry["state"] = RUN_SET_ASIDE
+            entry["set_aside_source"] = SET_ASIDE_SOURCE_HUMAN
 
 
 # --------------------------------------------------------------------------- blocking obligations (§9.7, §29.18)

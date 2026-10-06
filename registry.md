@@ -73,6 +73,16 @@ activationは、lockの後、他のどのownerのpending mutationも無い時だ
 
 activationが決めるもの、一度だけであること、移行をしないこと、validationでの意味は `skills/review`（Work-terminal activation）が所有する。activationはreview-v1を選ばない。review-v1はSTARTの呼び出しごとの明示opt-inのままで、legacy STARTは変わらない（`skills/start`）。
 
+Human recovery disposition（自動では再開できず、置き換えRunの `set_aside_runs` でも外せないpending mutation / Review Runを、人が明示に自動回復の選択から外すこと）は、Workline recovery authorityの専用Project maintenance operation `recovery-disposition` がownerであり、自分のmutationを持つ。START・Review・Roadmap・CREATE・Project開始・lifecycle（`state.py`）のどれでもない。Skillではないのでregistryからroutingせず、新しいSkillもrouting IDも作らない。CLIは `dispose-recovery [project_root] --target <mut_...|rr_...> --reason <text> --confirm`、APIは `dispose_recovery(project_root, target_id, reason, confirmed=True)`。
+
+dispositionはHuman-confirmed maintenanceであり（`rules/human-confirmation`）、人間確認の明示入力（`--confirm`、`confirmed=True`）が無ければ、Project state・lock・mutation stateを読む前に `recovery_disposition_unconfirmed` で停止する。callerの身元、AI promptの記述、壊れたrecordがあること、reasonが与えられたことを確認の代わりにしない。対象は既存のstable ID 1つ（pending mutationの `mut_...` かReview Runの `rr_...`）だけで、reasonは空でない1行のtextであり、canonicalなProject dataとしてcommitされる。人は公開してよい理由を書き、secretや非公開の生の資料を書かない。
+
+正本は対象ごとに1件の `.workline/recovery/dispositions/<target_id>.yaml` だけで（clone-localな `.workline/runtime` ではない）、`workline-recovery-disposition` version 1は `target_kind` / `target_id` / `target_state_contract`（`pending-mutation-v1` / `review-run-recovery-v1`）/ `target_state_digest`（domain-separatedなSHA-256。pending mutationはそのruntime recordのexact bytes、Review RunはそのRunのcanonical Review recordすべてのpathとcontent digest）/ `decision: set_aside` / `decision_source: human` / `reason` だけを持ち、時刻を持たない。意味はRB3-C1のset-asideと同じ1つだけである: 古いstateはevidenceとして残り、自動の回復選択がそれを再び選ばない。削除・完了・修理・再解釈ではなく、target mutation recordもReview recordも書き換えず、Work / Phase / Roadmapのlifecycleに何も起こさない。
+
+pending mutationは、read-onlyのpending classifier（`run-workline.py status`）が `pending_reconcile_required` と示す時だけdisposeできる（`pending_resumable`・`unknown_or_invalid`・completed・abandoned・無いものは拒否）。Review Runは、recordが揃って読め、exactなwitnessが再現でき、consumedでもset aside済みでもなく、generalized recovery classifierが「どのpending STARTも持たない」というowner側の理由だけで再開不能とする時だけdisposeできる（owner不明・形の壊れたRunは処分可能にしない）。current（未supersede）なsealed Receiptを持つRunは拒否し、その許可の無効化は従来どおりSupersessionが所有する（dispositionはgeneration 4もSupersessionも書かない）。dispositionは、対象のpending mutation 1件のほかにpending mutationが無い時だけ始まり（`recovery_disposition_pending_operation`）、対象のstateをrecordを書く直前にもう一度witnessする。pendingのdispositionは全体のrecovery barrierであり、同じdispositionの再実行で完了するまで、他のどのownerのmutationも開かず再開しない（`recovery_disposition_pending`）。同じtarget・digest・reasonの再実行は `already_disposed` で2回目のcommitをせず、別のreasonやdigestは `reconcile required` で、上書き・追記・時刻による選択をしない。
+
+valid（canonical、HEADがcommitし、対象のexact stateを束縛している）dispositionのpending mutationはactiveでない: 通常のpending discoveryはそれを選ばず、明示のloadは `disposed_by_human` で拒否し、runtime recordは診断用のevidenceとして残る（statusは `disposed_by_human`。runtime recordを失った後やcloneでもdispositionは履歴として見え、古いmutation recordを作り直さない）。Review Runはrecovery discoveryで安定code `disposed_by_human` によってset asideされ、新しいRunのrequestはこのcodeだけを名指して自由記述のreasonを写さない。束縛したstateと合わないdisposition（runtime recordのbytesやRunのrecordが変わった、読めない）はvalidationを失敗させ、自動回復をfail closedにする（再開も隠しもしない）。commitはdisposition pathだけを持ち（`chore(workline): set aside recovery <target_id>`。reasonはmessageに入れない）、remoteがあれば通常の承認済みdestinationへそのcommitだけをpushする（force・remote変更・専用の公開経路は無い）。lifecycleの導出はこのnamespaceを読まない。
+
 ### Project context
 
 成立済みWorkline Projectへ書き込むstate-changing operationは、invocation Project contextがtarget Projectと一致する場合だけ実行する。一致しなければ `foreign_project_mutation` としてSTOPする。
@@ -347,6 +357,8 @@ Domain Skillは意味を決め、Mutation Controllerは決定済みpayloadをval
 正本とrecovery recordのstructured text（YAML subsetのfile、`events/events.jsonl`）では、文字列fieldの中のUnicode line separatorを物理的な行・recordの区切りとして扱わない（`events/events.jsonl` の1件はLFで終わる）。U+0085 / U+2028 / U+2029は合法なtextであり、入力として拒否しない。writerはこれらを文字列の中でJSONのUnicode escapeとして書き、1つの値・1件のrecordを1物理行に収める。readerは、それ以前に文字列の中へraw文字のまま書かれた既存のrecordとfileも読む。そのようなfileは通常のoperationで次に保存されるときにescape表現になり、修復のためだけに書き換えない。
 
 canonical Review recordのimmutable createはownerを問わない。例外はWork-terminal activation record（`.workline/review/activation/work-terminal-v1.yaml`）だけで、それを作れるのは `work-terminal-activation` ownerだけである。Mutation Controllerは、effectをrecordへ書く前のeffect validationで、activation directoryへのcreate（directory名のASCII大文字小文字違いを含む）を、そのowner以外なら `work_terminal_activation_owner` で拒否し、そのownerでもfrozenのfile名以外なら同じcodeで拒否する（push destination pinのowner検査と同じ形）。それ以外のcanonical Review recordはowner非依存のままであり、generic update（`write_file`）がReview pathへ届かないことも変わらない。
+
+Human recovery disposition（`.workline/recovery/dispositions/<mut_...|rr_...>.yaml`）は、canonical Review recordと同じimmutable createの物理primitiveだけで書く2つ目のnamespaceである。作れるのは `recovery-disposition` ownerだけで、それもexactなdisposition pathだけであり（directory名のASCII大文字小文字違いや末尾のdot / spaceを含め、他のownerは `recovery_disposition_owner`、形の違うpathは `recovery_disposition_path`）、そのownerはReview recordを作らない。generic update（`write_file`）はこのnamespaceのどこへも届かない（`recovery_disposition_immutable`）。そのownerのmutationは通常のopenでは開かず、専用のopenが対象のpending mutation 1件だけをpending-overlapの拒否から外し、他のpending mutationは1件も外さず、対象をwritableとして読み込まない。Review recordのimmutable pathの規則は変わらない。
 
 event appendは、lifecycleではないmetadata（review-v1 `work_completed` のoperation-contract metadata `operation_contract` / `review_receipt_id` / `review_run_id` / `review_generation`）をrecordに載せたまま、effect record → event log → canonical Event reader → Event model → effect classificationの全経路で運ぶ。lifecycleの導出が読むのは `id` / `type` / `entity` / `at` だけで、metadataはnon-normativeである。metadataを持たないeventは従来と同じbytesで書かれ、読まれ、分類され、digestされる。commit規則はこれで何も変わらない。
 
@@ -676,6 +688,7 @@ Phaseのeffective current-plan Work集合は、当該Phaseに所属するWorkの
 - Workline共通ルール / Project固有ルール変更
 - Projectの実行能力・自動実行・外部接続・外部へのデータ開示・書込可能範囲を新たに拡張または変更するtooling / configuration変更
 - Work-terminal activation（review-v1 Work terminalizationのProject単位の有効化。Project固有ルール変更。専用のmaintenance operationが明示の確認入力でだけ実行する。`rules/git` のOperation Owner）
+- Human recovery disposition（自動では再開できないpending mutation / Review Runを、対象のstable IDと理由を明示して自動回復の選択から外すこと。削除や完了ではなく古いstateはevidenceとして残る。AIが自分から行わず、専用のmaintenance operationが明示の確認入力でだけ実行する。`rules/git` のOperation Owner）
 
 未開始Phase / Workの、上位目的を維持した通常の未来計画調整は一律人間確認にしない。
 

@@ -318,11 +318,28 @@ def _review_problems(store: ProjectStore) -> list[Problem]:
     return [Problem(problem.code, problem.message) for problem in found]
 
 
+def _recovery_disposition_problems(store: ProjectStore) -> list[Problem]:
+    """Human recovery dispositions (RB10 N4 §35.18), checked outside ``ProjectView`` and without ``state.py``.
+
+    A Project with no ``.workline/recovery/`` has none. Broken or conflicting
+    disposition authority fails validation here, as it makes automatic recovery
+    fail closed; lifecycle derivation never reads the namespace.
+    """
+    from .recovery_disposition import namespace_problems
+
+    try:
+        found = namespace_problems(store)
+    except Exception as exc:  # anything unreadable in the namespace
+        return [Problem("recovery_disposition_invalid", str(exc))]
+    return [Problem(code, message) for code, message in found]
+
+
 def validate_project(store: ProjectStore) -> list[Problem]:
-    """Full validation: project.yaml + registry routing + supported topology + structure + Review."""
+    """Full validation: project.yaml + registry routing + supported topology + structure + Review + recovery."""
     problems = validate_project_yaml(store)
     problems.extend(_self_hosting_problems(store))
     problems.extend(_review_problems(store))
+    problems.extend(_recovery_disposition_problems(store))
     try:
         view = ProjectView.load(store)
     except Exception as exc:  # ValidationError from store

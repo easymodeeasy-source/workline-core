@@ -60,6 +60,16 @@ PIN_OWNERS = ("project-start", "push-destination-pin")
 # canonical Review record stays creatable by whichever owner records it.
 ACTIVATION_OWNERS = ("work-terminal-activation",)
 
+# Workline recovery authority's canonical namespace (RB10 N4): one immutable
+# Human recovery disposition per target stable ID, at
+# ``.workline/recovery/dispositions/<target_id>.yaml``. Committed Project state,
+# never runtime, and never read by lifecycle derivation. Only this operation
+# owner may create a record there, and nothing updates one; the Mutation
+# Controller enforces both, as it does for the activation record.
+RECOVERY_DIR = ".workline/recovery"
+RECOVERY_DISPOSITIONS_DIR = f"{RECOVERY_DIR}/dispositions"
+RECOVERY_DISPOSITION_OWNERS = ("recovery-disposition",)
+
 # Initial Project開始 runs before a Project is established and is outside the
 # Project execution lock. Its mutation is opened, resumed and written only
 # inside the pre-project authorization a running Project開始 grants for its own

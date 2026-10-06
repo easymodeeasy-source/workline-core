@@ -10,6 +10,7 @@ from .errors import StopError
 from .implementation import require_configured_implementation
 from .project_start import project_start
 from .push_pin import pin_push_destination
+from .recovery_disposition import dispose_recovery
 from .registry import validate_registry
 from .status import build_status, render_human, render_json
 from .store import ProjectStore
@@ -103,6 +104,27 @@ def main(argv: list[str] | None = None) -> int:
         help="state that a human has confirmed this Project-specific Workline rule change (required)",
     )
 
+    disposition = subparsers.add_parser(
+        "dispose-recovery",
+        help="set one pending mutation or Review Run aside from automatic recovery by explicit Human disposition "
+        "(human-confirmed maintenance; the old state stays as evidence and nothing is deleted or completed)",
+    )
+    disposition.add_argument("project_root", nargs="?", default=".")
+    disposition.add_argument(
+        "--target", required=True, help="the exact stable ID of the pending mutation (mut_...) or Review Run (rr_...)"
+    )
+    disposition.add_argument(
+        "--reason",
+        required=True,
+        help="why it is set aside: one line, committed as canonical Project data - keep it public-safe, with no "
+        "secret or private raw material",
+    )
+    disposition.add_argument(
+        "--confirm",
+        action="store_true",
+        help="state that a human has decided this target must no longer be considered for automatic resume (required)",
+    )
+
     check = subparsers.add_parser("validate-project", help="validate a Project's canonical structure")
     check.add_argument("project_root", nargs="?", default=".")
 
@@ -180,6 +202,15 @@ def main(argv: list[str] | None = None) -> int:
                 f"activate-work-terminal-review: {result.status} ({result.project_root}) "
                 f"legacy_event_count={result.legacy_event_count} activation_base_head={result.activation_base_head} "
                 f"head={result.head} pushed={result.pushed}"
+            )
+            return 0
+
+        if args.command == "dispose-recovery":
+            result = dispose_recovery(Path(args.project_root), args.target, args.reason, confirmed=args.confirm)
+            print(
+                f"dispose-recovery: {result.status} ({result.project_root}) {result.target_kind} {result.target_id} "
+                f"target_state_digest={result.target_state_digest} record={result.path} head={result.head} "
+                f"pushed={result.pushed}"
             )
             return 0
 

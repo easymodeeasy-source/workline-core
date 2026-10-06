@@ -249,6 +249,16 @@ automatic reset / rebase / amend / force push / clean recoveryは行わない。
 
 Reviewが関わる回復も従来どおりreconcile requiredで止まり、人が判断する。例外は、このoperation自身が作ったexact K1を新しい許可のもとで採用する、下記のWork post-commit recovery（F4）のClass Aだけで、それもhistoryを書き換えず、厳格な適格性を示せない時はreconcile requiredで止まる。
 
+## Human recovery disposition（RB10 N4）
+
+置き換えRunを作らず、自動では再開できないReview Runを、人が明示に自動回復の選択から外す処分は、Reviewではなく `rules/git` のWorkline recovery authority（専用のmaintenance operation `recovery-disposition`、CLI `dispose-recovery`、明示の `--confirm` と対象のstable ID・理由が必須）が所有し、その正本はReview historyではなく `.workline/recovery/dispositions/<rr_...>.yaml` である。新しいSkillもrouting IDも作らない。
+
+意味はRB3-C1のset-asideと同じ1つだけである: 古いRunとそのrecordはevidenceとして残り、自動の回復選択がそれを再び選ばない。dispositionはRunの削除・完了・修理・再解釈ではなく、generation 4もSupersessionも書かず、Review recordを書き換えない。canonical recovery discovery（planningもWorkも）は、他のRunのrequestの `set_aside_runs` に加えて、validなdisposition（canonical、HEADがcommitし、そのRunのexactなrecovery witness `review-run-recovery-v1` に一致する）を同じset-aside関係のもう1つの源として読み、そのRunを安定code `disposed_by_human` でset asideする。新しいRunのrequestはこのcodeだけで名指し、人の自由記述の理由を写さない。witnessと合わない・読めないdisposition、pendingのSTART mutationが持つRunのdispositionは、discoveryを `review_recovery_incomplete` で止める（fail closed）。
+
+処分できるのは、recordが揃って読め、consumedでも既にset asideでもなく、current（未supersede）なsealed Receiptを持たず、Work policyの分類が「どのpending STARTも持たない」ことだけを理由に回復不能とするRun（上記の回復の選択でincompleteになる孤立Run）である。この規則（pendingのSTART mutationが持つRunだけが回復可能）は変わらず、owner不明・形の壊れたRunを処分可能にしない。current Receiptの無効化は従来どおりSupersessionが所有し、dispositionはそれを迂回しない（`recovery_disposition_receipt_current`）。既にsupersede・consumed・set asideのRunには重複した意味を書かない（`recovery_disposition_unnecessary`）。planning Runの分類はそれを再開するplanning requestに対して行うものなので、dispositionの対象にならない。
+
+statusは、validなdispositionのRunを既存の `set_aside` とし、追加の `set_aside_source: human_disposition` で区別する（他のRunのrequestによるものは `successor_request`）。Receipt / Consumptionの状態はそのまま別に見える。
+
 ## Planning kinds and identities（P2）
 
 ```text

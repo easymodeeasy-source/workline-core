@@ -31,6 +31,12 @@ adapter exactly as it was, and the Work kind (``work-result-v1``) has its own
 (``skills/start``). A Work Run is resumed only through the START mutation that
 reserved it, so the Work policy needs one more input than planning's: the Runs
 the pending START mutations of the Work hold.
+
+A valid committed explicit Human recovery disposition of a matching Run (RB10
+N4, :mod:`workline.recovery_disposition`) is one more source of the same
+set-aside relation the requests name: the Run is set aside with the stable
+reason ``disposed_by_human`` and never selected again; a disposition that does
+not hold its Run's exact witness stops the call (:func:`_human_dispositions`).
 """
 
 from __future__ import annotations
@@ -169,6 +175,7 @@ def _discover(
     review = ReviewStore(store)
     head = gitcmd.head_commit(store.root)
     matching = _matching_runs(store, review, head, review_kind, operation_identity)
+    disposed = _human_dispositions(store, review, matching, held)
     runs: dict[str, MatchingRun] = {}
     for review_run_id in sorted(matching - held):
         runs[review_run_id] = _clean_run(store, review, head, review_run_id, adapter.shape)
@@ -177,10 +184,14 @@ def _discover(
         named_aside.update(adapter.named(review, found))
     for review_run_id in sorted(matching & held):
         named_aside.update(_held_named(review, review_run_id, adapter))
+    # RB10 N4 §35.15: an explicit Human disposition is one more source of the SAME set-aside relation.
+    named_aside.update(disposed)
     recoverable: list[MatchingRun] = []
     set_aside: list[dict[str, str]] = []
     for review_run_id, found in runs.items():
         reason = adapter.classify(store, review, head, found, named_aside, currency)
+        if reason == planning.SET_ASIDE_SET_ASIDE and review_run_id in disposed:
+            reason = _DISPOSED_BY_HUMAN  # propagated by its stable code, never by the Human's free-form reason
         if reason is None:
             recoverable.append(found)
         else:
@@ -193,6 +204,119 @@ def _discover(
             reason="review_recovery_ambiguous",
         )
     return Discovery(recoverable[0] if recoverable else None, tuple(sorted(set_aside, key=lambda item: item["review_run_id"])))
+
+
+#: The stable set-aside reason of a Run an explicit Human recovery disposition sets aside (RB10 N4 §35.15).
+_DISPOSED_BY_HUMAN = "disposed_by_human"
+
+
+def _human_dispositions(
+    store: ProjectStore, review: ReviewStore, matching: set[str], held: frozenset[str]
+) -> frozenset[str]:
+    """The matching Runs a valid committed Human recovery disposition sets aside (RB10 N4 §35.15, §35.18).
+
+    Read from recovery authority's own records (:mod:`workline.recovery_disposition`),
+    each held to its Run's exact recovery witness. A disposition written and
+    not committed yet sets nothing aside. One that does not hold - a record
+    that does not read, a Run whose records changed, a Run holding a current
+    Receipt - and one naming a Run a pending START mutation holds, stop the
+    call: broken disposition authority fails closed.
+    """
+    from .. import recovery_disposition as disposition
+
+    if not matching or not disposition.namespace_present(store):
+        return frozenset()
+    found: set[str] = set()
+    for review_run_id in sorted(matching):
+        state = disposition.review_run_target_state(store, review_run_id, review)
+        if state.state == disposition.STATE_INVALID:
+            raise _incomplete(f"the recovery disposition of Review Run {review_run_id} does not hold ({state.problem})")
+        if state.state != disposition.STATE_EFFECTIVE:
+            continue
+        if review_run_id in held:
+            raise _incomplete(
+                f"Review Run {review_run_id} is set aside by an explicit Human recovery disposition, and a pending START "
+                "mutation of this Work holds it"
+            )
+        found.add(review_run_id)
+    return frozenset(found)
+
+
+#: What :func:`disposition_outcome` finds for one Run (RB10 N4 §35.10).
+OUTCOME_RECOVERABLE = "recoverable"
+OUTCOME_SET_ASIDE = "set_aside"
+OUTCOME_UNOWNED = "unowned"
+OUTCOME_UNRESOLVED = "unresolved"
+
+
+def disposition_outcome(
+    store: ProjectStore, review_run_id: str, *, currency: Callable[[MatchingRun], Any]
+) -> tuple[str, str]:
+    """How the generalized recovery classifier treats one Work Review Run, for a Human disposition; it writes nothing.
+
+    The read-only, per-Run form of :func:`discover_work` for the case the
+    disposition operation allows (no pending mutation at all, so nothing is
+    owned or held): every Run matching the target's Work is proven whole and
+    the Runs their requests and valid Human dispositions set aside are
+    harvested exactly as discovery does, and the target is classified by the
+    unchanged Work policy (:func:`_classify_work`, :func:`_require_owner`
+    untouched):
+
+    ```text
+    a set-aside reason                       set_aside     (already resolved)
+    recoverable                              recoverable
+    review_recovery_incomplete, and the very
+    same classification with the Run owned
+    makes it recoverable                     unowned       (the one owner-supported non-resumable case)
+    anything else                            unresolved    (a malformed or ambiguous namespace)
+    ```
+
+    A planning Run is ``unresolved``: its recovery classification is made
+    against the planning request that would resume it, which no Human
+    disposition has.
+    """
+    review = ReviewStore(store)
+    try:
+        chain = review.gate_chain(review_run_id)
+    except ValidationError as exc:
+        return OUTCOME_UNRESOLVED, str(exc)
+    if chain is None:
+        return OUTCOME_UNRESOLVED, f"Review Run {review_run_id} holds no gate generation"
+    first = chain.generations[0]
+    if first.review_kind != work_review.REVIEW_KIND:
+        return OUTCOME_UNRESOLVED, (
+            f"Review Run {review_run_id} is a {first.review_kind} Run, classified only against the planning request "
+            "that would resume it"
+        )
+    try:
+        checkout.require_namespace_readable(store)
+        head = gitcmd.head_commit(store.root)
+        matching = _matching_runs(store, review, head, first.review_kind, first.operation_identity)
+        if review_run_id not in matching:
+            return OUTCOME_UNRESOLVED, f"Review Run {review_run_id} is not a matching Run of its own Work"
+        disposed = _human_dispositions(store, review, matching, frozenset())
+        runs = {found: _clean_run(store, review, head, found, _work_shape_problem) for found in sorted(matching)}
+        named_aside: set[str] = set(disposed)
+        for found in runs.values():
+            named_aside.update(_work_named(review, found))
+    except StopError as exc:
+        return OUTCOME_UNRESOLVED, str(exc)
+    target = runs[review_run_id]
+    try:
+        reason = _classify_work(store, review, head, target, named_aside, currency, frozenset())
+    except ReconcileRequired as exc:
+        if exc.reason != "review_recovery_incomplete":
+            return OUTCOME_UNRESOLVED, str(exc)
+        try:
+            owned = _classify_work(store, review, head, target, named_aside, currency, frozenset({review_run_id}))
+        except StopError:
+            return OUTCOME_UNRESOLVED, str(exc)
+        return (OUTCOME_UNOWNED if owned is None else OUTCOME_UNRESOLVED), str(exc)
+    except StopError as exc:
+        return OUTCOME_UNRESOLVED, str(exc)
+    if reason is None:
+        return OUTCOME_RECOVERABLE, f"Review Run {review_run_id} is the one recoverable Run of its Work"
+    return OUTCOME_SET_ASIDE, reason
 
 
 def _held_named(review: ReviewStore, review_run_id: str, adapter: RecoveryAdapter) -> list[str]:

@@ -13,7 +13,9 @@ recovery records, its Review records and its local Git repository say:
   (:class:`~workline.state.ProjectView`, :mod:`workline.selection`) - or the
   ambiguity or blocker that keeps them from naming one;
 * what is unfinished: every recovery record, each judged on its own, with how
-  its owner's recovery would treat it;
+  its owner's recovery would treat it - ``disposed_by_human`` where an explicit
+  Human recovery disposition sets it aside, which stays visible as historical
+  evidence after its runtime record is gone (RB10 N4);
 * what the Review records, ``validate-project`` and local Git say.
 
 It is a diagnostic. It never writes - no canonical file, no runtime record, no
@@ -58,6 +60,17 @@ from .mutation import (
     replay_probe,
     same_request,
 )
+from .recovery_disposition import (
+    KIND_MUTATION,
+    STATE_EFFECTIVE,
+    STATE_INVALID,
+    STATE_NONE,
+    TargetState,
+    disposition_ids,
+    mutation_target_state,
+    namespace_present,
+    target_kind,
+)
 from .registry import authority_inventory
 from .selection import MULTIPLE_TARGETS, work_continuation
 from .state import ACTIVE, AMBIGUOUS_CANDIDATES, HELD, IN_PROGRESS, UNSTARTED, ProjectView
@@ -78,7 +91,7 @@ REMOTE_NOT_CHECKED = "not_checked"
 PENDING_NONE = "none"
 PENDING_RESUMABLE = "pending_resumable"
 PENDING_RECONCILE = "pending_reconcile_required"
-DISPOSED_BY_HUMAN = "disposed_by_human"  # RB10 N4 fills it; nothing produces it yet
+DISPOSED_BY_HUMAN = "disposed_by_human"  # RB10 N4: a valid committed Human recovery disposition sets it aside
 UNKNOWN_OR_INVALID = "unknown_or_invalid"
 RESUME_CLASSIFICATIONS = (PENDING_RESUMABLE, PENDING_RECONCILE, DISPOSED_BY_HUMAN, UNKNOWN_OR_INVALID)
 
@@ -105,7 +118,7 @@ HUMAN_SECTIONS = (
 _SAFE_INVOCATION_KEYS = (
     "operation", "work_id", "mode", "roadmap_id", "phase_id", "entity", "remote", "review_run_id", "generation",
     "planning_mutation_id", "review_kind", "review_contract", "publication_contract", "operation_contract",
-    "recovery_of_review_run_id",
+    "recovery_of_review_run_id", "target_id",
 )
 _GENERATION_OPERATION = "review-generation"
 # The canonical paths whose writes change what lifecycle derivation reads.
@@ -726,6 +739,104 @@ def _classify(
     return probe(store, record, pending)
 
 
+# --------------------------------------------------------------------------- Human recovery dispositions (RB10 N4)
+
+
+def _pending_dispositions(store: ProjectStore, pending: list[dict[str, Any]]) -> dict[str, TargetState]:
+    """What the disposition of each pending record amounts to, for the records that have one (§35.16)."""
+    if not pending or not namespace_present(store):
+        return {}
+    found: dict[str, TargetState] = {}
+    for record in pending:
+        state = mutation_target_state(store, str(record["mutation_id"]))
+        if state.state != STATE_NONE:
+            found[str(record["mutation_id"])] = state
+    return found
+
+
+def _classify_pending(
+    store: ProjectStore,
+    record: dict[str, Any],
+    active: list[dict[str, Any]],
+    unreadable: list[RecordInspection],
+    dispositions: dict[str, TargetState],
+) -> tuple[str, dict[str, str]]:
+    """RB1's classification, with what a Human disposition changes in it and nothing else.
+
+    A record a valid committed disposition sets aside is ``disposed_by_human``
+    (never completed, abandoned or absent), and is not among the pending
+    records another owner's probe meets - as :meth:`MutationController.list_pending`
+    passes it over. A disposition that does not hold stops every owner's
+    pending read, so every other record is ``pending_reconcile_required``.
+    """
+    own = dispositions.get(str(record["mutation_id"]))
+    if own is not None and own.state == STATE_EFFECTIVE:
+        return DISPOSED_BY_HUMAN, _reason(
+            DISPOSED_BY_HUMAN,
+            "an explicit Human recovery disposition sets this record aside: no owner resumes it automatically, and it "
+            "stays as diagnostic evidence",
+        )
+    broken = sorted(mutation_id for mutation_id, state in dispositions.items() if state.state == STATE_INVALID)
+    if broken and not unreadable:
+        return PENDING_RECONCILE, _reason(
+            "recovery_disposition_invalid",
+            f"every operation owner reads the pending records through their recovery dispositions, and the "
+            f"disposition of {', '.join(broken)} does not hold: reconcile required",
+        )
+    return _classify(store, record, active, unreadable)
+
+
+def _disposition_detail(target_id: str, state: TargetState | None) -> dict[str, Any] | None:
+    """The additive disposition detail (§35.16): identities, the bound digest, the public-safe reason, the runtime record."""
+    if state is None:
+        return None
+    found = state.disposition
+    return {
+        "state": state.state,
+        "target_id": target_id,
+        "path": None if found is None else found.path,
+        "target_state_digest": None if found is None else found.target_state_digest,
+        "reason": None if found is None else found.reason,
+        "runtime_record": state.runtime_record,
+        "problem": None if state.problem is None else _reason("recovery_disposition_invalid", state.problem),
+    }
+
+
+def _mutation_dispositions(store: ProjectStore) -> list[dict[str, Any]]:
+    """Every disposition of a mutation, the runtime record present or not: historical recovery evidence (§35.19)."""
+    if not namespace_present(store):
+        return []
+    return [
+        _disposition_detail(target_id, mutation_target_state(store, target_id))
+        for target_id in disposition_ids(store)
+        if target_kind(target_id) == KIND_MUTATION
+    ]
+
+
+def pending_classification(
+    store: ProjectStore, mutation_id: str, *, excluding: tuple[str, ...] = ()
+) -> tuple[str, dict[str, str]]:
+    """The read-only classification status reports for one pending record; ``excluding`` leaves records out of the set.
+
+    The one reader RB10 N4's eligibility asks (§35.5): a pending mutation is
+    disposable only while this proves ``pending_reconcile_required``. A
+    disposition resuming its own unfinished attempt leaves its own record out,
+    as nothing it would compete with.
+    """
+    inspections = inspect_records(store)
+    unreadable = [item for item in inspections if item.parse_state != RECORD_VALID]
+    pending = [
+        item.record for item in inspections
+        if item.record is not None and item.record.get("status") == "pending" and item.mutation_id not in excluding
+    ]
+    dispositions = _pending_dispositions(store, pending)
+    active = [record for record in pending if dispositions.get(str(record["mutation_id"]), TargetState(STATE_NONE)).state != STATE_EFFECTIVE]
+    for record in pending:
+        if record["mutation_id"] == mutation_id:
+            return _classify_pending(store, record, active, unreadable, dispositions)
+    return UNKNOWN_OR_INVALID, _reason("mutation_not_pending", f"{mutation_id} is not a pending recovery record")
+
+
 def _pending(context: _Context) -> dict[str, Any]:
     store = context.store
     lock = _lock_hint(store)
@@ -737,6 +848,8 @@ def _pending(context: _Context) -> dict[str, Any]:
     context.inspections = inspections
     unreadable = [item for item in inspections if item.parse_state != RECORD_VALID]
     pending = [item.record for item in inspections if item.record is not None and item.record.get("status") == "pending"]
+    dispositions = _pending_dispositions(store, pending)
+    active = [record for record in pending if dispositions.get(str(record["mutation_id"]), TargetState(STATE_NONE)).state != STATE_EFFECTIVE]
     records: list[dict[str, Any]] = []
     closed: list[dict[str, Any]] = []
     for item in sorted(inspections, key=lambda found: found.filename):
@@ -764,7 +877,7 @@ def _pending(context: _Context) -> dict[str, Any]:
             closed.append({"mutation_id": item.mutation_id, "owner": record.get("owner"), "status": record.get("status")})
             continue
         try:
-            classification, reason = _classify(store, record, pending, unreadable)
+            classification, reason = _classify_pending(store, record, active, unreadable, dispositions)
         except Exception as exc:  # a probe that cannot finish proves nothing
             classification, reason = UNKNOWN_OR_INVALID, _failure(exc)
         records.append({
@@ -781,16 +894,30 @@ def _pending(context: _Context) -> dict[str, Any]:
             "classification": classification,
             "reason": reason,
         })
-    context.blocking_mutations = tuple(
-        sorted(entry["mutation_id"] or entry["filename"] for entry in records if entry["affects_progression"])
-    )
+        # RB10 N4 §35.16: the additive detail, present only for a record that has a Human disposition
+        detail = _disposition_detail(str(item.mutation_id), dispositions.get(str(item.mutation_id)))
+        if detail is not None:
+            records[-1]["disposition"] = detail
+    # A record a Human disposition sets aside is resumed by no owner, so it holds no selection back.
+    context.blocking_mutations = tuple(sorted(
+        entry["mutation_id"] or entry["filename"] for entry in records
+        if entry["affects_progression"] and entry["classification"] != DISPOSED_BY_HUMAN
+    ))
     return {
         "status": "present" if records else PENDING_NONE,
         "reason": None,
         "records": records,
         "closed": sorted(closed, key=lambda entry: str(entry["mutation_id"])),
         "lock": lock,
+        "dispositions": _isolated_list(lambda: _mutation_dispositions(store)),
     }
+
+
+def _isolated_list(reader: Callable[[], list[dict[str, Any]]]) -> list[dict[str, Any]] | dict[str, Any]:
+    try:
+        return reader()
+    except Exception as exc:  # a reader that cannot finish is reported, never taken for "none"
+        return _unavailable(exc)
 
 
 def _lock_hint(store: ProjectStore) -> dict[str, Any]:
@@ -1287,6 +1414,14 @@ def render_human(model: StatusModel) -> str:
             scope = record.get("write_scope") or {}
             if scope.get("entities") or scope.get("files"):
                 out.append(f"    write scope: {', '.join((scope.get('entities') or []) + (scope.get('files') or []))}")
+    found = pending.get("dispositions") if isinstance(pending, dict) else None
+    if isinstance(found, list):
+        for disposition in found:
+            out.append(
+                f"  Human disposition {disposition['target_id']}: {disposition['state']} (runtime record "
+                f"{disposition['runtime_record'] or 'unknown'})"
+                + (f" - {_reason_text(disposition['problem'])}" if disposition.get("problem") else "")
+            )
     if isinstance(pending, dict) and isinstance(pending.get("lock"), dict):
         lock = pending["lock"]
         out.append(

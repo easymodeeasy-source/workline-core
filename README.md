@@ -260,6 +260,30 @@ review-v1 WorkのCandidate snapshot materialはcanonicalなrepository contentで
 
 Workline implementationのrepository（workline-core）自身をそのProjectとしてactivateしない。self-hostingは現在のWorkline rulesでサポートしておらず（`rules/git` のUnsupported self-hosting）、activationも `workline_self_hosting_unsupported` でSTOPする。
 
+### Human recovery disposition
+
+自動では再開できず、置き換えRunのset-asideでも外れないpending mutation / Review Run（例: STARTのruntime recordを失い、どのSTARTも `review_recovery_incomplete` で止まるWork Review Run）は、人間が明示に自動回復の選択から外せる（`rules/git` のOperation Owner、`skills/review`）。Skillではない。対象Projectを直接開き、Project内で実行する。
+
+```powershell
+py -3 -I -B "<R>\run-workline.py" dispose-recovery . --target <mut_... | rr_...> --reason "<public-safe reason>" --confirm
+```
+
+```text
+確認:     --confirm（人間がこの対象を自動再開の対象から外すと決めたことの明示）。無ければ何も読まず書かずにSTOP
+対象:     既存のstable ID 1つ（pending mutation mut_... / Review Run rr_...）
+理由:     空でない1行。canonicalなProject dataとしてcommitされる。secretや非公開の生の資料を書かない
+記録:     .workline/recovery/dispositions/<target_id>.yaml を1つだけ（1 commit。remoteがあれば承認先へpush）
+          target_state_digest で、処分した時点の対象のexactな状態を束縛する
+意味:     set aside = 自動の回復選択がもう選ばないこと。削除・完了・修理ではない。古いrecordはevidenceとして残る
+対象条件: mutationはstatusが pending_reconcile_required と示すものだけ（resumable / unknown / completed /
+          abandoned / missing はSTOP）。Review Runは記録が揃い、consumed・set aside済みでなく、どのpending STARTも
+          持たないことだけが再開不能の理由であるもの。current Receiptを持つRunはSTOP（無効化はSupersession）
+前提:     対象mutationのほかにpending mutationなし。処分中は他のoperationを始めない
+再実行:   同じtarget・状態・理由は already_disposed（2回目のcommitなし）。違う理由・状態は reconcile required
+```
+
+処分したmutationのruntime recordは消えず、`status` は `disposed_by_human` として残し続ける（cloneやruntime消失の後も履歴として見える）。処分したReview Runは `status` で `set_aside`（`set_aside_source: human_disposition`）となり、次のRunのrequestは安定code `disposed_by_human` だけでそれを名指す。
+
 ## Canonical implementation first
 
 canonical implementationが存在する処理を、Skill実行者が独自に再実装しない。

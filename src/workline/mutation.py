@@ -46,6 +46,11 @@ Contract (``rules/git`` / Mutation Controller, Multi-write mutation):
   Project context check (:mod:`workline.context`); initial Project開始 is
   outside the lock, and its mutation is written only inside the authorization
   a running Project開始 grants for its own target root;
+* a pending mutation a valid committed Human recovery disposition sets aside
+  is no longer active: pending discovery passes it over, an explicit load
+  refuses it, and its record stays as evidence; a pending disposition itself is
+  a barrier every other owner waits behind - RB10 N4, whose checks and narrow
+  opening path :mod:`workline.recovery_disposition` owns;
 * the controller validates and physically writes decided payloads. It never
   decides domain meaning.
 """
@@ -81,6 +86,7 @@ from .store import (
     PHASE_TERMINAL_EVENTS,
     PIN_OWNERS,
     PROJECT_YAML_REL,
+    RECOVERY_DISPOSITION_OWNERS,
     RELATED_TYPES,
     ROADMAP_EVENTS,
     ROADMAP_RELATION_TYPES,
@@ -2072,6 +2078,44 @@ def _bind_recovered_reservations(
     mutation._save()
 
 
+# --------------------------------------------------------------------------- Human recovery dispositions (RB10 N4)
+#
+# The immutable namespace's guards (``WORKLINE_COMPLETION_SPRINT.md`` §35.12).
+# What a valid disposition changes in pending selection, the barrier and the
+# narrow opening path (§35.7, §35.8) are recovery authority's, and the
+# controller calls them (:mod:`workline.recovery_disposition`). Module-level, so
+# the controller's public surface stays exactly what it was.
+
+
+def _in_recovery_namespace(path: object) -> bool:
+    from .recovery_disposition import in_recovery_namespace
+
+    return in_recovery_namespace(path)
+
+
+def _guard_recovery_disposition(path: str, owner: str) -> None:
+    """Only the recovery-disposition owner creates under the namespace, and only an exact disposition path (§35.12)."""
+    from .recovery_disposition import require_disposition_path
+
+    if owner not in RECOVERY_DISPOSITION_OWNERS:
+        raise ValidationError(
+            f"operation owner {owner} may not create {path}; a recovery disposition is created only by the "
+            "recovery-disposition maintenance operation, on explicit Human confirmation",
+            code="recovery_disposition_owner",
+        )
+    require_disposition_path(path)
+
+
+def _require_immutable_record_path(relative: str) -> None:
+    """The exact shape of a path the immutable create primitive writes: a Review record or a recovery disposition."""
+    if _in_recovery_namespace(relative):
+        from .recovery_disposition import require_disposition_path
+
+        require_disposition_path(relative)
+        return
+    review_paths.require_review_record_path(relative)
+
+
 class MutationController:
     """Physical writer for a Project's canonical files."""
 
@@ -2109,13 +2153,26 @@ class MutationController:
         return records
 
     def list_pending(self) -> list[dict[str, Any]]:
-        return [record for record in self.list_records() if record["status"] == "pending"]
+        """The ACTIVE pending records: what every operation owner discovers, resumes and is held back by.
+
+        A pending record a valid committed Human recovery disposition sets aside
+        is not among them (:func:`workline.recovery_disposition.active_pending`,
+        RB10 N4); :meth:`list_records` still reads it, as every raw inspection does.
+        """
+        from .recovery_disposition import active_pending
+
+        return active_pending(self.store, [record for record in self.list_records() if record["status"] == "pending"])
 
     def load(self, mutation_id: str) -> Mutation:
         path = self.intent_path(mutation_id)
         if not path.is_file():
             raise ReconcileRequired(f"mutation record missing: {mutation_id}")
-        return Mutation(self, self._load_intent(path), resumed=True)
+        record = self._load_intent(path)
+        if record["status"] == "pending":
+            from .recovery_disposition import refuse_disposed
+
+            refuse_disposed(self.store, record)  # a disposed record is never resumed (RB10 N4 §35.8)
+        return Mutation(self, record, resumed=True)
 
     # operation authorization ---------------------------------------------------
     def require_execution_lock(self, owner: str) -> None:
@@ -2157,9 +2214,22 @@ class MutationController:
 
         The caller holds the Project execution lock, so the pending records
         read here cannot change before the chosen mutation is resumed or begun.
+
+        A pending recovery disposition is a global recovery barrier (RB10 N4
+        §35.7): no other owner begins or resumes anything until it is resumed
+        and completed. The disposition owner itself never opens here; it has its
+        one narrow path (:func:`workline.recovery_disposition.open_disposition_mutation`).
         """
+        from .recovery_disposition import require_no_pending_disposition
+
         self.require_execution_lock(owner)
+        if owner in RECOVERY_DISPOSITION_OWNERS:
+            raise ValidationError(
+                f"{owner} opens its mutation only through its own narrow opening path, never the ordinary one",
+                code="recovery_disposition_owner",
+            )
         pending = self.list_pending()
+        require_no_pending_disposition(pending)
         invocation = json.loads(json.dumps(invocation, sort_keys=True))
         matches = [p for p in pending if p["owner"] == owner and p["invocation"] == invocation]
         others = [p for p in pending if p not in matches]
@@ -2307,11 +2377,20 @@ class MutationController:
                 # expectation of what it replaces.
                 if "base" in payload:
                     raise ValidationError("create_file is immutable and takes no base")
-                if not review_paths.is_review_path(path):
+                if _in_recovery_namespace(path):
+                    # The one other immutable namespace: recovery authority's dispositions (RB10 N4 §35.12).
+                    _guard_recovery_disposition(path, owner)
+                elif not review_paths.is_review_path(path):
                     raise ValidationError(
-                        f"create_file writes canonical Review records; {path!r} is not one"
+                        f"create_file writes canonical Review records and recovery dispositions; {path!r} is neither"
                     )
-                self._guard_activation_record(path, owner)
+                elif owner in RECOVERY_DISPOSITION_OWNERS:
+                    raise ValidationError(
+                        f"operation owner {owner} creates its recovery disposition and nothing else, never {path}",
+                        code="recovery_disposition_owner",
+                    )
+                else:
+                    self._guard_activation_record(path, owner)
                 # Where no create can be kept inside the Project, none is
                 # recorded either: no mutation is left holding one it could
                 # never apply.
@@ -2325,6 +2404,12 @@ class MutationController:
             if review_paths.is_review_path(path):
                 raise ValidationError(
                     f"{path} is a canonical Review record and is written only by create_file, which never updates one"
+                )
+            if _in_recovery_namespace(path):
+                raise ValidationError(
+                    f"{path} is in the recovery disposition namespace, which only create_file writes and nothing "
+                    "ever updates",
+                    code="recovery_disposition_immutable",
                 )
             if path == PROJECT_YAML_REL:
                 self._guard_push_pin(payload["content"], owner)
@@ -2623,8 +2708,10 @@ class MutationController:
         anything else, a directory, an indirection anywhere
                                                 -> applied, mismatch
         ```
+
+        A recovery disposition (RB10 N4 §35.12) is classified the same way.
         """
-        review_paths.require_review_record_path(relative)
+        _require_immutable_record_path(relative)
         parts = relative.split("/")
         try:
             chain = fsafe.walk(self.store.root, parts[:-1])
@@ -2669,8 +2756,11 @@ class MutationController:
                                         writer of the identical record)
         name taken by anything else  -> reconcile required; nothing replaced
         ```
+
+        A recovery disposition (RB10 N4 §35.12) is created by this same
+        primitive, at its own exact path, and is never overwritten either.
         """
-        review_paths.require_review_record_path(relative)
+        _require_immutable_record_path(relative)
         fsafe.require_immutable_create()
         parts = relative.split("/")
         name = parts[-1]
@@ -2684,7 +2774,8 @@ class MutationController:
                 return  # the identical record is already there: replay, never a second write
         raise ReconcileRequired(
             f"{relative} already exists and does not hold the record this mutation creates; an immutable "
-            "Review record is never overwritten: reconcile required"
+            + ("recovery disposition" if _in_recovery_namespace(relative) else "Review record")
+            + " is never overwritten: reconcile required"
         )
 
     def _planned_write(self, record: dict[str, Any]) -> tuple[Path, str] | None:
