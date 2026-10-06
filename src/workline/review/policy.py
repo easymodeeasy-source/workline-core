@@ -31,8 +31,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
 import re
+import stat
 from typing import Any, Iterable, Mapping, Sequence
 
 from ..errors import ReconcileRequired, StopError, ValidationError
@@ -491,10 +493,11 @@ BASELINE_FIELDS = (
 class GlobalPolicyBaseline:
     """The normalized, read-only logical representation of current Global Review policy.
 
-    ``source_mode`` is ``derived-baseline`` until RB7 materializes Global policy;
-    RB7 keeps this interface (:func:`load_global_baseline`). Its canonical
-    digest is the Global baseline identity Review Context and Project Profiles
-    bind.
+    ``source_mode`` is ``materialized-global-policy`` for what the loader reads
+    since P7 (:func:`load_global_baseline`) and ``derived-baseline`` for the P6
+    derived record (:func:`derived_global_baseline`, and every record stored
+    before P7); the interface is the same. Its canonical digest is the Global
+    baseline identity Review Context and Project Profiles bind.
     """
 
     record: dict[str, Any]
@@ -645,17 +648,83 @@ def baseline_record(authority: Sequence[Mapping[str, str]], sources: Sequence[Ma
 
 
 def load_global_baseline(workline_root: Path) -> GlobalPolicyBaseline:
-    """The canonical read-only GlobalPolicyBaseline loader (§30.4); it never writes the Workline root.
+    """The canonical read-only GlobalPolicyBaseline loader (§30.4, §31.3); it never writes the Workline root.
 
-    Before RB7 it derives the baseline exactly and reproducibly from the
-    current canonical runtime authority (registry.md and the review, roadmap
-    and start Skills), the fixed meta-rules, the two surface definitions and
-    the existing planning / Work / P4 / P5 policy identities. RB7 keeps this
-    interface when it materializes Global policy.
+    P7 materialized the Global policy, so the same interface now reads the
+    tracked ``review-policy/global-policy.yaml`` of the configured Workline root
+    (``source_mode = materialized-global-policy``): its strict record, as the
+    baseline record of the same fields, with the root's runtime authority
+    digests and the source policy identities as provenance. The file is
+    required: an absent, indirected or unreadable one is
+    ``review_p6_baseline_unavailable`` and a malformed one
+    ``review_record_invalid`` - never "absent, so derived" by guess. Version 1
+    is exactly the derived baseline restated (:func:`derived_global_baseline`),
+    so the transition changes ``source_mode`` and provenance only (§16.2).
+    """
+    found = _global_policy_of(_read_global_policy(Path(workline_root)))
+    record = materialized_baseline_record(found, baseline_authority_digests(workline_root), source_policy_identities())
+    return parse_baseline(record, "the materialized Global policy baseline")
+
+
+def derived_global_baseline(workline_root: Path) -> GlobalPolicyBaseline:
+    """The P6 derived baseline of ``workline_root`` (§30.4): what Global policy version 1 restates (RB7C-10).
+
+    Derived exactly and reproducibly from the canonical runtime authority
+    (registry.md and the review, roadmap and start Skills), the fixed
+    meta-rules, the two surface definitions and the existing planning / Work /
+    P4 / P5 policy identities. No Run reads it once P7 materialized the Global
+    policy; it remains the reference the materialization is proven against.
     """
     record = baseline_record(baseline_authority_digests(workline_root), source_policy_identities())
-    parse_baseline(record, "the derived Global policy baseline")
-    return GlobalPolicyBaseline(record)
+    return parse_baseline(record, "the derived Global policy baseline")
+
+
+def _read_global_policy(workline_root: Path) -> bytes:
+    """The bytes of ``review-policy/global-policy.yaml``, read without following any indirection.
+
+    This module may not use :mod:`workline.review.fsafe` (it stays inert), so
+    the read proves it directly: every component below the root is a plain
+    directory and the last a regular file (``lstat``: no symlink, junction or
+    other reparse point), the bytes are read, and the file is ``lstat``-ed again
+    and must be the same file with the same size. Anything else - absent,
+    indirected, unreadable, changed while read - is
+    ``review_p6_baseline_unavailable`` and nothing is derived in its place.
+    A checkout's CRLF line ends are read as LF (``core.autocrlf``), as the
+    derived baseline reads registry.md and the Skills; the committed blob a
+    Global Policy Change proves is exact either way.
+    """
+    path = workline_root
+    parts = GLOBAL_POLICY_REL.split("/")
+    try:
+        for index, part in enumerate(parts):
+            path = path / part
+            info = os.lstat(path)
+            plain = stat.S_ISREG(info.st_mode) if index == len(parts) - 1 else stat.S_ISDIR(info.st_mode)
+            if not plain or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                raise stop(CODE_BASELINE_UNAVAILABLE,
+                           f"the Global policy {GLOBAL_POLICY_REL} of {workline_root} is not reached through plain "
+                           f"directories to a regular file ({'/'.join(parts[:index + 1])}); it is never followed")
+        data = path.read_bytes()
+        after = os.lstat(path)
+    except FileNotFoundError as exc:
+        raise stop(CODE_BASELINE_UNAVAILABLE,
+                   f"the Workline root {workline_root} has no Global policy {GLOBAL_POLICY_REL}; nothing is derived in "
+                   "its place") from exc
+    except OSError as exc:
+        raise stop(CODE_BASELINE_UNAVAILABLE,
+                   f"the Global policy {GLOBAL_POLICY_REL} of {workline_root} cannot be read ({exc})") from exc
+    if (after.st_dev, after.st_ino, after.st_size) != (info.st_dev, info.st_ino, info.st_size) \
+            or len(data) != after.st_size or not stat.S_ISREG(after.st_mode):
+        raise stop(CODE_BASELINE_UNAVAILABLE,
+                   f"the Global policy {GLOBAL_POLICY_REL} of {workline_root} changed while it was read")
+    return data.replace(b"\r\n", b"\n")
+
+
+def _global_policy_of(raw: bytes) -> dict[str, Any]:
+    try:
+        return parse_global_policy_bytes(raw, f"the Global policy {GLOBAL_POLICY_REL}")
+    except ValidationError as exc:
+        raise _invalid(f"the Global policy {GLOBAL_POLICY_REL} is not a Global policy record: {exc}") from exc
 
 
 def baseline_version_admitted(version: object, source_mode: object) -> bool:

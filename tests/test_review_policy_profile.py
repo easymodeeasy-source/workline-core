@@ -27,6 +27,20 @@ def baseline() -> policy.GlobalPolicyBaseline:
     return policy.load_global_baseline(WORKLINE_ROOT)
 
 
+def p7_root_copy(dest: Path) -> Path:
+    """A copied Workline root carrying its tracked Global policy (P7 §31.2, RB7C-7): the loader requires the file.
+
+    ``copy_workline_root`` gains the file itself with RB7's shared helper change; until then the copy is completed
+    here, and afterwards this adds nothing.
+    """
+    root = copy_workline_root(dest)
+    target = root.joinpath(*policy.GLOBAL_POLICY_REL.split("/"))
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(WORKLINE_ROOT.joinpath(*policy.GLOBAL_POLICY_REL.split("/")).read_bytes())
+    return root
+
+
 def profile(version: int = 1, parent: str | None = None, *, setting: int = 2, surface: str = policy.SURFACE_REQUIRED_SLOTS,
             supporting: str = RPC, refs: tuple[str, ...] = (RPC,), digest: str | None = None) -> policy.ProjectProfile:
     found = policy.SURFACE_BY_ID[surface]
@@ -257,7 +271,7 @@ class CompatibilityTests(WorklineTestCase):
 
     def test_a_text_only_root_edit_keeps_the_profile_compatible(self) -> None:
         # R6-2 item 4: the canonical digest moves, the policy-semantic projection does not
-        other = copy_workline_root(self.tmp / "root2")
+        other = p7_root_copy(self.tmp / "root2")
         skill = other / ".claude" / "skills" / "review" / "SKILL.md"
         skill.write_bytes(skill.read_bytes() + b"\n")
         edited = policy.load_global_baseline(other)
@@ -434,7 +448,10 @@ class PreP6CompatibilityTests(unittest.TestCase):
 
 class LoaderSeamTests(WorklineTestCase):
     def test_the_derived_baseline_is_canonical_exact_and_reproducible(self) -> None:
-        first, second = baseline(), baseline()
+        # RB7C-10 (pin updated deliberately with the P7 materialization, RB7 step 4): the derived builder is asserted
+        # directly - the loader itself now reads the tracked Global policy - and the loaded baseline differs from it
+        # in source_mode and provenance identity only (§31.3)
+        first, second = policy.derived_global_baseline(WORKLINE_ROOT), policy.derived_global_baseline(WORKLINE_ROOT)
         self.assertEqual(first.record, second.record)
         self.assertEqual(policy.SOURCE_MODE_DERIVED, first.source_mode)
         self.assertEqual(set(policy.BASELINE_FIELDS), set(first.record))
@@ -443,9 +460,15 @@ class LoaderSeamTests(WorklineTestCase):
         self.assertEqual(["planning", "work", "p4", "p5", "p6"],
                          [item["id"] for item in first.record["source_policy_identities"]])
         self.assertEqual(policy.GlobalPolicyBaseline(first.record).digest, policy.parse_baseline(first.record, "b").digest)
+        loaded = baseline()
+        self.assertEqual(policy.SOURCE_MODE_MATERIALIZED, loaded.source_mode)
+        self.assertEqual(loaded.record, baseline().record)
+        self.assertEqual(first.semantic_projection, loaded.semantic_projection)
+        self.assertEqual({"source_mode", "global_policy_identity"},
+                         {key for key in first.record if first.record[key] != loaded.record[key]})
 
     def test_the_loader_never_mutates_the_workline_root(self) -> None:
-        root = copy_workline_root(self.tmp / "root")
+        root = p7_root_copy(self.tmp / "root")
 
         def snapshot() -> dict[str, tuple[bytes, int]]:
             return {str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
@@ -456,7 +479,7 @@ class LoaderSeamTests(WorklineTestCase):
         self.assertEqual(before, snapshot())
 
     def test_an_unreadable_root_authority_stops_the_loader(self) -> None:
-        root = copy_workline_root(self.tmp / "root")
+        root = p7_root_copy(self.tmp / "root")
         (root / ".claude" / "skills" / "start" / "SKILL.md").unlink()
         with self.assertRaises(StopError) as raised:
             policy.load_global_baseline(root)

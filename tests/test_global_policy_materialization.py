@@ -10,16 +10,18 @@ exactly (R6-2), so materializing it changes no Effective Policy.
 Rows: the record and its bytes (foundation); the tracked version 1 file and the
 reader side of the loader transition (RB7C-8: both source modes, the runtime
 Global policy version rule, the fixed registry facts in both modes, Effective
-Policies frozen under a later version). The loader's own switch to the tracked
-file adds its rows here when it lands.
+Policies frozen under a later version); and the loader's switch to the tracked
+file (§31.3: source_mode and provenance only, the file required, no-follow).
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import unittest
 
-from helpers import WORKLINE_ROOT
-from workline.errors import ValidationError
+from helpers import WORKLINE_ROOT, WorklineTestCase, copy_workline_root
+from workline.errors import StopError, ValidationError
 from workline.review import policy, serialize
 
 #: The exact bytes of Global policy version 1: the derived baseline's two Global settings, nothing else.
@@ -43,8 +45,7 @@ STEPS = policy.SURFACE_EXTRA_SCOPE_STEPS
 
 def derived() -> policy.GlobalPolicyBaseline:
     """The P6 derived baseline of this root, from the derived builder itself (whatever mode the loader reads)."""
-    record = policy.baseline_record(policy.baseline_authority_digests(WORKLINE_ROOT), policy.source_policy_identities())
-    return policy.parse_baseline(record, "the derived Global policy baseline")
+    return policy.derived_global_baseline(WORKLINE_ROOT)
 
 
 def v1() -> dict:
@@ -287,6 +288,104 @@ class LoaderReadsBothModesTests(unittest.TestCase):
                          for path in WORKLINE_ROOT.joinpath("review-policy").rglob("*"))
         self.assertEqual(["review-policy/global-policy.yaml"], tracked,
                          "no Promotion Packet, change, evaluation or Patch Note is fabricated for it (§31.2)")
+
+
+class LoaderSwitchTests(WorklineTestCase):
+    """§31.3 / §16.26: the same loader reads the tracked Global policy; the transition is source_mode only."""
+
+    def root_with(self, data: bytes | None) -> Path:
+        root = copy_workline_root(self.tmp / "root")
+        if data is not None:
+            (root / "review-policy").mkdir()
+            (root / "review-policy" / "global-policy.yaml").write_bytes(data)
+        return root
+
+    def test_the_real_root_loads_its_tracked_version_1(self) -> None:
+        loaded = policy.load_global_baseline(WORKLINE_ROOT)
+        baseline = derived()
+        self.assertEqual((policy.SOURCE_MODE_MATERIALIZED, 1, V1_DIGEST),
+                         (loaded.source_mode, loaded.version, loaded.global_policy_identity))
+        self.assertEqual(baseline.semantic_projection, loaded.semantic_projection)
+        self.assertEqual({"source_mode", "global_policy_identity"},
+                         {key for key in loaded.record if loaded.record[key] != baseline.record[key]})
+        self.assertEqual(loaded.record, policy.load_global_baseline(WORKLINE_ROOT).record)
+
+    def test_no_effective_policy_semantics_change_at_the_transition(self) -> None:
+        """§16.26: a new Run freezes the same settings; a Run frozen before keeps reading; no Profile is touched."""
+        before = policy.effective_policy_record(derived(), None, ())
+        after = policy.effective_policy_record(policy.load_global_baseline(WORKLINE_ROOT), None, ())
+        self.assertEqual(before["settings"], after["settings"])
+        self.assertEqual(before["compatibility"], after["compatibility"])
+        self.assertEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC, after["compatibility"])
+        self.assertEqual(before, policy.parse_effective_policy(before, "an Effective Policy frozen before"))
+
+    def test_a_crlf_checkout_reads_as_the_same_policy(self) -> None:
+        root = self.root_with(V1_TEXT.replace("\n", "\r\n").encode("utf-8"))
+        self.assertEqual(V1_DIGEST, policy.load_global_baseline(root).global_policy_identity)
+
+    def test_a_later_version_loads_as_runtime_data(self) -> None:
+        later = policy.global_policy_record(2, V1_DIGEST, {SLOTS: 3, STEPS: 1})
+        loaded = policy.load_global_baseline(self.root_with(policy.global_policy_bytes(later)))
+        self.assertEqual((2, 3, 1), (loaded.version, loaded.global_setting(SLOTS), loaded.global_setting(STEPS)))
+        self.assertEqual(policy.global_policy_projection(later), loaded.semantic_projection)
+
+    def test_the_file_is_required_and_never_replaced_by_the_derived_baseline(self) -> None:
+        root = self.root_with(None)
+        with self.assertRaises(StopError) as raised:
+            policy.load_global_baseline(root)
+        self.assertEqual(policy.CODE_BASELINE_UNAVAILABLE, raised.exception.code)
+        self.assertFalse((root / "review-policy").exists(), "the loader writes nothing")
+
+    def test_a_malformed_file_is_an_invalid_record(self) -> None:
+        for name, data in (
+            ("not canonical", ("# note\n" + V1_TEXT).encode("utf-8")),
+            ("version 1 with another setting", V1_TEXT.replace("global_setting: 1", "global_setting: 2").encode("utf-8")),
+            ("not yaml", b"\x00\xff"),
+        ):
+            with self.subTest(name):
+                root = copy_workline_root(self.tmp / name.replace(" ", "-"))
+                (root / "review-policy").mkdir()
+                (root / "review-policy" / "global-policy.yaml").write_bytes(data)
+                with self.assertRaises(ValidationError) as raised:
+                    policy.load_global_baseline(root)
+                self.assertEqual("review_record_invalid", raised.exception.code)
+
+    def test_an_indirected_file_or_directory_is_never_followed(self) -> None:
+        outside = self.new_dir("outside")
+        (outside / "global-policy.yaml").write_text(V1_TEXT, encoding="utf-8", newline="")
+        for name in ("file symlink", "directory symlink", "directory junction"):
+            with self.subTest(name):
+                root = copy_workline_root(self.tmp / f"root-{name.replace(' ', '-')}")
+                try:
+                    if name == "file symlink":
+                        (root / "review-policy").mkdir()
+                        os.symlink(outside / "global-policy.yaml", root / "review-policy" / "global-policy.yaml")
+                    elif name == "directory symlink":
+                        os.symlink(outside, root / "review-policy", target_is_directory=True)
+                    else:
+                        if os.name != "nt":
+                            self.skipTest("a junction is a Windows reparse point")
+                        import _winapi
+
+                        _winapi.CreateJunction(str(outside), str(root / "review-policy"))
+                except OSError as exc:
+                    self.skipTest(f"this platform cannot create a {name} here ({exc})")
+                with self.assertRaises(StopError) as raised:
+                    policy.load_global_baseline(root)
+                self.assertEqual(policy.CODE_BASELINE_UNAVAILABLE, raised.exception.code)
+
+    def test_the_loader_never_writes_the_root(self) -> None:
+        root = self.root_with(V1_TEXT.encode("utf-8"))
+
+        def snapshot() -> dict[str, tuple[bytes, int]]:
+            return {str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
+                    for path in sorted(root.rglob("*")) if path.is_file()}
+
+        before = snapshot()
+        policy.load_global_baseline(root)
+        self.assertEqual(before, snapshot())
+        self.assertFalse((root / ".workline").exists())
+        self.assertFalse((root / ".workline-root-runtime").exists())
 
 
 class SuccessorTests(unittest.TestCase):
