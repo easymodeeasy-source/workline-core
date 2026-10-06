@@ -1255,7 +1255,7 @@ class CommittedRecords(CommittedReviewStore):
         self._tree = tree
 
     def read_bytes(self, relative: str) -> bytes | None:
-        review_paths.require_review_record_path(relative)
+        review_paths.require_review_readable_path(relative)
         found = self._tree.get(relative)
         if found is None:
             return None

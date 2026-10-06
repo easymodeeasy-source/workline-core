@@ -364,9 +364,10 @@ class DecisionRecordTests(CancelCase):
         # Nothing else about the record changed: the same stages in the same order, no new field, kind or version.
         self.assertEqual([re.sub(r"^w_\w+:", "<I1>:", s) for s in stages], REPOINT_STAGES)
         self.assertEqual(set(saves[-1]), CLOSED_RECORD_FIELDS)
+        # P6 (§30.18) adds exactly one dedicated kind, the Profile compare-and-replace, after every earlier one.
         self.assertEqual((INTENT_VERSION, EFFECT_KINDS),
                          (1, ("write_file", "create_file", "add_relation", "remove_relation", "append_event",
-                              "git_commit", "git_push")))
+                              "git_commit", "git_push", "replace_review_profile")))
         # and the closed record of an uninterrupted cancel is still taken away (BL-019)
         self.assertNotIn(result.mutation_id, {r["mutation_id"] for r in MutationController(self.store).list_records()})
 

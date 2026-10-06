@@ -533,6 +533,10 @@ class _PosixDirectory:
         """Refused before anything is written, not even a temporary file: see :func:`immutable_create_supported`."""
         raise _unsupported()
 
+    def replace_file(self, name: str, data: bytes, tmp: "_PosixDirectory") -> None:
+        """Refused before anything is written: a replace is held to the same containment capability as a create."""
+        raise _unsupported()
+
     def identity(self) -> tuple:
         """This held directory's own identity, from its fd: ``(st_dev, st_ino)``."""
         info = os.fstat(self.fd)
@@ -984,6 +988,55 @@ if sys.platform == "win32":
             finally:
                 _CloseHandle(handle)
 
+        def replace_file(self, name: str, data: bytes, tmp: "_WindowsDirectory") -> None:
+            """Place ``data`` at ``name`` in this held directory, replacing the plain file that is there (P6 §30.18).
+
+            The bytes are written to a temporary file in the held runtime area and
+            placed by ONE rename relative to this pinned parent handle with
+            ``ReplaceIfExists = TRUE``: the name is replaced as a directory entry,
+            never resolved, so nothing at it is followed, and the parent cannot
+            have moved out of the Project while it is held. Which bytes may be
+            replaced is the caller's compare (:func:`compare_and_replace`), made
+            through this same held parent immediately before.
+            """
+            _require_component(name)
+            status, handle = _nt_open(
+                tmp.handle, _tmp_name(name), _GENERIC_WRITE | _DELETE | _SYNCHRONIZE, 0, _FILE_CREATE,
+                _FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT,
+            )
+            if status != 0:
+                raise _refuse(f"a temporary Review file cannot be created (NTSTATUS 0x{status:08X})")
+            delete_on_close = ctypes.create_string_buffer(b"\x01", 1)
+            try:
+                view = memoryview(data)
+                written = wintypes.DWORD()
+                while view:
+                    part = bytes(view[: 1 << 20])
+                    if not _WriteFile(handle, part, len(part), ctypes.byref(written), None) or written.value == 0:
+                        raise _refuse(f"a temporary Review file cannot be written (error {ctypes.get_last_error()})")
+                    view = view[written.value:]
+                if not _FlushFileBuffers(handle):
+                    raise _refuse(f"a temporary Review file cannot be flushed (error {ctypes.get_last_error()})")
+            except BaseException:
+                self._set_information(handle, delete_on_close, _FileDispositionInformation)
+                _CloseHandle(handle)
+                raise
+            try:
+                encoded = name.encode("utf-16-le")
+                pointer = ctypes.sizeof(ctypes.c_void_p)
+                name_at = pointer + pointer + 4
+                rename = ctypes.create_string_buffer(name_at + len(encoded) + 2)
+                rename[0] = 1  # ReplaceIfExists = TRUE: the entry at the name is replaced, never followed
+                ctypes.memmove(ctypes.addressof(rename) + pointer, ctypes.byref(wintypes.HANDLE(self.handle)), pointer)
+                ctypes.memmove(ctypes.addressof(rename) + pointer + pointer, ctypes.byref(wintypes.ULONG(len(encoded))), 4)
+                ctypes.memmove(ctypes.addressof(rename) + name_at, encoded, len(encoded))
+                status = self._set_information(handle, rename, _FileRenameInformation)
+                if status != 0:
+                    self._set_information(handle, ctypes.create_string_buffer(b"\x01", 1), _FileDispositionInformation)
+                    raise _refuse(f"{self.described}\\{name} cannot be replaced (NTSTATUS 0x{status:08X})")
+            finally:
+                _CloseHandle(handle)
+
         def identity(self) -> tuple:
             """This held directory's own identity, from its handle: volume serial plus file index."""
             info = _info(self.handle)
@@ -1116,6 +1169,11 @@ class SafeDirectory:
         require_immutable_create()
         return self._backend.create_file_exclusive(name, data, tmp._backend)
 
+    def replace_file(self, name: str, data: bytes, tmp: "SafeDirectory") -> None:
+        """Place ``data`` at ``name``, replacing what is there: only where a create could be contained."""
+        require_immutable_create()
+        self._backend.replace_file(name, data, tmp._backend)
+
     def identity(self) -> tuple:
         """Which directory object this handle holds, asked of the handle itself - never of a name.
 
@@ -1194,6 +1252,94 @@ def walk(root: Path, parts: list[str], *, create: bool = False) -> Chain | None:
             directory.close()
         raise
     return Chain(directories)
+
+
+# --------------------------------------------------------------------------- the one compare-and-replace (P6 §30.18)
+
+#: What :func:`compare_and_replace` found and did. ``replaced``: the target held exactly the expected prior state
+#: and now holds the new bytes; ``matching``: it already held the new bytes, and nothing was written; ``mismatch``:
+#: it held anything else, and nothing was written.
+CAS_REPLACED = "replaced"
+CAS_MATCHING = "matching"
+CAS_MISMATCH = "mismatch"
+
+
+def classify_replacement(root: Path, parts: list[str], expected: bytes | None, data: bytes) -> str:
+    """What the plain file at ``root`` / ``parts`` holds, against an exact compare-and-replace, read without following.
+
+    ``expected`` is the exact prior bytes the replace may overwrite, or ``None``
+    when the only state it may create into is absence:
+
+    ```text
+    target holds ``data``                      -> matching (already applied)
+    target holds ``expected`` (None: absent)   -> unapplied
+    anything else, a directory, an indirection anywhere on the way
+                                               -> mismatch
+    ```
+
+    Read-only: nothing is created, written or replaced, and on POSIX - where no
+    replace can be contained - it still reads, exactly as Review records do.
+    """
+    try:
+        chain = walk(root, parts[:-1])
+    except ValidationError:
+        return CAS_MISMATCH
+    if chain is None:
+        return "unapplied" if expected is None else CAS_MISMATCH
+    with chain:
+        try:
+            stored = chain.last.read_file(parts[-1])
+        except ValidationError:
+            return CAS_MISMATCH
+    if stored is not None and stored == data:
+        return CAS_MATCHING
+    if stored is None:
+        return "unapplied" if expected is None else CAS_MISMATCH
+    return "unapplied" if expected is not None and stored == expected else CAS_MISMATCH
+
+
+def compare_and_replace(root: Path, parts: list[str], expected: bytes | None, data: bytes, tmp_parts: list[str]) -> str:
+    """Replace the plain file at ``root`` / ``parts`` with ``data`` only while it holds exactly ``expected``.
+
+    The narrow primitive the P6 Profile CAS effect applies (§30.18), held to the
+    containment standard of the canonical Review create: refused before anything
+    is opened or written where a create could not be contained
+    (:func:`require_immutable_create`); the parent walked from ``root`` without
+    following anything and held - pinned - until the bytes are placed; the
+    current target read through that held parent with no-follow semantics, so
+    an indirection at the target or anywhere above it is a mismatch, never
+    followed; and the new bytes placed by one rename relative to the held
+    parent. ``expected`` ``None`` means the target must be absent, and the
+    placement is then exclusive: a name that appears in the meantime is never
+    replaced.
+
+    Returns :data:`CAS_REPLACED`, :data:`CAS_MATCHING` or :data:`CAS_MISMATCH`;
+    nothing is written for the last two.
+    """
+    require_immutable_create()
+    name = parts[-1]
+    _require_component(name)
+    with walk(root, parts[:-1], create=True) as parent, walk(root, tmp_parts, create=True) as tmp:
+        try:
+            stored = parent.last.read_file(name)
+        except ValidationError:
+            return CAS_MISMATCH
+        if stored is not None and stored == data:
+            return CAS_MATCHING
+        if expected is None:
+            if stored is not None:
+                return CAS_MISMATCH
+            if parent.last.create_file_exclusive(name, data, tmp.last):
+                return CAS_REPLACED
+            try:
+                raced = parent.last.read_file(name)
+            except ValidationError:
+                return CAS_MISMATCH
+            return CAS_MATCHING if raced == data else CAS_MISMATCH
+        if stored != expected:
+            return CAS_MISMATCH
+        parent.last.replace_file(name, data, tmp.last)
+        return CAS_REPLACED
 
 
 # --------------------------------------------------------------------------- the submodule HEAD

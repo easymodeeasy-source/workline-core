@@ -935,15 +935,175 @@ class PlanningConsumption:
         )
 
 
-def consumption_from_record(record: dict[str, Any], described: str) -> "Consumption | PlanningConsumption":
-    """A stored Consumption of either version, read by its own reader.
+# --------------------------------------------------------------------------- policy consumption (version 3)
+#
+# The Policy Consumption (P6, ``WORKLINE_COMPLETION_SPRINT`` §30.21): the P1 Consumption schema at version 3,
+# for the ``project-policy-change-v1`` kind only, with a ``persisted_policy`` that binds the exact local policy
+# commit Kp and the persisted Profile projection it consumed the Receipt for. Versions 1 and 2 keep every record
+# they ever read with exactly their meaning; the policy kind is valid only in version 3, and version 3 only for
+# the policy kind. One Receipt still has at most one Consumption (keyed by the Receipt alone).
 
-    Version 1 is the P1 reader, unchanged, and a planning kind is refused there;
-    version 2 is the Planning Consumption. Any other version is not read.
+POLICY_CONSUMPTION_VERSION = 3
+
+#: The Policy Review kind, and the only kind a version 3 Consumption may name.
+POLICY_REVIEW_KIND = "project-policy-change-v1"
+POLICY_TARGET_IDENTITY = "project-policy"
+PERSISTED_POLICY_CONTRACT = "review-v1-p6-persisted-policy-v1"
+POLICY_ADAPTER_IDENTITY = "project-policy-adapter-v1"
+
+POLICY_CONSUMPTION_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "consumption_id",
+    "receipt_id",
+    "review_run_id",
+    "review_generation",
+    "review_kind",
+    "authorized_candidate_hash",
+    "operation_identity",
+    "operation_mutation_id",
+    "target_identity",
+    "persisted_policy",
+)
+
+PERSISTED_POLICY_FIELDS = (
+    "contract",
+    "policy_change_id",
+    "before_profile_version",
+    "before_profile_digest",
+    "after_profile_version",
+    "after_profile_digest",
+    "global_baseline_digest",
+    "normalized_projection_hash",
+    "policy_commit",
+    "policy_parent",
+    "branch",
+    "policy_delta_digest",
+    "adapter_identity",
+    "loader_identity",
+)
+
+
+def _validate_persisted_policy(value: object, described: str) -> dict[str, Any]:
+    where = f"{described} persisted_policy"
+    result = _require_mapping(value, where)
+    _require_exact_fields(result, PERSISTED_POLICY_FIELDS, where)
+    _require_choice(result, "contract", (PERSISTED_POLICY_CONTRACT,), where)
+    _require_id(result, "policy_change_id", "review_policy_change", where)
+    before_version, before_digest = result.get("before_profile_version"), result.get("before_profile_digest")
+    if (before_version is None) != (before_digest is None):
+        raise ValidationError(f"{where} names a before Profile version without its digest, or the reverse",
+                              code="review_record_invalid")
+    if before_version is not None:
+        _require_int(result, "before_profile_version", where, minimum=1)
+        _require_digest(result, "before_profile_digest", where)
+    after_version = _require_int(result, "after_profile_version", where, minimum=1)
+    if after_version != (1 if before_version is None else before_version + 1):
+        raise ValidationError(f"{where} skips a Profile version", code="review_record_invalid")
+    _require_digest(result, "after_profile_digest", where)
+    _require_digest(result, "global_baseline_digest", where)
+    _require_digest(result, "normalized_projection_hash", where)
+    _require_full_commit(result, "policy_commit", where)
+    _require_full_commit(result, "policy_parent", where)
+    branch = result.get("branch")
+    if not isinstance(branch, str) or _FULL_BRANCH.fullmatch(branch) is None:
+        raise ValidationError(f"{where} branch is not a full branch ref: {branch!r}", code="review_record_invalid")
+    _require_digest(result, "policy_delta_digest", where)
+    _require_choice(result, "adapter_identity", (POLICY_ADAPTER_IDENTITY,), where)
+    _require_digest(result, "loader_identity", where)
+    return result
+
+
+@dataclass(frozen=True)
+class PolicyConsumption:
+    """The one use of one Policy Change Receipt, bound to the exact policy commit it authorized (version 3).
+
+    Reading proves form and bindings only; the committed policy proof
+    recomputes what it claims from committed objects. It binds no Work terminal
+    event and never invents one, and it is not Project lifecycle truth.
+    """
+
+    consumption_id: str
+    receipt_id: str
+    review_run_id: str
+    review_generation: int
+    review_kind: str
+    authorized_candidate_hash: str
+    operation_identity: str
+    operation_mutation_id: str
+    target_identity: str
+    persisted_policy: dict[str, Any]
+
+    #: A Policy Consumption binds no Work terminal event.
+    terminal_event_id = None
+    terminal_event_type = None
+    authorized_result_commit_sha = None
+
+    @property
+    def work_kind(self) -> bool:
+        return False
+
+    @property
+    def work_id(self) -> str | None:
+        return None
+
+    @property
+    def policy_commit(self) -> str:
+        return str(self.persisted_policy["policy_commit"])
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            serialize.SCHEMA_KEY: SCHEMA_CONSUMPTION,
+            serialize.VERSION_KEY: POLICY_CONSUMPTION_VERSION,
+            "consumption_id": self.consumption_id,
+            "receipt_id": self.receipt_id,
+            "review_run_id": self.review_run_id,
+            "review_generation": self.review_generation,
+            "review_kind": self.review_kind,
+            "authorized_candidate_hash": self.authorized_candidate_hash,
+            "operation_identity": self.operation_identity,
+            "operation_mutation_id": self.operation_mutation_id,
+            "target_identity": self.target_identity,
+            "persisted_policy": dict(self.persisted_policy),
+        }
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "PolicyConsumption":
+        serialize.require_schema(record, SCHEMA_CONSUMPTION, POLICY_CONSUMPTION_VERSION, described)
+        _require_exact_fields(record, POLICY_CONSUMPTION_FIELDS, described)
+        review_kind = _require_choice(record, "review_kind", (POLICY_REVIEW_KIND,), described)
+        target = _require_choice(record, "target_identity", (POLICY_TARGET_IDENTITY,), described)
+        persisted = _validate_persisted_policy(record.get("persisted_policy"), described)
+        return PolicyConsumption(
+            consumption_id=_require_id(record, "consumption_id", "review_consumption", described),
+            receipt_id=_require_id(record, "receipt_id", "review_receipt", described),
+            review_run_id=_require_id(record, "review_run_id", "review_run", described),
+            review_generation=_require_int(record, "review_generation", described, minimum=FIRST_GENERATION),
+            review_kind=review_kind,
+            authorized_candidate_hash=_require_digest(record, "authorized_candidate_hash", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            operation_mutation_id=_require_id(record, "operation_mutation_id", "mutation", described),
+            target_identity=target,
+            persisted_policy=dict(persisted),
+        )
+
+
+def consumption_from_record(
+    record: dict[str, Any], described: str
+) -> "Consumption | PlanningConsumption | PolicyConsumption":
+    """A stored Consumption of any version, read by its own reader.
+
+    Version 1 is the P1 reader, unchanged, and a planning kind is refused
+    there; version 2 is the Planning Consumption; version 3 is the Policy
+    Consumption (P6). Any other version is not read. Version 1 reads exactly
+    what it always read: that a Policy Receipt is consumed only by a version 3
+    Consumption is the P6 validation's, made where a Policy Receipt exists.
     """
     version = record.get(serialize.VERSION_KEY)
     if version == PLANNING_CONSUMPTION_VERSION:
         return PlanningConsumption.from_record(record, described)
+    if version == POLICY_CONSUMPTION_VERSION:
+        return PolicyConsumption.from_record(record, described)
     found = Consumption.from_record(record, described)
     if found.review_kind in PLANNING_REVIEW_KINDS:
         raise ValidationError(
@@ -1251,7 +1411,13 @@ SCHEMA_P4_REPAIR_RESULT = "review-p4-repair-result"
 #: The two P4 Review contracts (§12.21 / G-6): distinct durable identities, never a v1 string.
 P4_PLANNING_CONTRACT = "review-v1-planning-p4-v1"
 P4_WORK_CONTRACT = "review-v1-work-p4-v1"
-P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT)
+#: P6 (§30.12): the Policy Review contract of the ``project-policy-change-v1`` kind. A member of the P4-capable
+#: contract family - P4 discovery reports and the P4 adjudication, G1-G5 - with no Repair Batch branch, so a
+#: Repair Batch or Repair Result never names it (:data:`P4_REPAIR_CONTRACTS`).
+P6_POLICY_CHANGE_CONTRACT = "review-v1-policy-change-p6-v1"
+P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT, P6_POLICY_CHANGE_CONTRACT)
+#: The contracts whose Runs may repair: exactly the two P4 owner contracts, unchanged.
+P4_REPAIR_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT)
 
 #: The P4 discovery task slot prefix; the rest of the slot is the viewpoint.
 P4_DISCOVERY_SLOT_PREFIX = "p4-discovery."
@@ -1957,7 +2123,7 @@ class P4RepairBatch:
             review_kind=_require_text(record, "review_kind", described),
             target_identity=_require_text(record, "target_identity", described),
             operation_identity=_require_text(record, "operation_identity", described),
-            review_contract=_require_choice(record, "review_contract", P4_CONTRACTS, described),
+            review_contract=_require_choice(record, "review_contract", P4_REPAIR_CONTRACTS, described),
             source_review_run_id=_require_id(record, "source_review_run_id", "review_run", described),
             source_candidate_hash=_require_digest(record, "source_candidate_hash", described),
             candidate_generation=_require_int(record, "candidate_generation", described, minimum=1),
@@ -2179,7 +2345,7 @@ class P4RepairResult:
             review_kind=_require_text(record, "review_kind", described),
             target_identity=_require_text(record, "target_identity", described),
             operation_identity=_require_text(record, "operation_identity", described),
-            review_contract=_require_choice(record, "review_contract", P4_CONTRACTS, described),
+            review_contract=_require_choice(record, "review_contract", P4_REPAIR_CONTRACTS, described),
             source_review_run_id=_require_id(record, "source_review_run_id", "review_run", described),
             source_candidate_hash=source_hash,
             source_candidate_generation=source_generation,

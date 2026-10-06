@@ -307,6 +307,12 @@ def require_namespace_readable(store: ProjectStore) -> None:
         for family in paths.HISTORY_FAMILIES:
             for identifier in review.history_ids(family):
                 review.read_history(family, identifier)
+        # P6 (§30.17): the Project Profile and the immutable policy evidence records
+        review.read_profile()
+        for policy_change_id in review.policy_change_ids():
+            review.read_policy_change(policy_change_id)
+        for evaluation_id in review.policy_evaluation_ids():
+            review.read_policy_evaluation(evaluation_id)
         review.read_activation()
     except ValidationError as exc:
         raise StopError(

@@ -285,7 +285,9 @@ class IdKindTests(unittest.TestCase):
                    "derivation": "der", "review_run": "rr", "review_receipt": "rcp", "review_consumption": "rcs",
                    "review_task": "rtk", "review_finding": "rfd", "review_repair_batch": "rrb"}
         self.assertEqual(earlier, {kind: prefix for kind, prefix in ids.PREFIXES.items() if kind in earlier})
-        self.assertEqual(set(earlier) | {"review_relation", "review_decision"}, set(ids.PREFIXES))
+        # P6 (§30.16) adds the two policy kinds after P5's two; nothing else is added.
+        self.assertEqual(set(earlier) | {"review_relation", "review_decision", "review_policy_change",
+                                         "review_policy_evaluation"}, set(ids.PREFIXES))
 
     def test_reservation_keys_are_replay_stable_and_never_a_run_key(self) -> None:
         self.assertEqual(f"review-relation:{RUN}:1", history.review_relation_key(RUN, 1))
@@ -345,8 +347,10 @@ class PathTests(unittest.TestCase):
                 paths.require_review_record_path(refused)
 
     def test_history_is_the_twelfth_closed_namespace_entry(self) -> None:
-        self.assertEqual(12, len(paths.REVIEW_SUBDIRS))
-        self.assertEqual("history", paths.REVIEW_SUBDIRS[-1])
+        # P6 (§30.17) appends ``policy`` after it; history stays the twelfth entry.
+        self.assertEqual(13, len(paths.REVIEW_SUBDIRS))
+        self.assertEqual("history", paths.REVIEW_SUBDIRS[11])
+        self.assertEqual("policy", paths.REVIEW_SUBDIRS[-1])
         self.assertEqual(paths.HISTORY_DIR, f"{paths.REVIEW_DIR}/history")
 
 

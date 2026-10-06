@@ -92,7 +92,7 @@ class CommittedReviewStore(ReviewStore):
         return found
 
     def read_bytes(self, relative: str) -> bytes | None:
-        paths.require_review_record_path(relative)
+        paths.require_review_readable_path(relative)
         found = self._tree.get(relative)
         if found is None:
             return None

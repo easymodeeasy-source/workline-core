@@ -161,7 +161,7 @@ class ResultingTreeReviewStore(ReviewStore):
         return found
 
     def read_bytes(self, relative: str) -> bytes | None:
-        paths.require_review_record_path(relative)
+        paths.require_review_readable_path(relative)
         found = self._tree.get(relative)
         if found is None:
             return None
@@ -499,6 +499,18 @@ def _read_every_record(reader: ResultingTreeReviewStore, record_paths: Sequence[
             if family not in paths.HISTORY_FAMILIES or not identifier or "/" in identifier:
                 raise _unsafe(f"the resulting tree holds {relative}, which is not a canonical Review history record")
             reader.read_history(family, identifier)
+        elif area == "policy":
+            # P6 (§30.17): the one Profile file, or exactly ``policy/<family>/<id>.yaml``, each by its own reader.
+            if tail == paths.POLICY_PROFILE_NAME:
+                reader.read_profile()
+                continue
+            family, _, identifier = stem.partition("/")
+            if family not in paths.POLICY_FAMILIES or not identifier or "/" in identifier:
+                raise _unsafe(f"the resulting tree holds {relative}, which is not a canonical Review policy record")
+            if family == paths.POLICY_CHANGES:
+                reader.read_policy_change(identifier)
+            else:
+                reader.read_policy_evaluation(identifier)
         else:
             # Never skipped: an area this reader does not read is an area it cannot prove (P-12).
             raise _unsafe(f"the resulting tree holds {relative}, in a Review area no strict reader reads")

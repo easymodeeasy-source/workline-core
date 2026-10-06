@@ -85,6 +85,7 @@ from .store import (
     PHASE_EVENTS,
     PHASE_TERMINAL_EVENTS,
     PIN_OWNERS,
+    POLICY_CHANGE_OWNERS,
     PROJECT_YAML_REL,
     RECOVERY_DISPOSITION_OWNERS,
     RELATED_TYPES,
@@ -122,9 +123,15 @@ MISMATCH = "applied_mismatch"
 
 EFFECT_KINDS = (
     "write_file", "create_file", "add_relation", "remove_relation", "append_event", "git_commit", "git_push",
+    # P6 (``WORKLINE_COMPLETION_SPRINT`` §30.18): the one dedicated compare-and-replace of the canonical Project
+    # Profile, for exactly ``.workline/review/policy/project-profile.yaml`` and only the ``project-policy-change``
+    # owner. Every other canonical Review record stays immutable create-only.
+    "replace_review_profile",
 )
 #: The effects that write a Project's files rather than Git.
-FILE_EFFECT_KINDS = ("write_file", "create_file", "add_relation", "remove_relation", "append_event")
+FILE_EFFECT_KINDS = (
+    "write_file", "create_file", "add_relation", "remove_relation", "append_event", "replace_review_profile",
+)
 
 # A recorded commit names its base by the full object ID and its branch by the full ref name, never by an
 # expression Git would resolve.
@@ -175,7 +182,7 @@ def effect_path(effect: "dict[str, Any] | Effect") -> str | None:
     it wrote are the same path.
     """
     kind, payload = (effect["kind"], effect["payload"]) if isinstance(effect, dict) else (effect.kind, effect.payload)
-    if kind in ("write_file", "create_file"):
+    if kind in ("write_file", "create_file", "replace_review_profile"):
         return payload["path"]
     if kind in ("add_relation", "remove_relation"):
         return f"{WORKLINE_DIR}/relations/{payload['file']}.yaml"
@@ -265,6 +272,28 @@ class Effect:
         redirect the record out of the Project.
         """
         return Effect("create_file", {"path": path, "content": content})
+
+    @staticmethod
+    def replace_review_profile(path: str, content: str, expected_digest: str | None) -> "Effect":
+        """Replace the canonical Project Profile at ``path`` with ``content``, exactly once, by compare-and-replace.
+
+        The one mutable canonical Review state (P6 §30.18), with its own kind for
+        the reason :meth:`create_file` has one: the expectation is part of the
+        effect, not a convention at a call site. ``expected_digest`` is the
+        SHA-256 of the exact prior bytes the replace may overwrite, or ``None``
+        when the Profile must be absent (the first accepted policy change):
+
+        ```text
+        target == expected prior    -> unapplied
+        target == exactly content   -> applied, matching (replay writes nothing)
+        anything else               -> applied, mismatch: reconcile required
+        ```
+
+        Only the exact Profile path, only the ``project-policy-change`` owner, and
+        only where the platform can contain the write (the immutable create's
+        capability) - refused before it is recorded otherwise.
+        """
+        return Effect("replace_review_profile", {"path": path, "content": content, "expected_digest": expected_digest})
 
     @staticmethod
     def add_relation(file: str, relation: Relation) -> "Effect":
@@ -1940,7 +1969,7 @@ def planned_write(store: ProjectStore, record: dict[str, Any]) -> tuple[Path, st
     """
     kind = record["kind"]
     payload = record["payload"]
-    if kind in ("write_file", "create_file"):
+    if kind in ("write_file", "create_file", "replace_review_profile"):
         return store.abs(payload["path"]), payload["content"]
     if kind in ("add_relation", "remove_relation"):
         return store.relation_file(payload["file"]), rendered_ledger(record, store.read_relation_file(payload["file"]))
@@ -2114,6 +2143,120 @@ def _require_immutable_record_path(relative: str) -> None:
         require_disposition_path(relative)
         return
     review_paths.require_review_record_path(relative)
+
+
+# --------------------------------------------------------------------------- the P6 Project Profile (§30.18)
+#
+# The one mutable canonical Review state and the policy evidence namespace around it. Module-level, so the
+# controller's public surface stays exactly what it was.
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _guard_policy_record(path: str, owner: str) -> None:
+    """Only the ``project-policy-change`` owner creates under ``.workline/review/policy/`` (P6 §30.15, §30.17).
+
+    The directory named in any ASCII letter case, as the activation guard reads
+    its own, because a case-insensitive filesystem lands another spelling on
+    the same file.
+    """
+    from .review.ownership import ascii_fold  # the frozen ASCII-only fold (P3 F3 §7.8.4)
+
+    parts = path.split("/")
+    if len(parts) < 4 or ascii_fold(parts[2]) != "policy":
+        return
+    if owner not in POLICY_CHANGE_OWNERS:
+        raise ValidationError(
+            f"operation owner {owner} may not create {path}; the Project-local Review policy namespace is written only "
+            "by the project-policy-change operation",
+            code="review_policy_owner",
+        )
+
+
+def _validate_profile_replacement(payload: dict[str, Any], previous: list[dict[str, Any]], owner: str) -> None:
+    """The Profile CAS effect: exact path, exact owner, an exact expectation, containable - or not recorded at all."""
+    path = payload.get("path")
+    if set(payload) != {"path", "content", "expected_digest"}:
+        raise ValidationError("replace_review_profile carries exactly path, content and expected_digest")
+    if owner not in POLICY_CHANGE_OWNERS:
+        raise ValidationError(
+            f"operation owner {owner} may not replace the Project Profile; it is changed only by the "
+            "project-policy-change operation",
+            code="review_policy_owner",
+        )
+    if not review_paths.is_policy_profile_path(path):
+        raise ValidationError(
+            f"replace_review_profile writes exactly {review_paths.POLICY_PROFILE_REL}, never {path!r}",
+            code="review_policy_owner",
+        )
+    content = payload.get("content")
+    if not isinstance(content, str) or not content:
+        raise ValidationError("replace_review_profile content must be text")
+    expected = payload.get("expected_digest")
+    if expected is not None and (not isinstance(expected, str) or _SHA256.fullmatch(expected) is None):
+        raise ValidationError(
+            "replace_review_profile expected_digest is the lowercase hex SHA-256 of the prior bytes, or null"
+        )
+    if expected is not None and hashlib.sha256(content.encode("utf-8")).hexdigest() == expected:
+        raise ValidationError("replace_review_profile replaces the Profile with different bytes; a no-op is not recorded")
+    if any(effect_path(effect) == path for effect in previous):
+        raise ValidationError(f"replace_review_profile path written twice in one mutation: {path}")
+    # Where no replace can be kept inside the Project, none is recorded either (the immutable create's capability).
+    fsafe.require_immutable_create()
+
+
+def _classify_profile_replacement(store: ProjectStore, payload: dict[str, Any]) -> str:
+    """UNAPPLIED / MATCHING / MISMATCH of a recorded Profile CAS, by the exact bytes at its target, never followed."""
+    review_paths.require_policy_profile_path(payload["path"])
+    expected = payload.get("expected_digest")
+    data = payload["content"].encode("utf-8")
+    parts = payload["path"].split("/")
+    try:
+        chain = fsafe.walk(store.root, parts[:-1])
+    except ValidationError:
+        return MISMATCH
+    if chain is None:
+        return UNAPPLIED if expected is None else MISMATCH
+    with chain:
+        try:
+            stored = chain.last.read_file(parts[-1])
+        except ValidationError:
+            return MISMATCH
+    if stored is not None and stored == data:
+        return MATCHING
+    if stored is None:
+        return UNAPPLIED if expected is None else MISMATCH
+    if expected is not None and hashlib.sha256(stored).hexdigest() == expected:
+        return UNAPPLIED
+    return MISMATCH
+
+
+def _replace_review_profile(store: ProjectStore, payload: dict[str, Any]) -> None:
+    """Apply a recorded Profile CAS through the narrow fsafe compare-and-replace primitive, or reconcile required."""
+    review_paths.require_policy_profile_path(payload["path"])
+    fsafe.require_immutable_create()
+    parts = payload["path"].split("/")
+    data = payload["content"].encode("utf-8")
+    expected = payload.get("expected_digest")
+    prior: bytes | None = None
+    if expected is not None:
+        chain = fsafe.walk(store.root, parts[:-1])
+        if chain is not None:
+            with chain:
+                prior = chain.last.read_file(parts[-1])
+        if prior is None or hashlib.sha256(prior).hexdigest() != expected:
+            raise ReconcileRequired(
+                f"{payload['path']} no longer holds the exact prior Profile this change was decided against; the "
+                "Profile is never overwritten on a before-state mismatch: reconcile required",
+                reason="review_p6_profile_before_mismatch",
+            )
+    outcome = fsafe.compare_and_replace(store.root, parts, prior, data, TMP_DIR.split("/"))
+    if outcome == fsafe.CAS_MISMATCH:
+        raise ReconcileRequired(
+            f"{payload['path']} does not hold the exact prior state this change was decided against; the Profile is "
+            "never overwritten on a before-state mismatch: reconcile required",
+            reason="review_p6_profile_before_mismatch",
+        )
 
 
 class MutationController:
@@ -2391,6 +2534,7 @@ class MutationController:
                     )
                 else:
                     self._guard_activation_record(path, owner)
+                    _guard_policy_record(path, owner)
                 # Where no create can be kept inside the Project, none is
                 # recorded either: no mutation is left holding one it could
                 # never apply.
@@ -2413,6 +2557,9 @@ class MutationController:
                 )
             if path == PROJECT_YAML_REL:
                 self._guard_push_pin(payload["content"], owner)
+            return
+        if kind == "replace_review_profile":
+            _validate_profile_replacement(payload, previous, owner)
             return
         if kind in ("add_relation", "remove_relation"):
             file = payload.get("file")
@@ -2526,6 +2673,8 @@ class MutationController:
         payload = record["payload"]
         if kind == "create_file":
             return self._classify_review_create(payload["path"], payload["content"])
+        if kind == "replace_review_profile":
+            return _classify_profile_replacement(self.store, payload)
         if kind == "write_file":
             path = self.store.abs(payload["path"])
             if not path.exists():
@@ -2794,6 +2943,9 @@ class MutationController:
         if kind == "create_file":
             self._create_review_record(payload["path"], payload["content"])
             return
+        if kind == "replace_review_profile":
+            _replace_review_profile(self.store, payload)
+            return
         planned = self._planned_write(record)
         if planned is not None:
             path, text = planned
@@ -2998,7 +3150,7 @@ def _replay_key(effect: dict[str, Any]) -> tuple[str, ...] | None:
     kind, payload = effect.get("kind"), effect.get("payload")
     if not isinstance(payload, dict):
         return None
-    if kind in ("write_file", "create_file"):
+    if kind in ("write_file", "create_file", "replace_review_profile"):
         return ("path", str(payload.get("path")))
     if kind in ("add_relation", "remove_relation"):
         record = payload.get("record")

@@ -60,6 +60,21 @@ HISTORY_FAMILY_KINDS = {
     HISTORY_HUMAN_DECISIONS: "review_decision",
 }
 
+#: The P6 Project-local Review policy namespace (§15.23 / §30.17): the one mutable canonical Profile, written only
+#: by the dedicated Profile CAS effect of the ``project-policy-change`` owner, and two immutable create-only
+#: evidence families one level below it. Nothing else lives here - no index, no cache, no free-form configuration.
+POLICY_DIR = f"{REVIEW_DIR}/policy"
+POLICY_PROFILE_NAME = "project-profile.yaml"
+POLICY_PROFILE_REL = f"{POLICY_DIR}/{POLICY_PROFILE_NAME}"
+POLICY_CHANGES = "changes"
+POLICY_EVALUATIONS = "evaluations"
+POLICY_FAMILIES = (POLICY_CHANGES, POLICY_EVALUATIONS)
+#: The identity kind a policy evidence record of each family is named by (§30.16).
+POLICY_FAMILY_KINDS = {
+    POLICY_CHANGES: "review_policy_change",
+    POLICY_EVALUATIONS: "review_policy_evaluation",
+}
+
 #: The ephemeral Review area. Never canonical truth, never evidence, never the
 #: only material an accepted task can be reconstructed from (``R1`` §3).
 RUNTIME_REVIEW_DIR = f"{WORKLINE_DIR}/runtime/review"
@@ -114,6 +129,8 @@ REVIEW_SUBDIRS = (
     "repair-batches",
     "repair-results",
     "history",
+    # P6 (§30.17): the Project-local policy namespace, after P5's history.
+    "policy",
 )
 
 #: Gate generation files are zero-padded to this width.
@@ -252,6 +269,43 @@ def history_decision_rel(decision_id: str) -> str:
     return history_rel(HISTORY_HUMAN_DECISIONS, decision_id)
 
 
+def policy_family_dir(family: str) -> str:
+    """The directory of one P6 policy evidence family (``changes`` / ``evaluations``)."""
+    if family not in POLICY_FAMILIES:
+        raise ValidationError(f"not a Review policy evidence family: {family!r}", code="review_record_invalid")
+    return f"{POLICY_DIR}/{family}"
+
+
+def policy_record_rel(family: str, identifier: str) -> str:
+    """``policy/<family>/<identifier>.yaml``, the identifier being of the family's own identity kind."""
+    directory = policy_family_dir(family)
+    _require_id(identifier, POLICY_FAMILY_KINDS[family])
+    return f"{directory}/{identifier}.yaml"
+
+
+def policy_change_rel(policy_change_id: str) -> str:
+    """The one immutable change record of the applied Policy Change ``policy_change_id``."""
+    return policy_record_rel(POLICY_CHANGES, policy_change_id)
+
+
+def policy_evaluation_rel(evaluation_id: str) -> str:
+    """The one immutable observation evaluation ``evaluation_id``."""
+    return policy_record_rel(POLICY_EVALUATIONS, evaluation_id)
+
+
+def is_policy_profile_path(relative: object) -> bool:
+    """Whether ``relative`` is exactly the canonical Project Profile path - and nothing that resembles it."""
+    return relative == POLICY_PROFILE_REL
+
+
+def require_policy_profile_path(relative: str) -> None:
+    """Refuse every path but the exact canonical Project Profile (§15.27: only the exact path is authority)."""
+    if not is_policy_profile_path(relative):
+        raise ValidationError(
+            f"{relative!r} is not the canonical Project Profile {POLICY_PROFILE_REL}", code="review_containment"
+        )
+
+
 def is_review_path(relative: str) -> bool:
     """Whether ``relative`` is inside the canonical Review namespace."""
     return isinstance(relative, str) and relative.startswith(REVIEW_DIR + "/")
@@ -303,4 +357,20 @@ def require_review_record_path(relative: str) -> None:
     # P5 history is the one two-level area: exactly ``history/<family>/<id>.yaml`` (§28.3).
     if below[0] == "history" and len(below) == 3 and below[1] in HISTORY_FAMILIES:
         return
+    # P6 immutable policy evidence: exactly ``policy/<family>/<id>.yaml`` (§30.17). The mutable Profile is not a
+    # record this rule admits: it is written only by the dedicated Profile CAS effect (§30.18).
+    if below[0] == "policy" and len(below) == 3 and below[1] in POLICY_FAMILIES:
+        return
     raise ValidationError(f"not a canonical Review record location: {relative!r}", code="review_containment")
+
+
+def require_review_readable_path(relative: str) -> None:
+    """A path a Review reader may read: a canonical Review record, or the exact canonical Project Profile (P6).
+
+    Reading only. The immutable create still admits record paths alone
+    (:func:`require_review_record_path`), so the Profile is never created or
+    replaced by anything but its dedicated compare-and-replace effect.
+    """
+    if is_policy_profile_path(relative):
+        return
+    require_review_record_path(relative)

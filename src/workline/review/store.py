@@ -264,7 +264,7 @@ class ReviewStore:
     # reading ----------------------------------------------------------------
     def read_bytes(self, relative: str) -> bytes | None:
         """The exact stored bytes at ``relative``, read through the held no-follow chain; ``None`` if absent."""
-        paths.require_review_record_path(relative)
+        paths.require_review_readable_path(relative)
         parts = relative.split("/")
         chain = fsafe.walk(self.root, parts[:-1])
         if chain is None:
@@ -432,7 +432,8 @@ class ReviewStore:
 
     # consumptions -----------------------------------------------------------
     def read_consumption(self, consumption_id: str) -> "Consumption | PlanningConsumption":
-        """One stored Consumption: version 1 through the P1 reader, a Planning Consumption through version 2's."""
+        """One stored Consumption: version 1 through the P1 reader, a Planning Consumption through version 2's, a
+        Policy Consumption (P6) through version 3's."""
         relative = paths.consumption_rel(consumption_id)
         found, _ = self._read_record(relative, f"Review consumption {relative}", records.consumption_from_record)
         if found.consumption_id != consumption_id:
@@ -859,6 +860,83 @@ class ReviewStore:
 
     def human_decision_history_ids(self) -> tuple[str, ...]:
         return self.history_ids(paths.HISTORY_HUMAN_DECISIONS)
+
+    # P6 Project-local Review policy (§30.17) ------------------------------------
+    #
+    # The one mutable canonical Profile and the two immutable evidence families. The Profile is read through the
+    # same no-follow path safety and canonical-bytes boundary as every record; absence is valid and returns None.
+    # Read-only: nothing here writes, caches or indexes policy state.
+
+    def read_profile_bytes(self) -> bytes | None:
+        """The exact stored Project Profile bytes, or ``None`` when the Project has no Profile (valid: no override)."""
+        return self.read_bytes(paths.POLICY_PROFILE_REL)
+
+    def read_profile(self) -> Any:
+        """The canonical Project Profile (:class:`workline.review.policy.ProjectProfile`), or ``None`` when absent."""
+        from . import policy
+
+        raw = self.read_profile_bytes()
+        if raw is None:
+            return None
+        found, _ = policy.parse_profile_bytes(raw, f"the Project Profile {paths.POLICY_PROFILE_REL}")
+        return found
+
+    def profile_digest(self) -> str | None:
+        """The canonical digest of the stored Profile (the digest of its exact bytes), or ``None`` when absent."""
+        from . import policy
+
+        raw = self.read_profile_bytes()
+        if raw is None:
+            return None
+        _, text = policy.parse_profile_bytes(raw, f"the Project Profile {paths.POLICY_PROFILE_REL}")
+        return serialize.digest_of_text(text)
+
+    def _read_policy_record(self, family: str, identifier: str) -> tuple[dict[str, Any], str]:
+        from . import policy
+
+        relative = paths.policy_record_rel(family, identifier)
+        raw = self.read_bytes(relative)
+        if raw is None:
+            raise ValidationError(f"Review policy record not found: {relative}", code="review_record_missing")
+        data, text = serialize.parse_canonical(raw, f"Review policy record {relative}")
+        parse = policy.parse_change if family == paths.POLICY_CHANGES else policy.parse_evaluation
+        found = parse(data, f"Review policy record {relative}")
+        if serialize.canonical_data(found) != serialize.canonical_data(data):
+            raise ValidationError(f"Review policy record {relative} does not round-trip through its schema unchanged",
+                                  code="review_record_noncanonical")
+        key = "policy_change_id" if family == paths.POLICY_CHANGES else "evaluation_id"
+        if found[key] != identifier:
+            raise ValidationError(f"Review policy record {relative} declares {found[key]}, not the identity its "
+                                  "filename names", code="review_record_invalid")
+        return found, text
+
+    def read_policy_change(self, policy_change_id: str) -> dict[str, Any]:
+        found, _ = self._read_policy_record(paths.POLICY_CHANGES, policy_change_id)
+        return found
+
+    def policy_change_exists(self, policy_change_id: str) -> bool:
+        return self.read_bytes(paths.policy_change_rel(policy_change_id)) is not None
+
+    def policy_change_digest(self, policy_change_id: str) -> str:
+        _, text = self._read_policy_record(paths.POLICY_CHANGES, policy_change_id)
+        return serialize.digest_of_text(text)
+
+    def policy_change_ids(self) -> tuple[str, ...]:
+        return self._ids_in(paths.policy_family_dir(paths.POLICY_CHANGES), "review_policy_change")
+
+    def read_policy_evaluation(self, evaluation_id: str) -> dict[str, Any]:
+        found, _ = self._read_policy_record(paths.POLICY_EVALUATIONS, evaluation_id)
+        return found
+
+    def policy_evaluation_exists(self, evaluation_id: str) -> bool:
+        return self.read_bytes(paths.policy_evaluation_rel(evaluation_id)) is not None
+
+    def policy_evaluation_digest(self, evaluation_id: str) -> str:
+        _, text = self._read_policy_record(paths.POLICY_EVALUATIONS, evaluation_id)
+        return serialize.digest_of_text(text)
+
+    def policy_evaluation_ids(self) -> tuple[str, ...]:
+        return self._ids_in(paths.policy_family_dir(paths.POLICY_EVALUATIONS), "review_policy_evaluation")
 
     # activation -------------------------------------------------------------
     def activation_exists(self) -> bool:

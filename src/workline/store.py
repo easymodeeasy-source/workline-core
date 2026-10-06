@@ -60,6 +60,13 @@ PIN_OWNERS = ("project-start", "push-destination-pin")
 # canonical Review record stays creatable by whichever owner records it.
 ACTIVATION_OWNERS = ("work-terminal-activation",)
 
+# Only this internal operation owner writes the P6 Project-local Review policy namespace
+# (``.workline/review/policy/``, ``WORKLINE_COMPLETION_SPRINT`` §30.15 / §30.18): the mutable canonical
+# Project Profile through its one dedicated compare-and-replace effect, and the immutable change and
+# evaluation records through the ordinary immutable create. The Mutation Controller enforces it, the
+# activation guard's sibling; no other canonical Review record becomes mutable.
+POLICY_CHANGE_OWNERS = ("project-policy-change",)
+
 # Workline recovery authority's canonical namespace (RB10 N4): one immutable
 # Human recovery disposition per target stable ID, at
 # ``.workline/recovery/dispositions/<target_id>.yaml``. Committed Project state,

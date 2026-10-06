@@ -105,7 +105,7 @@ def validate_review(store: ProjectStore) -> list[ReviewProblem]:
     for the Project, and never by a reader of one commit's records.
     """
     review = ReviewStore(store)
-    return review_problems(review) + activation_problems(store, review)
+    return review_problems(review) + activation_problems(store, review) + _policy_compatibility(store, review)
 
 
 def review_problems(review: ReviewStore) -> list[ReviewProblem]:
@@ -132,6 +132,7 @@ def review_problems(review: ReviewStore) -> list[ReviewProblem]:
     problems.extend(_p4_records(review, chains))
     problems.extend(_history_records(review))
     problems.extend(_activation(review))
+    problems.extend(_policy_records(review, chains))
     return problems
 
 
@@ -163,6 +164,33 @@ def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
             )
         elif entry.name == "history":
             problems.extend(_history_shape(review))
+        elif entry.name == "policy":
+            problems.extend(_policy_shape(review))
+    return problems
+
+
+def _policy_shape(review: ReviewStore) -> list[ReviewProblem]:
+    """``policy/`` holds the one Profile file and the two evidence family directories, and nothing else (§30.17).
+
+    Read without following: an indirection where the Profile or a family
+    belongs is refused, and a Profile that is a directory, or a family that is
+    a file, is a namespace problem. Absence of any of them is valid.
+    """
+    try:
+        found = review.entries(paths.POLICY_DIR) or []
+    except ValidationError as exc:
+        return [_problem(exc)]
+    problems: list[ReviewProblem] = []
+    for entry in found:
+        where = f"{paths.POLICY_DIR}/{entry.name}"
+        if entry.name != paths.POLICY_PROFILE_NAME and entry.name not in paths.POLICY_FAMILIES:
+            problems.append(ReviewProblem("review_namespace_invalid", f"{paths.POLICY_DIR} holds unknown entry {entry.name}"))
+        elif entry.is_indirection:
+            problems.append(ReviewProblem("review_containment", f"{where} is a symlink, junction or other reparse point"))
+        elif entry.name == paths.POLICY_PROFILE_NAME and not entry.is_file:
+            problems.append(ReviewProblem("review_namespace_invalid", f"{where} is not a plain Profile file"))
+        elif entry.name in paths.POLICY_FAMILIES and not entry.is_dir:
+            problems.append(ReviewProblem("review_namespace_invalid", f"{where} is a file where a directory belongs"))
     return problems
 
 
@@ -675,6 +703,98 @@ def _p4_chain(
                     "review_record_missing", f"{where}: Candidate N+1 {result.result_candidate_hash} is not stored",
                 ))
     return problems
+
+
+def _policy_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[ReviewProblem]:
+    """P6 normative Review validation (§30.30): the Profile, change and evaluation records, read strictly.
+
+    Absence is valid. A malformed Profile, a broken lineage, an unreadable or
+    orphaned evidence record, a Policy Receipt consumed by anything but a
+    version 3 Policy Consumption, and a Policy Review Run with a repair branch
+    are Problems. Whether the Profile is compatible with the current Global
+    baseline needs the configured Workline root, so it is checked for the
+    Project (:func:`validate_review`), never for one commit's records.
+    """
+    from . import p4, policy
+    from .records import PolicyConsumption
+
+    problems = [ReviewProblem(code, message) for code, message in policy.policy_problems(review, None)]
+    try:
+        consumptions = review.consumptions()
+    except ValidationError:
+        consumptions = ()  # the Consumption pass reports it
+    try:
+        policy_receipts = {str(review.read_policy_change(change_id)["receipt_id"])
+                           for change_id in review.policy_change_ids()}
+    except ValidationError:
+        policy_receipts = set()  # the record pass reports it
+    for found in consumptions:
+        if isinstance(found, PolicyConsumption):
+            try:
+                receipt = review.read_receipt(found.receipt_id)
+            except ValidationError:
+                continue  # the Consumption pass reports a missing Receipt
+            if receipt.review_kind != policy.REVIEW_KIND \
+                    or receipt.authorized_operation_stage != policy.AUTHORIZED_OPERATION_STAGE:
+                problems.append(ReviewProblem("review_record_conflict",
+                                              f"Policy Consumption {found.consumption_id} consumes a Receipt that is not a "
+                                              "Policy Change authorization"))
+            change_id = str(found.persisted_policy["policy_change_id"])
+            try:
+                change = review.read_policy_change(change_id) if review.policy_change_exists(change_id) else None
+            except ValidationError:
+                change = None
+            if change is None or change["receipt_id"] != found.receipt_id \
+                    or change["after_profile_digest"] != found.persisted_policy["after_profile_digest"] \
+                    or change["candidate_hash"] != found.authorized_candidate_hash:
+                problems.append(ReviewProblem("review_record_conflict",
+                                              f"Policy Consumption {found.consumption_id} does not bind the stored change "
+                                              f"record of {change_id}"))
+        elif found.receipt_id in policy_receipts:
+            problems.append(ReviewProblem("review_record_conflict",
+                                          f"consumption {found.consumption_id} consumes the Policy Change Receipt "
+                                          f"{found.receipt_id} and is not a version 3 Policy Consumption"))
+    for run_id, chain in sorted(chains.items()):
+        first = chain.generations[0]
+        try:
+            contracts = {p4.contract_of_task_input(review.read_task_input(str(task["task_id"])))
+                         for task in first.accepted_tasks}
+        except ValidationError:
+            continue  # the provenance pass reports it
+        if policy.POLICY_CHANGE_CONTRACT not in contracts:
+            continue
+        where = f"Policy Review Run {run_id}"
+        if contracts != {policy.POLICY_CHANGE_CONTRACT} or first.target_identity != policy.TARGET_IDENTITY \
+                or first.review_kind != policy.REVIEW_KIND:
+            problems.append(ReviewProblem("review_record_conflict",
+                                          f"{where} does not bind exactly the Policy Review contract, kind and target"))
+        elif p4.shape_of(chain) == p4.SHAPE_REPAIR:
+            problems.append(ReviewProblem("review_gate_chain", f"{where} accepts a repair; a Policy Review has no "
+                                                               "Repair Batch branch"))
+    return problems
+
+
+def _policy_compatibility(store: ProjectStore, review: ReviewStore) -> list[ReviewProblem]:
+    """§30.7 / §30.30: an incompatible canonical Profile is a validation Problem; an absent one never is."""
+    from . import policy
+
+    try:
+        if review.read_profile_bytes() is None:
+            return []
+        profile = review.read_profile()
+    except ValidationError:
+        return []  # a malformed Profile is the record pass's
+    try:
+        workline_root = store.workline_root()
+        baseline = policy.load_global_baseline(workline_root)
+    except (ValidationError, StopError) as exc:
+        return [ReviewProblem(policy.CODE_BASELINE_UNAVAILABLE, "the Global policy baseline cannot be derived to "
+                                                                f"check the Project Profile: {exc}")]
+    problem = policy.compatibility_problem(profile, baseline)
+    if problem is None:
+        return []
+    return [ReviewProblem(policy.CODE_PROFILE_INCOMPATIBLE, f"the canonical Project Profile is incompatible: {problem} "
+                                                            "(policy maintenance / reconcile)")]
 
 
 def _history_records(review: ReviewStore) -> list[ReviewProblem]:

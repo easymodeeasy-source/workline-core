@@ -35,7 +35,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
-from . import closure, history, paths, records, serialize
+from . import closure, history, paths, policy, records, serialize
 from .records import (
     AUTHORIZATION_READY,
     DISPOSITION_FUTURE_WORK_CANDIDATE,
@@ -111,6 +111,15 @@ P5_ADJUDICATION_INSTRUCTION = "review-v1-p5-adjudication-instruction-v1"
 POLICY_IDS = (POLICY_ID, P5_POLICY_ID)
 #: What a NEW first Run of a P4-capable owner binds (GAP-A items 2 and 7).
 DEFAULT_POLICY_ID = P5_POLICY_ID
+#: P6 (§30.6, R6-1): the P6-capable family policy. Its Effective Policy is not a static record: a P6-capable Run
+#: freezes the normalized Effective Policy it resolved (GlobalPolicyBaseline + Profile or explicit absence) in its
+#: own request envelopes, and its effective_policy_hash is that record's digest. Every P5 rule and the P5 history
+#: contract hold for it unchanged.
+P6_POLICY_ID = policy.P6_POLICY_ID
+#: Every family policy, oldest first: the two with a static Effective Policy, then the P6-capable one.
+FAMILY_POLICY_IDS = POLICY_IDS + (P6_POLICY_ID,)
+#: The family policies that bind the durable P5 history contract: P5, and P6 which keeps it unchanged.
+HISTORY_POLICY_IDS = (P5_POLICY_ID, P6_POLICY_ID)
 
 TASK_KIND_DISCOVERY = "p4-discovery-v1"
 TASK_KIND_ADJUDICATION = "p4-adjudication-v1"
@@ -650,14 +659,63 @@ P5_POLICY_RECORD: dict[str, Any] = {
     },
 }
 
-#: Every policy of the P4-capable family, by its identity.
+#: Every policy of the P4-capable family with a static Effective Policy, by its identity.
 POLICY_RECORDS: Mapping[str, dict[str, Any]] = {POLICY_ID: POLICY_RECORD, P5_POLICY_ID: P5_POLICY_RECORD}
+
+
+#: The P6-capable family policy (§30.6, R6-1): the P5 policy's every rule and its history contract unchanged, the
+#: Policy Review contract among the family's contracts, and the fixed adaptive rules. It is the family's static
+#: identity record; a P6-capable Run's Effective Policy is the normalized record it froze, which binds this record's
+#: digest. ``skills/review`` declares it verbatim under its own heading, after the P5 block.
+P6_POLICY_RECORD: dict[str, Any] = {
+    **{key: value for key, value in P5_POLICY_RECORD.items() if key not in (serialize.SCHEMA_KEY, "policy_id")},
+    serialize.SCHEMA_KEY: "review-p6-policy",
+    "policy_id": P6_POLICY_ID,
+    "review_contracts": [PLANNING_CONTRACT, WORK_CONTRACT, records.P6_POLICY_CHANGE_CONTRACT],
+    "adaptive": {
+        "registry": [policy.SURFACE_REQUIRED_SLOTS, policy.SURFACE_EXTRA_SCOPE_STEPS],
+        "registry_rule": "exactly the two fixed v1 surfaces; an unknown surface is rejected; the absolute non-adaptive "
+                         "surface is rejected mechanically; a Profile never reclassifies or invents a surface",
+        "resolution_rule": "a NEW first Run of a P4-capable Formal Review resolves GlobalPolicyBaseline + the canonical "
+                           "Project Profile or its explicit absence and freezes the normalized Effective Policy in its "
+                           "requests; an open Run never changes policy; an incompatible Profile starts no new Run",
+        "required_slots_rule": "N required discovery slots bound to N distinct reviewer identity/version pairs, all "
+                               "settled at G2 before adjudication",
+        "extra_scope_steps_rule": "post-repair reverification at the repair's impact level widened by N levels, capped "
+                                  "at FOUNDATION, never below the P4 minimum",
+        "holdout_rule": "an active lightening experiment freezes the pre-change stronger behaviour as an all_relevant "
+                        "holdout: discovery holdout slots accepted at G1, settled at G2 and adjudicated at G4; "
+                        "reverification holdout checks present in the repair verification before the Repair Result; "
+                        "a failed holdout check blocks; without its holdout channel the Run is refused",
+        "policy_review_rule": "project-policy-change-v1 is reviewed under the pre-change Effective Policy and the fixed "
+                              "meta-rules, G1-G5, no Repair Batch branch; blocking or HUMAN issues no Receipt",
+    },
+}
+#: Every family policy record, the P6-capable family identity included.
+FAMILY_POLICY_RECORDS: Mapping[str, dict[str, Any]] = {**POLICY_RECORDS, P6_POLICY_ID: P6_POLICY_RECORD}
 
 
 def _require_policy(policy_id: object) -> str:
     if policy_id not in POLICY_RECORDS:
         raise ValidationError(f"not a policy of the P4-capable family: {policy_id!r}", code="review_contract_invalid")
     return str(policy_id)
+
+
+def _require_family_policy(policy_id: object) -> str:
+    """A policy of the P4-capable family, the P6-capable one included (§30.6)."""
+    if policy_id not in FAMILY_POLICY_RECORDS:
+        raise ValidationError(f"not a policy of the P4-capable family: {policy_id!r}", code="review_contract_invalid")
+    return str(policy_id)
+
+
+def family_policy_hash(policy_id: str) -> str:
+    """The digest of a family policy's static identity record - for P4 and P5 their Effective Policy hash."""
+    return serialize.digest(serialize.canonical_data(FAMILY_POLICY_RECORDS[_require_family_policy(policy_id)]))
+
+
+def is_history_policy(policy_id: object) -> bool:
+    """Whether a family policy binds the durable P5 history contract (P5, and P6 which keeps it unchanged)."""
+    return policy_id in HISTORY_POLICY_IDS
 
 
 def policy_record(policy_id: str = POLICY_ID) -> dict[str, Any]:
@@ -686,12 +744,32 @@ def new_run_policy() -> str:
 
 
 def history_contract_of_policy(policy_id: str) -> str | None:
-    """The durable history contract a family policy binds: none for P4, :data:`history.HISTORY_CONTRACT` for P5."""
-    return history.HISTORY_CONTRACT if _require_policy(policy_id) == P5_POLICY_ID else None
+    """The durable history contract a family policy binds: none for P4, :data:`history.HISTORY_CONTRACT` for P5 / P6."""
+    return history.HISTORY_CONTRACT if is_history_policy(_require_family_policy(policy_id)) else None
 
 
 def adjudication_instruction_of(policy_id: str) -> str:
-    return str(POLICY_RECORDS[_require_policy(policy_id)]["adjudication"]["instruction"])
+    return str(FAMILY_POLICY_RECORDS[_require_family_policy(policy_id)]["adjudication"]["instruction"])
+
+
+def _p6_fields(policy_id: str, effective_policy: object, role: object, *, discovery: bool) -> dict[str, Any]:
+    """The fields a P6-capable request adds - its frozen Effective Policy (and a discovery task's role) - or none."""
+    if policy_id != P6_POLICY_ID:
+        if effective_policy is not None or role is not None:
+            raise ValidationError("only a P6-capable request binds an Effective Policy record or a discovery role",
+                                  code="review_record_invalid")
+        return {}
+    fields: dict[str, Any] = {
+        policy.EFFECTIVE_POLICY_KEY: policy.parse_effective_policy(effective_policy, "the request's Effective Policy"),
+    }
+    if discovery:
+        if role not in policy.DISCOVERY_ROLES:
+            raise ValidationError(f"a P6 discovery request is {' or '.join(policy.DISCOVERY_ROLES)}, not {role!r}",
+                                  code="review_record_invalid")
+        fields[policy.DISCOVERY_ROLE_KEY] = role
+    elif role is not None:
+        raise ValidationError("only a discovery request carries a discovery role", code="review_record_invalid")
+    return fields
 
 
 #: The verification identities each impact class requires at least (§12.14 / §27.19).
@@ -754,6 +832,8 @@ def discovery_request(
     policy_id: str = POLICY_ID,
     set_aside_summaries: Iterable[Mapping[str, Any]] = (),
     decision_evidence: Iterable[Mapping[str, Any]] = (),
+    effective_policy: Mapping[str, Any] | None = None,
+    discovery_role: str | None = None,
 ) -> dict[str, Any]:
     """The P4 discovery request: what one discovery actor is asked, with the P4 contract bound explicitly.
 
@@ -767,7 +847,9 @@ def discovery_request(
     writes (P-5): the ``set_aside`` Run summaries of the predecessors it sets
     aside, and the Human Decision Evidence it persists before any launch
     (§28.14) - each by identity and exact digest, so what generation 1 owns is
-    read from this canonical request, never from file presence.
+    read from this canonical request, never from file presence. A P6-capable
+    request (§30.6) is a P5 request that also binds the Run's frozen Effective
+    Policy and the task's ``discovery_role`` (required slot or holdout).
     """
     if review_contract not in CONTRACTS:
         raise ValidationError(f"not a P4 contract: {review_contract!r}", code="review_contract_invalid")
@@ -784,7 +866,7 @@ def discovery_request(
         serialize.VERSION_KEY: RECORD_VERSION,
         "review_contract": review_contract,
         "review_kind": review_kind,
-        "policy_id": _require_policy(policy_id),
+        "policy_id": _require_family_policy(policy_id),
         "instruction": DISCOVERY_INSTRUCTION,
         "viewpoint": viewpoint,
         "candidate": candidate,
@@ -805,6 +887,7 @@ def discovery_request(
         history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT,
         "set_aside_summaries": summaries,
         "decision_evidence": decisions,
+        **_p6_fields(policy_id, effective_policy, discovery_role, discovery=True),
     })
     return serialize.canonical_data(record)
 
@@ -823,6 +906,7 @@ def adjudication_request(
     evidence_ids: Sequence[str],
     policy_id: str = POLICY_ID,
     prior_history: Iterable[Mapping[str, Any]] = (),
+    effective_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The adjudication request, built from canonical material only (§12.7 / §27.10).
 
@@ -840,7 +924,7 @@ def adjudication_request(
         serialize.VERSION_KEY: RECORD_VERSION,
         "review_contract": review_contract,
         "review_kind": review_kind,
-        "policy_id": _require_policy(policy_id),
+        "policy_id": _require_family_policy(policy_id),
         "instruction": adjudication_instruction_of(policy_id),
         "adjudication_contract": ADJUDICATION_CONTRACT,
         "review_run_id": review_run_id,
@@ -856,7 +940,8 @@ def adjudication_request(
         if references:
             raise ValidationError("a P4-only adjudication binds no prior history", code="review_record_invalid")
         return serialize.canonical_data(record)
-    record.update({history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT, "prior_history": references})
+    record.update({history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT, "prior_history": references,
+                   **_p6_fields(policy_id, effective_policy, None, discovery=False)})
     return serialize.canonical_data(record)
 
 
@@ -874,6 +959,7 @@ def repair_request(
     strategy: str,
     evidence_constraints: Sequence[str],
     policy_id: str = POLICY_ID,
+    effective_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The ReviewRepairRequest, built from canonical material only (§12.9 / §27.15).
 
@@ -884,7 +970,7 @@ def repair_request(
         serialize.VERSION_KEY: RECORD_VERSION,
         "review_contract": review_contract,
         "review_kind": review_kind,
-        "policy_id": _require_policy(policy_id),
+        "policy_id": _require_family_policy(policy_id),
         "instruction": REPAIR_INSTRUCTION,
         "review_run_id": review_run_id,
         "candidate_hash": candidate_hash,
@@ -899,6 +985,7 @@ def repair_request(
     if policy_id == POLICY_ID:
         return serialize.canonical_data(record)
     record[history.HISTORY_CONTRACT_KEY] = history.HISTORY_CONTRACT
+    record.update(_p6_fields(policy_id, effective_policy, None, discovery=False))
     return serialize.canonical_data(record)
 
 
@@ -914,12 +1001,57 @@ def policy_of_envelope(envelope: object) -> str | None:
         return None
     if envelope.get(serialize.VERSION_KEY) != RECORD_VERSION:
         return None
-    policy = envelope.get("policy_id")
-    if policy == POLICY_ID:
+    policy_value = envelope.get("policy_id")
+    if policy_value == POLICY_ID:
         return POLICY_ID
-    if policy == P5_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT:
+    if policy_value == P5_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT:
         return P5_POLICY_ID
+    if policy_value == P6_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT \
+            and effective_policy_of_envelope(envelope) is not None:
+        return P6_POLICY_ID
     return None
+
+
+def effective_policy_of_envelope(envelope: object) -> dict[str, Any] | None:
+    """The frozen Effective Policy a P6-capable request binds, strictly read; ``None`` when it binds none (or none
+    this build reads). A P6 discovery request also names its role; anything else names none."""
+    if not isinstance(envelope, dict) or envelope.get("policy_id") != P6_POLICY_ID:
+        return None
+    try:
+        found = policy.parse_effective_policy(envelope.get(policy.EFFECTIVE_POLICY_KEY), "a request's Effective Policy")
+    except ValidationError:
+        return None
+    discovery = envelope.get(serialize.SCHEMA_KEY) == SCHEMA_DISCOVERY_REQUEST
+    role = envelope.get(policy.DISCOVERY_ROLE_KEY)
+    if (discovery and role not in policy.DISCOVERY_ROLES) or (not discovery and policy.DISCOVERY_ROLE_KEY in envelope):
+        return None
+    return found
+
+
+def envelope_policy_hash(envelope: object) -> str | None:
+    """The Effective Policy hash a P4-capable request binds: its family policy's static hash, or - P6 - the digest
+    of the Effective Policy it froze. ``None`` when the envelope is not a P4-capable request."""
+    found = policy_of_envelope(envelope)
+    if found is None:
+        return None
+    if found == P6_POLICY_ID:
+        return policy.effective_policy_hash(effective_policy_of_envelope(envelope) or {})
+    return policy_hash(found)
+
+
+def run_effective_policy(reader: Any, chain: Any) -> dict[str, Any] | None:
+    """The Effective Policy a P6-capable Run froze, read from its generation-1 request; ``None`` for P4 / P5 Runs."""
+    first = chain.generations[0]
+    if not first.accepted_tasks:
+        return None
+    envelope = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
+    return effective_policy_of_envelope(envelope)
+
+
+def discovery_role_of(task_input: records.TaskInput) -> str:
+    """A discovery task's role: ``holdout`` only where a P6-capable request says so; every other is required."""
+    role = task_input.request_envelope.get(policy.DISCOVERY_ROLE_KEY)
+    return policy.ROLE_HOLDOUT if role == policy.ROLE_HOLDOUT else policy.ROLE_REQUIRED
 
 
 def contract_of_envelope(envelope: object) -> str | None:
@@ -1004,6 +1136,14 @@ def task_input(
     """
     if policy_of_envelope(envelope) not in (None, policy_id):
         raise ValidationError("a task input binds the policy its request names", code="review_record_invalid")
+    if policy_id == P6_POLICY_ID:
+        effective = effective_policy_of_envelope(envelope)
+        if effective is None:
+            raise ValidationError("a P6-capable task input binds the Effective Policy its request froze",
+                                  code="review_record_invalid")
+        effective_hash = policy.effective_policy_hash(effective)
+    else:
+        effective_hash = policy_hash(policy_id)
     return records.TaskInput(
         task_id=task_id,
         task_slot=task_slot,
@@ -1016,7 +1156,7 @@ def task_input(
         reconstruction_mode=records.RECONSTRUCTION_SNAPSHOT,
         candidate_material_digest=candidate_material_digest,
         review_context_hash=review_context_hash,
-        effective_policy_hash=policy_hash(policy_id),
+        effective_policy_hash=effective_hash,
         accepted_generation=accepted_generation,
     )
 
@@ -2817,7 +2957,7 @@ def set_aside_summaries(reader: Any, set_aside: Iterable[Mapping[str, Any]]) -> 
         contracts = run_contracts(reader, chain)
         if len(contracts) != 1 or None in contracts:
             continue
-        if run_policy(reader, chain) != P5_POLICY_ID or final_disposition(reader, chain) is not None:
+        if not is_history_policy(run_policy(reader, chain)) or final_disposition(reader, chain) is not None:
             continue
         found.append(history.set_aside_run_summary(
             chain.latest, candidate_generation=run_candidate_generation(reader, chain),
@@ -2869,7 +3009,7 @@ def run_history_paths(reader: Any, review_run_id: str, chain: Any) -> list[str]:
     is the Consumption transition's, never a generation's.
     """
     first = chain.generations[0]
-    if not first.accepted_tasks or run_policy(reader, chain) != P5_POLICY_ID:
+    if not first.accepted_tasks or not is_history_policy(run_policy(reader, chain)):
         return []
     envelope = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
     found = first_generation_history_paths(envelope)
@@ -2898,7 +3038,7 @@ def recovered_history_bindings(reader: Any, review_run_id: str, chain: Any) -> l
     Run re-reserves none of them. None for a P4-only Run.
     """
     first = chain.generations[0]
-    if not first.accepted_tasks or run_policy(reader, chain) != P5_POLICY_ID:
+    if not first.accepted_tasks or not is_history_policy(run_policy(reader, chain)):
         return []
     envelope = reader.read_task_input(str(first.accepted_tasks[0]["task_id"])).request_envelope
     found = [(history.review_decision_key(str(item["affected_review_run_id"])), str(item["review_decision_id"]),
@@ -3036,7 +3176,7 @@ def decision_evidence_record(
     chain = reader.gate_chain(run_id)
     if chain is None:
         raise _evidence_stop(f"the affected Review Run {run_id} does not exist")
-    if run_policy(reader, chain) != P5_POLICY_ID:
+    if not is_history_policy(run_policy(reader, chain)):
         raise _evidence_stop(f"the affected Review Run {run_id} is not a P5 Run; a P4-only cycle binds no history")
     adjudication = bound_adjudication(reader, chain)
     if chain.latest.generation != ADJUDICATION_SETTLE_GENERATION or adjudication is None \
@@ -3113,7 +3253,7 @@ def require_first_generation_history(reader: Any, review_run_id: str, envelope: 
     evidence validates against its source (``successor_launch``). A P4-only
     request binds nothing and passes by its explicit contract.
     """
-    if policy_of_envelope(envelope) != P5_POLICY_ID:
+    if not is_history_policy(policy_of_envelope(envelope)):
         return
     bound: list[tuple[str, str, str]] = [
         (paths.HISTORY_RUNS, str(item["review_run_id"]), str(item["digest"]))
@@ -3135,7 +3275,7 @@ def require_first_generation_history(reader: Any, review_run_id: str, envelope: 
                for item in envelope.get("decision_evidence") or []}
     for run_id in human_decision_resumes(envelope.get("set_aside_runs") or []):
         chain = reader.gate_chain(run_id)
-        if chain is not None and run_policy(reader, chain) == P5_POLICY_ID and run_id not in covered:
+        if chain is not None and is_history_policy(run_policy(reader, chain)) and run_id not in covered:
             raise history.stop(history.CODE_HISTORY_MISSING,
                                f"Review Run {review_run_id} resumes P5 Run {run_id} under a Human decision and binds no "
                                "Human Decision Evidence for it; nothing is launched")
@@ -3167,7 +3307,8 @@ def require_decision_evidence_cover(reader: Any, set_aside: Iterable[Mapping[str
                              "as human_decision; a detached record is never created")
     for run_id in sorted(named):
         chain = reader.gate_chain(run_id)
-        if chain is None or run_policies(reader, chain) != {P5_POLICY_ID}:
+        policies = None if chain is None else run_policies(reader, chain)
+        if policies is None or len(policies) != 1 or not is_history_policy(next(iter(policies))):
             raise _evidence_stop(f"Human Decision Evidence names Review Run {run_id}, which is not a P5 Run; a P4-only "
                                  "cycle binds no history and resumes with the Human decision alone")
         if resumed_elsewhere(reader, run_id):
@@ -3175,7 +3316,8 @@ def require_decision_evidence_cover(reader: Any, set_aside: Iterable[Mapping[str
                                  "affected Run")
     for run_id in resumed:
         chain = reader.gate_chain(run_id)
-        if chain is None or run_policies(reader, chain) != {P5_POLICY_ID}:
+        policies = None if chain is None else run_policies(reader, chain)
+        if policies is None or len(policies) != 1 or not is_history_policy(next(iter(policies))):
             continue
         if run_id not in named:
             raise history.stop(
@@ -3312,7 +3454,7 @@ def relation_drafts(returned: P4AdjudicationReturn, found: records.P4Adjudicatio
     claims = returned.relation_claims
     if not isinstance(claims, tuple):
         raise _relation_invalid("relation_claims is not a tuple")
-    if policy_id != P5_POLICY_ID:
+    if not is_history_policy(policy_id):
         if claims:
             raise _relation_invalid("a P4-only adjudication returns no cross-run relation claim")
         return ()

@@ -44,11 +44,16 @@ PREFIXES = {
     # reuses the identity of its immutable source record and allocates nothing.
     "review_relation": "rhr",
     "review_decision": "rhd",
+    # P6 (§30.16): an applied Project Policy Change and an observation evaluation of one are explicit Review
+    # kinds, never the Project-domain ``relation`` / ``derivation`` kinds, with prefixes that cannot be read as
+    # ``rel_``, ``rr_`` or the Roadmap prefix ``r`` followed by text.
+    "review_policy_change": "rpc",
+    "review_policy_evaluation": "rpe",
 }
 
-# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_``/``rhr_``/``rhd_``
+# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_``/``rhr_``/``rhd_``/``rpc_``/``rpe_``
 # are read as themselves rather than as the Roadmap prefix ``r`` followed by text.
-_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
+_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rpc|rpe|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
 
 
 def new_ulid(now_ms: int | None = None) -> str:

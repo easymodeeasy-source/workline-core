@@ -114,8 +114,10 @@ class ScopeTests(unittest.TestCase):
                "duplicate_relation_problems", "duplicate_decision_problems")
     #: The modules that may reach the history core: the reader, the structural validator, the inert P4/P5 core,
     #: the two operation owners, the committed planning proof, and CREATE's explicit future-Work provenance (GAP-D).
+    #: P6 (§30.31) adds the inert policy core, which reads only validated P5 references, and the
+    #: ``project-policy-change`` owner, which writes its Policy Run's history at its own boundaries.
     REACHING = {"store.py", "validate.py", "p4.py", "roadmap_review.py", "start_review.py", "publication.py",
-                "create.py"}
+                "create.py", "policy.py", "project_policy.py"}
 
     def test_what_stays_unwired_is_called_from_nowhere(self) -> None:
         for path, text in _sources().items():
