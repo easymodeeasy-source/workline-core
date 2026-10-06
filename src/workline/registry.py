@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 
@@ -264,6 +265,68 @@ def skill_inventory(root: Path) -> dict[str, SkillEntry]:
             raise StopError(f"unroutable skill survived validation: {skill_id}", code="registry_invalid")
         inventory[skill_id] = SkillEntry(skill_id, entry.target, entry.context, resolved)
     return inventory
+
+
+@dataclass(frozen=True)
+class AuthorityEntry:
+    """One stable authority ID a registry declares, by identity only - never by its prose.
+
+    ``target`` is the routing target exactly as registered (``None`` for a rule:
+    its text is the registry itself), ``context`` the declared
+    ``workline-context`` (Skills only), and ``sha256`` the digest of the exact
+    target bytes (``None`` for a rule, or when the target cannot be read).
+    """
+
+    authority_id: str
+    target: str | None
+    context: str | None
+    sha256: str | None
+
+
+@dataclass(frozen=True)
+class AuthorityInventory:
+    """What explains the active rules of a Workline root, read-only and deterministic.
+
+    ``entries`` lists the required rules and every registry-routed canonical
+    Skill, sorted by ID - and is empty whenever the registry does not validate:
+    a broken registry never degrades into a partial routing inventory.
+    ``registry_sha256`` is the digest of the exact ``registry.md`` bytes
+    whenever they can be read, valid or not.
+    """
+
+    registry_sha256: str | None
+    validation: RegistryValidation
+    entries: tuple[AuthorityEntry, ...]
+
+
+def _sha256_of(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def authority_inventory(root: Path) -> AuthorityInventory:
+    """The read-only authority inventory of the Workline root ``root`` (a diagnostic, never a routing decision)."""
+    root = Path(root).resolve()
+    registry = root / "registry.md"
+    digest = _sha256_of(registry) if registry.is_file() else None
+    validation = validate_registry(root)
+    if not validation.ok:
+        return AuthorityInventory(digest, validation, ())
+    try:
+        blocks = _extract_id_blocks(registry.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError):
+        problem = RegistryProblem("registry_unreadable", "registry.md is not readable UTF-8")
+        return AuthorityInventory(digest, RegistryValidation((problem,)), ())
+    entries = [AuthorityEntry(rule_id, None, None, None) for rule_id in REQUIRED_RULE_IDS]
+    for skill_id in sorted(k for k in blocks if k.startswith(SKILL_ID_PREFIX)):
+        block = blocks[skill_id][0]
+        resolved = _safe_target(root, block.target) if block.target else None
+        entries.append(
+            AuthorityEntry(skill_id, block.target, block.context, _sha256_of(resolved) if resolved is not None else None)
+        )
+    return AuthorityInventory(digest, validation, tuple(sorted(entries, key=lambda entry: entry.authority_id)))
 
 
 def router_candidates(root: Path) -> dict[str, SkillEntry]:

@@ -11,9 +11,27 @@ from .implementation import require_configured_implementation
 from .project_start import project_start
 from .push_pin import pin_push_destination
 from .registry import validate_registry
+from .status import build_status, render_human, render_json
 from .store import ProjectStore
 from .validate import validate_project
 from .work_terminal_activation import activate_work_terminal_review
+
+
+#: The one CLI command that is not bound to the Workline root of the Project it is started from: it reads any
+#: Project, from anywhere, and changes nothing (``rules/git``: Read-only status).
+READ_ONLY_STATUS_COMMAND = "status"
+
+
+def binds_invocation_project(argv: list[str]) -> bool:
+    """Whether the launcher binds this invocation to the configured Workline root of the caller's Project.
+
+    Every command is bound, except exactly ``status`` given as the command: its
+    parser has no option or subcommand that writes, so no mutation-capable
+    command can be selected through this exception. Anything else - another
+    command, an unknown one, no command, or ``status`` not in the command
+    position - stays bound.
+    """
+    return not (len(argv) > 0 and argv[0] == READ_ONLY_STATUS_COMMAND)
 
 
 def _related(items: list[str] | None, rel_type: str) -> list[RelatedSpec]:
@@ -104,7 +122,21 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--must-update", action="append")
     create.add_argument("--source-finding-id")
 
+    status = subparsers.add_parser(
+        READ_ONLY_STATUS_COMMAND,
+        help="report the read-only status of a Workline Project (any Project, from anywhere; writes nothing)",
+    )
+    status.add_argument("project_root")
+    status.add_argument("--json", action="store_true", help="print the versioned machine-readable status model")
+
     args = parser.parse_args(argv)
+
+    if args.command == READ_ONLY_STATUS_COMMAND:
+        # A diagnostic: every condition the Project is in is a field of the model, never a failed command.
+        model = build_status(Path(args.project_root))
+        sys.stdout.write(render_json(model) if args.json else render_human(model))
+        sys.stdout.flush()
+        return 0
 
     try:
         if args.command == "validate-registry":

@@ -107,6 +107,17 @@ CLIが無いoperation（委譲先Skillが使うPython API）
 → isolated processを開始し、同じprocessで <R>/run-workline.py の activate() を実行してから workline をimportする
 ```
 
+## Read-only status
+
+Projectの現在状態を確認・診断するだけのrequest（current / next、blocked / waiting、pending mutation、Review、validation、Git / push destination）は、Skillを選ばず、canonical CLIの読み取り専用 `status` で答える（`rules/git` のRead-only status）。
+
+```text
+Windows: py -3 -I -B "<R>\run-workline.py" status <project-root> [--json]
+POSIX:   python3 -I -B "<R>/run-workline.py" status <project-root> [--json]
+```
+
+`status` は何も書かず、lock・mutation・networkを使わず、Roadmap / Phase / Workを進めない。その出力はcanonical recordとは独立したlifecycle truthではない。報告されたnextを実行する・再開する・修復するrequestは、ここから所有するcanonical Skillへ委譲し、`status` の出力を実行の許可として扱わない。別Projectの `status` はread-only参照として実行してよい。
+
 `python -m workline.cli`、PYTHONPATHの手組み、editable installを前提にしたimportへfallbackしない。`workline_python_unsupported`・`workline_invocation_not_isolated`・`workline_implementation_*` のSTOPは報告して止まる。
 
 ## Mutation / Git

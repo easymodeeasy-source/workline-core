@@ -21,7 +21,9 @@ Nothing is installed: the launcher runs R's working tree, <R>/src/workline. It
 requires Python 3.11 or newer and isolated mode, turns bytecode writing off,
 and proves by origin verification that every loaded workline module comes from
 <R>/src/workline; inside an established Project it also requires that
-Project's configured Workline root to be R. Isolated mode keeps PYTHONPATH,
+Project's configured Workline root to be R - for every command except
+``status``, which only reads (the Project it names, from anywhere) and reports
+any root mismatch as a fact instead. Isolated mode keeps PYTHONPATH,
 user site-packages and the working directory out of the import path, but
 system site-packages and their .pth startup code remain: the proof is the
 origin check, not the flag.
@@ -136,7 +138,14 @@ def _require_project_configured_for_this_root():
         _stop(exc.code, exc.message)
 
 
-def _activate(modules):
+def _binds_invocation_project(argv):
+    """Whether this CLI invocation is bound to the caller's Project's configured root (all but ``status``)."""
+    from workline.cli import binds_invocation_project
+
+    return binds_invocation_project(list(argv))
+
+
+def _activate(modules, argv=None):
     launcher = os.path.realpath(os.path.abspath(__file__))
     _require_supported_python(launcher)
     _require_isolated_mode(launcher)
@@ -170,7 +179,10 @@ def _activate(modules):
                 "cannot import %s from %s (%s: %s); nothing was written" % (name, source, type(exc).__name__, exc),
             )
     _require(helper.loaded_implementation_problem(root))
-    _require_project_configured_for_this_root()
+    # API activation (argv None) and every CLI command but the read-only status are bound to the
+    # Project the process works in; status reads the Project it names and writes nothing.
+    if argv is None or _binds_invocation_project(argv):
+        _require_project_configured_for_this_root()
 
 
 def activate():
@@ -186,10 +198,11 @@ def activate():
 
 def main(argv=None):
     """Run a Workline CLI command with this Workline root's implementation."""
-    _activate(_CLI_MODULES)
+    arguments = sys.argv[1:] if argv is None else argv
+    _activate(_CLI_MODULES, arguments)
     from workline.cli import main as run_cli
 
-    return run_cli(sys.argv[1:] if argv is None else argv)
+    return run_cli(arguments)
 
 
 if __name__ == "__main__":

@@ -2089,16 +2089,7 @@ class MutationController:
             data = yamlish.load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, yamlish.YamlishError) as exc:
             raise ReconcileRequired(f"cannot read recovery record {path.name}: {exc}") from exc
-        if (
-            not isinstance(data, dict)
-            or data.get("workline") != INTENT_MARKER
-            or data.get("version") != INTENT_VERSION
-            or data.get("mutation_id") != path.stem
-            or not isinstance(data.get("owner"), str)
-            or not isinstance(data.get("invocation"), dict)
-            or not isinstance(data.get("write_scope"), dict)
-            or data.get("status") not in ("pending", "completed", "abandoned")
-        ):
+        if not _ownership_confirmed(data, path.stem):
             raise ReconcileRequired(f"cannot confirm Workline ownership of recovery record {path.name}")
         return data
 
@@ -2754,3 +2745,282 @@ class MutationController:
                 raise GitError(f"push to {locator} failed: {result.stderr.strip() or result.stdout.strip()}")
             return
         raise ValidationError(f"unknown effect kind: {kind}")
+
+
+# --------------------------------------------------------------------------- read-only inspection (status)
+#
+# What a diagnostic reader may ask of the runtime mutation area, and nothing
+# more: every file read as it is, each one on its own, and every pending record
+# asked what its replay would meet - with nothing opened, resumed, written,
+# saved, closed, committed, pushed or contacted (``rules/git``: Read-only
+# status). :meth:`MutationController.list_records` stays the strict reader every
+# operation owner discovers its own record through.
+
+
+@contextmanager
+def read_only_git():
+    """Run the block with Git's optional locks off, so a read never writes the repository it reads.
+
+    ``git status`` refreshes the index's stat cache and writes it back when it
+    can take ``index.lock``; ``GIT_OPTIONAL_LOCKS=0`` tells Git to skip every
+    such optional write. Set for this process for the duration of the block and
+    restored afterwards; a Git command given an environment of its own is not
+    reached by it.
+    """
+    previous = os.environ.get("GIT_OPTIONAL_LOCKS")
+    os.environ["GIT_OPTIONAL_LOCKS"] = "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("GIT_OPTIONAL_LOCKS", None)
+        else:
+            os.environ["GIT_OPTIONAL_LOCKS"] = previous
+
+
+def _ownership_confirmed(data: object, stem: str) -> bool:
+    """Whether ``data`` read from ``<stem>.yaml`` is a recovery record this controller can call its own.
+
+    The one predicate the strict reader (:meth:`MutationController._load_intent`)
+    and the tolerant one (:func:`inspect_records`) both apply.
+    """
+    return (
+        isinstance(data, dict)
+        and data.get("workline") == INTENT_MARKER
+        and data.get("version") == INTENT_VERSION
+        and data.get("mutation_id") == stem
+        and isinstance(data.get("owner"), str)
+        and isinstance(data.get("invocation"), dict)
+        and isinstance(data.get("write_scope"), dict)
+        and data.get("status") in ("pending", "completed", "abandoned")
+    )
+
+
+#: How one file of the runtime mutation area reads (:func:`inspect_records`).
+RECORD_VALID = "valid"
+RECORD_FILENAME_INVALID = "filename_invalid"
+RECORD_UNREADABLE = "unreadable"
+RECORD_OWNERSHIP_UNCONFIRMED = "ownership_unconfirmed"
+
+
+@dataclass(frozen=True)
+class RecordInspection:
+    """One file of the runtime mutation area as :func:`inspect_records` read it.
+
+    ``sha256`` is over the exact bytes read (``None`` when they could not be
+    read). ``record`` is the validated record, only when ``parse_state`` is
+    :data:`RECORD_VALID`; otherwise ``reason`` is the exact message the strict
+    reader stops with for that file, and nothing about its owner or intent is
+    guessed.
+    """
+
+    filename: str
+    mutation_id: str | None
+    sha256: str | None
+    parse_state: str
+    record: dict[str, Any] | None = None
+    reason: str | None = None
+
+
+def _inspect_record(path: Path) -> RecordInspection:
+    name, stem = path.name, path.stem
+    raw: bytes | None
+    try:
+        raw = path.read_bytes()
+        read_error: OSError | None = None
+    except OSError as exc:
+        raw, read_error = None, exc
+    digest = None if raw is None else hashlib.sha256(raw).hexdigest()
+    if not is_valid_id(stem, "mutation"):
+        return RecordInspection(
+            name, None, digest, RECORD_FILENAME_INVALID, reason=f"unexpected file in runtime mutation area: {name}"
+        )
+    if raw is None:
+        return RecordInspection(
+            name, stem, None, RECORD_UNREADABLE, reason=f"cannot read recovery record {name}: {read_error}"
+        )
+    try:
+        # exactly the text ``Path.read_text`` gives the strict reader: UTF-8, with CRLF and a lone CR read as LF
+        data = yamlish.load(raw.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n"))
+    except (UnicodeError, yamlish.YamlishError) as exc:
+        return RecordInspection(name, stem, digest, RECORD_UNREADABLE, reason=f"cannot read recovery record {name}: {exc}")
+    if not _ownership_confirmed(data, stem):
+        return RecordInspection(
+            name, stem, digest, RECORD_OWNERSHIP_UNCONFIRMED,
+            reason=f"cannot confirm Workline ownership of recovery record {name}",
+        )
+    return RecordInspection(name, stem, digest, RECORD_VALID, record=data)
+
+
+def inspect_records(store: ProjectStore) -> tuple[RecordInspection, ...]:
+    """Every file the strict reader enumerates in the runtime mutation area, each read and judged on its own.
+
+    The same files :meth:`MutationController.list_records` reads, in the same
+    order, under the same filename, ownership and version checks - but one file
+    that fails them is reported with its exact reason instead of hiding every
+    other. Exact bytes are read once and never written; no :class:`Mutation` is
+    constructed, and nothing is opened, repaired, closed or abandoned. An area
+    that cannot be listed at all raises the ``OSError`` that says so.
+    """
+    if not store.mutations.is_dir():
+        return ()
+    return tuple(_inspect_record(path) for path in sorted(store.mutations.glob("*.yaml")))
+
+
+#: What :func:`replay_probe` found replaying a pending record would meet before it writes anything.
+REPLAY_CLEAR = "clear"
+REPLAY_RECONCILE = "reconcile_required"
+REPLAY_UNPROVEN = "unproven"
+
+
+@dataclass(frozen=True)
+class ReplayProbe:
+    outcome: str
+    code: str
+    message: str
+
+
+class _InspectedRecord:
+    """A recovery record as the replay predicates read it: its effects, notes and Project - and no way to write."""
+
+    __slots__ = ("store", "controller", "record")
+
+    def __init__(self, store: ProjectStore, record: dict[str, Any]) -> None:
+        self.store = store
+        self.controller = MutationController(store)
+        self.record = record
+
+    @property
+    def id(self) -> str:
+        return str(self.record["mutation_id"])
+
+    @property
+    def effects(self) -> list[dict[str, Any]]:
+        return list(self.record.get("effects") or [])
+
+    def note(self, key: str) -> Any:
+        return (self.record.get("notes") or {}).get(key)
+
+
+def _replay_key(effect: dict[str, Any]) -> tuple[str, ...] | None:
+    """What one file effect's classification is about: a whole file, one relation record, or one event."""
+    kind, payload = effect.get("kind"), effect.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if kind in ("write_file", "create_file"):
+        return ("path", str(payload.get("path")))
+    if kind in ("add_relation", "remove_relation"):
+        record = payload.get("record")
+        return ("relation", str(payload.get("file")), str(record.get("id") if isinstance(record, dict) else None))
+    if kind == "append_event":
+        record = payload.get("record")
+        return ("event", str(record.get("id") if isinstance(record, dict) else None))
+    return None
+
+
+def replay_probe(store: ProjectStore, record: dict[str, Any]) -> ReplayProbe:
+    """What replaying the pending ``record`` would meet before it writes anything, asked read-only and offline.
+
+    The predicates :meth:`Mutation.apply` evaluates, through the same
+    functions, in the same order, against the same Project - with nothing
+    written, saved, committed or pushed, and no remote contacted:
+
+    * the decisions no recorded commit finalizes are still where they were made
+      (:func:`_require_decided_branch`), and no applied effect would be written
+      again off the branch its commit names (:func:`_require_finalized_branch`);
+    * every recorded effect, classified as the replay classifies it
+      (:func:`_classify_recorded`); one applied with an unexpected result is
+      the replay's ``reconcile required``;
+    * an effect the replay would apply is held to the own-bytes proof the
+      replay makes before writing it (:func:`_require_own_bytes_before_write`,
+      :func:`_require_own_bytes_committed`).
+
+    Once the replay would have written something, an effect whose
+    classification depends on that write - the same file, the same relation
+    record, the same event, and every commit after it - is not classified: no
+    read of the Project as it is now can show what the replay will find there.
+    A push is classified only by contacting its destination, and a Work-mode
+    commit only by a primitive with no read-only form, so either leaves the
+    replay unproven rather than assumed.
+
+    ``clear`` is a statement about the Mutation Controller's replay only; what
+    an operation owner checks before it reaches its replay is its own
+    (``unproven`` / ``reconcile_required`` say why, by ``code``).
+    """
+
+    def unproven(code: str, message: str) -> ReplayProbe:
+        return ReplayProbe(REPLAY_UNPROVEN, code, message)
+
+    if record.get("status") != "pending":
+        return unproven("mutation_not_pending", f"mutation {record.get('mutation_id')} is {record.get('status')}")
+    view = _InspectedRecord(store, record)
+    try:
+        with read_only_git():
+            return _replay_probe(view, record)
+    except ReconcileRequired as exc:
+        return ReplayProbe(REPLAY_RECONCILE, exc.reason or exc.code, str(exc))
+    except StopError as exc:
+        return unproven(exc.code, str(exc))
+    except Exception as exc:  # a record whose effects this controller cannot read the way it writes them
+        return unproven("record_not_replayable", f"mutation {record.get('mutation_id')}: {type(exc).__name__}: {exc}")
+
+
+def _replay_probe(view: _InspectedRecord, record: dict[str, Any]) -> ReplayProbe:
+    """:func:`replay_probe`'s walk; a refusal the replay would make is raised exactly as the replay raises it."""
+    _require_decided_branch(view, "inspecting it")  # type: ignore[arg-type]
+    _require_finalized_branch(view, "inspecting it")  # type: ignore[arg-type]
+    effects = view.effects
+    written_keys: set[tuple[str, ...]] = set()
+    written_paths: set[str] = set()
+    replaying = False
+    for position, effect in enumerate(effects):
+        kind = effect.get("kind")
+        if kind == "git_push":
+            return ReplayProbe(
+                REPLAY_UNPROVEN,
+                "push_classification_requires_network",
+                f"mutation {view.id} effect {effect.get('seq')} is a push, which the replay classifies only by asking "
+                "its destination; nothing contacts a remote here",
+            )
+        if _is_work_commit(effect):
+            return ReplayProbe(
+                REPLAY_UNPROVEN,
+                "work_commit_replay_not_inspectable",
+                f"mutation {view.id} effect {effect.get('seq')} is a {WORK_COMMIT_MODE} commit, whose replay has no "
+                "read-only form",
+            )
+        if kind == "git_commit":
+            if replaying:
+                continue  # classified against the files the replay writes before it
+            classification = _classify_recorded(view.controller, effects, position, record)
+            if classification == MISMATCH:
+                raise ReconcileRequired(
+                    f"mutation {view.id} effect {effect.get('seq')} ({kind}) applied with unexpected result: "
+                    "reconcile required"
+                )
+            if classification == UNAPPLIED:
+                _require_own_bytes_committed(view, effects, position, effect)  # type: ignore[arg-type]
+                replaying = True
+            continue
+        if kind not in FILE_EFFECT_KINDS:
+            return ReplayProbe(
+                REPLAY_UNPROVEN, "effect_kind_unknown", f"mutation {view.id} records an effect of kind {kind!r}"
+            )
+        key = _replay_key(effect)
+        if key is None or key in written_keys:
+            continue
+        classification = _classify_recorded(view.controller, effects, position, record)
+        if classification == MISMATCH:
+            raise ReconcileRequired(
+                f"mutation {view.id} effect {effect.get('seq')} ({kind}) applied with unexpected result: "
+                "reconcile required"
+            )
+        if classification == UNAPPLIED:
+            path = effect_path(effect)
+            if path not in written_paths:
+                _require_own_bytes_before_write(view, effects, position, effect)  # type: ignore[arg-type]
+            written_keys.add(key)
+            if path is not None:
+                written_paths.add(path)
+            replaying = True
+    return ReplayProbe(REPLAY_CLEAR, "replay_clear", f"mutation {view.id}: replaying what it recorded meets no refusal")

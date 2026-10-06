@@ -71,6 +71,7 @@ from .ops import (
     validate_projection,
 )
 from .registry import validate_registry
+from .selection import work_continuation
 from .state import (
     ACTIVE,
     AMBIGUOUS_CANDIDATES,
@@ -1314,22 +1315,10 @@ class _Session:
     # continuation ------------------------------------------------------------
     def next_work(self, view: ProjectView, phase_id: str | None, entry: Entity, just_completed: str | None) -> Entity | None:
         works = view.effective_works(phase_id) if phase_id else standalone_scope(view, entry.id)
-        inflight = [w for w in works if view.work_state(w.id).state == IN_PROGRESS and view.work_state(w.id).has_target]
-        if len(inflight) > 1:
-            raise StopError("multiple Works carry a target: " + ", ".join(w.id for w in inflight), code="multiple_targets")
-        if inflight:
-            return inflight[0]
-        startable = view.startable_works(phase_id, works if phase_id is None else None)
-        # a Work that a still-active branch plans to return to waits for that branch
-        pending_returns = {
-            r.to for r in view.roadmap_relations
-            if r.type == "return_to" and r.from_id in view.works and not view.work_state(r.from_id).terminal
-        }
-        startable = [w for w in startable if w.id not in pending_returns] or startable
-        # The plan decides which Work comes next. When it leaves several equally
-        # planned, the continuation STOPs instead of separating them by the order
-        # they were read in.
-        return view.choose_startable(startable, "Work")
+        # The one continuation calculation START and the read-only status share (workline.selection):
+        # in-flight first (more than one is multiple_targets), then the startable Works less the return_to
+        # waits, chosen by planned_next - several equally planned STOP instead of being separated by read order.
+        return work_continuation(view, phase_id, works).choose()
 
 
 def _next_or_ambiguous(

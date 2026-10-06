@@ -191,6 +191,25 @@ def loaded_implementation_problem(
     return None
 
 
+def running_workline_root(modules: Mapping[str, object] | None = None) -> Path | None:
+    """The Workline root whose implementation this process runs; ``None`` when none can be proven.
+
+    Read-only and diagnostic. The candidate is the root the loaded ``workline``
+    package sits in (``<root>/src/workline``), and it is the answer only when
+    :func:`loaded_implementation_problem` proves every loaded module is that
+    root's implementation - the one origin check, not a second one.
+    """
+    loaded = sys.modules if modules is None else modules
+    package = loaded.get(PACKAGE)
+    init = _source_file(package) if package is not None else None
+    if init is None or init.name != "__init__.py":
+        return None
+    root = init.parent.parent.parent
+    if loaded_implementation_problem(root, modules=loaded) is not None:
+        return None
+    return root
+
+
 def configured_implementation_problem(configured_root: str | os.PathLike[str]) -> IdentityProblem | None:
     """Layer 2: this interpreter and the loaded implementation, against the configured Workline root."""
     return python_problem() or loaded_implementation_problem(configured_root)
@@ -224,4 +243,5 @@ __all__ = [
     "package_directory",
     "python_problem",
     "require_configured_implementation",
+    "running_workline_root",
 ]

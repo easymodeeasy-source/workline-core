@@ -125,6 +125,23 @@ Project開始のmutationは、その実行が対象rootに与えた許可の内�
 
 このcontextは、あるProject contextで作業中に別Projectのpathを誤ってmutation targetへ渡す事故を防ぐmechanical guardであり、security sandboxではない。意図的な作業directoryの変更（`cd` / `chdir`）や、Worklineを経由しないfilesystemへの直接書込みは保証の対象外である。
 
+### Read-only status
+
+`status` は、1つのWorkline Projectを読み取り専用で診断する正式CLIである（Skillではないのでregistryからroutingせず、新しいSkill・routing IDを持たない）。
+
+```text
+Windows: py -3 -I -B "<R>\run-workline.py" status <project-root> [--json]
+POSIX:   python3 -I -B "<R>/run-workline.py" status <project-root> [--json]
+```
+
+- 人間向け出力と `--json`（schema `workline-status`、version 1）は、1回の読取りで作った同じstatus modelの2つの表現である。JSONの既存fieldの意味は後のversionで変えず、fieldの追加だけを行う。
+- 作業directoryのProject、別のProject、Project外のどこからでも実行でき、引数で名指したProjectだけを読む（別Projectのread-only参照、Project context）。canonical launcherは `status` に限り、作業directoryのProjectのconfigured Workline rootとの照合を行わない。isolated modeとorigin verificationは他のcommandと同じであり、他のすべてのcommandとAPIの `activate()` の照合は変わらない。target Projectのconfigured Workline rootや実行中implementationとの不一致はauthorityの事実として報告し、何の許可にもならない。
+- 何も書かない。Project execution lockの取得・lock / holder情報の作成、Mutation Controllerのopen / resume / 記録、正本・runtime record・cacheへのwrite、Gitのindex / ref / configへのwrite（optional lockによるindexの更新を含む）、fetch / pull / push / ls-remote等のnetwork接続、reviewer・外部serviceの起動、activation / pin / backfill、自動修復・cleanupを行わない。`holder.json` は診断用のhintとして読むだけで、lockを保持しているという事実として報告しない。remoteへの公開状態は確認せず `not_checked` と報告する。
+- Execution lockを取らない読取りはatomicではない。HEAD、branch、pending mutation record（file名・bytesのSHA-256・読取り状態）、canonical `.workline`（`.workline/runtime/` を除き、indirectionを辿らないfingerprint）を読取りの前後で比べ、違えば `changing` としてcurrent / nextの選択を主張しない（即時の読み直しは1回だけ）。進行に関わるpending mutationがある場合と、構造validationが失敗している場合も、選択を主張しない。
+- current / nextは、既存のstate・Roadmapの Phase選択・STARTの同一Phase continuationの選択semanticsを同じ計算で投影した診断であり、新しいprogression規則ではない。一意に決まらなければ候補集合と理由を返し、勝者を作らない。単独Workには暗黙のentryを作らない。
+- pending mutationは、owner固有のrecoveryが評価する述語をread-onlyかつnetworkなしで評価して再開を示せた場合だけ `pending_resumable`、そのrecoveryが `reconcile required` になると示せた場合だけ `pending_reconcile_required` とする。示せなければ `unknown_or_invalid` とし、楽観的に再開可能とはしない。読めないrecordは推測せず、その理由とともに報告する。
+- statusはRoadmap / Phase / Workを進めず、報告したnextを開始しない。statusの出力は、それが読んだcanonical recordとは独立したlifecycle truthではない。Review recordの状態はlifecycleとは別に報告する。
+
 ### Unsupported self-hosting
 
 Workline rootを、それ自身をWorkline rootとするWorkline Projectとして管理するself-hostingは、現在のWorkline rulesではサポートしない。
@@ -246,7 +263,7 @@ Python version（3.11未満 → workline_python_unsupported）
 → 既にloadされている workline / workline.* のoriginを全件検査
 → <R>/src をimport sourceとして設定し、worklineをload
 → load済みの workline / workline.* のoriginを全件再検査
-→ 作業directoryが成立済みProjectなら、その workline.root が R であることを照合
+→ 作業directoryが成立済みProjectなら、その workline.root が R であることを照合（CLIの status を除く。Read-only status）
 → CLIへdispatch / activateはreturn
 ```
 
