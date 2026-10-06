@@ -188,7 +188,7 @@ class StaleRecoveryTests(_RuntimeLoss):
         # every later Policy Change still runs (reviewed under the pre-change policy: required_slots 3)
         third = self.applied(self.request(after=4, supersedes=(other.policy_change_id,), overlap=policy.OVERLAP_KNOWN),
                              self.three_reviewers())
-        self.assertEqual(3, self.review_store.read_profile().profile_version)
+        self.assertEqual(2, self.review_store.read_profile().profile_version, "the stale request never applied")
         self.assertNotEqual(stale, third.review_run_id)
 
     def test_stale_at_g1(self) -> None:
@@ -367,7 +367,7 @@ class CommittedPolicyProofTests(PolicyCase):
         (self.kp,) = self.commits_with(KP_SUBJECT)
         (self.km,) = self.commits_with(KM_SUBJECT)
         self.parent = self.parents(self.kp)[0]
-        self.change = self.review_store.read_policy_change(self.change_id)
+        self.record = self.review_store.read_policy_change(self.change_id)
 
     def item(self, commit: str) -> str | None:
         failed = publication.committed_policy_proof(self.root, commit, self.change_path)
@@ -385,7 +385,7 @@ class CommittedPolicyProofTests(PolicyCase):
         self.assertIn("PK1 fails", publication.barrier_problem(self.root, again))
 
     def test_pk3_a_change_record_that_is_not_its_candidates(self) -> None:
-        record = dict(self.change, success_criteria="a different success criterion than the reviewed one")
+        record = dict(self.record, success_criteria="a different success criterion than the reviewed one")
         forged = plumb_commit(self.store, self.parent, {
             self.change_path: serialize.canonical_bytes(record),
             paths.POLICY_PROFILE_REL: self.blob(self.kp, paths.POLICY_PROFILE_REL)}, "a forged change record")
@@ -415,7 +415,7 @@ class CommittedPolicyProofTests(PolicyCase):
         self.assertEqual("PK5", publication.committed_policy_proof(self.root, forged, change_path)[0])
 
     def test_pk6_a_parent_without_the_sealed_run(self) -> None:
-        run_id = self.change["review_run_id"]
+        run_id = self.record["review_run_id"]
         (fifth,) = [commit for commit in self.commits_with(GENERATION_SUBJECT)
                     if self.subject(commit) == f"{GENERATION_SUBJECT}5 of {run_id}"]
         forged = plumb_commit(self.store, self.parents(fifth)[0], {
@@ -424,7 +424,7 @@ class CommittedPolicyProofTests(PolicyCase):
         self.assertEqual("PK6", self.item(forged))
 
     def test_pk7_a_supersession_of_the_receipt(self) -> None:
-        forged = plumb_commit(self.store, self.km, {paths.supersession_rel(str(self.change["receipt_id"])): b"x: 1\n"},
+        forged = plumb_commit(self.store, self.km, {paths.supersession_rel(str(self.record["receipt_id"])): b"x: 1\n"},
                               "a Supersession")
         self.assertEqual("PK7", self.item(forged))
 
@@ -440,7 +440,7 @@ class CommittedPolicyProofTests(PolicyCase):
     def test_pk9_a_metadata_commit_with_an_extra_path(self) -> None:
         (consumption,) = self.policy_consumptions()
         consumption_path = paths.consumption_rel(consumption.consumption_id)
-        summary_path = paths.history_run_rel(str(self.change["review_run_id"]))
+        summary_path = paths.history_run_rel(str(self.record["review_run_id"]))
         forged = plumb_commit(self.store, self.kp, {
             consumption_path: self.blob(self.km, consumption_path), summary_path: self.blob(self.km, summary_path),
             ".workline/extra.txt": b"x\n"}, "a metadata commit with an extra path")
