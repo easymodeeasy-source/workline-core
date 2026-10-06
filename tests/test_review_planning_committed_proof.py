@@ -548,7 +548,7 @@ class LegacyOnlyPushTests(PlanningTestCase):
         real_touches, real_run = gitcmd.history_touches, gitcmd.run_git
 
         def run(repo, *args, **kwargs):
-            if "--full-history" in args and args[-1] == publication.FAST_PATH_DIRECTORY:
+            if "--full-history" in args and publication.FAST_PATH_DIRECTORY in args:
                 reads.append(args)
             return real_run(repo, *args, **kwargs)
 
@@ -565,9 +565,10 @@ class LegacyOnlyPushTests(PlanningTestCase):
         before = gitcmd.commit_parents(store.root, made)[0]
         # §18.7: before the Git stage is recorded (HEAD), at classification and right before the push (the commit made)
         self.assertEqual([before, made, made], calls)
-        # one path-limited read per commit: the same commit ID's answer is remembered within the process
-        self.assertEqual([("rev-list", "--full-history", "-n", "1", commit, "--", publication.FAST_PATH_DIRECTORY)
-                          for commit in (before, made)], reads)
+        # one path-limited read per commit: the same commit ID's answer is remembered within the process. RB6 round 4
+        # (CP R5 case E), a deliberate pin update: that one read names the policy change directory too
+        self.assertEqual([("rev-list", "--full-history", "-n", "1", commit, "--", ".workline/review/candidate-snapshots/",
+                           ".workline/review/policy/changes/") for commit in (before, made)], reads)
         self.assertEqual(made, self.remote_head())
 
 

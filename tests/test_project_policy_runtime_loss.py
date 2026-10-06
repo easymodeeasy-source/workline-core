@@ -33,7 +33,7 @@ from __future__ import annotations
 from typing import Any
 from unittest import mock
 
-from helpers import rmtree
+from helpers import git, rmtree
 from planning_helpers import Crash, crash_at, move_branch, plan, plumb_commit
 from project_policy_helpers import (
     GENERATION_SUBJECT, KM_SUBJECT, KP_SUBJECT, Adjudicator, Discovery, Interrupted, PolicyCase, after_effect,
@@ -43,6 +43,13 @@ from workline import gitcmd, project_policy
 from workline import roadmap as rm
 from workline.errors import ReconcileRequired, StopError
 from workline.review import history, paths, policy, publication, records, recovery, serialize
+from workline.review.store import ReviewStore
+from workline.validate import validate_project
+
+#: The identities a hand-made policy change record names (RB6 round 4): no Run or Receipt with them exists.
+HAND_RPC = "rpc_01ARZ3NDEKTSV4RRFFQ69G5FTV"
+HAND_RR = "rr_01ARZ3NDEKTSV4RRFFQ69G5FTV"
+HAND_RCP = "rcp_01ARZ3NDEKTSV4RRFFQ69G5FTV"
 
 
 class _RuntimeLoss(PolicyCase):
@@ -283,6 +290,26 @@ class HumanWaitRecoveryTests(_HumanWait):
         self.assertEqual(kept, self.run_records(waiting))
         self.assertEqual(sorted([waiting, other.review_run_id]), sorted(self.policy_runs()))
 
+    def test_a_waiting_run_frozen_under_three_slots_answers_one_actor_the_same(self) -> None:
+        """RB6FR1-4: a waiting Run launches nothing, so the invocation's discovery actors are not judged for it: a Run
+        frozen under required_slots 3 at G4 HUMAN_WAIT, its runtime lost, answers a one-actor retry with the same
+        human_wait (a596fad / 15f2735: review_p6_discovery_slots_unmet)."""
+        other = self.applied(change_request(self.first.evidence, after=3))
+        waiting_request = self.request(after=4, supersedes=(other.policy_change_id,), overlap=policy.OVERLAP_KNOWN)
+        first = self.change(waiting_request, policy_review(
+            Discovery(claim("human", "MID")), Discovery(viewpoint="safety", identity="discovery-two"),
+            Discovery(viewpoint="scope", identity="discovery-three")))
+        self.assertEqual(project_policy.STATUS_HUMAN_WAIT, first.status, first.detail)
+        self.lose_runtime()
+        before = (self.canonical(), self.run_records(first.review_run_id))
+        actor = Discovery()
+        again = self.change(waiting_request, policy_review(actor))
+        self.assertEqual((project_policy.STATUS_HUMAN_WAIT, first.review_run_id, first.policy_change_id),
+                         (again.status, again.review_run_id, again.policy_change_id))
+        self.assertEqual([], actor.tasks)
+        self.assertEqual(before, (self.canonical(), self.run_records(first.review_run_id)))
+        self.assertEqual([], self.policy_pending())
+
     def test_a_moved_before_state_still_returns_the_same_human_wait_run(self) -> None:
         """Item 13 (CANDIDATE §6d: HUMAN_WAIT for the unchanged canonical Run): another request applied and moved the
         Profile since the waiting Run froze. Row f (currency / before-state) does not apply to a G4 HUMAN_WAIT Run -
@@ -411,15 +438,13 @@ class StrandedKpTests(_RuntimeLoss):
         self.assertNotEqual(change_id, other.policy_change_id)
         self.assertIsNone(publication.barrier_problem(self.root, self.commit_of()))
 
-    def test_a_consumption_naming_the_change_under_another_receipt_does_not_consume_it(self) -> None:
-        """N4: only the Policy Consumption of the change's own Receipt consumes it. A hand-made one naming the change
-        id under another Receipt clears neither the Project-wide stranded check nor row b (at a596fad it cleared
-        both, keyed on the change id alone)."""
-        kp = self.stranded()
+    def hand_made_consumption(self, kp: str, *, receipt_id: str | None = None) -> str:
+        """A v3 Policy Consumption of the stranded change written by hand (under ``receipt_id``, default its own
+        Receipt) in the working tree; its path."""
         (change_id,) = self.review_store.policy_change_ids()
         change = self.review_store.read_policy_change(change_id)
         forged = records.PolicyConsumption(
-            consumption_id="rcs_01ARZ3NDEKTSV4RRFFQ69G5FTV", receipt_id="rcp_01ARZ3NDEKTSV4RRFFQ69G5FTV",
+            consumption_id="rcs_01ARZ3NDEKTSV4RRFFQ69G5FTV", receipt_id=receipt_id or str(change["receipt_id"]),
             review_run_id=str(change["review_run_id"]), review_generation=5, review_kind=policy.REVIEW_KIND,
             authorized_candidate_hash=str(change["candidate_hash"]),
             operation_identity=policy.operation_identity(policy.request_digest(policy.request_record(self.first))),
@@ -436,10 +461,56 @@ class StrandedKpTests(_RuntimeLoss):
         )
         relative = paths.consumption_rel(forged.consumption_id)
         (self.root / relative).write_bytes(serialize.canonical_bytes(forged.to_record()))
+        return relative
+
+    def test_a_consumption_naming_the_change_under_another_receipt_does_not_consume_it(self) -> None:
+        """N4: only the Policy Consumption of the change's own Receipt consumes it. A hand-made one naming the change
+        id under another Receipt clears neither the Project-wide stranded check nor row b (at a596fad it cleared
+        both, keyed on the change id alone)."""
+        kp = self.stranded()
+        relative = self.hand_made_consumption(kp, receipt_id="rcp_01ARZ3NDEKTSV4RRFFQ69G5FTV")
         self.git("add", "--", relative)
         self.git("commit", "-q", "-m", "docs: a hand-made Consumption naming the change under another Receipt")
         self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first, self.request(after=3))
         self.assertEqual([kp], self.commits_with(KP_SUBJECT))
+
+    def test_an_uncommitted_consumption_of_its_own_receipt_does_not_consume_it(self) -> None:
+        """RB6FR1-2: only a COMMITTED Consumption consumes a change. A hand-written, uncommitted one naming the stranded
+        change under its own Receipt proves nothing: the manual reconciliation boundary holds for every request
+        (15f2735 read the working tree and let new Policy Changes build on the unproven state)."""
+        kp = self.stranded()
+        self.hand_made_consumption(kp)
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first, self.request(after=3))
+        self.assertEqual([kp], self.commits_with(KP_SUBJECT))
+        self.assertEqual([], self.commits_with(KM_SUBJECT))
+
+    def lost_between_the_consumption_and_km(self, window: Any) -> tuple[str, str]:
+        """Run the first request into ``window`` (between the Consumption stage and Km), then lose the runtime."""
+        with window, self.assertRaises(Interrupted):
+            self.change(self.first)
+        (run_id,) = self.policy_runs()
+        (change_id,) = self.review_store.policy_change_ids()
+        self.lose_runtime()
+        return run_id, change_id
+
+    def test_windows_16_17_the_consumption_and_run_summary_written_before_km(self) -> None:
+        """RB6FR1-2 (§30.40 windows 16-17): the Consumption and the consumed Run summary are written, Km is not
+        committed, the runtime is lost. The same request is refused ``review_p6_run_unrecovered`` - symmetric with
+        the Kp window - with the same Run and change IDs and nothing new frozen (15f2735 read the uncommitted
+        Consumption as proof and froze a new Run with new IDs)."""
+        run_id, change_id = self.lost_between_the_consumption_and_km(before_effect("git_commit", project_policy.STAGE_KM))
+        self.assertEqual(1, len(self.policy_consumptions()), "the Consumption is written, uncommitted")
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first, self.request(after=3))
+        self.assertEqual(([run_id], (change_id,)), (self.policy_runs(), self.review_store.policy_change_ids()))
+        self.assertEqual([], self.commits_with(KM_SUBJECT))
+
+    def test_window_17_only_the_run_summary_written(self) -> None:
+        """§30.40 window 17 alone (the Run summary written first, the Consumption not): refused the same way."""
+        run_id, change_id = self.lost_between_the_consumption_and_km(
+            after_effect("create_file", project_policy.STAGE_CONSUMPTION))
+        self.assertEqual([], self.policy_consumptions())
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first)
+        self.assertEqual(([run_id], (change_id,)), (self.policy_runs(), self.review_store.policy_change_ids()))
 
 
 class MalformedTests(_RuntimeLoss):
@@ -640,15 +711,90 @@ class BarrierTests(_RuntimeLoss):
         self.assertEqual(published, self.remote_main(), "the destination keeps what it had")
 
 
-class BarrierEquivalenceTests(PolicyCase):
+class _HandMadePolicy(PolicyCase):
+    """A Project with no Review history holding a hand-made policy change record and Profile (RB6 round 4)."""
+
+    def hand_made_pair(self) -> tuple[str, bytes, bytes]:
+        """A policy change record and its Profile written by hand - through the module's own builders, from this
+        Project's state and evidence, so both are well formed and chain - with no Policy Review Run, Candidate
+        snapshot, Receipt or Consumption behind them."""
+        state = self.state()
+        candidate = policy.build_candidate(policy.request_record(self.request()), HAND_RPC, state, self.review_store)
+        record = policy.change_record(candidate, review_run_id=HAND_RR, receipt_id=HAND_RCP,
+                                      baseline_record=state.baseline.record)
+        after = policy.ProjectProfile.from_record(dict(candidate["after_profile"]), "the hand-made Profile")
+        return paths.policy_change_rel(HAND_RPC), serialize.canonical_bytes(record), after.text().encode("utf-8")
+
+    def legacy_with_hand_made_policy(self) -> tuple[Any, str, str, str, str]:
+        """A Project with no Review history (legacy, with a remote), one legacy push, then a person's commit adding the
+        hand-made pair: (store, roadmap id, the published commit, the hand-made commit, the change record path)."""
+        change_rel, change_bytes, profile_bytes = self.hand_made_pair()
+        legacy = self.new_project("legacy", remote=True)
+        roadmap = rm.create_roadmap(legacy, plan("Legacy Roadmap"))
+        published = gitcmd.head_commit(legacy.root)
+        for relative, data in ((change_rel, change_bytes), (paths.POLICY_PROFILE_REL, profile_bytes)):
+            (legacy.root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (legacy.root / relative).write_bytes(data)
+        git(legacy.root, "add", "--", change_rel, paths.POLICY_PROFILE_REL)
+        git(legacy.root, "commit", "-q", "-m", "docs: a person adds a policy change record and a Profile")
+        made = str(gitcmd.head_commit(legacy.root))
+        self.assertEqual(published, self.legacy_remote_main())
+        return legacy, roadmap.roadmap_id, str(published), made, change_rel
+
+    def legacy_remote_main(self) -> str | None:
+        found = git(self.remote_path("legacy"), "rev-parse", "--verify", "--quiet", "refs/heads/main", check=False)
+        return found.strip() or None
+
+
+class UnbackedChangeRecordTests(_HandMadePolicy):
+    """RB6FR2-2: a change record must be backed by the Policy Change Receipt it names."""
+
+    template = "local"
+
+    def test_a_change_record_without_its_receipt_is_no_effective_policy_and_a_validation_problem(self) -> None:
+        """The hand-made pair chains and is compatible, so at 15f2735 it became the Effective Policy of every new
+        P6-capable Run and validated clean; now lineage refuses it and validation names it."""
+        legacy, _roadmap, _published, _made, change_rel = self.legacy_with_hand_made_policy()
+        review = ReviewStore(legacy)
+        with self.assertRaises(StopError) as raised:
+            policy.resolve_policy_state(review, legacy.workline_root())
+        self.assertEqual(policy.CODE_LINEAGE_INVALID, raised.exception.code)
+        self.assertIn(f"names Receipt {HAND_RCP}, which does not read", str(raised.exception))
+        found = [(problem.code, problem.message) for problem in validate_project(legacy)]
+        self.assertIn("review_record_conflict", [code for code, _ in found])
+        self.assertTrue(any(HAND_RPC in message for _, message in found))
+        from workline.status import build_status
+
+        section = build_status(legacy.root).data["policy"]
+        self.assertEqual(("unavailable", "reconcile_required"),
+                         (section["effective_policy"]["status"], section["maintenance"]["status"]))
+
+    def test_a_genuine_profile_still_resolves(self) -> None:
+        """Every genuine change record's Receipt is committed before it (Kp's parent holds the sealed G5 and its
+        Receipt): the new rule refuses no genuine state."""
+        result = self.applied(self.request())
+        state = self.state()
+        self.assertEqual((1, result.profile_digest), (state.profile_version, state.profile_digest))
+        review = self.review_store
+        stored = {change_id: review.read_policy_change(change_id) for change_id in review.policy_change_ids()}
+        self.assertEqual([], policy.change_backing_problems(review, stored))
+        receipt_at_parent = gitcmd.blob_at(self.root, self.parents(str(result.policy_commit))[0],
+                                           paths.receipt_rel(str(result.receipt_id)))
+        self.assertIsNotNone(receipt_at_parent, "Kp's parent already holds the Receipt")
+        self.assertEqual([], self.problems())
+
+
+class BarrierEquivalenceTests(_HandMadePolicy):
     """R5 item 4 (case A): a history with no policy change is decided exactly as main decides it.
 
     The reference is the barrier with its P6 block neutralized (``policy_change_adders`` answering ``{}`` without a
-    read): ``publication.py`` adds to main's barrier only that block, after the unchanged fast path and planning
-    proofs. Against it the real barrier gives the byte-equal answer, makes every one of the reference's Git reads in
-    the same order, and adds at most one: the policy change directory's add-history read, which lists nothing. No
-    committed policy proof runs. (Legacy-only histories: ``test_review_planning_publication.LegacyOnlyTests`` and
-    ``test_review_planning_committed_proof.LegacyOnlyPushTests`` pin main's one fast-path read, unchanged.)
+    read): ``publication.py`` adds to main's barrier only that block, after the fast path and planning proofs.
+    Against it the real barrier gives the byte-equal answer, makes every one of the reference's Git reads in the same
+    order, and adds at most one: the policy change directory's add-history read, which lists nothing. No committed
+    policy proof runs. The one fast-path read now names the policy change directory beside the Candidate-snapshot
+    directory (RB6 round 4, CP R5 case E: a deliberate pin change, still ONE read - pinned for legacy-only histories
+    by ``test_review_planning_publication.LegacyOnlyTests`` and ``test_review_planning_committed_proof.
+    LegacyOnlyPushTests``); a snapshot-free history holding a policy change reaches the policy proof (rows below).
     """
 
     template = "local"
@@ -695,6 +841,54 @@ class BarrierEquivalenceTests(PolicyCase):
         self.assertEqual([("log", "--full-history", "--no-renames", "--diff-merges=combined", "--diff-filter=A",
                            "--name-only", "-z", "--format=%x01%H%x02", head, "--", directory)], extra)
         self.assertEqual([{}], listed)
+
+    # ---------------------------------------------------------------- RB6 round 4: R5 case E (RB6FR1-1 / RB6FR2-1)
+    def fast_path_reads(self, repo: Any, commit: str) -> tuple[str | None, list[tuple[str, ...]]]:
+        """The barrier's answer for ``commit`` and every ``rev-list --full-history`` read it made (answers forgotten)."""
+        reads: list[tuple[str, ...]] = []
+        real_run = gitcmd.run_git
+
+        def run(at: Any, *args: str, **kwargs: Any) -> Any:
+            if args[:4] == ("rev-list", "--full-history", "-n", "1"):
+                reads.append(tuple(args))
+            return real_run(at, *args, **kwargs)
+
+        gitcmd.forget_object_answers()
+        with mock.patch.object(gitcmd, "run_git", run):
+            problem = publication.barrier_problem(repo, commit)
+        return problem, reads
+
+    def test_a_snapshot_free_history_with_a_policy_change_reaches_the_policy_proof_in_one_read(self) -> None:
+        """R5 case E row: the one fast-path read names both directories. Before the hand-made commit (legacy only) it
+        clears the history alone - no version, Runs or proof read; with the hand-made policy change record it is
+        'touched', so the version check, the Runs (none) and the policy proof run, and the unproven Kp is refused."""
+        legacy, _roadmap, published, made, _change_rel = self.legacy_with_hand_made_policy()
+        one_read = ("rev-list", "--full-history", "-n", "1")
+        with mock.patch.object(gitcmd, "running_git_version", side_effect=AssertionError("a version was read")), \
+                mock.patch.object(publication, "registered_runs", side_effect=AssertionError("Runs were read")), \
+                mock.patch.object(publication, "committed_policy_proof", side_effect=AssertionError("a proof ran")):
+            found, reads = self.fast_path_reads(legacy.root, published)
+        self.assertIsNone(found)
+        self.assertEqual([one_read + (published, "--", *publication.FAST_PATH_DIRECTORIES)], reads)
+        self.assertEqual([], publication.registered_runs(legacy.root, made), "no planning Run in that history")
+        with mock.patch.object(publication, "committed_policy_proof",
+                               wraps=publication.committed_policy_proof) as proof:
+            found, reads = self.fast_path_reads(legacy.root, made)
+        self.assertEqual([one_read + (made, "--", *publication.FAST_PATH_DIRECTORIES)], reads, "still ONE read")
+        self.assertEqual(1, proof.call_count, "the policy proof ran for the one policy change")
+        self.assertIn("PK3 fails", str(found))
+
+    def test_an_unrelated_push_over_a_hand_made_policy_commit_is_refused(self) -> None:
+        """R5 case E (RB6FR1-1 / RB6FR2-1): an ordinary legacy operation's push over a hand-made policy commit in a
+        history that never touched the Candidate-snapshot directory is refused; the destination keeps what it had
+        (15f2735 published it)."""
+        legacy, roadmap_id, published, made, change_rel = self.legacy_with_hand_made_policy()
+        self.assertFalse(gitcmd.history_touches(legacy.root, made, publication.FAST_PATH_DIRECTORY))
+        with self.assertRaises(StopError) as raised:
+            rm.hold_roadmap(legacy, roadmap_id)
+        self.assertEqual("review_publication_barrier", raised.exception.code)
+        self.assertIn(change_rel, str(raised.exception))
+        self.assertEqual(published, self.legacy_remote_main(), "the destination keeps what it had")
 
     def test_a_refused_planning_only_history_adds_no_read(self) -> None:
         (consumption, *_) = [found for found in self.review_store.consumptions()

@@ -68,10 +68,16 @@ def change_with_baseline(change_id: str, after: policy.ProjectProfile, record: d
             "after_setting": setting}
 
 
-def change(change_id: str, before_version: int | None, before_digest: str | None, after: policy.ProjectProfile) -> dict:
+def change(change_id: str, before_version: int | None, before_digest: str | None, after: policy.ProjectProfile,
+           *, surface: str | None = None, setting: int | None = None) -> dict:
+    """The lineage fields of a change record; its surface / after setting are those of the override it supports in
+    ``after`` (RB6FR1-3), unless given."""
+    supported = next((item for item in after.overrides if item["supporting_policy_change_id"] == change_id), None)
     return {"policy_change_id": change_id, "before_profile_version": before_version,
             "before_profile_digest": before_digest, "after_profile_version": after.profile_version,
-            "after_profile_digest": after.digest}
+            "after_profile_digest": after.digest,
+            "affected_policy_surface": surface or (supported or {}).get("policy_surface_id"),
+            "after_setting": setting if setting is not None else (supported or {}).get("setting")}
 
 
 class AbsentProfileTests(WorklineTestCase):
@@ -173,6 +179,48 @@ class StrictProfileTests(unittest.TestCase):
                       codes(policy.lineage_problems(wrong_parent, {RPC: changes[RPC], RPC2: change(RPC2, 1, first.digest, wrong_parent)})))
         self.assertIn(policy.CODE_LINEAGE_INVALID, codes(policy.lineage_problems(None, changes)))
         self.assertEqual([], policy.lineage_problems(None, {}))
+
+    def test_an_override_is_exactly_what_its_supporting_change_decided(self) -> None:
+        """RB6FR1-3: an override's surface and setting are those of the change it names (affected_policy_surface,
+        after_setting) - checked by lineage itself, not only by the compatibility decision."""
+        first = profile()
+        good = {RPC: change(RPC, None, None, first)}
+        self.assertEqual([], policy.lineage_problems(first, good))
+        for name, forged in (("another setting", change(RPC, None, None, first, setting=4)),
+                             ("another surface", change(RPC, None, None, first, surface=policy.SURFACE_EXTRA_SCOPE_STEPS)),
+                             ("no surface or setting recorded", {key: value for key, value in good[RPC].items()
+                                                                 if key not in ("affected_policy_surface",
+                                                                                "after_setting")})):
+            with self.subTest(name):
+                found = policy.lineage_problems(first, {RPC: forged})
+                self.assertIn(policy.CODE_LINEAGE_INVALID, codes(found))
+                self.assertIn("is not the surface and setting its supporting policy change", found[-1][1])
+
+    def test_genuine_carried_rollback_and_experiment_shapes_keep_their_lineage(self) -> None:
+        """RB6FR1-3 pins the genuine shapes (``policy.expected_after_profile``): an override carried across a change
+        on the other surface keeps the change that set it; a rollback away from the Global supports the restored
+        setting; a rollback to the Global removes the override; experiment refs are not overrides."""
+        surface_b = policy.SURFACE_BY_ID[policy.SURFACE_EXTRA_SCOPE_STEPS]
+        first = profile(setting=3)  # RPC: required_slots 1 -> 3
+        carried_override = dict(first.overrides[0])
+        second = policy.ProjectProfile(  # RPC2: extra_scope_steps 0 -> 1, RPC's override carried unchanged
+            2, first.digest, baseline().digest, 1, policy.LOADER_SEMANTICS_IDENTITY,
+            (carried_override, {"policy_surface_id": surface_b.policy_surface_id, "strength_class": surface_b.strength_class,
+                                "setting": 1, "direction": "strengthen", "supporting_policy_change_id": RPC2}),
+            (RPC, RPC2))
+        changes = {RPC: change(RPC, None, None, first), RPC2: change(RPC2, 1, first.digest, second)}
+        self.assertEqual([], policy.lineage_problems(second, changes), "a carried override keeps its own change")
+        rpc3 = "rpc_01ARZ3NDEKTSV4RRFFQ69G5FB1"
+        rolled_back = policy.ProjectProfile(  # RPC3 rolls RPC back to 2 (not the Global): it supports setting 2
+            3, second.digest, baseline().digest, 1, policy.LOADER_SEMANTICS_IDENTITY,
+            (dict(carried_override, setting=2, supporting_policy_change_id=rpc3), second.overrides[1]), (RPC2, rpc3))
+        rollback = change(rpc3, 2, second.digest, rolled_back)
+        self.assertEqual((policy.SURFACE_REQUIRED_SLOTS, 2), (rollback["affected_policy_surface"], rollback["after_setting"]))
+        self.assertEqual([], policy.lineage_problems(rolled_back, dict(changes, **{rpc3: rollback})))
+        to_global = policy.ProjectProfile(  # RPC3 rolls RPC back to the Global 1: the override is gone
+            3, second.digest, baseline().digest, 1, policy.LOADER_SEMANTICS_IDENTITY, (second.overrides[1],), (RPC2, rpc3))
+        self.assertEqual([], policy.lineage_problems(to_global, dict(changes, **{rpc3: change(
+            rpc3, 2, second.digest, to_global, surface=policy.SURFACE_REQUIRED_SLOTS, setting=1)})))
 
 
 class CompatibilityTests(WorklineTestCase):

@@ -931,7 +931,11 @@ class LegacyOnlyTests(PlanningTestCase):
         self.assertEqual(self.head(store), self.remote_head())
         self.assertEqual(".workline/review/candidate-snapshots/", publication.FAST_PATH_DIRECTORY)
         self.assertTrue(directories)
-        self.assertEqual({publication.FAST_PATH_DIRECTORY}, set(directories))
+        # RB6 round 4 (CP R5 case E), a deliberate pin update: the one fast-path read names the Candidate-snapshot
+        # directory and the P6 policy change directory together - still one path-limited read, nothing else
+        self.assertEqual((".workline/review/candidate-snapshots/", ".workline/review/policy/changes/"),
+                         publication.FAST_PATH_DIRECTORIES)
+        self.assertEqual({publication.FAST_PATH_DIRECTORIES}, set(directories))
 
 
 if __name__ == "__main__":
