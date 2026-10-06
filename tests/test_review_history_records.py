@@ -289,9 +289,31 @@ class IdKindTests(unittest.TestCase):
                    "derivation": "der", "review_run": "rr", "review_receipt": "rcp", "review_consumption": "rcs",
                    "review_task": "rtk", "review_finding": "rfd", "review_repair_batch": "rrb"}
         self.assertEqual(earlier, {kind: prefix for kind, prefix in ids.PREFIXES.items() if kind in earlier})
-        # P6 (§30.16) adds the two policy kinds after P5's two; nothing else is added.
+        # P6 (§30.16) adds the two policy kinds after P5's two; P7 (§31.11, allocation A-1) adds the four root policy
+        # maintenance kinds; nothing else is added.
         self.assertEqual(set(earlier) | {"review_relation", "review_decision", "review_policy_change",
-                                         "review_policy_evaluation"}, set(ids.PREFIXES))
+                                         "review_policy_evaluation", "root_policy_mutation", "review_promotion_packet",
+                                         "review_global_policy_change", "review_global_policy_evaluation"},
+                         set(ids.PREFIXES))
+
+    def test_the_p7_root_kinds_have_their_allocated_prefixes_and_are_read_as_themselves(self) -> None:
+        allocated = {"root_policy_mutation": "rpm", "review_promotion_packet": "rpp",
+                     "review_global_policy_change": "rgc", "review_global_policy_evaluation": "rge"}
+        self.assertEqual(allocated, {kind: ids.PREFIXES[kind] for kind in allocated})
+        for kind, prefix in allocated.items():
+            with self.subTest(kind=kind):
+                identifier = ids.new_id(kind)
+                self.assertTrue(identifier.startswith(prefix + "_"), identifier)
+                self.assertEqual(kind, ids.kind_of(identifier))
+                self.assertTrue(ids.is_valid_id(identifier, kind))
+                fixed = f"{prefix}_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+                self.assertEqual(kind, ids.kind_of(fixed), "never the Roadmap prefix r followed by text")
+                self.assertFalse(ids.is_valid_id(fixed, "roadmap"))
+                self.assertFalse(prefix.startswith("rel") or prefix.startswith("rr"), prefix)
+                self.assertNotIn(prefix, ("rpc", "rpe", "rha"), "A-1: distinct from the RB6 and RB5 prefixes")
+                self.assertIsNone(ids.kind_of(f"{prefix}x_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+        self.assertEqual("review_policy_change", ids.kind_of("rpc_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+        self.assertEqual("review_policy_evaluation", ids.kind_of("rpe_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
 
     def test_reservation_keys_are_replay_stable_and_never_a_run_key(self) -> None:
         self.assertEqual(f"review-relation:{RUN}:1", history.review_relation_key(RUN, 1))

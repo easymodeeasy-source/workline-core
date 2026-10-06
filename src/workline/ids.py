@@ -49,11 +49,18 @@ PREFIXES = {
     # ``rel_``, ``rr_`` or the Roadmap prefix ``r`` followed by text.
     "review_policy_change": "rpc",
     "review_policy_evaluation": "rpe",
+    # P7 (§31.11, allocation A-1): the root policy maintenance mutation, a Promotion Packet and an applied / evaluated
+    # Global Policy Change are explicit kinds reserved by the same replay-stable rule, with prefixes that cannot be
+    # read as ``rel_``, ``rr_``, ``rpc_`` / ``rpe_`` or the Roadmap prefix ``r`` followed by text.
+    "root_policy_mutation": "rpm",
+    "review_promotion_packet": "rpp",
+    "review_global_policy_change": "rgc",
+    "review_global_policy_evaluation": "rge",
 }
 
-# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_``/``rhr_``/``rhd_``/``rpc_``/``rpe_``
-# are read as themselves rather than as the Roadmap prefix ``r`` followed by text.
-_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rpc|rpe|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
+# Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_``/``rhr_``/``rhd_``/``rpc_``/``rpe_``/
+# ``rpm_``/``rpp_``/``rgc_``/``rge_`` are read as themselves rather than as the Roadmap prefix ``r`` followed by text.
+_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rpc|rpe|rpm|rpp|rgc|rge|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
 
 
 def new_ulid(now_ms: int | None = None) -> str:
