@@ -481,14 +481,21 @@ def after_recording(stage: str) -> Iterator[None]:
         yield
 
 
+def _matches(record: dict[str, Any], kind: str, stage: str, path: "str | Callable[[str], bool] | None") -> bool:
+    if record["kind"] != kind or record["stage"] != stage:
+        return False
+    found = str(record["payload"].get("path"))
+    return path is None or (path(found) if callable(path) else found == path)
+
+
 @contextmanager
-def after_effect(kind: str, stage: str, *, path: str | None = None) -> Iterator[None]:
+def after_effect(kind: str, stage: str, *, path: "str | Callable[[str], bool] | None" = None) -> Iterator[None]:
     """Stop right after the first effect of ``kind`` in ``stage`` (at ``path``) is applied, its flag not saved."""
     real = MutationController.apply_effect
 
     def fire(controller: MutationController, record: dict[str, Any]) -> None:
         real(controller, record)
-        if record["kind"] == kind and record["stage"] == stage and (path is None or record["payload"].get("path") == path):
+        if _matches(record, kind, stage, path):
             raise Interrupted(f"applied {kind} of {stage}, flag not saved")
 
     with mock.patch.object(MutationController, "apply_effect", fire):
@@ -496,12 +503,12 @@ def after_effect(kind: str, stage: str, *, path: str | None = None) -> Iterator[
 
 
 @contextmanager
-def before_effect(kind: str, stage: str, *, path: str | None = None) -> Iterator[None]:
-    """Stop right before the first effect of ``kind`` in ``stage`` (at ``path``) is applied."""
+def before_effect(kind: str, stage: str, *, path: "str | Callable[[str], bool] | None" = None) -> Iterator[None]:
+    """Stop right before the first effect of ``kind`` in ``stage`` (at ``path``) is applied (its bytes recorded)."""
     real = MutationController.apply_effect
 
     def fire(controller: MutationController, record: dict[str, Any]) -> None:
-        if record["kind"] == kind and record["stage"] == stage and (path is None or record["payload"].get("path") == path):
+        if _matches(record, kind, stage, path):
             raise Interrupted(f"before {kind} of {stage}")
         real(controller, record)
 
@@ -527,9 +534,109 @@ def at_call(n: int) -> Callable[..., bool]:
     return lambda calls, *args, **kwargs: calls == n
 
 
+def reserving(kind: str) -> Callable[..., bool]:
+    """A ``crash_at(Mutation, "reserve_id", when=...)`` filter: the reservation of an ID of ``kind``."""
+    return lambda calls, mutation, key, found_kind: found_kind == kind
+
+
+# --------------------------------------------------------------------------- the §30.40 retry invariants
+
+class InterruptionCase(PolicyCase):
+    """One §30.40 window: run the change into the window, then the same request again, and prove the invariants.
+
+    The request is a strengthen of ``required_slots`` 1 -> 2 reviewed by ONE discovery actor (the pre-change
+    policy). A retry that resolved its policy from the after state would need two reviewers and refuse; one that
+    authorized under it would bind the after Effective Policy - both are caught below.
+    """
+
+    template = "remote"
+
+    def interrupted(self, window: Callable[[], Any], expected: Any = (Crash, Interrupted),
+                    *, between: Callable[[], None] | None = None) -> None:
+        before = self.state()
+        remote_before = self.remote_main() if self.template == "remote" else None
+        head_before = self.commit_of()
+        request = self.request()
+        with window(), self.assertRaises(expected):
+            self.change(request, policy_review())
+        pending = self.policy_pending()
+        self.assertEqual(1, len(pending), "the policy change mutation is kept for the retry")
+        reserved = dict(pending[0].get("reserved_ids") or {})
+        frozen = ((pending[0].get("notes") or {}).get("policy_candidate") or {}).get("candidate")
+        if between is not None:
+            between()
+        discovery, adjudicator = Discovery(), Adjudicator()
+        result = self.change(request, policy_review(discovery, adjudicator=adjudicator))
+        self.assertEqual("applied", result.status, result.detail)
+        self.assert_invariants(result, reserved, frozen, before, remote_before, head_before)
+        self.discovery_calls, self.adjudicator_calls = len(discovery.tasks), len(adjudicator.tasks)
+
+    def assert_invariants(self, result: Any, reserved: dict[str, str], frozen: dict[str, Any] | None,
+                          before: policy.PolicyState, remote_before: str | None, head_before: str) -> None:
+        review = ReviewStore(self.store)
+        # the same policy_change_id / Candidate / Review IDs the interrupted attempt reserved
+        for key, identifier in reserved.items():
+            if key.startswith("review-policy-change:"):
+                self.assertEqual(identifier, result.policy_change_id, "the retry keeps the policy_change_id")
+            elif key.startswith("review-run:"):
+                self.assertEqual(identifier, result.review_run_id, "the retry keeps the Review Run")
+            elif key.startswith("review-receipt:"):
+                self.assertEqual(identifier, result.receipt_id, "the retry keeps the Receipt ID")
+            elif key.startswith("review-consumption:"):
+                self.assertEqual(identifier, result.consumption_id, "the retry keeps the Consumption ID")
+            elif key.startswith("review-task:"):
+                chain = review.gate_chain(result.review_run_id)
+                self.assertIn(identifier, [t["task_id"] for g in chain.generations for t in g.accepted_tasks])
+        chain = review.gate_chain(result.review_run_id)
+        candidate_hash = chain.generations[0].candidate_hash
+        if frozen is not None:
+            self.assertEqual(policy.candidate_hash(frozen), candidate_hash, "the retry keeps the Candidate")
+        self.assertEqual([result.review_run_id], self.policy_runs(), "one Policy Review Run, never a second")
+        self.assertEqual(5, len(chain.generations))
+        self.assertEqual([], p4.chain_problems(chain))
+        settled = [t for t in chain.generations[1].settled_tasks]
+        self.assertEqual(1, len(settled), "one raw discovery report, no duplicate")
+        # no duplicate change record, no Profile version skip
+        self.assertEqual((result.policy_change_id,), review.policy_change_ids(), "no duplicate change record")
+        change = review.read_policy_change(result.policy_change_id)
+        self.assertEqual(candidate_hash, change["candidate_hash"])
+        profile = review.read_profile()
+        self.assertEqual((1, None), (profile.profile_version, profile.parent_profile_digest), "no version skip")
+        self.assertEqual(profile.digest, change["after_profile_digest"])
+        # one Receipt, one Consumption, one Kp, one Km - and nothing authorized under the after state
+        self.assertEqual([result.receipt_id], self.policy_receipts())
+        self.assertEqual([result.consumption_id], [c.consumption_id for c in self.policy_consumptions()])
+        receipt = review.read_receipt(str(result.receipt_id))
+        self.assertEqual(candidate_hash, receipt.authorized_candidate_hash)
+        self.assertEqual(before.effective_hash, receipt.effective_policy_hash, "no authorization under the after state")
+        for gate in chain.generations:
+            self.assertEqual(before.effective_hash, gate.effective_policy_hash)
+        kps, kms = self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT)
+        self.assertEqual([result.policy_commit], kps, "one Kp")
+        self.assertEqual([result.metadata_commit], kms, "one Km")
+        self.assertEqual(5, len([c for c in self.commits_with(GENERATION_SUBJECT)
+                                 if self.subject(c).endswith(result.review_run_id)]))
+        summary = review.read_history(paths.HISTORY_RUNS, result.review_run_id)
+        self.assertEqual(result.consumption_id, summary.consumption_id)
+        # no force / history rewrite, no duplicate publication
+        self.assertTrue(self.is_ancestor(head_before, str(result.metadata_commit)), "no history rewrite")
+        if self.template == "remote":
+            self.assertEqual(result.metadata_commit, self.remote_main())
+            news = [new for _, new, _ in self.pushes()]
+            self.assertLessEqual(news.count(str(result.policy_commit)), 1, "Kp is published at most once")
+            self.assertEqual(1, news.count(str(result.metadata_commit)), "Km is published exactly once")
+            self.assertTrue(set(news) <= {str(result.policy_commit), str(result.metadata_commit)})
+            if remote_before is not None:
+                self.assertTrue(self.is_ancestor(remote_before, str(result.metadata_commit), self.remote))
+            self.assert_fast_forward_pushes()
+        self.assertEqual([], self.owner_pending())
+        self.assertEqual([], self.dirty())
+        self.assertEqual([], self.problems())
+
+
 __all__ = [
     "Adjudicator", "COVERAGE", "Crash", "Delta", "Discovery", "EVALUATION_SUBJECT", "GENERATION_SUBJECT",
-    "Interrupted", "KM_SUBJECT", "KP_SUBJECT", "PolicyCase", "after_effect", "after_recording", "at_call",
+    "InterruptionCase", "Interrupted", "KM_SUBJECT", "KP_SUBJECT", "PolicyCase", "after_effect", "after_recording", "at_call",
     "before_effect", "before_owner_completion", "change_request", "claim", "crash_at", "evaluation_request",
-    "history_refs", "planning_review", "policy_review", "records", "serialize", "two_reviewers",
+    "history_refs", "planning_review", "policy_review", "records", "reserving", "serialize", "two_reviewers",
 ]
