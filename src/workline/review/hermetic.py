@@ -43,6 +43,15 @@ Project - its validation, above all - therefore writes nothing into it.
 This module builds environments. It dispatches nothing: no persistence identity
 names it yet, and the review-v1 Work path stays unavailable until the unit that
 owns that dispatch lands.
+
+**Where the scratch lives.** A class B environment that commits keeps its two
+Workline-owned empty objects - the ``core.hooksPath`` directory and the
+``GIT_CONFIG_GLOBAL`` file - at the paths a :class:`ScratchPaths` names inside
+the repository it commits in. A Project's are :data:`PROJECT_SCRATCH`, under
+``.workline/runtime/review/``, exactly as always (:func:`enter`). Workline-root
+policy maintenance (P7, ``WORKLINE_COMPLETION_SPRINT`` §31.8 / §31.30) enters
+the same frozen order with its own root-runtime scratch (:func:`enter_root`),
+which can never name ``.workline/``: no root operation creates it.
 """
 
 from __future__ import annotations
@@ -59,7 +68,7 @@ from typing import Iterator
 
 from .. import gitcmd
 from ..errors import StopError
-from ..store import ProjectStore
+from ..store import WORKLINE_DIR, ProjectStore
 from . import paths as review_paths
 
 #: The prefix of every variable the strip removes. No inherited name survives it,
@@ -196,6 +205,45 @@ def capture_identity(root: Path) -> Identity:
     return Identity(captured["user.name"], captured["user.email"])
 
 
+@dataclass(frozen=True)
+class ScratchPaths:
+    """Where a committing class B environment keeps its two Workline-owned empty objects, inside its repository.
+
+    ``no_hooks`` is the directory named as ``core.hooksPath`` and ``no_config``
+    the file named as ``GIT_CONFIG_GLOBAL``, each a repository-relative POSIX
+    path: no absolute path, no empty, ``.`` or ``..`` component, no backslash.
+    The same strings name them in a refusal. Nothing else about the scratch
+    varies: both are created when absent and proven empty and plain
+    immediately before every use, wherever they live.
+    """
+
+    no_hooks: str
+    no_config: str
+
+    def __post_init__(self) -> None:
+        for named, value in (("no_hooks", self.no_hooks), ("no_config", self.no_config)):
+            parts = value.split("/") if isinstance(value, str) else []
+            if not parts or value.startswith("/") or ":" in value or "\\" in value \
+                    or any(part in ("", ".", "..") for part in parts):
+                raise ValueError(f"a class B scratch {named} is a repository-relative POSIX path, not {value!r}")
+
+    def parts(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """The path components of the hooks directory and of the configuration file."""
+        return tuple(self.no_hooks.split("/")), tuple(self.no_config.split("/"))
+
+
+#: A Project's class B scratch: under ``.workline/runtime/review/``, exactly where it always was.
+PROJECT_SCRATCH = ScratchPaths(review_paths.RUNTIME_NO_HOOKS_DIR, review_paths.RUNTIME_NO_CONFIG_FILE)
+
+
+def _scratch_hooks_directory(root: Path, scratch: ScratchPaths) -> str:
+    return _empty_hooks_directory(Path(root) / scratch.no_hooks, scratch.no_hooks, _COMMIT_HOOK_CONSEQUENCE)
+
+
+def _scratch_config_file(root: Path, scratch: ScratchPaths) -> str:
+    return _empty_config_file(Path(root) / scratch.no_config, scratch.no_config, _COMMIT_OUTCOME)
+
+
 def no_hooks_directory(store: ProjectStore) -> str:
     """The absolute path of the Workline-owned empty directory named as ``core.hooksPath``.
 
@@ -206,9 +254,7 @@ def no_hooks_directory(store: ProjectStore) -> str:
     times for one call with the default hooks directory and not at all with this
     one, and ``update-index`` ran ``post-index-change`` the same way.
     """
-    return _empty_hooks_directory(
-        store.root / review_paths.RUNTIME_NO_HOOKS_DIR, review_paths.RUNTIME_NO_HOOKS_DIR, _COMMIT_HOOK_CONSEQUENCE
-    )
+    return _scratch_hooks_directory(store.root, PROJECT_SCRATCH)
 
 
 def no_config_file(store: ProjectStore) -> str:
@@ -219,9 +265,7 @@ def no_config_file(store: ProjectStore) -> str:
     invocation's global configuration, which is the one thing the variable
     exists to prevent.
     """
-    return _empty_config_file(
-        store.root / review_paths.RUNTIME_NO_CONFIG_FILE, review_paths.RUNTIME_NO_CONFIG_FILE, _COMMIT_OUTCOME
-    )
+    return _scratch_config_file(store.root, PROJECT_SCRATCH)
 
 
 #: How a refusal of a class B scratch object says what it prevented, for a write-capable and a read-only context.
@@ -335,7 +379,7 @@ class HermeticGit:
     identity: Identity
     promisor_remotes: tuple[str, ...]
     _no_config: str
-    _store: ProjectStore
+    _scratch: ScratchPaths
 
     def environment(self, *, index_file: str | None = None) -> dict[str, str]:
         """The class B environment: the strip, then the allowlist, and nothing else.
@@ -388,7 +432,7 @@ class HermeticGit:
         because it is proven empty *immediately before use* and a hook can be
         dropped there at any later moment.
         """
-        return _configuration_arguments(no_hooks_directory(self._store))
+        return _configuration_arguments(_scratch_hooks_directory(self.root, self._scratch))
 
     def attribute_configuration_arguments(self, source: str) -> tuple[str, ...]:
         """:meth:`configuration_arguments` plus the attribute-source pin (``F3`` §7.1.9 class (b)).
@@ -423,7 +467,7 @@ class HermeticGit:
                 "commit it is meant to govern: STOP",
                 code="review_git_transform",
             )
-        empty = no_config_file(self._store)
+        empty = _scratch_config_file(self.root, self._scratch)
         return (*self.configuration_arguments(), "-c", f"attr.tree={source}", "-c", f"core.attributesFile={empty}")
 
     def run(
@@ -515,7 +559,7 @@ def _promisor_remotes(hermetic: "HermeticGit") -> tuple[str, ...]:
     return tuple(sorted(set(names)))
 
 
-def _require_no_grafts(store: ProjectStore) -> None:
+def _require_no_grafts(root: Path) -> None:
     """A legacy ``.git/info/grafts`` file that is PRESENT AND NON-EMPTY is STOP (§7.1.9, §21.14 B).
 
     The predicate is the contract's, exactly: "Legacy ``.git/info/grafts``, if
@@ -534,7 +578,7 @@ def _require_no_grafts(store: ProjectStore) -> None:
     following it to decide would be the one thing a no-follow check must not do,
     so what cannot be proven empty is not treated as empty.
     """
-    grafts = store.root / ".git" / "info" / "grafts"
+    grafts = Path(root) / ".git" / "info" / "grafts"
     try:
         if not os.path.lexists(grafts):
             return
@@ -599,14 +643,38 @@ def enter(store: ProjectStore) -> HermeticGit:
     so they are class B invocations in full: one authority builds the envelope,
     and an entry read cannot carry a different one from a later proof command.
     """
-    identity = capture_identity(store.root)
-    _require_no_grafts(store)
+    return _enter(store.root, PROJECT_SCRATCH)
+
+
+def enter_root(root: Path, scratch: ScratchPaths) -> HermeticGit:
+    """The same frozen order for the repository at ``root``, with ``scratch`` as its class B scratch (P7 §31.30).
+
+    For Workline-root policy maintenance, which is not a Project and has no
+    ``ProjectStore``: every step of :func:`enter` - the class A identity
+    capture (STOP AT ENTRY ``review_identity_unavailable`` when either field is
+    unconfigured), the grafts, shallow and promisor entry reads, and the
+    neutralized class B envelope - with the two empty objects at ``scratch``
+    (``.workline-root-runtime/no-hooks`` and ``.workline-root-runtime/no-config``
+    for the root, §31.8). A scratch under ``.workline/`` is refused before
+    anything is read or created: nothing entered here may create the Project
+    namespace in the repository it commits in. The caller has already proven
+    the directory the scratch lives in.
+    """
+    for parts in scratch.parts():
+        if parts[0] == WORKLINE_DIR:
+            raise ValueError(f"a root class B scratch never lives under {WORKLINE_DIR}/: {'/'.join(parts)!r}")
+    return _enter(Path(root), scratch)
+
+
+def _enter(root: Path, scratch: ScratchPaths) -> HermeticGit:
+    identity = capture_identity(root)
+    _require_no_grafts(root)
     built = HermeticGit(
-        root=store.root,
+        root=root,
         identity=identity,
         promisor_remotes=(),
-        _no_config=no_config_file(store),
-        _store=store,
+        _no_config=_scratch_config_file(root, scratch),
+        _scratch=scratch,
     )
     _require_not_shallow(built)
     return replace(built, promisor_remotes=_promisor_remotes(built))

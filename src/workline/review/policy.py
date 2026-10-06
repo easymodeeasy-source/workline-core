@@ -660,6 +660,187 @@ def parse_baseline(record: object, described: str) -> GlobalPolicyBaseline:
     return GlobalPolicyBaseline(serialize.canonical_data(found))
 
 
+# --------------------------------------------------------------------------- the materialized Global policy record (P7 §31.2, §31.22)
+
+#: The tracked Workline-root Global policy P7 materializes (§16.2 / §31.2): adaptive policy data only. It names the
+#: Global setting of each fixed surface and nothing else; every other surface fact, the meta-rules and the loader
+#: semantics stay fixed in code and the record binds their identities. Until the loader's materialized mode reads it
+#: (§31.3), the baseline stays ``derived-baseline``; the record's form and its baseline projection are defined here,
+#: once, so the loader, the Global Policy Change Candidate and the committed-object proof read it the same way.
+GLOBAL_POLICY_REL = "review-policy/global-policy.yaml"
+SOURCE_MODE_MATERIALIZED = "materialized-global-policy"
+SCHEMA_GLOBAL_POLICY = "review-p7-global-policy"
+GLOBAL_POLICY_FIELDS = (
+    serialize.SCHEMA_KEY, serialize.VERSION_KEY, "global_policy_version", "parent_global_policy_digest",
+    "loader_semantics_identity", "fixed_meta_rules_identity", "settings",
+)
+GLOBAL_POLICY_SETTING_FIELDS = ("policy_surface_id", "global_setting")
+
+
+def parse_global_policy(record: object, described: str) -> dict[str, Any]:
+    """A Global policy record, strictly (§31.22): its canonical data, or ``review_record_invalid``.
+
+    Exactly its fields; a positive ``global_policy_version``; no parent at
+    version 1 and an exact SHA-256 parent above it; the running loader
+    semantics and fixed meta-rules identities; and ``settings`` holding each
+    fixed surface exactly once, sorted by ``policy_surface_id``, each inside
+    its fixed range. Whether a record is the exact successor of another is
+    :func:`global_policy_successor_problem`'s question, never this one's.
+    """
+    found = records._require_mapping(record, described)
+    serialize.require_schema(found, SCHEMA_GLOBAL_POLICY, RECORD_VERSION, described)
+    records._require_exact_fields(found, GLOBAL_POLICY_FIELDS, described)
+    version = found.get("global_policy_version")
+    if type(version) is not int or version < 1:
+        raise _invalid(f"{described} global_policy_version is not a positive integer: {version!r}")
+    parent = found.get("parent_global_policy_digest")
+    if version == 1:
+        if parent is not None:
+            raise _invalid(f"{described} is Global policy version 1 and names a parent policy")
+    elif not isinstance(parent, str) or records.DIGEST_RE.match(parent) is None:
+        raise _invalid(f"{described} is Global policy version {version} and names no exact parent policy digest")
+    if found.get("loader_semantics_identity") != LOADER_SEMANTICS_IDENTITY:
+        raise _invalid(f"{described} binds another loader semantics identity than {LOADER_SEMANTICS_IDENTITY}")
+    if found.get("fixed_meta_rules_identity") != META_RULES_ID:
+        raise _invalid(f"{described} binds other fixed meta-rules than {META_RULES_ID}")
+    settings = found.get("settings")
+    if not isinstance(settings, list):
+        raise _invalid(f"{described} settings is not a list")
+    ordered = sorted(SURFACE_BY_ID)
+    if len(settings) != len(ordered):
+        raise _invalid(f"{described} does not set exactly the fixed surfaces {', '.join(ordered)}")
+    for expected, item in zip(ordered, settings):
+        if not isinstance(item, dict) or set(item) != set(GLOBAL_POLICY_SETTING_FIELDS):
+            raise _invalid(f"{described} setting is not exactly {', '.join(GLOBAL_POLICY_SETTING_FIELDS)}")
+        if item["policy_surface_id"] != expected:
+            raise _invalid(f"{described} settings are not each fixed surface exactly once, sorted by policy_surface_id")
+        if not SURFACE_BY_ID[expected].in_range(item["global_setting"]):
+            surface = SURFACE_BY_ID[expected]
+            raise _invalid(f"{described} sets {expected} to {item['global_setting']!r}, outside "
+                           f"{surface.minimum}..{surface.maximum}")
+    return serialize.canonical_data(found)
+
+
+def parse_global_policy_bytes(raw: bytes, described: str) -> dict[str, Any]:
+    """A stored Global policy file: canonical bytes only (no other spelling of the same data), then strict form."""
+    data, _ = serialize.parse_canonical(raw, described)
+    return parse_global_policy(data, described)
+
+
+def global_policy_record(global_policy_version: int, parent_global_policy_digest: str | None,
+                         settings: Mapping[str, int]) -> dict[str, Any]:
+    """The canonical Global policy record of ``settings`` (each fixed surface's Global setting), strictly checked."""
+    if not isinstance(settings, Mapping) or set(settings) != set(SURFACE_BY_ID):
+        raise _invalid(f"a Global policy sets exactly the fixed surfaces {', '.join(sorted(SURFACE_BY_ID))}")
+    return parse_global_policy({
+        serialize.SCHEMA_KEY: SCHEMA_GLOBAL_POLICY,
+        serialize.VERSION_KEY: RECORD_VERSION,
+        "global_policy_version": global_policy_version,
+        "parent_global_policy_digest": parent_global_policy_digest,
+        "loader_semantics_identity": LOADER_SEMANTICS_IDENTITY,
+        "fixed_meta_rules_identity": META_RULES_ID,
+        "settings": [{"policy_surface_id": surface_id, "global_setting": settings[surface_id]}
+                     for surface_id in sorted(SURFACE_BY_ID)],
+    }, "the Global policy")
+
+
+def global_policy_digest(record: Mapping[str, Any]) -> str:
+    """The exact identity of a Global policy record: SHA-256 over its canonical bytes (the parent a successor names)."""
+    return serialize.digest(dict(record))
+
+
+def global_policy_bytes(record: Mapping[str, Any]) -> bytes:
+    """The exact bytes ``review-policy/global-policy.yaml`` holds for ``record``: its canonical serialization."""
+    return serialize.canonical_bytes(dict(record))
+
+
+def global_policy_settings(record: Mapping[str, Any]) -> dict[str, int]:
+    """Each fixed surface's Global setting in a (parsed) Global policy record."""
+    return {str(item["policy_surface_id"]): int(item["global_setting"]) for item in record["settings"]}
+
+
+def global_policy_successor_problem(before: Mapping[str, Any], after: Mapping[str, Any]) -> str | None:
+    """Why ``after`` is not the exact next Global policy version of ``before``, or ``None`` (§31.22).
+
+    The version increments by exactly one and the parent is the exact digest
+    of ``before``; a rollback is a new, higher version like any other change.
+    Both records are parsed strictly first.
+    """
+    try:
+        parent = parse_global_policy(before, "the before Global policy")
+        child = parse_global_policy(after, "the after Global policy")
+    except ValidationError as exc:
+        return str(exc)
+    if child["global_policy_version"] != parent["global_policy_version"] + 1:
+        return (f"the after Global policy is version {child['global_policy_version']}, not exactly "
+                f"{parent['global_policy_version'] + 1}")
+    if child["parent_global_policy_digest"] != global_policy_digest(parent):
+        return "the after Global policy does not name the exact before policy digest as its parent"
+    return None
+
+
+def global_policy_from_baseline(baseline: GlobalPolicyBaseline) -> dict[str, Any]:
+    """The Global policy record that states ``baseline``'s Global settings at its own Global policy version.
+
+    For the derived baseline this is the initial zero-semantic-change
+    materialization (§16.2 / §31.2): version 1, no parent, the two code
+    defaults. Nothing about it is a learned change (§31.2: no Packet, change
+    record, evaluation or Patch Note is fabricated for it).
+    """
+    if baseline.version != 1:
+        raise _invalid("only Global policy version 1 is materialized from a baseline; every later version is a "
+                       "reviewed Global Policy Change")
+    return global_policy_record(1, None, {surface.policy_surface_id: baseline.global_setting(surface.policy_surface_id)
+                                          for surface in SURFACES})
+
+
+def materialized_baseline_record(global_policy: Mapping[str, Any], authority: Sequence[Mapping[str, str]],
+                                 sources: Sequence[Mapping[str, str]]) -> dict[str, Any]:
+    """The GlobalPolicyBaseline record a Global policy record loads as: the SAME fields as the derived one (§31.3).
+
+    ``source_mode`` is ``materialized-global-policy``; ``baseline_version`` is
+    the Global policy version; ``global_policy_identity`` is the record's own
+    digest; every surface carries its fixed registry facts with the record's
+    Global setting. ``authority`` and ``sources`` are the provenance the derived
+    baseline binds (:func:`baseline_authority_digests`,
+    :func:`source_policy_identities`): provenance only, outside the semantic
+    projection, so a materialized record whose settings equal the code defaults
+    has exactly the derived baseline's policy semantics (§16.2, R6-2).
+    """
+    found = parse_global_policy(global_policy, "the Global policy")
+    settings = global_policy_settings(found)
+    surfaces = []
+    for surface in SURFACES:
+        item = surface.to_record()
+        item["global_setting"] = settings[surface.policy_surface_id]
+        surfaces.append(item)
+    return serialize.canonical_data({
+        serialize.SCHEMA_KEY: SCHEMA_BASELINE,
+        serialize.VERSION_KEY: RECORD_VERSION,
+        "contract": BASELINE_CONTRACT,
+        "baseline_version": found["global_policy_version"],
+        "source_mode": SOURCE_MODE_MATERIALIZED,
+        "global_policy_identity": global_policy_digest(found),
+        "root_authority_digests": [dict(item) for item in authority],
+        "meta_rules_id": META_RULES_ID,
+        "meta_rules_digest": meta_rules_digest(),
+        "surfaces": surfaces,
+        "loader_semantics_identity": LOADER_SEMANTICS_IDENTITY,
+        "source_policy_identities": [dict(item) for item in sources],
+    })
+
+
+def global_policy_projection(global_policy: Mapping[str, Any]) -> dict[str, Any]:
+    """The normalized policy-semantic projection of a Global policy record (R6-2's, of the baseline it loads as).
+
+    What C-2(Kp) compares between the committed file and the Candidate's
+    after-state, and what Global Policy Consumption v4's
+    ``normalized_projection_hash`` digests (:func:`semantic_digest` of the same
+    record). Provenance is not part of it.
+    """
+    return semantic_projection(materialized_baseline_record(global_policy, (), ()))
+
+
 # --------------------------------------------------------------------------- the canonical Project Profile (§15.12, §30.5)
 
 PROFILE_FIELDS = (

@@ -37,6 +37,16 @@ cores join the operation that already holds it; starting another top-level
 operation on the same Project from inside a running one is
 ``project_operation_nested``. Initial Project開始 runs before a Project is
 established and is outside this lock.
+
+The OS primitive under the lock is public and nothing more: open the lock file
+(:func:`open_lock_file`), take the non-blocking exclusive lock
+(:func:`try_exclusive_lock`), prove the path still names the locked file
+(:func:`names_locked_file`), and let go (:func:`release_exclusive_lock`).
+Workline-root policy maintenance (P7, ``WORKLINE_COMPLETION_SPRINT`` §31.9)
+takes its own lock file with the same primitive. It shares nothing else with
+the Project lock - no Project context, no ``ProjectStore``, no holder record,
+no nesting registry - and the Project lock's semantics are exactly the ones
+above.
 """
 
 from __future__ import annotations
@@ -62,6 +72,18 @@ from .store import PROJECT_YAML_REL, ProjectStore
 HOLDER_MARKER = "workline-operation-holder"
 HOLDER_VERSION = 1
 
+# --------------------------------------------------------------------------- the OS lock primitive (also P7 §31.9)
+
+
+def open_lock_file(path: Path) -> int:
+    """Open the lock file ``path`` for the OS lock - read/write, binary, created when absent - or raise ``OSError``.
+
+    The caller has already made its parent directory and closes the descriptor
+    however it ends. Opening takes no lock.
+    """
+    return os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+
+
 if os.name == "nt":
     import msvcrt
 
@@ -69,7 +91,11 @@ if os.name == "nt":
     # deadlock codes belong to the retrying modes, which are never used here.
     _CONTENDED = {errno.EACCES, errno.EDEADLK, getattr(errno, "EDEADLOCK", errno.EDEADLK)}
 
-    def _try_lock(fd: int) -> bool:
+    def try_exclusive_lock(fd: int) -> bool:
+        """Take the non-blocking exclusive lock on the open lock file ``fd``: ``False`` when another holder has it.
+
+        Never waits. Any failure other than contention raises ``OSError``.
+        """
         os.lseek(fd, 0, os.SEEK_SET)
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
@@ -79,11 +105,13 @@ if os.name == "nt":
             raise
         return True
 
-    def _unlock(fd: int) -> None:
+    def release_exclusive_lock(fd: int) -> None:
+        """Let go of the lock :func:`try_exclusive_lock` took on ``fd`` (the descriptor stays open)."""
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
 
-    def _names_locked_file(fd: int, path: Path) -> bool:
+    def names_locked_file(fd: int, path: Path) -> bool:
+        """Whether ``path`` still names the file ``fd`` locked, so the lock is the one on that path."""
         # A file open here cannot be deleted or renamed on Windows, so the path
         # still names the file this descriptor locked.
         return True
@@ -91,17 +119,23 @@ if os.name == "nt":
 else:
     import fcntl
 
-    def _try_lock(fd: int) -> bool:
+    def try_exclusive_lock(fd: int) -> bool:
+        """Take the non-blocking exclusive lock on the open lock file ``fd``: ``False`` when another holder has it.
+
+        Never waits. Any failure other than contention raises ``OSError``.
+        """
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return False
         return True
 
-    def _unlock(fd: int) -> None:
+    def release_exclusive_lock(fd: int) -> None:
+        """Let go of the lock :func:`try_exclusive_lock` took on ``fd`` (the descriptor stays open)."""
         fcntl.flock(fd, fcntl.LOCK_UN)
 
-    def _names_locked_file(fd: int, path: Path) -> bool:
+    def names_locked_file(fd: int, path: Path) -> bool:
+        """Whether ``path`` still names the file ``fd`` locked, so the lock is the one on that path."""
         # flock follows the open file, not the name: had the lock file been
         # unlinked and recreated meanwhile, another process could lock a
         # different file under the same path.
@@ -109,6 +143,9 @@ else:
             return os.path.samestat(os.fstat(fd), os.stat(path))
         except OSError:
             return False
+
+
+# --------------------------------------------------------------------------- the Project execution lock
 
 
 @dataclass
@@ -256,13 +293,13 @@ def project_operation(
         )
     try:
         store.locks.mkdir(parents=True, exist_ok=True)
-        fd = os.open(store.lock_file, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+        fd = open_lock_file(store.lock_file)
     except OSError as exc:
         raise StopError(
             f"cannot open the Project execution lock {store.lock_file}: {exc}", code="project_lock_unavailable"
         ) from exc
     try:
-        locked = _try_lock(fd)
+        locked = try_exclusive_lock(fd)
     except OSError as exc:
         os.close(fd)
         raise StopError(
@@ -272,7 +309,7 @@ def project_operation(
         os.close(fd)
         holder = read_holder(store)
         raise ProjectOperationBusy(_busy_message(store, holder), holder)
-    if not _names_locked_file(fd, store.lock_file):
+    if not names_locked_file(fd, store.lock_file):
         os.close(fd)
         raise StopError(
             f"the Project execution lock {store.lock_file} was replaced while it was being taken; STOP",
@@ -292,10 +329,13 @@ def project_operation(
         # never erase the description the next holder writes.
         _clear_holder(store)
         try:
-            _unlock(fd)
+            release_exclusive_lock(fd)
         except OSError:
             pass
         os.close(fd)
 
 
-__all__ = ["ProjectLock", "held_lock", "note_mutation", "project_operation", "read_holder"]
+__all__ = [
+    "ProjectLock", "held_lock", "names_locked_file", "note_mutation", "open_lock_file", "project_operation",
+    "read_holder", "release_exclusive_lock", "try_exclusive_lock",
+]
