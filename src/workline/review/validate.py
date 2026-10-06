@@ -643,6 +643,11 @@ def _p4_chain(
     problems = [ReviewProblem("review_gate_chain", f"{where}: {message}") for message in p4.chain_problems(chain)]
     if problems:
         return problems
+    contract = next(iter(contracts))
+    if not p4.repairs(contract) and p4.shape_of(chain) == p4.SHAPE_REPAIR:
+        # a G4-terminal contract (P6 Policy Review) has no Repair Batch branch
+        return [ReviewProblem("review_gate_chain", f"{where} accepts a repair under {contract}, which has no Repair "
+                                                   "Batch branch")]
     for task in p4.discovery_tasks(chain):
         settled = p4.settled_of(chain, str(task["task_id"]))
         if settled is None:
@@ -768,9 +773,6 @@ def _policy_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[R
                 or first.review_kind != policy.REVIEW_KIND:
             problems.append(ReviewProblem("review_record_conflict",
                                           f"{where} does not bind exactly the Policy Review contract, kind and target"))
-        elif p4.shape_of(chain) == p4.SHAPE_REPAIR:
-            problems.append(ReviewProblem("review_gate_chain", f"{where} accepts a repair; a Policy Review has no "
-                                                               "Repair Batch branch"))
     return problems
 
 

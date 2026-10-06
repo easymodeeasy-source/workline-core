@@ -1629,6 +1629,17 @@ _STAGE_REGISTRATION_COMMIT = "review-registration-commit"
 _STAGE_CONSUMPTION = "review-consumption"
 #: The live START invocation a review-v1 Work START carries its two markers beside (F1-D2, F3 §11.1).
 _WORK_START_KEYS = frozenset({"operation", "work_id", "mode"})
+#: P6 (§30.15, §30.20): the durable invocation of a ``project-policy-change`` mutation - exactly these keys - and the
+#: two push-only stages it may record, each publishing exactly the commit its own Git stage made and its proof note
+#: names: the policy commit Kp, then the metadata commit Km.
+_POLICY_REVIEW_CONTRACT = "review-v1-policy-change-p6-v1"
+_POLICY_PUBLICATION_CONTRACT = "review-v1-p6-policy-publication-v1"
+_POLICY_OPERATION = "project-policy-change"
+_POLICY_KEYS = frozenset({"operation", "request_digest", "review_contract", "publication_contract"})
+_POLICY_PUBLICATIONS = {
+    "policy-publication": ("policy-commit", "policy_commit"),
+    "policy-consumption-publication": ("policy-consumption-commit", "metadata_commit"),
+}
 
 
 def _publication_contract(invocation: object) -> str:
@@ -1654,6 +1665,13 @@ def _publication_contract(invocation: object) -> str:
         and invocation.get("operation") in _PLANNING_OPERATIONS
     ):
         return "planning"
+    if (
+        invocation.get("review_contract") == _POLICY_REVIEW_CONTRACT
+        and invocation.get("publication_contract") == _POLICY_PUBLICATION_CONTRACT
+        and invocation.get("operation") == _POLICY_OPERATION
+        and set(invocation) == _POLICY_KEYS
+    ):
+        return "policy"
     from .review import work_invocation
 
     if (
@@ -1761,6 +1779,74 @@ def _planning_publication(
     return _Publication(commit, ref)
 
 
+def _policy_publication(
+    repo: Path, effects: list[dict[str, Any]], position: int, mutation_record: dict[str, Any]
+) -> "_Publication | _Refused":
+    """The P6 policy push validator (§30.20): exactly Kp or exactly Km, each only after its own C-2 proof note.
+
+    A push-only stage; its commit is the one applied commit of its own Git
+    stage, made by this mutation with exactly that ID, on the pushed branch, of
+    nothing but that stage's recorded paths, and named by the proof note the
+    owner writes only after the commit's C-2 proof holds. Km must be on top of
+    Kp's history. Anything short of that names no commit, and nothing is pushed.
+    """
+    invalid = "review_publication_invalid"
+    push = effects[position]
+    stage = push.get("stage")
+    members = [index for index, effect in enumerate(effects) if effect.get("stage") == stage]
+    if members != [position]:
+        combined = any(effects[index].get("kind") == "git_commit" for index in members)
+        return _Refused(
+            "a project-policy-change mutation publishes by a push-only stage, and this push shares its stage"
+            + (" with a commit (a combined commit and push)" if combined else ""),
+            "review_publication_contract_invalid" if combined else invalid,
+        )
+    spec = _POLICY_PUBLICATIONS.get(str(stage))
+    if spec is None:
+        return _Refused(f"stage {stage!r} is not a publication stage of a project-policy-change mutation", invalid)
+    commit_stage, proof_key = spec
+    payload = push.get("payload") if isinstance(push.get("payload"), dict) else {}
+    commit = payload.get("commit")
+    if not isinstance(commit, str) or _COMMIT_ID.fullmatch(commit) is None:
+        return _Refused("the policy push does not name a full commit ID", invalid)
+    notes = mutation_record.get("notes") if isinstance(mutation_record.get("notes"), dict) else {}
+    proof = notes.get("policy_publication_proof")
+    if not isinstance(proof, dict) or proof.get(proof_key) != commit:
+        return _Refused("the policy push does not name the commit its C-2 proof note names", invalid)
+    made = [(index, effect) for index, effect in enumerate(effects)
+            if effect.get("stage") == commit_stage and effect.get("kind") == "git_commit"]
+    ref = f"refs/heads/{payload.get('branch')}"
+    if (
+        len(made) != 1
+        or [index for index, effect in enumerate(effects) if effect.get("stage") == commit_stage] != [made[0][0]]
+        or made[0][0] >= position
+        or made[0][1].get("applied") is not True
+        or made[0][1].get(_MADE_COMMIT) != commit
+        or not isinstance(made[0][1].get("payload"), dict)
+        or made[0][1]["payload"].get("branch") != ref
+    ):
+        return _Refused(
+            "the policy push does not publish the one applied commit of its own Git stage, made by this mutation with "
+            "the pushed ID, on the pushed branch",
+            invalid,
+        )
+    parents = gitcmd.commit_parents(repo, commit)
+    if parents is None or len(parents) != 1:
+        return _Refused(f"Git does not show {commit} as one commit on one parent", invalid)
+    changed = gitcmd.commit_changes(repo, commit)
+    recorded_paths = made[0][1]["payload"].get("paths")
+    if changed is None or not isinstance(recorded_paths, list) or not set(changed) <= set(recorded_paths):
+        return _Refused(f"Git does not show {commit} as a commit of its recorded paths alone", invalid)
+    if proof_key == "metadata_commit":
+        kp = proof.get("policy_commit")
+        if not isinstance(kp, str) or gitcmd.descends_from(repo, commit, kp) is not True:
+            return _Refused(f"Git does not show {commit} on top of the policy commit {kp}", invalid)
+    tip = gitcmd.branch_commit(repo, ref)
+    if tip is None or gitcmd.descends_from(repo, tip, commit) is not True:
+        return _Refused(f"{ref} does not hold {commit}", invalid)
+    return _Publication(commit, ref)
+
+
 def _work_publication(
     repo: Path, effects: list[dict[str, Any]], position: int, mutation_record: dict[str, Any]
 ) -> "_Publication | _Refused":
@@ -1841,6 +1927,8 @@ def _recorded_publication(
         return _planning_publication(repo, effects, position, mutation_record or {})
     if contract == "work":
         return _work_publication(repo, effects, position, mutation_record or {})
+    if contract == "policy":
+        return _policy_publication(repo, effects, position, mutation_record or {})
     push = effects[position]
     stage = push.get("stage")
     commit = effects[position - 1] if position > 0 else {}

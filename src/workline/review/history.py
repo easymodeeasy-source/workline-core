@@ -1664,13 +1664,31 @@ def _run_source_problems(reader: Any, summary: RunSummary, where: str) -> list[P
         problems.append((PROBLEM_CONFLICT, f"{where} is human_wait, and its adjudication is {bound.outcome}"))
     if summary.durable_disposition == DISPOSITION_NOT_AUTHORIZED and not any(
         task["status"] == records.TASK_SETTLED_FAILED for task in latest.settled_tasks
-    ):
-        # GAP-E: the canonical discovery settlement itself establishes the terminal non-authorizing fact.
+    ) and not _g4_terminal(latest, bound):
+        # GAP-E: the canonical discovery settlement itself establishes the terminal non-authorizing fact - or, for a
+        # contract with no Repair Batch branch (P6), the G4 that settles REPAIR_REQUIRED does.
         problems.append((PROBLEM_CONFLICT, f"{where} is not_authorized, and generation {latest.generation} settles no "
                                            "task as failed"))
     problems.extend(_run_authorization_problems(reader, summary, chain, where))
     problems.extend(_run_repair_problems(reader, summary, where))
     return problems
+
+
+def _g4_terminal(latest: records.GateGeneration, adjudication: records.P4Adjudication | None) -> bool:
+    """Whether ``latest`` is the G4 that makes a G4-terminal Run final and non-authorizing (P6 §30.14).
+
+    Read from the canonical adjudication the summary binds: REPAIR_REQUIRED,
+    settled at generation 4, under a P4-family contract that has no Repair
+    Batch branch. A repairing contract's G4 is never final here.
+    """
+    return (
+        adjudication is not None
+        and latest.generation == 4
+        and latest.adjudication_digest == serialize.digest(adjudication.to_record())
+        and adjudication.outcome == records.REPAIR_REQUIRED
+        and adjudication.review_contract in records.P4_CONTRACTS
+        and adjudication.review_contract not in records.P4_REPAIR_CONTRACTS
+    )
 
 
 def _run_authorization_problems(reader: Any, summary: RunSummary, chain: Any, where: str) -> list[Problem]:

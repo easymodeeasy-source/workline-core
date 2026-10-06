@@ -713,6 +713,17 @@ def family_policy_hash(policy_id: str) -> str:
     return serialize.digest(serialize.canonical_data(FAMILY_POLICY_RECORDS[_require_family_policy(policy_id)]))
 
 
+def repairs(review_contract: object) -> bool:
+    """Whether Runs of ``review_contract`` have the P4 Repair Batch branch (§27.14) - or end at G4 instead.
+
+    The P4 owner contracts repair. Every other P4-family contract (the P6
+    Policy Review, and any later kind with no repair executor) is G4-terminal:
+    a REPAIR_REQUIRED adjudication issues no Receipt and accepts no repair
+    (:func:`g4_history` records its ``not_authorized`` Run summary).
+    """
+    return review_contract in records.P4_REPAIR_CONTRACTS
+
+
 def is_history_policy(policy_id: object) -> bool:
     """Whether a family policy binds the durable P5 history contract (P5, and P6 which keeps it unchanged)."""
     return policy_id in HISTORY_POLICY_IDS
@@ -3522,7 +3533,12 @@ class G4History:
 
 def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration, drafts: Sequence[RelationDraft],
                relation_ids: Sequence[str], references: Sequence[Mapping[str, Any]]) -> G4History:
-    """§28.8 / §28.12 / §28.5: the Finding summaries, the accepted relations and (HUMAN_WAIT) the Run summary of one G4."""
+    """§28.8 / §28.12 / §28.5: the Finding summaries, the accepted relations and (HUMAN_WAIT) the Run summary of one G4.
+
+    For a G4-terminal contract (:func:`repairs` false - the P6 Policy Review), a
+    REPAIR_REQUIRED adjudication makes non-authorization final in this same G4,
+    so its ``not_authorized`` Run summary is written here too (§28.5).
+    """
     if len(relation_ids) != len(drafts):
         raise ValidationError("one reserved relation ID per accepted relation claim", code="review_record_invalid")
     owned: dict[str, list[str]] = {}
@@ -3538,6 +3554,9 @@ def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration,
     summary = None
     if found.outcome == HUMAN_WAIT:
         summary = history.run_summary(gate_four, durable_disposition=history.DISPOSITION_HUMAN_WAIT,
+                                      candidate_generation=found.candidate_generation, adjudication=found)
+    elif found.outcome == REPAIR_REQUIRED and not repairs(found.review_contract):
+        summary = history.run_summary(gate_four, durable_disposition=history.DISPOSITION_NOT_AUTHORIZED,
                                       candidate_generation=found.candidate_generation, adjudication=found)
     return G4History(summaries, relations, summary)
 
