@@ -1164,6 +1164,76 @@ def _review(context: _Context) -> dict[str, Any]:
 # --------------------------------------------------------------------------- build
 
 
+def _policy(context: _Context) -> dict[str, Any]:
+    """The P6 policy section (§30.30, §15.28): read-only, additive, each part isolated from the others.
+
+    The Global baseline (source_mode / version / digest), the canonical Profile
+    or its absence, the Effective Policy a new Review Run would freeze now (its
+    hash and both adaptive surfaces' values), the experiments with their
+    status, the policy maintenance / reconcile need, and the advisory BL-055
+    shadow-authority diagnostic. Nothing is written, locked or repaired.
+    """
+    from .review import policy as review_policy
+    from .review.store import ReviewStore
+
+    review = ReviewStore(context.store)
+    section: dict[str, Any] = {"status": "available"}
+
+    def baseline() -> dict[str, Any]:
+        found = review_policy.load_global_baseline(context.store.workline_root())
+        return {"status": "available", "source_mode": found.source_mode, "version": found.version,
+                "digest": found.digest}
+
+    def profile() -> dict[str, Any]:
+        found = review.read_profile()
+        if found is None:
+            return {"status": "absent"}
+        return {"status": "present", "version": found.profile_version, "digest": found.digest}
+
+    def effective() -> dict[str, Any]:
+        state = review_policy.resolve_policy_state(review, context.store.workline_root())
+        return {"status": "available", "policy_id": state.effective["policy_id"], "hash": state.effective_hash,
+                "settings": dict(state.effective["settings"])}
+
+    def experiments() -> dict[str, Any]:
+        found = review.read_profile()
+        refs = () if found is None else found.active_experiment_refs
+        ended = review_policy.ended_experiments(review)
+        items = []
+        for ref in refs:
+            change = review.read_policy_change(ref)
+            items.append({"policy_change_id": ref, "policy_surface_id": change["affected_policy_surface"],
+                          "direction": change["direction"], "status": "settled" if ref in ended else "active"})
+        return {"status": "available", "items": items}
+
+    section["global_baseline"] = _isolated(baseline)
+    section["profile"] = _isolated(profile)
+    section["effective_policy"] = _isolated(effective)
+    section["experiments"] = _isolated(experiments)
+    problems = [{"code": code, "message": message}
+                for code, message in _isolated_problems(lambda: review_policy.policy_problems(
+                    review, context.store.workline_root()))]
+    unavailable = section["effective_policy"].get("status") == "unavailable"
+    section["maintenance"] = {
+        "status": "reconcile_required" if problems or unavailable else "none",
+        "problems": problems + ([section["effective_policy"]["reason"]] if unavailable else []),
+    }
+    # RB6A-IR-2: the advisory shadow-authority diagnostic, exactly the detector's stable JSON (additive keys
+    # included); it never changes validation and never withholds current / next
+    from .shadow_authority import detect_shadow_authority
+
+    section["shadow_authority"] = _isolated(lambda: detect_shadow_authority(context.store.root).to_json())
+    return section
+
+
+def _isolated_problems(reader: Callable[[], list[tuple[str, str]]]) -> list[tuple[str, str]]:
+    try:
+        return list(reader())
+    except Exception as exc:  # a reader failure is a maintenance need, never a guess
+        found = _failure(exc)
+        return [(found["code"], found["message"])]
+
+
 def _collect(root: Path) -> dict[str, Any]:
     """Every section from one pass over the Project; each reader isolated from the others."""
     context = _Context(root, ProjectStore(root))
@@ -1175,6 +1245,7 @@ def _collect(root: Path) -> dict[str, Any]:
     body["lifecycle"] = _isolated(lambda: _lifecycle(context))
     body["validation"] = _isolated(lambda: _validation(context))
     body["review"] = _isolated(lambda: _review(context))
+    body["policy"] = _isolated(lambda: _policy(context))
     body["_blocking_mutations"] = list(context.blocking_mutations)
     return body
 
@@ -1230,7 +1301,6 @@ def _assemble(body: dict[str, Any], consistency: str) -> StatusModel:
         "snapshot_reason": PROJECT_CHANGED if consistency == CHANGING else None,
         **body,
         "completion": {"status": NOT_AVAILABLE_BY_CONTRACT},
-        "policy": {"status": NOT_AVAILABLE_BY_CONTRACT},
     }
     return StatusModel(_scrub(data))
 
@@ -1509,8 +1579,68 @@ def render_human(model: StatusModel) -> str:
     heading("Achievement")
     out.append(f"  {data['completion']['status']}")
     heading("Policy")
-    out.append(f"  {data['policy']['status']}")
+    out.extend(_policy_lines(data["policy"]))
     return "\n".join(out) + "\n"
+
+
+def _policy_lines(section: Mapping[str, Any]) -> list[str]:
+    """The human Policy lines: presentation of the model only (§30.30)."""
+    failed = _section_status(section)
+    if failed is not None:
+        return [failed]
+    out: list[str] = [f"  {section.get('status')}"]
+
+    def part(name: str, render: Callable[[Mapping[str, Any]], str]) -> None:
+        found = section.get(name)
+        if not isinstance(found, Mapping):
+            return  # a section a later Block shaped otherwise is shown by its status line alone
+        failed_part = _section_status(found)
+        try:
+            shown = failed_part.strip() if failed_part else render(found)
+        except (KeyError, TypeError):
+            shown = str(found.get("status"))
+        out.append(f"  {name.replace('_', ' ')}: {shown}")
+
+    part("global_baseline", lambda found: f"{found['source_mode']} v{found['version']} {found['digest']}")
+    part("profile", lambda found: "absent" if found["status"] == "absent"
+         else f"v{found['version']} {found['digest']}")
+    part("effective_policy", lambda found: f"{found['hash']} ("
+         + ", ".join(f"{key} {value}" for key, value in sorted(found["settings"].items())) + ")")
+    part("experiments", lambda found: ", ".join(f"{item['policy_change_id']} {item['direction']} "
+                                                 f"{item['policy_surface_id']} {item['status']}"
+                                                 for item in found["items"]) or "none")
+    maintenance = section.get("maintenance")
+    if isinstance(maintenance, Mapping):
+        out.append(f"  maintenance: {maintenance.get('status')}")
+        for problem in maintenance.get("problems") or []:
+            out.append(f"    {_reason_text(problem)}")
+    shadow = section.get("shadow_authority")
+    failed_shadow = _section_status(shadow)
+    if failed_shadow is not None:
+        out.append(f"  shadow authority (advisory): {failed_shadow.strip()}")
+    elif isinstance(shadow, Mapping):
+        out.extend("  " + line for line in _shadow_lines(shadow))
+    return out
+
+
+def _shadow_lines(found: Mapping[str, Any]) -> list[str]:
+    """``ShadowDiagnostic.render_lines`` of the detector's stable JSON (RB6A-IR-2), presentation only."""
+    lines = [f"shadow authority (advisory): {found.get('status')}"]
+    if found.get("bootstrap_inspected") is not True:
+        # RB6A-L5: without a bootstrap verdict a none is not a proven none (a JSON without the key reads the same)
+        lines[0] += " (bootstrap not inspected)"
+    for item in found.get("evidence") or []:
+        where = item["path"] if item.get("component") is None \
+            else f"{item['path']} via {item['component']} ({item.get('indirection')})"
+        if item.get("line") is not None:
+            where = f"{where}:{item['line']}"
+        printable = "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in where)
+        lines.append(f"  {item.get('level')} {item.get('rule')} {printable} -> {item.get('responsibility')} owned by "
+                     f"{', '.join(item.get('canonical_owner') or [])}")
+    for skipped in found.get("uninspected") or []:
+        printable = "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in str(skipped["path"]))
+        lines.append(f"  uninspected {printable}: {skipped.get('reason')}")
+    return lines
 
 
 __all__ = [

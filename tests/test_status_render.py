@@ -54,7 +54,12 @@ class RenderTests(StatusCase):
         self.assertEqual((data["schema"], data["version"]), ("workline-status", 1))
         self.assertEqual(set(data), TOP_LEVEL)
         self.assertEqual(data["completion"], {"status": "not_available_by_contract"})
-        self.assertEqual(data["policy"], {"status": "not_available_by_contract"})
+        # RB6 (§30.30, RB6A-IR-2): the RB1 policy placeholder is filled additively - pin updated deliberately
+        self.assertEqual("available", data["policy"]["status"])
+        self.assertEqual({"status", "global_baseline", "profile", "effective_policy", "experiments", "maintenance",
+                          "shadow_authority"}, set(data["policy"]))
+        self.assertEqual({"status": "absent"}, data["policy"]["profile"])
+        self.assertEqual({"status": "none", "problems": []}, data["policy"]["maintenance"])
 
     def test_json_bytes_are_deterministic(self) -> None:
         first = status.render_json(self.model())

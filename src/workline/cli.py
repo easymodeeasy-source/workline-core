@@ -218,11 +218,22 @@ def main(argv: list[str] | None = None) -> int:
             store = ProjectStore(Path(args.project_root))
             _require_project_implementation(store)
             problems = validate_project(store)
+            # RB6A-IR-1 (§30.30, §30.28): the BL-055 shadow-authority diagnostic is advisory - shown after the
+            # verdict and only when it has something to say; never a Problem, never a change to PASS / FAIL or the
+            # exit code. ``validate.py`` stays free of it (it never imports the detector).
+            from .shadow_authority import detect_shadow_authority
+
+            diagnostic = detect_shadow_authority(store)
+            advisory = diagnostic.render_lines() if (diagnostic.evidence or diagnostic.uninspected) else []
             if not problems:
                 print("project validation: PASS")
+                for line in advisory:
+                    print(line)
                 return 0
             for problem in problems:
                 print(f"{problem.code}: {problem.message}")
+            for line in advisory:
+                print(line)
             return 1
 
         if args.command == "backfill-bootstrap":
