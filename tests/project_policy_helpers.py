@@ -173,9 +173,14 @@ def two_reviewers() -> project_policy.PolicyReview:
     return policy_review(Discovery(), Discovery(viewpoint="safety", identity="discovery-two"))
 
 
-def planning_review() -> planning.PlanningReviewP4:
-    """The P4 planning selector whose consumed Runs are the evidence (its repair actor is never asked)."""
-    return planning.PlanningReviewP4((Discovery().binding(),), Adjudicator().binding(),
+def planning_review(*, reviewers: int = 1) -> planning.PlanningReviewP4:
+    """The P4 planning selector whose consumed Runs are the evidence (its repair actor is never asked).
+
+    ``reviewers`` discovery actors over distinct identity/version pairs: a new P6-capable Run (R6-1) under a
+    Profile with ``required_slots`` N needs N of them.
+    """
+    found = (Discovery(), Discovery(viewpoint="safety", identity="discovery-two"))[:reviewers]
+    return planning.PlanningReviewP4(tuple(item.binding() for item in found), Adjudicator().binding(),
                                      p4.ActorBinding(lambda task: None, "repairer", "1"))
 
 
@@ -544,36 +549,49 @@ def reserving(kind: str) -> Callable[..., bool]:
 class InterruptionCase(PolicyCase):
     """One §30.40 window: run the change into the window, then the same request again, and prove the invariants.
 
-    The request is a strengthen of ``required_slots`` 1 -> 2 reviewed by ONE discovery actor (the pre-change
-    policy). A retry that resolved its policy from the after state would need two reviewers and refuse; one that
-    authorized under it would bind the after Effective Policy - both are caught below.
+    By default the request is a strengthen of ``required_slots`` 1 -> 2 reviewed by ONE discovery actor (the
+    pre-change policy). A retry that resolved its policy from the after state would need two reviewers and refuse;
+    one that authorized under it would bind the after Effective Policy - both are caught below. ``request`` /
+    ``review`` give another change (a later Profile version) and its pre-change reviewers.
     """
 
     template = "remote"
 
     def interrupted(self, window: Callable[[], Any], expected: Any = (Crash, Interrupted),
-                    *, between: Callable[[], None] | None = None) -> None:
-        before = self.state()
-        remote_before = self.remote_main() if self.template == "remote" else None
-        head_before = self.commit_of()
-        request = self.request()
+                    *, between: Callable[[], None] | None = None,
+                    request: policy.PolicyChangeRequest | None = None,
+                    review: Callable[[], project_policy.PolicyReview] | None = None) -> None:
+        make_review = review or policy_review
+        baseline = {
+            "state": self.state(), "remote": self.remote_main() if self.template == "remote" else None,
+            "head": self.commit_of(), "runs": self.policy_runs(),
+            "changes": ReviewStore(self.store).policy_change_ids(), "receipts": self.policy_receipts(),
+            "consumptions": [c.consumption_id for c in self.policy_consumptions()],
+            "kps": self.commits_with(KP_SUBJECT), "kms": self.commits_with(KM_SUBJECT),
+            "pushes": self.pushes() if self.template == "remote" else [],
+        }
+        request = request or self.request()
         with window(), self.assertRaises(expected):
-            self.change(request, policy_review())
+            self.change(request, make_review())
         pending = self.policy_pending()
         self.assertEqual(1, len(pending), "the policy change mutation is kept for the retry")
         reserved = dict(pending[0].get("reserved_ids") or {})
         frozen = ((pending[0].get("notes") or {}).get("policy_candidate") or {}).get("candidate")
         if between is not None:
             between()
-        discovery, adjudicator = Discovery(), Adjudicator()
-        result = self.change(request, policy_review(discovery, adjudicator=adjudicator))
+        retry = make_review()
+        discovery = [binding.actor for binding in retry.discovery + retry.holdout_discovery]
+        adjudicator = retry.adjudicator.actor
+        result = self.change(request, retry)
         self.assertEqual("applied", result.status, result.detail)
-        self.assert_invariants(result, reserved, frozen, before, remote_before, head_before)
-        self.discovery_calls, self.adjudicator_calls = len(discovery.tasks), len(adjudicator.tasks)
+        self.assert_invariants(result, reserved, frozen, baseline, len(discovery))
+        self.discovery_calls = sum(len(actor.tasks) for actor in discovery)
+        self.adjudicator_calls = len(adjudicator.tasks)
 
     def assert_invariants(self, result: Any, reserved: dict[str, str], frozen: dict[str, Any] | None,
-                          before: policy.PolicyState, remote_before: str | None, head_before: str) -> None:
+                          baseline: dict[str, Any], slots: int) -> None:
         review = ReviewStore(self.store)
+        before: policy.PolicyState = baseline["state"]
         # the same policy_change_id / Candidate / Review IDs the interrupted attempt reserved
         for key, identifier in reserved.items():
             if key.startswith("review-policy-change:"):
@@ -591,43 +609,45 @@ class InterruptionCase(PolicyCase):
         candidate_hash = chain.generations[0].candidate_hash
         if frozen is not None:
             self.assertEqual(policy.candidate_hash(frozen), candidate_hash, "the retry keeps the Candidate")
-        self.assertEqual([result.review_run_id], self.policy_runs(), "one Policy Review Run, never a second")
+        self.assertEqual(sorted(baseline["runs"] + [result.review_run_id]), sorted(self.policy_runs()),
+                         "one new Policy Review Run, never a second")
         self.assertEqual(5, len(chain.generations))
         self.assertEqual([], p4.chain_problems(chain))
-        settled = [t for t in chain.generations[1].settled_tasks]
-        self.assertEqual(1, len(settled), "one raw discovery report, no duplicate")
+        self.assertEqual(slots, len(chain.generations[1].settled_tasks), "one raw report per slot, no duplicate")
         # no duplicate change record, no Profile version skip
-        self.assertEqual((result.policy_change_id,), review.policy_change_ids(), "no duplicate change record")
+        self.assertEqual(sorted(baseline["changes"] + (result.policy_change_id,)), sorted(review.policy_change_ids()),
+                         "no duplicate change record")
         change = review.read_policy_change(result.policy_change_id)
         self.assertEqual(candidate_hash, change["candidate_hash"])
         profile = review.read_profile()
-        self.assertEqual((1, None), (profile.profile_version, profile.parent_profile_digest), "no version skip")
+        self.assertEqual(((before.profile_version or 0) + 1, before.profile_digest),
+                         (profile.profile_version, profile.parent_profile_digest), "no Profile version skip")
         self.assertEqual(profile.digest, change["after_profile_digest"])
         # one Receipt, one Consumption, one Kp, one Km - and nothing authorized under the after state
-        self.assertEqual([result.receipt_id], self.policy_receipts())
-        self.assertEqual([result.consumption_id], [c.consumption_id for c in self.policy_consumptions()])
+        self.assertEqual(sorted(baseline["receipts"] + [result.receipt_id]), sorted(self.policy_receipts()))
+        self.assertEqual(sorted(baseline["consumptions"] + [result.consumption_id]),
+                         sorted(c.consumption_id for c in self.policy_consumptions()), "no duplicate Consumption")
         receipt = review.read_receipt(str(result.receipt_id))
         self.assertEqual(candidate_hash, receipt.authorized_candidate_hash)
         self.assertEqual(before.effective_hash, receipt.effective_policy_hash, "no authorization under the after state")
         for gate in chain.generations:
             self.assertEqual(before.effective_hash, gate.effective_policy_hash)
-        kps, kms = self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT)
-        self.assertEqual([result.policy_commit], kps, "one Kp")
-        self.assertEqual([result.metadata_commit], kms, "one Km")
+        self.assertEqual([result.policy_commit] + baseline["kps"], self.commits_with(KP_SUBJECT), "one Kp")
+        self.assertEqual([result.metadata_commit] + baseline["kms"], self.commits_with(KM_SUBJECT), "one Km")
         self.assertEqual(5, len([c for c in self.commits_with(GENERATION_SUBJECT)
                                  if self.subject(c).endswith(result.review_run_id)]))
         summary = review.read_history(paths.HISTORY_RUNS, result.review_run_id)
         self.assertEqual(result.consumption_id, summary.consumption_id)
         # no force / history rewrite, no duplicate publication
-        self.assertTrue(self.is_ancestor(head_before, str(result.metadata_commit)), "no history rewrite")
+        self.assertTrue(self.is_ancestor(baseline["head"], str(result.metadata_commit)), "no history rewrite")
         if self.template == "remote":
             self.assertEqual(result.metadata_commit, self.remote_main())
-            news = [new for _, new, _ in self.pushes()]
+            news = [new for _, new, _ in self.pushes()[len(baseline["pushes"]):]]
             self.assertLessEqual(news.count(str(result.policy_commit)), 1, "Kp is published at most once")
             self.assertEqual(1, news.count(str(result.metadata_commit)), "Km is published exactly once")
             self.assertTrue(set(news) <= {str(result.policy_commit), str(result.metadata_commit)})
-            if remote_before is not None:
-                self.assertTrue(self.is_ancestor(remote_before, str(result.metadata_commit), self.remote))
+            if baseline["remote"] is not None:
+                self.assertTrue(self.is_ancestor(baseline["remote"], str(result.metadata_commit), self.remote))
             self.assert_fast_forward_pushes()
         self.assertEqual([], self.owner_pending())
         self.assertEqual([], self.dirty())

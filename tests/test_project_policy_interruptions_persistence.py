@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from project_policy_helpers import (
     KM_SUBJECT, KP_SUBJECT, Crash, InterruptionCase, Interrupted, after_effect, after_recording, before_effect,
-    before_owner_completion, crash_at,
+    before_owner_completion, crash_at, two_reviewers,
 )
 from workline import project_policy
 from workline.errors import ReconcileRequired
@@ -190,6 +190,28 @@ class PersistenceWindowsRemoteLess(UnownedCommitCase):
 
     def test_w21_owner_not_completed_remote_less(self) -> None:
         self.interrupted(before_owner_completion, Interrupted)
+
+
+class ProfileReplaceWindows(InterruptionCase):
+    """Windows 11 / 12 / 13 for a LATER Profile version: the CAS replaces exact prior bytes (v1 -> v2), never skips."""
+
+    template = "profiled"
+
+    def replace_request(self):
+        (first,) = self.review_store.policy_change_ids()
+        return self.request(after=3, supersedes=(first,), overlap=policy.OVERLAP_KNOWN)
+
+    def test_w11_profile_replace_applied_flag_not_saved(self) -> None:
+        self.interrupted(lambda: after_effect("replace_review_profile", STATE), Interrupted,
+                         request=self.replace_request(), review=two_reviewers)
+
+    def test_w12_change_record_applied_profile_replace_not(self) -> None:
+        self.interrupted(lambda: before_effect("replace_review_profile", STATE), Interrupted,
+                         request=self.replace_request(), review=two_reviewers)
+
+    def test_w13a_kp_recorded_not_made_on_a_replaced_profile(self) -> None:
+        self.interrupted(lambda: after_recording(project_policy.STAGE_KP), Interrupted,
+                         request=self.replace_request(), review=two_reviewers)
 
 
 class _Nothing:

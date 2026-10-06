@@ -21,8 +21,8 @@ from typing import Any
 from unittest import mock
 
 from project_policy_helpers import (
-    GENERATION_SUBJECT, KM_SUBJECT, KP_SUBJECT, Adjudicator, Discovery, PolicyCase, change_request, claim,
-    history_refs, policy_review, two_reviewers,
+    GENERATION_SUBJECT, KM_SUBJECT, KP_SUBJECT, Adjudicator, Crash, Discovery, PolicyCase, claim, crash_at,
+    policy_review, two_reviewers,
 )
 from workline import project_policy
 from workline.errors import StopError
@@ -81,6 +81,25 @@ class ReviewerCountTests(PolicyCase):
             self.assertEqual(policy.ROLE_REQUIRED, envelope[policy.DISCOVERY_ROLE_KEY])
         self.assertEqual(before.effective_hash, chain.generations[0].effective_policy_hash)
         self.assertEqual(3, self.state().profile.setting_of(policy.SURFACE_REQUIRED_SLOTS))
+
+    def test_a_resumed_review_still_binds_the_pre_change_reviewers(self) -> None:
+        """§30.13 / §30.2 A: the reviewer count is the pre-change policy's on EVERY pass, a resume after the freeze too."""
+        request = self.request(after=3, supersedes=(self.first_change(),), overlap=policy.OVERLAP_KNOWN)
+        before = self.state()
+        with crash_at(project_policy, "_accept"), self.assertRaises(Crash):
+            self.change(request, two_reviewers())
+        head, profile = self.commit_of(), self.profile_bytes()
+        with self.assertRaises(StopError) as raised:
+            self.change(request, policy_review())  # the same request resumed with one reviewer
+        self.assertEqual(policy.CODE_DISCOVERY_SLOTS_UNMET, raised.exception.code)
+        self.assertEqual([], self.policy_runs()[1:], "no Policy Review Run beyond the template's is started")
+        self.assertEqual(head, self.commit_of())
+        self.assertEqual(profile, self.profile_bytes())
+        result = self.applied(request, two_reviewers())
+        chain = self.review_store.gate_chain(result.review_run_id)
+        self.assertEqual(2, len([t for t in chain.generations[0].accepted_tasks
+                                 if t["task_kind"] == p4.TASK_KIND_DISCOVERY]))
+        self.assertEqual(before.effective_hash, chain.generations[0].effective_policy_hash)
 
     def test_a_proposed_lightening_cannot_reduce_its_own_review(self) -> None:
         before = self.state()

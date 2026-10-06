@@ -29,16 +29,19 @@ import unittest
 from unittest import mock
 
 from helpers import WORKLINE_ROOT, git, rmtree
+from planning_helpers import plan
 from project_policy_helpers import (
     EVALUATION_SUBJECT, GENERATION_SUBJECT, KM_SUBJECT, KP_SUBJECT, Crash, Discovery, Interrupted, PolicyCase,
-    after_effect, after_recording, change_request, crash_at, evaluation_request, policy_review, two_reviewers,
+    after_effect, after_recording, change_request, crash_at, evaluation_request, planning_review, policy_review,
+    two_reviewers,
 )
 from workline import gitcmd, gitops, mutation as mutation_module, project_policy, store as store_module
+from workline import roadmap as rm
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.implementation import package_directory
 from workline.mutation import Effect, Mutation, MutationController, WriteScope
 from workline.oplock import project_operation
-from workline.review import paths, planning, policy, records, serialize
+from workline.review import p4, paths, planning, policy, records, serialize
 from workline.review.store import ReviewStore
 
 PROFILE = paths.POLICY_PROFILE_REL
@@ -209,6 +212,24 @@ class ProfileCasTests(EffectCase):
         self.assertEqual(foreign_profile(2).text().encode("utf-8"), self.profile_bytes())
 
 
+    def test_an_unsupported_containment_capability_refuses_before_any_write(self) -> None:
+        from workline.review import fsafe
+
+        text = foreign_profile().text()
+        with mock.patch.object(fsafe._Backend, "PINS_HELD_DIRECTORIES", False):
+            found = self.open()
+            with self.assertRaises((ValidationError, StopError)):
+                found.add_effects("rb6c", [Effect.replace_review_profile(PROFILE, text, None)])
+            self.assertEqual([], found.effects, "a replace that cannot be contained is never recorded")
+            found.abandon()
+        recorded = self.open()
+        recorded.add_effects("rb6c", [Effect.replace_review_profile(PROFILE, text, None)])
+        with mock.patch.object(fsafe._Backend, "PINS_HELD_DIRECTORIES", False):
+            with self.assertRaises((ValidationError, StopError)):
+                recorded.apply()
+        self.assertIsNone(self.profile_bytes(), "refused before the write")
+
+
 class GenericReviewWriteTests(EffectCase):
     def test_generic_review_writes_stay_immutable_only(self) -> None:
         text = foreign_profile().text()
@@ -346,14 +367,17 @@ class PersistenceTests(PolicyCase):
         self.assertEqual([g5], self.parents(kp))
         self.assertEqual(f"{KP_SUBJECT}{result.policy_change_id}", self.subject(kp))
         change_bytes = serialize.canonical_bytes(policy.change_record(candidate, review_run_id=result.review_run_id,
-                                                                      receipt_id=str(result.receipt_id)))
+                                                                      receipt_id=str(result.receipt_id),
+                                                                      baseline_record=before.baseline.record))
+        global_settings = policy.bound_global_settings(before.baseline.record)
         delta = self.delta(kp)
         self.assertEqual({change_path, PROFILE}, set(delta))
         self.assertEqual(("A", "100644", change_bytes), (delta[change_path].status, delta[change_path].mode,
                                                          delta[change_path].data))
         self.assertEqual(("A", "100644", after.text().encode("utf-8")),
                          (delta[PROFILE].status, delta[PROFILE].mode, delta[PROFILE].data))
-        self.assertIsNone(policy.persisted_projection_problem(candidate["after_profile"], delta[PROFILE].data))
+        self.assertIsNone(policy.persisted_projection_problem(candidate["after_profile"], delta[PROFILE].data,
+                                                              global_settings))
         self.assertEqual(1, after.profile_version)
         self.assertIsNone(after.parent_profile_digest)
         self.assertEqual(before.baseline.digest, after.global_baseline_digest)
@@ -407,7 +431,8 @@ class PersistenceTests(PolicyCase):
             "contract": records.PERSISTED_POLICY_CONTRACT, "policy_change_id": result.policy_change_id,
             "before_profile_version": None, "before_profile_digest": None,
             "after_profile_version": 1, "after_profile_digest": after.digest,
-            "global_baseline_digest": before.baseline.digest, "normalized_projection_hash": policy.projection_hash(after),
+            "global_baseline_digest": before.baseline.digest,
+            "normalized_projection_hash": policy.projection_hash(after, policy.bound_global_settings(before.baseline.record)),
             "policy_commit": kp, "policy_parent": self.parents(kp)[0], "branch": "refs/heads/main",
             "adapter_identity": records.POLICY_ADAPTER_IDENTITY,
             "loader_identity": planning.loader_identity(package_directory(self.store.workline_root())),
@@ -461,7 +486,8 @@ class SemanticProjectionTests(PolicyCase):
     def test_the_projection_adapter_accepts_exactly_the_reviewed_bytes(self) -> None:
         after = foreign_profile(2)
         exact = after.text().encode("utf-8")
-        self.assertIsNone(policy.persisted_projection_problem(after.to_record(), exact))
+        settings = policy.bound_global_settings(policy.load_global_baseline(WORKLINE_ROOT).record)
+        self.assertIsNone(policy.persisted_projection_problem(after.to_record(), exact, settings))
         for name, raw in (
             ("CRLF", exact.replace(b"\n", b"\r\n")),
             ("a trailing blank line", exact + b"\n"),
@@ -470,7 +496,7 @@ class SemanticProjectionTests(PolicyCase):
             ("absent", None),
         ):
             with self.subTest(name):
-                self.assertIsNotNone(policy.persisted_projection_problem(after.to_record(), raw))
+                self.assertIsNotNone(policy.persisted_projection_problem(after.to_record(), raw, settings))
 
     def assert_not_published(self, remote_before: str | None) -> None:
         self.assertEqual(remote_before, self.remote_main(), "nothing was published")
@@ -547,6 +573,28 @@ class PublicationTests(PolicyCase):
                          "exactly Kp, then exactly Km")
         self.assert_fast_forward_pushes()
         self.assertEqual([], self.problems())
+
+
+class NoForceTests(PolicyCase):
+    template = "remote"
+
+    def test_a_remote_that_moved_on_is_never_forced(self) -> None:
+        other = self.tmp / "other-clone"
+        git(self.tmp, "clone", "-q", str(self.remote), str(other))
+        git(other, "config", "user.email", "t@example.invalid")
+        git(other, "config", "user.name", "t")
+        (other / "notes.txt").write_text("a person's note" + chr(10), encoding="utf-8")
+        git(other, "add", "notes.txt")
+        git(other, "commit", "-q", "-m", "docs: a person's note")
+        git(other, "push", "-q", "origin", "main")
+        foreign = git(other, "rev-parse", "HEAD").strip()
+        self.assertEqual(foreign, self.remote_main())
+        before = list(self.pushes())
+        with self.assertRaises((ReconcileRequired, StopError)):
+            self.change()
+        self.assertEqual(foreign, self.remote_main(), "the remote's own history is never overwritten")
+        self.assertEqual(before, self.pushes(), "nothing is pushed over it")
+        self.assert_fast_forward_pushes()
 
 
 class PublicationValidatorTests(unittest.TestCase):
@@ -743,6 +791,12 @@ class ChangeRecordAndRollbackTests(PolicyCase):
         record = review.read_policy_change(first)
         self.assertEqual(stored, serialize.canonical_bytes(record))
         self.assertEqual(set(policy.CHANGE_FIELDS), set(record))
+        # R6-2 item 3: it binds the complete baseline record the Candidate was reviewed under, by its exact digest
+        self.assertEqual(record["global_baseline_digest"], serialize.digest(record["global_baseline"]))
+        self.assertEqual(record["global_baseline_digest"],
+                         review.read_candidate_snapshot(
+                             review.gate_chain(record["review_run_id"]).generations[0].candidate_hash
+                         ).material["global_baseline_digest"])
         profile = review.read_profile()
         chain = review.gate_chain(record["review_run_id"])
         self.assertEqual((chain.generations[0].candidate_hash, chain.latest.receipt_id),
@@ -784,10 +838,38 @@ class EvaluationTests(PolicyCase):
         self.assertEqual(("A", "100644"), (delta[relative].status, delta[relative].mode))
         self.assertEqual((result.evaluation_id,), self.review_store.policy_evaluation_ids())
 
+    def observed_runs(self) -> tuple[policy.EvidenceRef, ...]:
+        """Two Review Runs AFTER the change: P6-capable (R6-1), two reviewers (required_slots 2), the change active."""
+        before_runs = set(self.review_store.run_history_ids())
+        for name in ("Observed One", "Observed Two"):
+            rm.create_roadmap(self.store, plan(name), review=planning_review(reviewers=2))
+        observed = tuple(ref for ref in self.refs() if ref.id not in before_runs)
+        self.assertEqual(2, len(observed))
+        review = self.review_store
+        for ref in observed:
+            frozen = p4.run_effective_policy(review, review.gate_chain(ref.id))
+            self.assertIsNotNone(frozen, "a new Run is P6-capable and freezes its Effective Policy")
+            self.assertIn(self.first(), [item["policy_change_id"] for item in frozen["active_experiments"]])
+            self.assertEqual(2, policy.setting(frozen, policy.SURFACE_REQUIRED_SLOTS))
+        return observed
+
+    def test_retain_without_post_change_observation_is_refused(self) -> None:
+        """§15.15 / §15.17: evidence from before the change never shows the change worked (RB6B-H1)."""
+        before, head = self.profile_bytes(), self.commit_of()
+        with self.assertRaises(StopError) as raised:
+            self.evaluate(result=policy.RESULT_RETAIN, next_action=policy.NEXT_END_OBSERVATION)
+        self.assertEqual(policy.CODE_EVALUATION_INVALID, raised.exception.code)
+        self.assertEqual(head, self.commit_of(), "nothing is written for a refused retain")
+        self.assertEqual(before, self.profile_bytes())
+        self.assertEqual((), self.review_store.policy_evaluation_ids())
+        self.assertEqual((self.first(),), tuple(item.policy_change_id for item in self.state().active))
+
     def test_retain_records_evidence_only_and_never_rewrites_the_profile(self) -> None:
+        observed = self.observed_runs()
         before, head = self.profile_bytes(), self.commit_of()
         profile = self.review_store.read_profile()
-        result = self.evaluate(result=policy.RESULT_RETAIN, next_action=policy.NEXT_END_OBSERVATION)
+        result = project_policy.record_policy_evaluation(self.store, evaluation_request(
+            self.first(), observed, result=policy.RESULT_RETAIN, next_action=policy.NEXT_END_OBSERVATION))
         self.assert_profile_unchanged(before, head)
         self.assert_one_evaluation_commit(result)
         record = self.review_store.read_policy_evaluation(result.evaluation_id)
