@@ -1264,40 +1264,6 @@ CAS_MATCHING = "matching"
 CAS_MISMATCH = "mismatch"
 
 
-def classify_replacement(root: Path, parts: list[str], expected: bytes | None, data: bytes) -> str:
-    """What the plain file at ``root`` / ``parts`` holds, against an exact compare-and-replace, read without following.
-
-    ``expected`` is the exact prior bytes the replace may overwrite, or ``None``
-    when the only state it may create into is absence:
-
-    ```text
-    target holds ``data``                      -> matching (already applied)
-    target holds ``expected`` (None: absent)   -> unapplied
-    anything else, a directory, an indirection anywhere on the way
-                                               -> mismatch
-    ```
-
-    Read-only: nothing is created, written or replaced, and on POSIX - where no
-    replace can be contained - it still reads, exactly as Review records do.
-    """
-    try:
-        chain = walk(root, parts[:-1])
-    except ValidationError:
-        return CAS_MISMATCH
-    if chain is None:
-        return "unapplied" if expected is None else CAS_MISMATCH
-    with chain:
-        try:
-            stored = chain.last.read_file(parts[-1])
-        except ValidationError:
-            return CAS_MISMATCH
-    if stored is not None and stored == data:
-        return CAS_MATCHING
-    if stored is None:
-        return "unapplied" if expected is None else CAS_MISMATCH
-    return "unapplied" if expected is not None and stored == expected else CAS_MISMATCH
-
-
 def compare_and_replace(root: Path, parts: list[str], expected: bytes | None, data: bytes, tmp_parts: list[str]) -> str:
     """Replace the plain file at ``root`` / ``parts`` with ``data`` only while it holds exactly ``expected``.
 

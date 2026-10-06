@@ -8,20 +8,25 @@ branch position, runtime note, mutation record, remote state or working-tree
 file takes part, and no attribute is evaluated.
 
 ```text
-fast path   git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/ .workline/review/policy/changes/
+fast path   git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/
+                .workline/review/policy/changes/ .workline/review/policy/project-profile.yaml
             (one read) empty -> clear, on any Git; a read Git cannot answer -> held
 Git         listed, and the running Git below P2_PUBLICATION_GIT_MIN (2.31.0) or of unknown
             version -> refused as a capability failure that names no Run
 Runs        every planning Candidate snapshot added in C's history -> its reserved entity paths
             -> the commits that add them; a Run with none is not registered and begins nothing
 proof       CP1-CP5, CP7, CP6, CP8-CP13 for every registered Run, from committed objects alone
-policy      PK1-PK9 for every policy change record (Kp) the history added (P6), from committed objects alone
+policy      PK1-PK9 for every policy change record (Kp) the history added (P6), and - when the history ever
+            added a change record or the Profile - the committed policy state AT C is one canonical Profile
+            lineage accepts (lineage + Receipt backing), from committed objects alone
 ```
 
-The one fast-path read names both directories (RB6 round 4, CP R5 case E): a
-history that never touched either is cleared by that single read exactly as
-before; one that holds a policy change record but no Candidate snapshot - a
-hand-made or foreign policy commit included - reaches the policy proof.
+The one fast-path read names the Candidate-snapshot directory, the policy
+change directory and the Profile path (RB6 rounds 4-5, CP R5 case E): a
+history that never touched any of them is cleared by that single read exactly
+as before; one that holds a policy change record or a Profile commit but no
+Candidate snapshot - a hand-made or foreign policy commit included - reaches
+the policy proof.
 
 A Candidate snapshot alone never begins the barrier; a Supersession, a
 Consumption, a metadata commit or the destination's state never clears it.
@@ -43,8 +48,10 @@ from . import committed, history, p4, paths, planning, records, serialize
 FAST_PATH_DIRECTORY = f"{paths.CANDIDATE_SNAPSHOTS_DIR}/"
 #: RB6 round 4 (CP R5 case E): the policy change records, read by the SAME one fast-path read.
 POLICY_FAST_PATH_DIRECTORY = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}/"
-#: The pathspecs of the one fast-path read, in this order.
-FAST_PATH_DIRECTORIES = (FAST_PATH_DIRECTORY, POLICY_FAST_PATH_DIRECTORY)
+#: RB6 round 5 (RB6FR1B-1): the canonical Project Profile path, read by the SAME one fast-path read.
+POLICY_PROFILE_PATHSPEC = paths.POLICY_PROFILE_REL
+#: The pathspecs of the one fast-path read, in this order (two directories and the one Profile file).
+FAST_PATH_DIRECTORIES = (FAST_PATH_DIRECTORY, POLICY_FAST_PATH_DIRECTORY, POLICY_PROFILE_PATHSPEC)
 
 UNAVAILABLE_BELOW = "publication proof unavailable: the running Git is below P2_PUBLICATION_GIT_MIN (2.31.0)"
 UNAVAILABLE_UNKNOWN = "publication proof unavailable: the running Git's version is unknown"
@@ -88,38 +95,83 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
                 f"candidate {run.candidate_hash} is not proven for {commit}: {item} fails ({detail})"
             )
     # P6 (ORCH-RB6-1): every policy commit (Kp) of the history is proven too. The one fast-path read names the policy
-    # change directory as well (RB6 round 4, CP R5 case E), so a history holding a policy change record reaches here
-    # whether or not it ever touched a Candidate snapshot; a legacy-only push still pays exactly its one fast-path
-    # read. One history read lists every policy change and its adders; what every change's proof reads alike at C is
-    # read once, and only when there is a change (ORCH-RB6-1-N2).
+    # change directory and the Profile path as well (RB6 rounds 4-5, CP R5 case E), so a history holding a policy
+    # change record or a Profile commit reaches here whether or not it ever touched a Candidate snapshot; a
+    # legacy-only push still pays exactly its one fast-path read. One history read lists every policy change record
+    # and Profile adder; what every change's proof reads alike at C is read once, and only when there is a change
+    # (ORCH-RB6-1-N2).
     try:
-        adders = policy_change_adders(Path(repo), commit)
+        added = policy_namespace_adders(Path(repo), commit)
     except (ValidationError, StopError, CommittedReadError) as exc:
         return f"the policy changes of {commit}'s history cannot be read ({exc})"
     shared = _PolicyReads(Path(repo), commit)
+    adders = {path: found for path, found in added.items() if path != paths.POLICY_PROFILE_REL}
     for change_path in sorted(adders):
         failed = committed_policy_proof(Path(repo), commit, change_path, adders[change_path], shared)
         if failed is not None:
             item, detail = failed
             return f"the policy commit adding {change_path} is not proven for {commit}: {item} fails ({detail})"
+    if added:
+        # RB6FR1B-1: a commit that changes the Profile (or deletes it, or leaves a change record without it) without a
+        # proven Kp is no Kp to prove; the published state itself must be one canonical Profile lineage accepts
+        problem = committed_policy_state_problem(Path(repo), commit, shared)
+        if problem is not None:
+            return f"the committed policy state of {commit} is not one canonical Profile lineage accepts: {problem}"
     return None
 
 
 # --------------------------------------------------------------------------- P6 policy commits (ORCH-RB6-1)
 
-def policy_change_adders(repo: Path, commit: str) -> dict[str, list[str]]:
-    """Every policy change record path a commit of ``commit``'s history adds, with the commits that add it.
+def policy_namespace_adders(repo: Path, commit: str) -> dict[str, list[str]]:
+    """Every policy change record path - and the Profile path - a commit of ``commit``'s history adds, with the
+    commits that add it.
 
-    One add-history read over the policy change directory (ORCH-RB6-1-R10);
-    each change record is one policy commit (Kp).
+    One add-history read over the policy change directory and the Profile path
+    (ORCH-RB6-1-R10, RB6 round 5); each change record is one policy commit
+    (Kp). A Profile that was ever committed was added by some commit of the
+    history, so an empty answer means the history never held policy state.
     """
     directory = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}"
     found: dict[str, list[str]] = {}
-    for adding, names in committed.added_in_history(repo, commit, [directory]):
+    for adding, names in committed.added_in_history(repo, commit, [directory, paths.POLICY_PROFILE_REL]):
         for name in names:
-            if name.startswith(directory + "/"):
+            if name.startswith(directory + "/") or name == paths.POLICY_PROFILE_REL:
                 found.setdefault(name, []).append(adding)
     return found
+
+
+def policy_change_adders(repo: Path, commit: str) -> dict[str, list[str]]:
+    """Every policy change record path a commit of ``commit``'s history adds, with the commits that add it (the
+    change-record part of :func:`policy_namespace_adders`)."""
+    return {path: found for path, found in policy_namespace_adders(repo, commit).items()
+            if path != paths.POLICY_PROFILE_REL}
+
+
+def committed_policy_state_problem(repo: Path, commit: str, shared: "_PolicyReads | None" = None) -> str | None:
+    """RB6FR1B-1: why the committed policy state AT ``commit`` is not one the canonical reader accepts as authority.
+
+    The Profile ``commit`` holds (or its absence) and the change records it
+    holds satisfy canonical Profile lineage (:func:`policy.lineage_problems`),
+    and every change record is backed by the Policy Change Receipt it names
+    (:func:`policy.change_backing_problems`) - the very rules
+    ``policy.require_lineage`` applies, read from the committed objects of
+    ``commit`` alone (no runtime record, note or working-tree file). Every
+    genuine state holds it: Kp commits the change record and the reviewed
+    Profile together on a parent holding the sealed Receipt, and a revert of a
+    stranded Kp takes both back. A Profile written, overwritten or deleted by
+    hand does not. Anything unreadable is no proof.
+    """
+    from . import policy
+
+    reads = shared or _PolicyReads(Path(repo), commit)
+    try:
+        at_commit = reads.at_commit()
+        profile = at_commit.read_profile()
+        changes = {change_id: at_commit.read_policy_change(change_id) for change_id in at_commit.policy_change_ids()}
+        problems = policy.lineage_problems(profile, changes) + policy.change_backing_problems(at_commit, changes)
+    except Exception as exc:  # an object, record or question that cannot be read or answered is no proof
+        return f"{type(exc).__name__}: {exc}"
+    return problems[0][1] if problems else None
 
 
 class _PolicyReads:
