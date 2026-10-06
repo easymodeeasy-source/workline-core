@@ -212,6 +212,8 @@ class _HumanWait(_RuntimeLoss):
         """Items 3-8: each call of the same request (repeated: stable) returns the same canonical HUMAN_WAIT Run."""
         candidate = self.snapshot_candidate(run_id)
         before = (self.canonical(), self.policy_runs(), self.run_records(run_id))
+        # another request may have applied its own change before (item 13): no NEW Kp / Km is ever made here
+        commits = (self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT))
         for call in range(calls):
             actor, adjudicator = Discovery(), Adjudicator()
             with self.subTest(call=call):
@@ -228,7 +230,8 @@ class _HumanWait(_RuntimeLoss):
                                  "no new Run, Receipt, change record, Profile, Consumption or commit; the waiting "
                                  "Run's records are unchanged byte for byte")
                 self.assertNotIn(run_id, self.named_aside(), "no set-aside is written")
-                self.assertEqual(([], []), (self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT)))
+                self.assertEqual(commits, (self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT)),
+                                 "no Kp or Km is made")
                 self.assertEqual([], self.policy_pending(), "no pending mutation is left behind")
         self.assertEqual([], self.problems())
 
@@ -291,6 +294,9 @@ class HumanWaitRecoveryTests(_HumanWait):
         self.lose_runtime()
         self.assert_still_waiting(waiting)
         self.assertEqual(moved.profile_digest, self.state().profile_digest, "the other change stands")
+        self.assertEqual(([str(moved.policy_commit)], [str(moved.metadata_commit)]),
+                         (self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT)),
+                         "the only Kp / Km are the other request's")
 
 
 class RemoteHumanWaitTests(_HumanWait):
