@@ -896,3 +896,192 @@ strategy_rule: two consecutive supported B/C failures on one semantic surface re
 version: 1
 work_creation_rule: LOW and Improvement never create Work automatically
 ```
+
+## P6 Project-local Adaptive Policy（§15 / §30）
+
+P6は、Global Review policyを下限として、Project固有の検証の強さを2つの固定surfaceの範囲内でだけ学習・調整する。Projectが学べるのは「どう検証するか」であり、「何が正しいか」ではない。Global policyはこのProjectから書き換えない（その変更はRB7）。
+
+### GlobalPolicyBaseline
+
+正本のloaderは読み取り専用の `workline.review.policy.load_global_baseline` である。RB7がGlobal policyを実体化するまでは `source_mode: derived-baseline` で、Workline rootの `registry.md` と review / roadmap / start Skillのdigest、固定meta-rules、2つのsurface定義、既存のplanning / Work / P4 / P5 / P6 policy identityから正確・再現可能に導く。canonical digestがbaseline identityで、Review ContextとProfileがそれを束ねる。Workline rootへは何も書かない。読めないauthorityは `review_p6_baseline_unavailable` で止まる。
+
+### 固定の2 surface
+
+```text
+review.discovery.required_slots      default   Global 1  範囲 1..4  N個の必須discovery slotを、N組の異なるreviewer identity/versionで
+review.reverification.extra_scope_steps  adaptive  Global 0  範囲 0..3  修理の再検証をimpact levelからN段広げる（FOUNDATIONで頭打ち、P4の下限より下げない）
+```
+
+強さは「大きい整数ほど強い」。登録されていないsurfaceは調整できず、学習で増えることもない。正しさ・権限の意味（severity / blocking、Problem / Improvement / HUMANの意味、要件の権威、Receipt / Consumptionの正しさ、Mutation / Gitの安全不変条件、self-hosting、破壊的操作の規則、Project固有capabilityの承認境界、lifecycleの完了・順序）は絶対に調整できない（`review_p6_surface_non_adaptive`）。
+
+### canonical Project Profile
+
+Project固有のpolicyの正本は `.workline/review/policy/project-profile.yaml` の1件だけである。無いことは正当で、Global baselineそのものを意味する。Project開始はこれを作らず、backfillもしない。中身は厳格なschema（version、親のdigest、束ねたbaselineのdigest / version、loader semantics identity、surfaceごとのoverride、active experiment refs）だけで、自由記述・script・credential・絶対pathの欄は無い。bytesはcanonicalそのものでなければならない（`review_p6_profile_invalid`）。
+
+Profileを変えるのは内部operation `project-policy-change`（owner `project-policy-change`、`workline.project_policy`）だけで、専用のMutation effect `replace_review_profile`（そのpath・そのownerだけ、直前のbytesの正確な期待値とのcompare-and-replace）で書く。generic write_fileはこのnamespaceへどの大小文字でも届かない。他のReview recordは今までどおりimmutableである。Project-facingのSkillもregistry routingも増やさない。
+
+lineageはimmutableな変更記録から証明する: version 1は不在から、以後は正確な親digestで+1、各versionを1件の保存された変更が作る。どの変更も作っていないProfile（`project-policy-change` の外での直接編集）は新しいRunのEffective Policyにならず `review_p6_lineage_invalid` で止まる（policy maintenance / reconcile）。
+
+### compatibility（R6-2）
+
+Profileは、それが書かれた時のbaseline（そのProfileを作った変更記録が束ねる完全なbaseline record）とcurrent baselineの、policy意味の射影（surfaceのid・class・範囲・Global setting、meta-rules、loader semantics、Global policy version）が正確に等しい時だけ適用する。Workline rootの文言だけの変更はcompatibleのままで、意味の変更はRB7のversioned total adapterが証明するまでincompatibleである。推測・merge・overrideの黙った削除はしない。incompatibleなProfileは新しいRunを始めず（`review_p6_profile_incompatible`）、validation Problemになる。open Runは自分が凍結したpolicyで続く。
+
+### Effective Policy
+
+P4-capableなFormal Review（planning、START、Policy Review）の新しい最初のRunは、すべてP6-capableで（Orchestrator ruling R6-1）、policy `review-v1-p6-policy-v1` を束ね、GlobalPolicyBaseline + Profile（または明示の不在）を解決して正規化したEffective Policyを自分のrequestに凍結する。effective_policy_hashはそのrecordのdigestである。open Runは途中でpolicyを変えず、後継とHuman decisionの新しいRunはcycleの最初のRunのpolicyを保つ。既存のP4-only / P5のRunは自分の保存したidentityでだけ読み、upgradeしない。P6 policyはP5の規則とhistory contractをそのまま持つ。
+
+凍結したEffective Policyがこのbuildで読めないP6 requestは、P6のまま `review_p6_effective_policy_unreadable` でfail closedし、別のfamilyのrequestやv1としては決して読まない。Policy Reviewのcontract `review-v1-policy-change-p6-v1` はP6 policyの下でだけ束ねられる。
+
+### holdout（lightening）
+
+設定を下げる（lightening）変更は、変更前の強い挙動を独立のall_relevant holdoutとして凍結する。holdoutはmeasurementであってauthorityではない。
+
+- `required_slots` 3 -> 2: 外した3つ目のdiscovery slotをholdout slotとしてG1で受理し、G2でsettleし、G4でadjudicateする（selectorの `holdout_discovery`）。必要なholdout actorが無ければlaunch前に `review_p6_holdout_unbound` で拒否する。holdoutを選ぶ実験が無いRunへのholdoutは `review_p6_holdout_not_applicable`。
+- `extra_scope_steps` 2 -> 1: 外した広い再検証levelのcheckを、Repair Resultより前に修理のverificationに含める。無ければ `review_p6_holdout_unsettled`、失敗すれば `review_p6_holdout_failed` でblockする。結果は既存の `reverification.completed` に残る。
+
+terminalより前に分かったholdoutの結果: Problem HIGH / MIDは現在のblocking obligation、Problem LOWはH-1 / H-4、Improvementは非blocking、要件の曖昧さはHUMAN、Findingなしはmeasurement evidenceだけ。terminal完了の後に分かった結果はP5の下流 / 履歴evidenceになり、古いlifecycleを書き換えない。
+
+### Policy Review（`project-policy-change-v1`）
+
+Policy Changeは正規化したPolicyChangeCandidate（命令的なpatchではない）として、kind `project-policy-change-v1`、target `project-policy`、stage `project-policy-change:persist-profile`、contract `review-v1-policy-change-p6-v1` でreviewする。P4のG1-G5を使い、Repair Batchの分岐は無い: blocking Problemは G4でterminal（`not_authorized`、Receipt無し）、HUMANはG4で `human_wait`、修正した提案は新しいCandidateである。
+
+変更前規則: Policy Reviewは変更前のEffective Policyと固定meta-rulesでreviewし、提案された後の状態は、自分を認可するreviewのreviewerやcheckを減らせない。discovery actorは変更前のEffective Policyに対して、freezeの時だけでなく、G1とdiscoveryのlaunchの各stepで（再開のたびに）検査する。
+
+固定の機械的meta-verifierは、reviewerが見落としても次を検査する: evidenceの出所（P5 recordのdigest）、Relevant Opportunityの基礎（異なるReview Runで、そのsurfaceを実際に使ったもの。同じRunの2つのrefやrelationとその対象は1つ）、surface / class / 範囲、正しさ・権限の変更が無いこと、lighteningのholdout、overlap、environmentの帰属、正確なrollback単位、before / afterの正規化された意味、requestの再導出とそのdigest。恒久的なstrengthen / lighten / adjustは2つ以上のRelevant Opportunityを要する（`review_p6_single_event`）。temporary_guardは強める向きだけで、1つの深刻な支持された逃し（supportedな downstream_escape / repair_induced relation、またはsupportedな HIGH / MID Problem）から作れ、再評価 / 期限の基準を持つ。
+
+### 永続化
+
+G5のReceiptの後、immutableな変更記録（`.workline/review/policy/changes/<rpc_...>.yaml`、Candidateがreviewされたbaseline recordを完全に束ねる）とProfileのCASを1つのstageに記録し、Kp（その2 pathだけの `base_exact` policy commit）、C-2(Kp)（正確な親 / branch / delta、reviewした後のProfile bytes、canonical loaderでの意味の往復、Receiptがcurrent）、push先があればKpの公開、Policy Consumption version 3とP5のconsumed Run summary、Km、C-2(Km)、Kmの公開、の順で進む。証明の前にpushせず、forceも履歴の書き換えもしない。remoteの無いProjectは同じlocalの証明とcommit境界を保つ。rollbackは新しい高いProfile versionであり、Gitのreset / revertではない。
+
+### evaluation
+
+観察の評価はevidenceであり、Profileを書き換えない（`.workline/review/policy/evaluations/<rpe_...>.yaml`、同じownerのimmutable createと通常のGit finalization）。
+
+- `retain`: 観察を終える（Profileの `active_experiment_refs` から、そのrefを有効なactive集合から外す）。その変更の凍結した `minimum_opportunities` 個以上の異なるRelevant Opportunity（そのsurfaceを使い、凍結したEffective Policyがその変更をactiveとして挙げるRun。lighteningならholdoutが効いていたRun）がevidenceで証明される時だけ受理する。temporary_guardは評価で恒久化しない: それを置き換えるreviewされたstrengthen Candidate（単一イベントの下限を満たす）が恒久化し、rollbackが終わらせる。根拠の無い保存されたretainは何も終わらせず、validation Problemになる。
+- `adjust` / `rollback`: 評価だけで、Profileを変えるには新しいreviewされたCandidateが要る。rollbackは、そのsurfaceを今governしているactiveな変更を正確に戻す。
+- `inconclusive`: 成功ではない。凍結した契約が安全に許す時だけ観察を続ける。
+
+overlap: 同じsurfaceの2つの実験は `known_overlap`、v1の2つのsurfaceは `proven_disjoint`。並行に観察できるのは `proven_disjoint` だけで、他は直列化するか、自分のsurfaceの実験を明示にsupersedeする（別のsurfaceの実験はsupersedeしない。lighteningの実験を、そのholdoutが測る挙動より下のままで終わらせない）。environment: 観察窓の中で重要なidentity（baseline、reviewer、adapter、toolchain、measurement contract、dependency）が変わったら、窓を分けるか、保存されたevidenceである正の無関係の証明を示すか、`inconclusive` にする。時系列は因果ではない。
+
+### BL-055 shadow authority（advisory）
+
+Project-localのartifactがWorkline authorityを複製・置換していないかの診断（none / suspected / confirmed）は、read-onlyの `status` のpolicy sectionと `validate-project` の表示がadvisoryとして示す。validate_projectのProblemにならず、PASS / FAILを変えず、何も編集・削除・移行しない。
+
+### 停止規則（P6）
+
+P6のSTOP code: `review_p6_surface_unknown`、`review_p6_surface_non_adaptive`、`review_p6_setting_invalid`、`review_p6_surface_reclassified`、`review_p6_profile_invalid`、`review_p6_profile_incompatible`、`review_p6_lineage_invalid`、`review_p6_baseline_unavailable`、`review_p6_candidate_invalid`、`review_p6_single_event`、`review_p6_duplicate_evidence`、`review_p6_evidence_invalid`、`review_p6_direction_invalid`、`review_p6_lightening_unmeasured`、`review_p6_guard_invalid`、`review_p6_overlap_unresolved`、`review_p6_forbidden_change`、`review_p6_before_state_conflict`、`review_p6_discovery_slots_unmet`、`review_p6_holdout_unbound`、`review_p6_holdout_not_applicable`、`review_p6_holdout_unsettled`、`review_p6_holdout_failed`、`review_p6_evaluation_invalid`、`review_p6_environment_unattributed`、`review_p6_human_wait`、`review_p6_not_authorized`、`review_p6_policy_review_invalid`。validation / 拒否のcode: `review_p6_effective_policy_unreadable`。P6のreconcile reason: `review_p6_profile_before_mismatch`、`review_p6_persisted_mismatch`、`review_p6_chain_invalid`、`review_p6_publication_invalid`、`review_p6_record_conflict`。
+
+## P6 Review Policy
+
+P6-capableなfamily policyのidentity recordは次の静的recordそのものである（Workline実装の定数 `workline.review.p4.P6_POLICY_RECORD` と一致しなければならない）。P6 RunのEffective Policyはこのrecordのdigestを束ねる、Runが凍結した正規化record（GlobalPolicyBaseline + Profileまたは明示の不在）である。
+
+```yaml
+adaptive:
+  extra_scope_steps_rule: "post-repair reverification at the repair's impact level widened by N levels, capped at FOUNDATION, never below the P4 minimum"
+  holdout_rule: "an active lightening experiment freezes the pre-change stronger behaviour as an all_relevant holdout: discovery holdout slots accepted at G1, settled at G2 and adjudicated at G4; reverification holdout checks present in the repair verification before the Repair Result; a failed holdout check blocks; without its holdout channel the Run is refused"
+  policy_review_rule: "project-policy-change-v1 is reviewed under the pre-change Effective Policy and the fixed meta-rules, G1-G5, no Repair Batch branch; blocking or HUMAN issues no Receipt"
+  registry:
+    - review.discovery.required_slots
+    - review.reverification.extra_scope_steps
+  registry_rule: "exactly the two fixed v1 surfaces; an unknown surface is rejected; the absolute non-adaptive surface is rejected mechanically; a Profile never reclassifies or invents a surface"
+  required_slots_rule: "N required discovery slots bound to N distinct reviewer identity/version pairs, all settled at G2 before adjudication"
+  resolution_rule: "a NEW first Run of a P4-capable Formal Review resolves GlobalPolicyBaseline + the canonical Project Profile or its explicit absence and freezes the normalized Effective Policy in its requests; an open Run never changes policy; an incompatible Profile starts no new Run"
+adjudication:
+  contract: review-v1-p4-adjudication-v1
+  instruction: review-v1-p5-adjudication-instruction-v1
+  merge_rule: "same substantive issue, same semantic responsibility, one repair closes all; uncertain stays separate"
+  order:
+    - unsupported
+    - HUMAN
+    - Problem
+    - Improvement
+    - dismissed_non_actionable
+  prior_history_rule: "a deterministic complete set of validated P5 Run / Finding / Repair history references of the same review kind and target, by digest; no chat memory, transcript or Candidate copy"
+  relation_rule: "structured cross-run relation claims (type, source Finding, prior target, surface, status, evidence digests, public-safe rationale); only supported is confirmed"
+  severity_rule: "the strongest severity the adjudication supports; the reviewer's severity is input only"
+  slot: p4-adjudicator
+  task_kind: p4-adjudication-v1
+blocking_rule: "Problem HIGH or MID, and every C_REPAIR_INDUCED Problem, is a blocking current-cycle obligation"
+categories:
+  - Problem
+  - Improvement
+convergence_rule: "unresolved blocking review obligations = 0 and required coverage and Evidence are current"
+discovery:
+  history: "fresh: no prior Finding or Repair history"
+  instruction: review-v1-p4-discovery-instruction-v1
+  report_rule: H-3 public-safe structured claims plus an explicit coverage declaration
+  slot_rule: "one required task per viewpoint the P4 selector binds; at least one"
+  task_kind: p4-discovery-v1
+dispositions:
+  - repair_required
+  - repaired_current_cycle
+  - retained_history_only
+  - future_work_candidate
+  - no_action_after_adjudication
+evidence_reuse_rule: "positive proof under the dependency vocabulary only; a report, adjudication or Receipt is never reused"
+history:
+  authority_rule: "history is a validated projection and reference layer, never lifecycle truth, a scheduler or a Work generator"
+  contract: review-v1-history-v1
+  family_rule: "a cycle keeps the policy and history contract of its first Run; an existing Run is read only from its own stored identity and is never upgraded"
+  finding_rule: "one Finding summary per normalized Finding, in the G4 that persists the adjudication"
+  human_decision_rule: "one Human Decision Evidence record per affected HUMAN_WAIT Run, in the successor G1 before any external launch; never requirement authority"
+  relation_rule: accepted relations are immutable new G4 facts and never rewrite an endpoint
+  repair_rule: "the Repair summary and the repaired Run summary, in the G6 that persists the Repair Result"
+  sanitation_rule: "structured public-safe fields only: no chain-of-thought, transcript, secret, free map or Candidate payload"
+  summary_rule: "one immutable Run summary, written in the transition that makes the Run's durable disposition final; the two reserved dispositions no transition proves are never written"
+human_rule: "a required requirement decision is HUMAN_WAIT at generation 4; no repair guesses it"
+impact_classes:
+  - LOCAL
+  - SHARED
+  - CONTRACT
+  - FOUNDATION
+improvement_rule: Improvement of any severity is non-blocking
+last_generation: 6
+low_rule: Problem LOW is non-blocking only while the current completion objective still holds
+outcomes:
+  - unsupported
+  - HUMAN
+  - Problem
+  - Improvement
+  - dismissed_non_actionable
+policy_id: review-v1-p6-policy-v1
+relations:
+  - A_NEW
+  - B_RECURRENCE
+  - C_REPAIR_INDUCED
+repair:
+  batch_rule: one Repair Batch per Candidate generation holding every decidable blocking Problem
+  instruction: review-v1-p4-repair-instruction-v1
+  proposal_rule: "a complete repaired Candidate proposal; the owner alone adopts it"
+  slot: p4-repair
+  task_kind: p4-repair-v1
+reverification_minimums:
+  CONTRACT:
+    - adjacent_eligibility
+    - contract_roundtrip
+    - failure_interruption_resume
+    - writers_readers
+  FOUNDATION:
+    - broad_integration
+    - full_suite
+  LOCAL:
+    - direct_consumers
+    - focused_tests
+  SHARED:
+    - focused_tests
+    - integration_checks
+    - representative_callers
+review_contracts:
+  - review-v1-planning-p4-v1
+  - review-v1-work-p4-v1
+  - review-v1-policy-change-p6-v1
+schema: review-p6-policy
+seal_generation: 5
+severities:
+  - HIGH
+  - MID
+  - LOW
+strategy_rule: two consecutive supported B/C failures on one semantic surface require STRATEGY_CHANGE
+version: 1
+work_creation_rule: LOW and Improvement never create Work automatically
+```

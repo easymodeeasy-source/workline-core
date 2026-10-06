@@ -420,7 +420,8 @@ META_RULES: dict[str, Any] = {
                         "an opportunity; only supported causality counts as confirmed",
     "temporary_guard_rule": "one serious supported escape may create a temporary_guard only when it strengthens inside "
                             "the allowed range, changes no correctness or authority meaning and carries reevaluation "
-                            "or expiry criteria; it never becomes permanent without the normal repeated-evidence path",
+                            "or expiry criteria; it never becomes permanent without the normal repeated-evidence path: "
+                            "a reviewed strengthen superseding it at its setting under the single-event floor",
     "lightening_rule": "every downward setting change freezes the pre-change stronger behaviour as an independent "
                        "all_relevant holdout; without it the lightening is not authorized; the change never weakens "
                        "the channel that measures it",
@@ -428,13 +429,19 @@ META_RULES: dict[str, Any] = {
                        "the proposed after-state never selects fewer reviewers or checks for the review authorizing it",
     "overlap_rule": "two experiments on one surface are known_overlap; experiments on the two v1 surfaces measure "
                     "disjoint channels and are proven_disjoint; only proven_disjoint observes concurrently; "
-                    "known_overlap and overlap_unresolved serialize or are explicitly superseded",
+                    "known_overlap and overlap_unresolved serialize or are explicitly superseded; a Candidate "
+                    "supersedes only experiments on its own surface and never ends a lightening below the behaviour "
+                    "its holdout measures",
     "overlap_classes": list(OVERLAP_CLASSES),
     "environment_rule": "a material environment identity change during an observation window needs a window split or a "
                         "positive irrelevance proof; otherwise the result is inconclusive; chronology is never causality",
     "evaluation_results": list(EVALUATION_RESULTS),
     "evaluation_rule": "an evaluation never rewrites the Profile; adjust and rollback need a new reviewed Candidate; "
-                       "inconclusive is not success",
+                       "inconclusive is not success; retain ends observation only after the frozen minimum of "
+                       "distinct relevant opportunities observed under the change (its holdout in force); a "
+                       "temporary_guard never ends observation by evaluation",
+    "lineage_rule": "a Profile is applied only when a stored Policy Change produced it: version 1 from absence, then "
+                    "+1 with the exact parent; a Profile no change produced is never an Effective Policy",
     "compatibility_rule": "a Profile is applied only when its compatibility with the current Global baseline is "
                           "positively proven: exact derived-baseline compatibility while the baseline source_mode is "
                           "derived-baseline, the versioned total compatibility adapter once RB7 materializes Global "

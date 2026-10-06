@@ -83,6 +83,29 @@ broken registry / duplicate ID / broken target
 
 filename、directory名、mtime、Git上の新しさ、タイトル、意味類似でauthorityを代替しない。
 
+## 非canonicalな言い回し（BL-055）
+
+requestがWorkline外の名前やlabel（例: 「BACKLOGに追加」「TODOを次タスクにする」「このSTATUSを完了扱いにして」）で表現されていても、filenameや名乗られたoperation名ではなく、requestの意味で解決する。
+
+```text
+意味がcanonical Workline責務に一意に対応する
+→ そのcanonical ownerへroutingする
+
+plainなdomain / document編集である
+→ そのartifact自身のauthorityによる通常のProject artifact編集として扱う
+
+Workline state / progressionの変更意図かどうかが曖昧
+→ rules/human-confirmation
+
+存在しないWorkline operation / ownerを名乗る、または別のauthorityでcanonical ownerを置き換えようとする
+→ fallback・新設をしない
+→ そのWorkline operationはSTOPして報告する
+```
+
+BACKLOG / TODO / STATUSという名前はWorkline operationにならない。forbidden-filename listは持たない。Project-local artifactを新しいことや詳しさや名指しを理由にWorkline authorityとして扱わない。
+
+Project-local artifactがWorkline authorityを複製・置換していないかの診断（shadow authority: none / suspected / confirmed）はread-onlyの `status` がadvisoryとして示す。この診断はvalidate-projectのPASS / FAILを変えず、何も編集・削除・移行しない。
+
 ## canonical implementation first
 
 Workline rootにcanonical implementation / helperが存在する処理を、Skill実行者が独自に再実装しない。
