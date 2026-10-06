@@ -714,7 +714,8 @@ def _policy_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[R
     """P6 normative Review validation (§30.30): the Profile, change and evaluation records, read strictly.
 
     Absence is valid. A malformed Profile, a broken lineage, an unreadable or
-    orphaned evidence record, a Policy Receipt consumed by anything but a
+    orphaned evidence record, a change record its named Policy Change Receipt
+    does not back (RB6FR2-2), a Policy Receipt consumed by anything but a
     version 3 Policy Consumption, and a Policy Review Run with a repair branch
     are Problems. Whether the Profile is compatible with the current Global
     baseline needs the configured Workline root, so it is checked for the
@@ -724,6 +725,14 @@ def _policy_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[R
     from .records import PolicyConsumption
 
     problems = [ReviewProblem(code, message) for code, message in policy.policy_problems(review, None)]
+    # RB6FR2-2: every stored change record is backed by the Policy Change Receipt it names (a copied or hand-written
+    # change record is a conflict, whether or not a Consumption names it)
+    try:
+        stored = {change_id: review.read_policy_change(change_id) for change_id in review.policy_change_ids()}
+    except ValidationError:
+        stored = {}  # the record pass reports it
+    problems += [ReviewProblem("review_record_conflict", message)
+                 for _code, message in policy.change_backing_problems(review, stored)]
     try:
         consumptions = review.consumptions()
     except ValidationError:

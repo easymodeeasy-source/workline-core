@@ -1177,7 +1177,10 @@ def require_lineage(reader: Any, profile: ProjectProfile | None) -> None:
     then +1 with the exact parent, each version produced by a stored change,
     and every override and experiment ref backed by one. A Profile no change
     produced (a direct edit outside ``project-policy-change``) never becomes
-    an Effective Policy. Absence with no change record stays valid.
+    an Effective Policy. Absence with no change record stays valid. RB6FR2-2:
+    every stored change record is itself backed by the Policy Change Receipt it
+    names (:func:`change_backing_problems`), so a copied or hand-written change
+    record never makes its Profile an Effective Policy either.
     """
     changes: dict[str, Mapping[str, Any]] = {}
     try:
@@ -1186,7 +1189,7 @@ def require_lineage(reader: Any, profile: ProjectProfile | None) -> None:
     except ValidationError as exc:
         raise stop(CODE_LINEAGE_INVALID, f"the policy change records do not read ({exc}); no new Review Run is started "
                                          "(policy maintenance / reconcile)") from exc
-    problems = lineage_problems(profile, changes)
+    problems = lineage_problems(profile, changes) + change_backing_problems(reader, changes)
     if problems:
         raise stop(CODE_LINEAGE_INVALID, f"the Project Profile's lineage is not proven: {problems[0][1]}; a Profile no "
                                          "Policy Change produced never becomes an Effective Policy, and no new Review "
@@ -2518,12 +2521,48 @@ def lineage_problems(profile: ProjectProfile | None, changes: Mapping[str, Mappi
     if max(by_after, default=0) > profile.profile_version:
         found.append((CODE_LINEAGE_INVALID, "a policy change produced a later Profile version than the current one"))
     for item in profile.overrides:
-        if str(item["supporting_policy_change_id"]) not in changes:
+        supporting = changes.get(str(item["supporting_policy_change_id"]))
+        if supporting is None:
             found.append((CODE_LINEAGE_INVALID, f"override of {item['policy_surface_id']} names policy change "
                                                 f"{item['supporting_policy_change_id']}, which is not stored"))
+        elif (supporting.get("affected_policy_surface"), supporting.get("after_setting")) \
+                != (item["policy_surface_id"], item["setting"]):
+            # RB6FR1-3: an override is exactly what its supporting change decided - that change's surface and its
+            # after setting (a carried override keeps the change that set it; a rollback away from the Global
+            # supports the restored setting; a rollback to the Global removes the override)
+            found.append((CODE_LINEAGE_INVALID, f"override of {item['policy_surface_id']} (setting {item['setting']}) "
+                                                f"is not the surface and setting its supporting policy change "
+                                                f"{item['supporting_policy_change_id']} decided"))
     for ref in profile.active_experiment_refs:
         if ref not in changes:
             found.append((CODE_LINEAGE_INVALID, f"active experiment {ref} names no stored policy change"))
+    return found
+
+
+def change_backing_problems(reader: Any, changes: Mapping[str, Mapping[str, Any]]) -> list[tuple[str, str]]:
+    """RB6FR2-2: every stored change record is backed by the Policy Change Receipt it names.
+
+    The Receipt reads, authorizes the Policy Change stage of a Policy Review,
+    and names the change record's Run and Candidate. The owner commits the
+    sealed generation 5 and its Receipt before the change record exists (Kp's
+    parent holds them), so every genuine state - the working tree and every
+    clone - holds the Receipt; a copied or hand-written change record does not.
+    """
+    found: list[tuple[str, str]] = []
+    for change_id, change in sorted(changes.items()):
+        receipt_id = change.get("receipt_id")
+        try:
+            receipt = reader.read_receipt(str(receipt_id))
+        except ValidationError as exc:
+            found.append((CODE_LINEAGE_INVALID, f"policy change {change_id} names Receipt {receipt_id}, which does not "
+                                                f"read ({exc})"))
+            continue
+        if (receipt.review_kind, receipt.authorized_operation_stage, receipt.review_run_id,
+                receipt.authorized_candidate_hash) != (REVIEW_KIND, AUTHORIZED_OPERATION_STAGE,
+                                                       change.get("review_run_id"), change.get("candidate_hash")):
+            found.append((CODE_LINEAGE_INVALID, f"policy change {change_id} is not backed by its Receipt {receipt_id}: "
+                                                "the Receipt is not the Policy Change authorization of its Run and "
+                                                "Candidate"))
     return found
 
 

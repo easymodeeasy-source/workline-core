@@ -300,12 +300,13 @@ class _PolicyHistory:
     ``added``: change ids whose record a commit of HEAD's history added;
     ``present``: change id -> the Receipts its record names, for every record
     HEAD's tree or the working tree holds (a record that does not read names
-    none, so it is never consumed); :meth:`consumptions`: every Consumption
-    HEAD's tree, the working tree or a commit of HEAD's history added, read
-    only once a policy change was ever added or is present, or once a Run with
-    a Receipt is classified (ORCH-RB6-1-N3: a Project with no policy history
-    never reads them, so an unreadable unrelated Consumption cannot refuse its
-    Policy Changes). Facts only, read the way planning's recovery row b reads
+    none, so it is never consumed); :meth:`consumptions`: every COMMITTED
+    Consumption - HEAD's tree or one a commit of HEAD's history added, never
+    the working tree (RB6FR1-2) - read only once a policy change was ever
+    added or is present, or once a Run with a Receipt is classified
+    (ORCH-RB6-1-N3: a Project with no policy history never reads them, so an
+    unreadable unrelated Consumption cannot refuse its Policy Changes).
+    Facts only, read the way planning's recovery row b reads
     registrations: no commit identity is inferred from them and nothing is
     adopted.
     """
@@ -371,11 +372,18 @@ def _policy_history(store: ProjectStore) -> _PolicyHistory:
 
 
 def _consumptions_of_history(store: ProjectStore, head: str | None) -> list[Any]:
-    """Every Consumption the working tree, HEAD's tree and every commit of HEAD's history that added one hold."""
-    review = ReviewStore(store)
+    """Every COMMITTED Consumption: HEAD's tree, and every one a commit of HEAD's history added.
+
+    Never the working tree (RB6FR1-2): a Consumption that is only written - the
+    §30.40 windows 16-17 between the Consumption stage and Km, or a hand-written
+    file - proves nothing about a committed change record, so such a change
+    stays stranded (``review_p6_run_unrecovered``, the manual reconciliation
+    boundary), symmetric with the Kp window. Change records may still be read
+    from the working tree (``_policy_history``): that direction only refuses.
+    """
     repo = store.root
+    consumptions: list[Any] = []
     try:
-        consumptions = list(review.consumptions())
         if head is not None:
             consumptions += list(review_committed.CommittedReviewStore(repo, head).consumptions())
             for adding, names in review_committed.added_in_history(repo, head, [review_paths.CONSUMPTIONS_DIR]):
@@ -394,8 +402,8 @@ def _consumptions_of_history(store: ProjectStore, head: str | None) -> list[Any]
 def _require_no_stranded_change(facts: _PolicyHistory) -> None:
     """ORCH-RB6-1: no Policy Change starts while an applied change has no Consumption (any request).
 
-    A change record HEAD's tree or the working tree holds without the v3
-    Consumption of its own Receipt is a policy-state stage whose Kp / Km
+    A change record HEAD's tree or the working tree holds without the
+    committed v3 Consumption of its own Receipt is a policy-state stage whose Kp / Km
     identity was not durably saved: it is never inferred from Git history (no
     commit is adopted), never published by this owner, and no new Candidate is
     built on top of it - ``review_p6_run_unrecovered``, reconcile required (the
@@ -580,10 +588,11 @@ def _recover(op: _Op, mutation: Mutation, found: Any) -> None:
 
     CP R8: a Run at canonical G4 HUMAN_WAIT is recovered as that same Run. It
     is re-proven as this request's Candidate under its frozen Effective
-    Policy, and nothing about it is re-judged against the current state - no
-    before-state, no meta-verifier, exactly as P4 planning and Work recovery
-    exempt a G4 HUMAN_WAIT Run from currency - because it authorizes, launches
-    and writes nothing: the owner reads its G4 and returns ``human_wait``. Only
+    Policy, and nothing about it is re-judged against the current state or the
+    invocation's actors - no before-state, no meta-verifier, no discovery-slot
+    check (RB6FR1-4), exactly as P4 planning and Work recovery exempt a G4
+    HUMAN_WAIT Run from currency - because it authorizes, launches and writes
+    nothing: the owner reads its G4 and returns ``human_wait``. Only
     its canonical IDs are bound, in this runtime mutation that then completes;
     no Receipt or Consumption is reserved and the scope is never extended.
     """
@@ -612,10 +621,11 @@ def _recover(op: _Op, mutation: Mutation, found: Any) -> None:
     if frozen_hash != first.effective_policy_hash or frozen_hash != candidate.get("before_effective_policy_digest"):
         raise _reconcile(f"Policy Review Run {run_id}'s frozen Effective Policy is not the one its generation 1 and its "
                          "Candidate bind", policy.REASON_CHAIN_INVALID)
-    problem = policy.discovery_slots_problem(effective, op.review.discovery, op.review.holdout_discovery)
-    if problem is not None:
-        raise policy.stop(*problem)
     if not waiting:
+        # RB6FR1-4: a waiting Run launches nothing, so the invocation's actors are not judged for it
+        problem = policy.discovery_slots_problem(effective, op.review.discovery, op.review.holdout_discovery)
+        if problem is not None:
+            raise policy.stop(*problem)
         state = _require_before_state(op, candidate)
         policy.require_candidate(candidate, state, review)
     bindings = [

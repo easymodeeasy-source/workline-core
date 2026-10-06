@@ -764,19 +764,24 @@ def _added_paths(repo: Path, commit: str, paths: "list[str] | tuple[str, ...]") 
     return found
 
 
-def history_touches(repo: Path, commit: str, directory: str) -> bool | None:
+def history_touches(repo: Path, commit: str, directory: "str | tuple[str, ...]") -> bool | None:
     """Whether any commit in ``commit``'s history changed anything under ``directory``; None when Git cannot answer.
 
     ``git rev-list --full-history -n 1 <commit> -- <directory>``: empty exactly
-    when no commit in the history changed anything there.
+    when no commit in the history changed anything there. Given a tuple of
+    directories, the same ONE read names them all as pathspecs and answers
+    whether anything under any of them changed (RB6 round 4: the publication
+    barrier's single fast-path read).
     """
+    directories = (directory,) if isinstance(directory, str) else tuple(directory)
+
     def read() -> bool | None:
-        result = run_git(repo, "rev-list", "--full-history", "-n", "1", commit, "--", directory, check=False)
+        result = run_git(repo, "rev-list", "--full-history", "-n", "1", commit, "--", *directories, check=False)
         if not result.ok:
             return None
         return bool(result.stdout.strip())
 
-    return _remembered(("touches", str(repo), commit, directory), read) if _immutable(commit) else read()
+    return _remembered(("touches", str(repo), commit, directories), read) if _immutable(commit) else read()
 
 
 def check_attributes(

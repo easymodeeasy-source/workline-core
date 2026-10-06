@@ -8,14 +8,20 @@ branch position, runtime note, mutation record, remote state or working-tree
 file takes part, and no attribute is evaluated.
 
 ```text
-fast path   git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/
-            empty -> clear, on any Git; a read Git cannot answer -> held
+fast path   git rev-list --full-history -n 1 <C> -- .workline/review/candidate-snapshots/ .workline/review/policy/changes/
+            (one read) empty -> clear, on any Git; a read Git cannot answer -> held
 Git         listed, and the running Git below P2_PUBLICATION_GIT_MIN (2.31.0) or of unknown
             version -> refused as a capability failure that names no Run
 Runs        every planning Candidate snapshot added in C's history -> its reserved entity paths
             -> the commits that add them; a Run with none is not registered and begins nothing
 proof       CP1-CP5, CP7, CP6, CP8-CP13 for every registered Run, from committed objects alone
+policy      PK1-PK9 for every policy change record (Kp) the history added (P6), from committed objects alone
 ```
+
+The one fast-path read names both directories (RB6 round 4, CP R5 case E): a
+history that never touched either is cleared by that single read exactly as
+before; one that holds a policy change record but no Candidate snapshot - a
+hand-made or foreign policy commit included - reaches the policy proof.
 
 A Candidate snapshot alone never begins the barrier; a Supersession, a
 Consumption, a metadata commit or the destination's state never clears it.
@@ -35,6 +41,10 @@ from . import committed, history, p4, paths, planning, records, serialize
 
 #: The directory whose history the fast path reads.
 FAST_PATH_DIRECTORY = f"{paths.CANDIDATE_SNAPSHOTS_DIR}/"
+#: RB6 round 4 (CP R5 case E): the policy change records, read by the SAME one fast-path read.
+POLICY_FAST_PATH_DIRECTORY = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}/"
+#: The pathspecs of the one fast-path read, in this order.
+FAST_PATH_DIRECTORIES = (FAST_PATH_DIRECTORY, POLICY_FAST_PATH_DIRECTORY)
 
 UNAVAILABLE_BELOW = "publication proof unavailable: the running Git is below P2_PUBLICATION_GIT_MIN (2.31.0)"
 UNAVAILABLE_UNKNOWN = "publication proof unavailable: the running Git's version is unknown"
@@ -55,7 +65,7 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
     """Why a push of ``commit`` may not publish its history; None when the barrier is clear."""
     if commit is None:
         return None  # no history, so no registration commit to publish
-    touched = gitcmd.history_touches(Path(repo), commit, FAST_PATH_DIRECTORY)
+    touched = gitcmd.history_touches(Path(repo), commit, FAST_PATH_DIRECTORIES)
     if touched is None:
         return f"the fast-path read of {commit}'s history could not be answered, and an unanswered read is no clear barrier"
     if not touched:
@@ -77,10 +87,11 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
                 f"the review-v1 registration commit {run.registration_commit or '(not unique)'} of the Run with "
                 f"candidate {run.candidate_hash} is not proven for {commit}: {item} fails ({detail})"
             )
-    # P6 (ORCH-RB6-1): every policy commit (Kp) of the history is proven too. A Workline Kp always follows its
-    # Policy Review Run's Candidate snapshot, so the unchanged snapshot fast path already reaches here; a legacy-only
-    # push still pays exactly its one fast-path read. One history read lists every policy change and its adders;
-    # what every change's proof reads alike at C is read once, and only when there is a change (ORCH-RB6-1-N2).
+    # P6 (ORCH-RB6-1): every policy commit (Kp) of the history is proven too. The one fast-path read names the policy
+    # change directory as well (RB6 round 4, CP R5 case E), so a history holding a policy change record reaches here
+    # whether or not it ever touched a Candidate snapshot; a legacy-only push still pays exactly its one fast-path
+    # read. One history read lists every policy change and its adders; what every change's proof reads alike at C is
+    # read once, and only when there is a change (ORCH-RB6-1-N2).
     try:
         adders = policy_change_adders(Path(repo), commit)
     except (ValidationError, StopError, CommittedReadError) as exc:
