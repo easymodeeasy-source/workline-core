@@ -108,7 +108,8 @@ P6_PRODUCERS = {
     ("mutation.py",): {"_guard_policy_record", "_validate_profile_replacement", "_classify_profile_replacement",
                        "_replace_review_profile", "bind_policy_recovery", "_policy_publication"},
     ("review", "recovery.py"): {"discover_kind", "p4_reconstruction_problem"},
-    ("review", "publication.py"): {"policy_change_adders", "committed_policy_proof", "_prove_policy"},
+    ("review", "publication.py"): {"policy_change_adders", "committed_policy_proof", "_prove_policy",
+                                   "consumptions_mentioning"},
 }
 #: ORCH-RB6-1-R11: the functions whose returned ``(code, message)`` a producer raises as ``stop(*problem)``.
 STARRED_SOURCES = {"surface_problem", "discovery_slots_problem"}
@@ -150,6 +151,22 @@ def _starred_source(function: ast.AST, call: ast.Call) -> bool:
                for node in ast.walk(function))
 
 
+def _outside_functions(tree: ast.Module) -> list[ast.AST]:
+    """ORCH-RB6-1-N6: every node of a module outside its function definitions - module- and class-level statements
+    and module-level lambdas - so a raising call there is scanned too."""
+    found: list[ast.AST] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            found.append(child)
+            visit(child)
+
+    visit(tree)
+    return found
+
+
 def p6_raised() -> tuple[set[str], list[str]]:
     """Every reason / code the P6 producers raise, and what the scan cannot resolve (beyond pass-through helpers)."""
     found: set[str] = set()
@@ -162,10 +179,12 @@ def p6_raised() -> tuple[set[str], list[str]]:
         if functions is not None:
             assert {scope.name for scope in scopes} == functions, f"{path.name}: {functions}"
         for scope in scopes:
-            enclosing = [scope] if isinstance(scope, ast.FunctionDef) else [
-                node for node in ast.walk(scope) if isinstance(node, ast.FunctionDef)]
-            for function in enclosing:
-                for node in ast.walk(function):
+            # a function: its own body; a whole module: each function's body, then everything outside every function
+            enclosing = [(scope, list(ast.walk(scope)))] if isinstance(scope, ast.FunctionDef) else [
+                (node, list(ast.walk(node))) for node in ast.walk(scope)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))] + [(scope, _outside_functions(scope))]
+            for function, nodes in enclosing:
+                for node in nodes:
                     if not isinstance(node, ast.Call):
                         continue
                     name = _call_name(node)
