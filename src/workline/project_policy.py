@@ -305,11 +305,38 @@ def _require_binding(op: _Op, mutation: Mutation) -> dict[str, str]:
     return dict(binding)
 
 
+def _require_discovery_actors(op: _Op, run: _Run) -> None:
+    """RB6C-D2: the invocation's discovery (and holdout) actors satisfy the FROZEN pre-change Effective Policy.
+
+    §30.13: the pre-change policy picks the reviewer count, and the after-state
+    never selects fewer for the review authorizing it. The freeze checks it
+    once; a retry of the same request may bind another PolicyReview, so every
+    step that accepts or launches discovery - G1 included, on every resume -
+    checks it again against the Effective Policy frozen in the Candidate note,
+    before anything is written or launched. Never trust the freeze alone.
+    """
+    problem = policy.discovery_slots_problem(run.effective, op.review.discovery, op.review.holdout_discovery)
+    if problem is not None:
+        code, message = problem
+        raise policy.stop(code, f"{message}; the Policy Review resumes only with discovery actors sufficient for the "
+                                "pre-change Effective Policy it froze, and nothing is written or launched")
+
+
 def _require_state_current(op: _Op, run: _Run) -> policy.PolicyState:
     """The exact before-state the Candidate was decided against still holds - or fail closed (§30.37)."""
     reader = ReviewStore(op.store)
-    state = policy.resolve_policy_state(reader, op.store.workline_root())
     candidate = run.candidate
+    # The Profile moved since the freeze (any bytes, valid or not): a before-state conflict, named as one before
+    # the new Profile is judged at all - a changed proposal is a later new Candidate.
+    try:
+        moved = reader.profile_digest() != candidate["before_profile"]["digest"]
+    except ValidationError:
+        moved = True
+    if moved:
+        raise policy.stop(policy.CODE_BEFORE_STATE_CONFLICT,
+                          "the Project Profile is no longer the exact before-state the PolicyChangeCandidate was "
+                          "decided against; nothing is written, and a changed proposal is a later new Candidate")
+    state = policy.resolve_policy_state(reader, op.store.workline_root())
     if candidate["before_profile"] != {"profile_version": state.profile_version, "digest": state.profile_digest} \
             or candidate["before_effective_policy_digest"] != state.effective_hash \
             or candidate["global_baseline_digest"] != state.baseline.digest:
@@ -452,6 +479,7 @@ def _context(op: _Op) -> dict[str, Any]:
 def _accept(op: _Op, mutation: Mutation, run: _Run) -> None:
     """G1: the Candidate snapshot, every discovery TaskInput (required + holdout) and the open gate, together."""
     store = op.store
+    _require_discovery_actors(op, run)
     _require_state_current(op, run)
     candidate = run.candidate
     snapshot = policy.snapshot_for(candidate)
@@ -501,6 +529,7 @@ def _accept(op: _Op, mutation: Mutation, run: _Run) -> None:
 def _launch_discovery(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> None:
     """G1 -> G2: every accepted discovery task (required and holdout) launched to its bound actor, then G2."""
     store = op.store
+    _require_discovery_actors(op, run)
     review = ReviewStore(store)
     first = chain.latest
     tasks = list(first.accepted_tasks)

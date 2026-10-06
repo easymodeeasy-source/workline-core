@@ -187,12 +187,16 @@ class CompatibilityTests(WorklineTestCase):
         target.write_bytes(found.text().encode("utf-8"))
 
     def test_an_incompatible_profile_fails_closed_and_is_a_validation_problem(self) -> None:
+        # RB6B-M3: a Profile no stored change produced fails the new-Run lineage gate first; validation names both
+        # the broken lineage and the incompatibility (its written-under baseline cannot be recovered)
         self.write_profile(profile(digest="a" * 64))
         with self.assertRaises(StopError) as raised:
             policy.resolve_policy_state(self.review, self.store.workline_root())
-        self.assertEqual(policy.CODE_PROFILE_INCOMPATIBLE, raised.exception.code)
+        self.assertEqual(policy.CODE_LINEAGE_INVALID, raised.exception.code)
         self.assertIn("policy maintenance / reconcile", str(raised.exception))
-        self.assertIn(policy.CODE_PROFILE_INCOMPATIBLE, [problem.code for problem in validate_project(self.store)])
+        found = [problem.code for problem in validate_project(self.store)]
+        self.assertIn(policy.CODE_PROFILE_INCOMPATIBLE, found)
+        self.assertIn(policy.CODE_LINEAGE_INVALID, found)
 
     def test_a_malformed_profile_fails_closed_and_is_a_validation_problem(self) -> None:
         target = self.store.root / paths.POLICY_PROFILE_REL
@@ -326,7 +330,34 @@ class EffectivePolicyTests(unittest.TestCase):
         self.assertEqual(0, policy.required_holdout_slots(found))
 
 
+#: RB6B-L12: computed at the base commit 61b0b9dd (before any P6 code) and pinned as literals, so the pre-P6
+#: identities are compared with what the base build said - never with the new code itself.
+BASE_LITERALS = {
+    "p4_policy_hash": "49abd2457c0affa393f4bb84c9cc6bffbc5cd461ddc3833501b252767343b6e5",
+    "p5_policy_hash": "662bea5575a40b91e46758c472fc2a8ec329e659ea0325dac6c24f27120d16e1",
+    "planning_policy_hash": "c556c5e68438f8656298c47060d62ad45830a42eae951bb7bb31ec85fbfe80ca",
+    "work_policy_hash": "46fde266f96c666101f9ca0e202e8a93048dc50a7cf49764039ca4baed6ef970",
+    "p4_request_digest": "e7734e23872d51427832ea1a8fb3eb7d4522e39fd56e9421a63542694317668f",
+    "p5_request_digest": "9c8b12fbab3b0de596256f09e2ebee1f2e7c5f37b487b6826afe3cf88a925c5b",
+}
+
+
 class PreP6CompatibilityTests(unittest.TestCase):
+    def test_the_pre_p6_identities_are_the_base_commit_literals(self) -> None:
+        from workline.review import planning, work_review
+
+        common = dict(review_kind="planning", viewpoint="correctness", candidate={"a": 1}, context={"b": 2},
+                      requirement={"c": 3}, candidate_generation=1, succession=None, set_aside_runs=(),
+                      human_decision=None, review_contract=p4.PLANNING_CONTRACT)
+        self.assertEqual(BASE_LITERALS, {
+            "p4_policy_hash": p4.policy_hash(p4.POLICY_ID),
+            "p5_policy_hash": p4.policy_hash(p4.P5_POLICY_ID),
+            "planning_policy_hash": planning.policy_hash(),
+            "work_policy_hash": work_review.policy_hash(),
+            "p4_request_digest": serialize.digest(p4.discovery_request(**common, policy_id=p4.POLICY_ID)),
+            "p5_request_digest": serialize.digest(p4.discovery_request(**common, policy_id=p4.P5_POLICY_ID)),
+        })
+
     def test_the_static_p4_and_p5_policies_are_exactly_what_they_were(self) -> None:
         self.assertEqual((p4.POLICY_ID, history.P5_POLICY_ID), p4.POLICY_IDS)
         self.assertEqual({p4.POLICY_ID, history.P5_POLICY_ID}, set(p4.POLICY_RECORDS))

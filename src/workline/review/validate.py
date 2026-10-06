@@ -755,24 +755,35 @@ def _policy_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[R
                 problems.append(ReviewProblem("review_record_conflict",
                                               f"Policy Consumption {found.consumption_id} does not bind the stored change "
                                               f"record of {change_id}"))
-        elif found.receipt_id in policy_receipts:
-            problems.append(ReviewProblem("review_record_conflict",
-                                          f"consumption {found.consumption_id} consumes the Policy Change Receipt "
-                                          f"{found.receipt_id} and is not a version 3 Policy Consumption"))
+        else:
+            # RB6B-L5: keyed on the Receipt itself, so a non-v3 Consumption of a Policy Receipt is named even before
+            # (or without) a change record naming that Receipt; the v1 / v2 readers stay byte-identical
+            try:
+                policy_kind = review.read_receipt(found.receipt_id).review_kind == policy.REVIEW_KIND
+            except ValidationError:
+                policy_kind = False  # the Consumption pass reports a missing Receipt
+            if policy_kind or found.receipt_id in policy_receipts:
+                problems.append(ReviewProblem("review_record_conflict",
+                                              f"consumption {found.consumption_id} consumes the Policy Change Receipt "
+                                              f"{found.receipt_id} and is not a version 3 Policy Consumption"))
     for run_id, chain in sorted(chains.items()):
         first = chain.generations[0]
         try:
-            contracts = {p4.contract_of_task_input(review.read_task_input(str(task["task_id"])))
-                         for task in first.accepted_tasks}
+            envelopes = [review.read_task_input(str(task["task_id"])).request_envelope for task in first.accepted_tasks]
+            contracts = {p4.contract_of_envelope(envelope) for envelope in envelopes}
         except ValidationError:
             continue  # the provenance pass reports it
-        if policy.POLICY_CHANGE_CONTRACT not in contracts:
+        named = {envelope.get("review_contract") for envelope in envelopes if isinstance(envelope, dict)}
+        if policy.POLICY_CHANGE_CONTRACT not in contracts | named:
             continue
         where = f"Policy Review Run {run_id}"
-        if contracts != {policy.POLICY_CHANGE_CONTRACT} or first.target_identity != policy.TARGET_IDENTITY \
-                or first.review_kind != policy.REVIEW_KIND:
+        # RB6B-M4: the Policy Review contract only under the P6-capable family policy, read from the stored requests
+        policies = {p4.policy_of_envelope(envelope) for envelope in envelopes}
+        if contracts != {policy.POLICY_CHANGE_CONTRACT} or policies != {policy.P6_POLICY_ID} \
+                or first.target_identity != policy.TARGET_IDENTITY or first.review_kind != policy.REVIEW_KIND:
             problems.append(ReviewProblem("review_record_conflict",
-                                          f"{where} does not bind exactly the Policy Review contract, kind and target"))
+                                          f"{where} does not bind exactly the Policy Review contract, kind and target "
+                                          "under the P6-capable family policy"))
     return problems
 
 

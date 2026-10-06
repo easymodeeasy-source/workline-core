@@ -162,7 +162,7 @@ class CatalogueTests(unittest.TestCase):
     def test_every_review_p6_literal_in_the_implementation_is_declared(self) -> None:
         import re
 
-        declared = set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS)
+        declared = set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS) | set(policy.VALIDATION_CODES)
         found: set[str] = set()
         for path in Path(policy.__file__).resolve().parents[1].rglob("*.py"):
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):

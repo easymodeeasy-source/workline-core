@@ -138,6 +138,9 @@ CODE_ENVIRONMENT_UNATTRIBUTED = "review_p6_environment_unattributed"
 CODE_HUMAN_WAIT = "review_p6_human_wait"
 CODE_NOT_AUTHORIZED = "review_p6_not_authorized"
 CODE_POLICY_REVIEW_INVALID = "review_p6_policy_review_invalid"
+#: RB6B-M5: a stored P6-capable request whose frozen Effective Policy does not read under this build. A validation /
+#: refusal code (ValidationError), never a reclassification of the request as another family's or as v1.
+CODE_EFFECTIVE_POLICY_UNREADABLE = "review_p6_effective_policy_unreadable"
 STOP_CODES = (
     CODE_SURFACE_UNKNOWN,
     CODE_SURFACE_NON_ADAPTIVE,
@@ -168,6 +171,9 @@ STOP_CODES = (
     CODE_NOT_AUTHORIZED,
     CODE_POLICY_REVIEW_INVALID,
 )
+
+#: The P6 validation / refusal codes raised as ValidationError, never as a STOP (RB6B-M5).
+VALIDATION_CODES = (CODE_EFFECTIVE_POLICY_UNREADABLE,)
 
 REASON_PROFILE_BEFORE_MISMATCH = "review_p6_profile_before_mismatch"
 REASON_PERSISTED_MISMATCH = "review_p6_persisted_mismatch"
@@ -297,8 +303,12 @@ def surface_problem(policy_surface_id: object) -> tuple[str, str] | None:
     non-adaptive surface (§15.11) is refused with its own code. The registry is
     fixed: nothing learned adds to it, and a Profile never reclassifies it.
     """
+    if not isinstance(policy_surface_id, str):
+        # RB6B-L1: an unhashable or non-text identity is a coded refusal, never a TypeError
+        return CODE_SURFACE_UNKNOWN, (f"{policy_surface_id!r} is not a policy surface identity; an unknown surface is "
+                                      "not adaptable")
     if policy_surface_id in SURFACE_BY_ID:
-        surface = SURFACE_BY_ID[str(policy_surface_id)]
+        surface = SURFACE_BY_ID[policy_surface_id]
         if surface.strength_class == CLASS_MANDATORY:
             return CODE_SURFACE_NON_ADAPTIVE, f"{policy_surface_id} is mandatory and cannot be adapted"
         return None
@@ -765,16 +775,20 @@ def profile_problems(record: object, described: str) -> list[tuple[str, str]]:
     if type(record["global_baseline_version"]) is not int or record["global_baseline_version"] < 1:
         found.append((CODE_PROFILE_INVALID, f"{described} global_baseline_version is not a positive Global policy "
                                             "version"))
-    if record["loader_semantics_identity"] != LOADER_SEMANTICS_IDENTITY:
-        found.append((CODE_PROFILE_INCOMPATIBLE, f"{described} binds loader semantics "
-                                                 f"{record['loader_semantics_identity']!r}, not {LOADER_SEMANTICS_IDENTITY}"))
+    # RB6B-L9: structure only. WHICH loader semantics the Profile binds is the compatibility decision's
+    # (:func:`compatibility_problem`): a well-formed Profile of another loader reads as incompatible, never malformed.
+    loader = record["loader_semantics_identity"]
+    if not isinstance(loader, str) or records.public_safe_problem(loader, limit=records.P4_MAX_LABEL) is not None:
+        found.append((CODE_PROFILE_INVALID, f"{described} loader_semantics_identity is not a bounded label"))
     overrides = record["overrides"]
     if not isinstance(overrides, list):
         found.append((CODE_PROFILE_INVALID, f"{described} overrides is not a list"))
         overrides = []
     for index, item in enumerate(overrides):
         found.extend(_override_problems(item, f"{described} override {index}"))
-    surfaces = [item.get("policy_surface_id") for item in overrides if isinstance(item, dict)]
+    # RB6B-L1: only text identities are compared; a non-text one is already refused above, coded
+    surfaces = [item["policy_surface_id"] for item in overrides
+                if isinstance(item, dict) and isinstance(item.get("policy_surface_id"), str)]
     if len(surfaces) != len(set(surfaces)):
         found.append((CODE_PROFILE_INVALID, f"{described} holds two overrides of one surface"))
     elif all(isinstance(value, str) for value in surfaces) and surfaces != sorted(surfaces):
@@ -795,8 +809,12 @@ def parse_profile_bytes(raw: bytes, described: str) -> tuple[ProjectProfile, str
     except ValidationError as exc:
         raise ValidationError(f"{described} is not canonical: {exc}", code=CODE_PROFILE_INVALID) from exc
     profile = ProjectProfile.from_record(data, described)
-    if serialize.canonical_data(profile.to_record()) != serialize.canonical_data(data):
-        raise ValidationError(f"{described} does not round-trip through its schema unchanged", code=CODE_PROFILE_INVALID)
+    # RB6B-L2: byte-exact canonical form. ``true`` for an integer round-trips as Python data (True == 1) and not as
+    # bytes; with this check one Profile has one digest - the digest of its exact bytes is its record's digest.
+    if raw != profile.text().encode("utf-8") \
+            or serialize.canonical_data(profile.to_record()) != serialize.canonical_data(data):
+        raise ValidationError(f"{described} is not exactly the canonical bytes of its schema record",
+                              code=CODE_PROFILE_INVALID)
     return profile, text
 
 
@@ -1077,12 +1095,24 @@ class PolicyState:
 
 
 def ended_experiments(reader: Any) -> set[str]:
-    """Policy change ids a terminal evaluation (``end_observation``) has settled (§30.24)."""
+    """Policy change ids a terminal evaluation (``end_observation``) has settled (§30.24).
+
+    RB6B-H1: only a terminal evaluation that :func:`retain_problem` accepts
+    settles a ref - one of a temporary_guard never does, and neither does one
+    whose evidence does not prove the frozen minimum of opportunities observed
+    under the change. Such a record is a validation Problem
+    (:func:`policy_problems`) and never ends a holdout channel.
+    """
     ended: set[str] = set()
     for evaluation_id in reader.policy_evaluation_ids():
         found = reader.read_policy_evaluation(evaluation_id)
-        if found["next_action"] == NEXT_END_OBSERVATION:
-            ended.add(str(found["policy_change_id"]))
+        if found["next_action"] != NEXT_END_OBSERVATION:
+            continue
+        change_id = str(found["policy_change_id"])
+        if not reader.policy_change_exists(change_id):
+            continue
+        if retain_problem(reader, reader.read_policy_change(change_id), found["evidence"]) is None:
+            ended.add(change_id)
     return ended
 
 
@@ -1118,6 +1148,7 @@ def resolve_policy_state(reader: Any, workline_root: Path, *, require_compatible
     except ValidationError as exc:
         raise stop(CODE_PROFILE_INVALID, f"the canonical Project Profile does not read: {exc}; no new Review Run is "
                                          "started under it (policy maintenance / reconcile)") from exc
+    require_lineage(reader, profile)
     if profile is not None and require_compatible:
         problem = compatibility_problem(profile, baseline, reader)
         if problem is not None:
@@ -1125,6 +1156,30 @@ def resolve_policy_state(reader: Any, workline_root: Path, *, require_compatible
                                                   "(policy maintenance / reconcile)")
     active = active_experiments(reader, profile)
     return PolicyState(baseline, profile, active, effective_policy_record(baseline, profile, active))
+
+
+def require_lineage(reader: Any, profile: ProjectProfile | None) -> None:
+    """RB6B-M3: the Profile a new Run would freeze is one the Policy Change operation produced - or a STOP.
+
+    Its lineage is proven from the immutable change records exactly as
+    validation proves it (:func:`lineage_problems`): version 1 from absence,
+    then +1 with the exact parent, each version produced by a stored change,
+    and every override and experiment ref backed by one. A Profile no change
+    produced (a direct edit outside ``project-policy-change``) never becomes
+    an Effective Policy. Absence with no change record stays valid.
+    """
+    changes: dict[str, Mapping[str, Any]] = {}
+    try:
+        for change_id in reader.policy_change_ids():
+            changes[change_id] = reader.read_policy_change(change_id)
+    except ValidationError as exc:
+        raise stop(CODE_LINEAGE_INVALID, f"the policy change records do not read ({exc}); no new Review Run is started "
+                                         "(policy maintenance / reconcile)") from exc
+    problems = lineage_problems(profile, changes)
+    if problems:
+        raise stop(CODE_LINEAGE_INVALID, f"the Project Profile's lineage is not proven: {problems[0][1]}; a Profile no "
+                                         "Policy Change produced never becomes an Effective Policy, and no new Review "
+                                         "Run is started (policy maintenance / reconcile)")
 
 
 def new_run_effective_policy(reader: Any, workline_root: Path, policy_id: str, discovery: Sequence[Any],
@@ -1163,7 +1218,10 @@ def current_effective_policy_hash(reader: Any, workline_root: Path) -> str:
 # --------------------------------------------------------------------------- P5 evidence references (§30.31)
 
 POLICY_EVIDENCE_EVALUATIONS = "policy-evaluations"
-EVIDENCE_FAMILIES = paths.HISTORY_FAMILIES + (POLICY_EVIDENCE_EVALUATIONS,)
+#: RB6B-L11: enumerated, never derived from ``paths.HISTORY_FAMILIES`` - a later history family (RB5's
+#: achievements) is not P6 evidence until a reviewed contract admits it.
+EVIDENCE_FAMILIES = (paths.HISTORY_RUNS, paths.HISTORY_FINDINGS, paths.HISTORY_REPAIRS, paths.HISTORY_RELATIONS,
+                     paths.HISTORY_HUMAN_DECISIONS, POLICY_EVIDENCE_EVALUATIONS)
 EVIDENCE_FIELDS = ("family", "id", "digest")
 
 
@@ -1196,6 +1254,12 @@ def opportunity(reader: Any, ref: Mapping[str, Any], policy_surface_id: str) -> 
     The denominator is Relevant Opportunity, never raw Review count: two refs
     of one Review Run are one opportunity; a surface the referenced Run never
     exercised is no opportunity; only a ``supported`` relation counts.
+
+    Every identity is a Review Run ID (RB6B-M2). A relation is causal evidence
+    ABOUT its target, so it is the opportunity of the Run its target belongs
+    to (the Run itself, a Finding's Run, a Repair Batch's source Run): naming
+    a record together with its own relation is one opportunity, never two. A
+    target whose Run cannot be resolved from stored history is none.
     """
     family, identifier = str(ref["family"]), str(ref["id"])
     if family == POLICY_EVIDENCE_EVALUATIONS:
@@ -1215,9 +1279,114 @@ def opportunity(reader: Any, ref: Mapping[str, Any], policy_surface_id: str) -> 
             return None
         if repair_surface and found.relation_type != history.RELATION_REPAIR_INDUCED:
             return None
-        return f"relation:{found.relation_id}"
+        return _endpoint_run(reader, found.target)
     if family == paths.HISTORY_HUMAN_DECISIONS:
         return None if repair_surface else found.affected_review_run_id
+    return None
+
+
+def _endpoint_run(reader: Any, endpoint: Any) -> str | None:
+    """The Review Run a relation endpoint belongs to, read from stored history; ``None`` when it cannot be proven."""
+    try:
+        if endpoint.kind == history.ENDPOINT_RUN:
+            return str(endpoint.id)
+        if endpoint.kind == history.ENDPOINT_FINDING:
+            return str(reader.read_history(paths.HISTORY_FINDINGS, str(endpoint.id)).review_run_id)
+        if endpoint.kind == history.ENDPOINT_REPAIR:
+            return str(reader.read_history(paths.HISTORY_REPAIRS, str(endpoint.id)).source_review_run_id)
+    except (ValidationError, KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
+#: The relation types that are escapes: what a temporary_guard may originate from (RB6B-L3).
+ESCAPE_RELATIONS = (history.RELATION_DOWNSTREAM_ESCAPE, history.RELATION_REPAIR_INDUCED)
+SERIOUS_SEVERITIES = ("HIGH", "MID")
+
+
+def serious_escape(reader: Any, ref: Mapping[str, Any]) -> bool:
+    """Whether ``ref`` is one serious supported escape (§15.15, §30.9; RB6B-L3).
+
+    A ``supported`` downstream_escape / repair_induced relation, or a stored
+    (hence supported) HIGH / MID Problem Finding. Anything unreadable is not.
+    """
+    family = str(ref["family"])
+    try:
+        if family == paths.HISTORY_RELATIONS:
+            found = reader.read_history(family, str(ref["id"]))
+            return bool(found.confirmed) and found.relation_type in ESCAPE_RELATIONS
+        if family == paths.HISTORY_FINDINGS:
+            found = reader.read_history(family, str(ref["id"]))
+            return found.category == records.OUTCOME_PROBLEM and found.severity in SERIOUS_SEVERITIES
+    except (ValidationError, KeyError, TypeError, AttributeError):
+        return False
+    return False
+
+
+def frozen_effective_policy(reader: Any, review_run_id: str) -> dict[str, Any] | None:
+    """The Effective Policy Review Run ``review_run_id`` froze in its own generation-1 request, or ``None``."""
+    from . import p4
+
+    try:
+        chain = reader.gate_chain(review_run_id)
+        return None if chain is None else p4.run_effective_policy(reader, chain)
+    except (ValidationError, KeyError, TypeError, AttributeError, IndexError):
+        return None
+
+
+def observed_opportunities(reader: Any, change: Mapping[str, Any], evidence: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The distinct Relevant Opportunities ``evidence`` proves were OBSERVED UNDER ``change`` (RB6B-H1).
+
+    One per Review Run. A ref counts only when it is a Relevant Opportunity of
+    the change's surface (that Run exercised the surface; :func:`opportunity`)
+    AND that Run froze an Effective Policy listing the change as an active
+    experiment - so it is post-change, observed under the change's frozen
+    contract and, for a lightening, ran with the holdout the change froze (a
+    Run is refused without it). Chronology is never the proof (§15.26).
+    """
+    surface_id = str(change["affected_policy_surface"])
+    change_id = str(change["policy_change_id"])
+    plan = change["holdout_plan"]
+    found: set[str] = set()
+    for ref in evidence:
+        if ref["family"] == POLICY_EVIDENCE_EVALUATIONS:
+            continue
+        try:
+            identity = opportunity(reader, ref, surface_id)
+        except (ValidationError, KeyError, TypeError, AttributeError):
+            continue
+        if identity is None or identity in found:
+            continue
+        frozen = frozen_effective_policy(reader, identity)
+        if frozen is None:
+            continue
+        if any(item["origin"] == ORIGIN_PROJECT and item["policy_change_id"] == change_id
+               and (plan is None or item["holdout_setting"] == plan["holdout_setting"])
+               for item in frozen["active_experiments"]):
+            found.add(identity)
+    return found
+
+
+def retain_problem(reader: Any, change: Mapping[str, Any], evidence: Iterable[Mapping[str, Any]]) -> str | None:
+    """Why a ``retain`` / ``end_observation`` of ``change`` is not allowed, or ``None`` (RB6B-H1, §15.15, §15.17).
+
+    A temporary_guard never becomes permanent by an evaluation: a reviewed
+    strengthen Candidate that meets the single-event floor and supersedes it
+    does, or a rollback ends it. Any other experiment ends only after its
+    frozen ``minimum_opportunities`` distinct relevant opportunities were
+    observed under it (:func:`observed_opportunities`).
+    """
+    if change["direction"] == DIRECTION_TEMPORARY_GUARD:
+        return (f"{change['policy_change_id']} is a temporary_guard, which never becomes permanent through an "
+                "evaluation; a reviewed strengthen Candidate that meets the single-event floor and supersedes it does, "
+                "or a rollback ends it")
+    minimum = int(change["observation_window"]["minimum_opportunities"])
+    observed = observed_opportunities(reader, change, evidence)
+    if len(observed) < minimum:
+        holdout = ", with its holdout in force," if change["holdout_plan"] is not None else ""
+        return (f"retain ends the observation of {change['policy_change_id']}, and its frozen measurement contract needs "
+                f"at least {minimum} distinct relevant opportunities observed under the change{holdout} that exercised "
+                f"{change['affected_policy_surface']}; the evidence proves {len(observed)}")
     return None
 
 
@@ -1356,8 +1525,30 @@ def request_record(request: object) -> dict[str, Any]:
 
 
 def request_problems(record: Mapping[str, Any]) -> list[tuple[str, str]]:
-    """The structural refusals of a request record, before any Project state is read."""
+    """The structural refusals of a request record, before any Project state is read - coded, never a crash."""
+    try:
+        return _request_problems(record)
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        return [(CODE_CANDIDATE_INVALID, f"the policy change request is malformed ({type(exc).__name__}: {exc})")]
+
+
+def _request_problems(record: Mapping[str, Any]) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
+    if not isinstance(record, Mapping) or set(record) != set(REQUEST_FIELDS):
+        return [(CODE_CANDIDATE_INVALID, "the request does not hold exactly the policy change request fields")]
+    for name, fields in (("measurement_contract", MEASUREMENT_FIELDS), ("observation_window", WINDOW_FIELDS),
+                         ("environment", ENVIRONMENT_INPUT_FIELDS)):
+        if not isinstance(record[name], Mapping) or set(record[name]) != set(fields):
+            return [(CODE_CANDIDATE_INVALID, f"the request's {name} does not hold exactly {', '.join(fields)}")]
+    for name in ("evidence", "opportunities", "supersedes"):
+        if not isinstance(record[name], list):
+            return [(CODE_CANDIDATE_INVALID, f"the request's {name} is not a list")]
+    for name in ("evidence", "opportunities"):
+        if any(not isinstance(item, Mapping) or set(item) != set(EVIDENCE_FIELDS) for item in record[name]):
+            return [(CODE_EVIDENCE_INVALID, f"a {name} reference is not exactly {{family, id, digest}}")]
+    for name in ("reviewers", "check_adapters", "dependencies"):
+        if not isinstance(record["environment"][name], list):
+            return [(CODE_CANDIDATE_INVALID, f"the request's environment {name} is not a list")]
     surface = surface_problem(record["policy_surface_id"])
     if surface is not None:
         return [surface]
@@ -1550,6 +1741,80 @@ def classify_overlap(policy_surface_id: str, active: Iterable[ActiveExperiment])
     return OVERLAP_KNOWN if any(item.policy_surface_id == policy_surface_id for item in active) else OVERLAP_PROVEN_DISJOINT
 
 
+#: The bound environment identities a Candidate adds to the caller's environment (§15.26, §30.25).
+ENVIRONMENT_BOUND_FIELDS = ("global_baseline_digest", "profile_version", "profile_digest", "measurement_contract_version")
+#: The exact field set of every mapping a Candidate carries (RB6B-M8).
+_CANDIDATE_MAPPINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("before_profile", ("profile_version", "digest")),
+    ("relevant_opportunity", ("definition", "opportunities")),
+    ("measurement_contract", MEASUREMENT_FIELDS),
+    ("observation_window", WINDOW_FIELDS),
+    ("environment_identity", ENVIRONMENT_BOUND_FIELDS + ENVIRONMENT_INPUT_FIELDS),
+    ("overlap", ("classification", "active_experiment_refs", "overlapping_refs")),
+    ("rollback_unit", ("policy_surface_id", "restore_setting", "profile_version")),
+)
+HOLDOUT_PLAN_FIELDS = ("policy_surface_id", "holdout_setting", "selection")
+
+
+def request_of_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """The Policy Change request a Candidate states, re-derived from the Candidate's own fields (RB6B-M8)."""
+    environment = candidate["environment_identity"]
+    return serialize.canonical_data({
+        serialize.SCHEMA_KEY: SCHEMA_REQUEST, serialize.VERSION_KEY: RECORD_VERSION,
+        "policy_surface_id": candidate["affected_policy_surface"], "direction": candidate["direction"],
+        "after_setting": candidate["after_setting"],
+        "evidence": [dict(item) for item in candidate["evidence"]],
+        "opportunity_definition": candidate["relevant_opportunity"]["definition"],
+        "opportunities": [dict(item) for item in candidate["relevant_opportunity"]["opportunities"]],
+        "expected_effect": candidate["expected_effect"], "validation_plan": candidate["validation_plan"],
+        "measurement_contract": dict(candidate["measurement_contract"]),
+        "observation_window": dict(candidate["observation_window"]),
+        "success_criteria": candidate["success_criteria"], "rollback_threshold": candidate["rollback_threshold"],
+        "environment": {key: environment[key] for key in ENVIRONMENT_INPUT_FIELDS},
+        "overlap_classification": candidate["overlap"]["classification"],
+        "supersedes": list(candidate["supersedes"]), "rolls_back": candidate["rolls_back"],
+        "reevaluation": candidate["reevaluation"],
+    })
+
+
+def _candidate_shape_problems(candidate: object) -> list[tuple[str, str]]:
+    """Every structural defect of a Candidate, coded - so no later rule ever indexes a malformed field (RB6B-M8)."""
+    if not isinstance(candidate, Mapping) or set(candidate) != set(CANDIDATE_FIELDS) \
+            or candidate.get(serialize.SCHEMA_KEY) != SCHEMA_CANDIDATE \
+            or candidate.get(serialize.VERSION_KEY) != RECORD_VERSION:
+        return [(CODE_CANDIDATE_INVALID, "the Candidate does not hold exactly the PolicyChangeCandidate fields")]
+    found: list[tuple[str, str]] = []
+    for name, fields in _CANDIDATE_MAPPINGS:
+        value = candidate[name]
+        if not isinstance(value, Mapping) or set(value) != set(fields):
+            found.append((CODE_CANDIDATE_INVALID, f"the Candidate's {name} does not hold exactly {', '.join(fields)}"))
+    if not isinstance(candidate["after_profile"], Mapping):
+        found.append((CODE_FORBIDDEN_CHANGE, "the Candidate's after Profile is not a Profile record"))
+    plan = candidate["holdout_plan"]
+    if plan is not None and (not isinstance(plan, Mapping) or set(plan) != set(HOLDOUT_PLAN_FIELDS)):
+        found.append((CODE_LIGHTENING_UNMEASURED, "the Candidate's holdout plan is not exactly "
+                                                  f"{', '.join(HOLDOUT_PLAN_FIELDS)}"))
+    for name in ("evidence", "supersedes"):
+        if not isinstance(candidate[name], list):
+            found.append((CODE_CANDIDATE_INVALID, f"the Candidate's {name} is not a list"))
+    if found:
+        return found
+    if not isinstance(candidate["relevant_opportunity"]["opportunities"], list):
+        found.append((CODE_CANDIDATE_INVALID, "the Candidate's Relevant Opportunity set is not a list"))
+    for name in ("active_experiment_refs", "overlapping_refs"):
+        if not isinstance(candidate["overlap"][name], list):
+            found.append((CODE_CANDIDATE_INVALID, f"the Candidate's overlap {name} is not a list"))
+    for name in ("reviewers", "check_adapters", "dependencies"):
+        if not isinstance(candidate["environment_identity"][name], list):
+            found.append((CODE_CANDIDATE_INVALID, f"the Candidate's environment {name} is not a list"))
+    if found:
+        return found
+    for item in list(candidate["evidence"]) + list(candidate["relevant_opportunity"]["opportunities"]):
+        if not isinstance(item, Mapping) or set(item) != set(EVIDENCE_FIELDS):
+            return [(CODE_EVIDENCE_INVALID, "an evidence reference of the Candidate is not exactly {family, id, digest}")]
+    return []
+
+
 def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader: Any) -> list[tuple[str, str]]:
     """The fixed mechanical meta-verifier (§15.19, §30.14): every violation, whatever any reviewer said.
 
@@ -1561,19 +1826,63 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
     semantics, and that the persisted-projection adapter can read the after
     Profile. The candidate policy never weakens the rules authorizing it: every
     rule here is a fixed meta-rule, never a Profile setting.
+
+    Self-contained (RB6B-M8): it re-derives the request from the Candidate's
+    own fields, holds it to every structural and H-3 rule
+    (:func:`request_problems`) and to the Candidate's ``request_digest``, and
+    returns a coded problem for every malformed field - never an exception.
     """
+    found = _candidate_shape_problems(candidate)
+    if found:
+        return found
+    try:
+        return _candidate_problems(candidate, state, reader)
+    except (KeyError, TypeError, AttributeError, ValueError, IndexError) as exc:
+        return [(CODE_CANDIDATE_INVALID, f"the Candidate is malformed ({type(exc).__name__}: {exc})")]
+
+
+def _rollback_problems(candidate: Mapping[str, Any], state: PolicyState, reader: Any, surface: PolicySurface,
+                       before_setting: int, after_setting: int) -> list[tuple[str, str]]:
+    """A rollback restores exactly the change that governs the surface now (RB6B-L4)."""
+    target = candidate["rolls_back"]
+    governing = {item.policy_change_id: item for item in state.active}.get(str(target)) if isinstance(target, str) \
+        else None
+    if governing is None or governing.policy_surface_id != surface.policy_surface_id:
+        return [(CODE_DIRECTION_INVALID, f"the rollback names {target}, which is not an active experiment on "
+                                         f"{surface.policy_surface_id}; a rollback restores the change that governs "
+                                         "the surface, never an earlier or settled one")]
+    try:
+        restored = reader.read_policy_change(str(target))
+    except (ValidationError, KeyError, TypeError, AttributeError) as exc:
+        return [(CODE_DIRECTION_INVALID, f"the rollback target {target} does not read ({exc})")]
     found: list[tuple[str, str]] = []
-    if not isinstance(candidate, Mapping) or set(candidate) != set(CANDIDATE_FIELDS) \
-            or candidate.get(serialize.SCHEMA_KEY) != SCHEMA_CANDIDATE \
-            or candidate.get(serialize.VERSION_KEY) != RECORD_VERSION:
-        return [(CODE_CANDIDATE_INVALID, "the Candidate does not hold exactly the PolicyChangeCandidate fields")]
-    if candidate["target_identity"] != TARGET_IDENTITY or not is_valid_id(str(candidate["policy_change_id"]),
-                                                                         "review_policy_change"):
+    if restored["affected_policy_surface"] != surface.policy_surface_id or restored["before_setting"] != after_setting \
+            or restored["after_setting"] != before_setting:
+        found.append((CODE_DIRECTION_INVALID, f"the rollback does not restore exactly the setting {target} replaced on "
+                                              "the same surface"))
+    override = None if state.profile is None else state.profile.override_of(surface.policy_surface_id)
+    if override is not None and override["supporting_policy_change_id"] != target:
+        found.append((CODE_DIRECTION_INVALID, f"the current override of {surface.policy_surface_id} is supported by "
+                                              f"{override['supporting_policy_change_id']}, not {target}"))
+    return found
+
+
+def _candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader: Any) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    if candidate["target_identity"] != TARGET_IDENTITY or not isinstance(candidate["policy_change_id"], str) \
+            or not is_valid_id(candidate["policy_change_id"], "review_policy_change"):
         found.append((CODE_CANDIDATE_INVALID, "the Candidate is not a project-policy Candidate with a policy change id"))
     surface_issue = surface_problem(candidate["affected_policy_surface"])
     if surface_issue is not None:
         return found + [surface_issue]
-    surface = SURFACE_BY_ID[str(candidate["affected_policy_surface"])]
+    surface = SURFACE_BY_ID[candidate["affected_policy_surface"]]
+    # RB6B-M8: the request the Candidate states, held to every request rule and to the digest it binds - so a
+    # Receipt never seals a Candidate its change record would refuse
+    stated = request_of_candidate(candidate)
+    found.extend(request_problems(stated))
+    if request_digest(stated) != candidate["request_digest"]:
+        found.append((CODE_CANDIDATE_INVALID, "the Candidate's request_digest is not the digest of the request its own "
+                                              "fields state"))
     if candidate["strength_class"] != surface.strength_class:
         found.append((CODE_RECLASSIFIED, f"the Candidate classifies {surface.policy_surface_id} as "
                                          f"{candidate['strength_class']!r}; the fixed class is {surface.strength_class}"))
@@ -1592,10 +1901,19 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
         found.append((CODE_SETTING_INVALID, f"after setting {after_setting!r} is outside {surface.minimum}.."
                                             f"{surface.maximum}"))
         return found
-    if after_setting == before_setting:
-        found.append((CODE_DIRECTION_INVALID, "the Candidate changes no setting"))
     direction = candidate["direction"]
-    if direction in (DIRECTION_STRENGTHEN, DIRECTION_TEMPORARY_GUARD) and not after_setting > before_setting:
+    active_by_id = {item.policy_change_id: item for item in state.active}
+    supersedes = [str(ref) for ref in candidate["supersedes"]]
+    # RB6B-H1: the one Candidate that keeps the setting is a strengthen superseding an active temporary_guard at that
+    # setting - the normal repeated-evidence path that makes a guard permanent (§15.15)
+    confirms_guard = direction == DIRECTION_STRENGTHEN and after_setting == before_setting and any(
+        ref in active_by_id and active_by_id[ref].direction == DIRECTION_TEMPORARY_GUARD
+        and active_by_id[ref].policy_surface_id == surface.policy_surface_id for ref in supersedes)
+    if after_setting == before_setting and not confirms_guard:
+        found.append((CODE_DIRECTION_INVALID, "the Candidate changes no setting; only a strengthen superseding an active "
+                                              "temporary_guard at its setting keeps it"))
+    if direction in (DIRECTION_STRENGTHEN, DIRECTION_TEMPORARY_GUARD) and not after_setting > before_setting \
+            and not confirms_guard:
         found.append((CODE_DIRECTION_INVALID if direction == DIRECTION_STRENGTHEN else CODE_GUARD_INVALID,
                       f"a {direction} moves the setting upward in the strength order"))
     if direction == DIRECTION_LIGHTEN and not after_setting < before_setting:
@@ -1603,15 +1921,7 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
     if direction == DIRECTION_TEMPORARY_GUARD and candidate["reevaluation"] is None:
         found.append((CODE_GUARD_INVALID, "a temporary_guard carries explicit reevaluation / expiry criteria"))
     if direction == DIRECTION_ROLLBACK:
-        target = candidate["rolls_back"]
-        if target is None or not reader.policy_change_exists(str(target)):
-            found.append((CODE_DIRECTION_INVALID, f"the rollback names {target}, which is no applied policy change"))
-        else:
-            restored = reader.read_policy_change(str(target))
-            if restored["affected_policy_surface"] != surface.policy_surface_id \
-                    or restored["before_setting"] != after_setting:
-                found.append((CODE_DIRECTION_INVALID, f"the rollback does not restore the setting {target} replaced on "
-                                                      "the same surface"))
+        found.extend(_rollback_problems(candidate, state, reader, surface, before_setting, after_setting))
     # lightening: the stronger pre-change behaviour stays an independent all_relevant holdout (§30.10)
     expected_holdout = None if after_setting >= before_setting else {
         "policy_surface_id": surface.policy_surface_id, "holdout_setting": before_setting,
@@ -1622,7 +1932,7 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
                       "upward one carries none; the change never weakens the channel that measures it"))
     # evidence provenance and the Relevant Opportunity basis (§30.9, §30.31)
     evidence = list(candidate["evidence"])
-    keys = [(item.get("family"), item.get("id")) for item in evidence if isinstance(item, dict)]
+    keys = [(item.get("family"), item.get("id")) for item in evidence]
     if len(keys) != len(set(keys)):
         found.append((CODE_DUPLICATE_EVIDENCE, "the Candidate names one evidence source twice"))
     for index, item in enumerate(evidence):
@@ -1632,6 +1942,7 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
         found.append((CODE_SINGLE_EVENT, "the Candidate names no evidence; raw run count is never evidence"))
     opportunities = list(candidate["relevant_opportunity"]["opportunities"])
     identities: set[str] = set()
+    serious = False
     for item in evidence:
         if evidence_ref_problems(item, "evidence"):
             continue
@@ -1646,9 +1957,13 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
                                                  f"{item['digest']}"))
             continue
         if item in opportunities:
-            identity = opportunity(reader, item, surface.policy_surface_id)
+            try:
+                identity = opportunity(reader, item, surface.policy_surface_id)
+            except (ValidationError, KeyError, TypeError, AttributeError):
+                identity = None
             if identity is not None:
                 identities.add(identity)
+                serious = serious or serious_escape(reader, item)
     if any(item not in evidence for item in opportunities):
         found.append((CODE_EVIDENCE_INVALID, "a Relevant Opportunity is not among the evidence"))
     floor = {DIRECTION_STRENGTHEN: SINGLE_EVENT_FLOOR, DIRECTION_LIGHTEN: SINGLE_EVENT_FLOOR,
@@ -1658,12 +1973,33 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
                       f"a {direction} needs at least {floor} distinct relevant opportunities that exercised "
                       f"{surface.policy_surface_id}, and the evidence proves {len(identities)}; one event never makes a "
                       "permanent adaptation"))
+    # RB6B-L3: a temporary_guard originates from one SERIOUS SUPPORTED ESCAPE, not from any one opportunity
+    if direction == DIRECTION_TEMPORARY_GUARD and not serious:
+        found.append((CODE_GUARD_INVALID, "a temporary_guard originates from one serious supported escape: a supported "
+                                          "downstream_escape / repair_induced relation or a supported HIGH / MID "
+                                          "Problem Finding among its Relevant Opportunities"))
     # the normalized before / after semantics: nothing but the affected override and the experiment refs changes
-    removed = set(candidate["supersedes"]) | ({str(candidate["rolls_back"])} if candidate["rolls_back"] else set())
-    active_ids = {item.policy_change_id for item in state.active}
-    unknown = sorted(set(candidate["supersedes"]) - active_ids)
+    rolls_back = candidate["rolls_back"]
+    removed = set(supersedes) | ({str(rolls_back)} if rolls_back else set())
+    unknown = sorted(set(supersedes) - set(active_by_id))
     if unknown:
         found.append((CODE_OVERLAP_UNRESOLVED, f"the Candidate supersedes {unknown}, which are not active experiments"))
+    # RB6B-M1: supersede resolves an overlap on the Candidate's OWN surface; another surface's experiment is disjoint
+    # and is never ended by this Candidate (that would drop its measuring channel)
+    foreign = sorted(ref for ref in supersedes
+                     if ref in active_by_id and active_by_id[ref].policy_surface_id != surface.policy_surface_id)
+    if foreign:
+        found.append((CODE_OVERLAP_UNRESOLVED, f"the Candidate supersedes {foreign}, experiments on another surface; "
+                                               "only an overlapping experiment on its own surface is superseded"))
+    # a lightening experiment this Candidate ends keeps its measuring channel unless the Candidate restores at least
+    # the behaviour that channel measures; otherwise the lightening must be settled first (serialize)
+    for ref in sorted(removed):
+        ended = active_by_id.get(ref)
+        if ended is not None and ended.holdout_setting is not None and after_setting < ended.holdout_setting:
+            found.append((CODE_LIGHTENING_UNMEASURED,
+                          f"the Candidate ends lightening experiment {ref} and keeps the setting below its holdout "
+                          f"setting {ended.holdout_setting}; a lightened behaviour never stays without the channel "
+                          "that measures it - settle that experiment first"))
     keep = [item.policy_change_id for item in state.active if item.policy_change_id not in removed]
     expected = expected_after_profile(state, str(candidate["policy_change_id"]), surface, int(after_setting), keep)
     if candidate["after_profile"] != expected.to_record():
@@ -1685,14 +2021,14 @@ def candidate_problems(candidate: Mapping[str, Any], state: PolicyState, reader:
         found.append((CODE_OVERLAP_UNRESOLVED, f"{declared}: an overlapping experiment must serialize, be explicitly "
                                                "superseded or be combined into one compound Candidate; it never "
                                                "observes concurrently"))
-    if candidate["overlap"] != {"classification": declared, "active_experiment_refs": sorted(active_ids),
+    if candidate["overlap"] != {"classification": declared, "active_experiment_refs": sorted(active_by_id),
                                 "overlapping_refs": sorted(item.policy_change_id for item in remaining
                                                            if item.policy_surface_id == surface.policy_surface_id)}:
         found.append((CODE_OVERLAP_UNRESOLVED, "the Candidate's overlap record is not the fixed classifier's view"))
     # environment attribution and the exact rollback unit
     environment = candidate["environment_identity"]
-    if (environment.get("global_baseline_digest"), environment.get("profile_version"), environment.get("profile_digest"),
-            environment.get("measurement_contract_version")) != (
+    if (environment["global_baseline_digest"], environment["profile_version"], environment["profile_digest"],
+            environment["measurement_contract_version"]) != (
             state.baseline.digest, state.profile_version, state.profile_digest,
             candidate["measurement_contract"]["version"]):
         found.append((CODE_ENVIRONMENT_UNATTRIBUTED, "the Candidate's environment identity does not bind the current "
@@ -1932,6 +2268,19 @@ def evaluation_record(request: Mapping[str, Any], evaluation_id: str, state: Pol
             raise stop(CODE_EVIDENCE_INVALID, f"evidence {item['family']}/{item['id']} is not stored ({exc})") from exc
         if stored != item["digest"]:
             raise stop(CODE_EVIDENCE_INVALID, f"evidence {item['family']}/{item['id']} digests to {stored}")
+    # RB6B-L10: the positive environment basis is one of this evaluation's stored evidence references, by digest
+    basis_digest = request["environment_basis_digest"]
+    if basis_digest is not None and basis_digest not in {item["digest"] for item in request["evidence"]}:
+        raise stop(CODE_ENVIRONMENT_UNATTRIBUTED,
+                   "the environment basis (window split / positive irrelevance proof) is one of the evaluation's stored "
+                   "evidence references, named by its digest; an arbitrary digest proves nothing")
+    # RB6B-H1: retain ends observation only after the frozen minimum of opportunities observed under the change; a
+    # temporary_guard never ends observation into permanence
+    if result == RESULT_RETAIN:
+        problem = retain_problem(reader, change, request["evidence"])
+        if problem is not None:
+            raise stop(CODE_GUARD_INVALID if change["direction"] == DIRECTION_TEMPORARY_GUARD else CODE_EVALUATION_INVALID,
+                       problem)
     record = serialize.canonical_data({
         serialize.SCHEMA_KEY: SCHEMA_EVALUATION, serialize.VERSION_KEY: RECORD_VERSION,
         "evaluation_id": evaluation_id, "policy_change_id": change_id,
@@ -1975,6 +2324,9 @@ def parse_evaluation(record: object, described: str) -> dict[str, Any]:
         problems = evidence_ref_problems(item, f"{described} evidence {index}")
         if problems:
             raise _invalid(problems[0])
+    if found["environment_basis_digest"] is not None \
+            and found["environment_basis_digest"] not in {item["digest"] for item in found["evidence"]}:
+        raise _invalid(f"{described} environment basis is not one of its evidence references")
     problem = history.summary_problem(found["rationale_summary"])
     if problem is not None:
         raise _invalid(f"{described} rationale is not public-safe text: {problem}")
@@ -2195,6 +2547,11 @@ def policy_problems(reader: Any, workline_root: Path | None) -> list[tuple[str, 
         if str(evaluation["policy_change_id"]) not in changes:
             found.append((CODE_EVALUATION_INVALID, f"evaluation {evaluation_id} evaluates "
                                                    f"{evaluation['policy_change_id']}, which is not stored"))
+        elif evaluation["next_action"] == NEXT_END_OBSERVATION:
+            problem = retain_problem(reader, changes[str(evaluation["policy_change_id"])], evaluation["evidence"])
+            if problem is not None:
+                found.append((CODE_EVALUATION_INVALID, f"evaluation {evaluation_id} ends an observation it may not end "
+                                                       f"(it settles nothing): {problem}"))
     try:
         profile = reader.read_profile()
     except ValidationError as exc:

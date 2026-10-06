@@ -126,6 +126,26 @@ HISTORY_POLICY_IDS = (P5_POLICY_ID, P6_POLICY_ID)
 #: with or without a Project Profile; it resolves and freezes its Effective Policy (GlobalPolicyBaseline + Profile
 #: or explicit absence). The P4-only and P5 identities stay exactly as they were, for the Runs that bind them.
 DEFAULT_POLICY_ID = P6_POLICY_ID
+#: RB6B-M4: the contracts bound to particular family policies, mechanically. The Policy Review contract exists only
+#: under the P6-capable policy - its Run is reviewed under the pre-change Effective Policy, which only a P6 Run
+#: freezes. A later contract restricted the same way adds its entry; a contract not named here keeps exactly the
+#: policies its owner binds today.
+CONTRACT_POLICIES: Mapping[str, tuple[str, ...]] = {records.P6_POLICY_CHANGE_CONTRACT: (P6_POLICY_ID,)}
+
+
+def contract_policy_problem(review_contract: object, policy_id: object) -> str | None:
+    """Why ``review_contract`` may not be bound under ``policy_id``, or ``None`` (RB6B-M4)."""
+    allowed = CONTRACT_POLICIES.get(review_contract) if isinstance(review_contract, str) else None
+    if allowed is not None and policy_id not in allowed:
+        return (f"{review_contract} Runs bind the {' / '.join(allowed)} family policy, never {policy_id!r}: a Policy "
+                "Review is reviewed under the pre-change Effective Policy only a P6-capable Run freezes")
+    return None
+
+
+def _require_contract_policy(review_contract: object, policy_id: object) -> None:
+    problem = contract_policy_problem(review_contract, policy_id)
+    if problem is not None:
+        raise ValidationError(problem, code="review_contract_invalid")
 
 TASK_KIND_DISCOVERY = "p4-discovery-v1"
 TASK_KIND_ADJUDICATION = "p4-adjudication-v1"
@@ -896,6 +916,7 @@ def discovery_request(
     """
     if review_contract not in CONTRACTS:
         raise ValidationError(f"not a P4 contract: {review_contract!r}", code="review_contract_invalid")
+    _require_contract_policy(review_contract, policy_id)
     if (candidate_generation == 1) != (succession is None):
         raise ValidationError("candidate generation 1 has no succession, and every later one has exactly one",
                               code="review_record_invalid")
@@ -958,6 +979,7 @@ def adjudication_request(
     deterministic complete validated prior-history reference set of the same
     review kind and target, by family, identity and digest (GAP-C).
     """
+    _require_contract_policy(review_contract, policy_id)
     references = sorted(
         ({"family": str(item["family"]), "id": str(item["id"]), "digest": str(item["digest"])} for item in prior_history),
         key=lambda item: (item["family"], item["id"]),
@@ -1008,6 +1030,7 @@ def repair_request(
 
     A P4-only request is byte for byte what it always was; a P5 one also binds the history contract.
     """
+    _require_contract_policy(review_contract, policy_id)
     record: dict[str, Any] = {
         serialize.SCHEMA_KEY: SCHEMA_REPAIR_REQUEST,
         serialize.VERSION_KEY: RECORD_VERSION,
@@ -1049,25 +1072,35 @@ def policy_of_envelope(envelope: object) -> str | None:
         return POLICY_ID
     if policy_value == P5_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT:
         return P5_POLICY_ID
-    if policy_value == P6_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT \
-            and effective_policy_of_envelope(envelope) is not None:
+    if policy_value == P6_POLICY_ID and envelope.get(history.HISTORY_CONTRACT_KEY) == history.HISTORY_CONTRACT:
+        # RB6B-M5: classified by its stored identity alone, as P5 is. Whether its frozen Effective Policy still reads
+        # is :func:`effective_policy_of_envelope`'s question, which fails closed - a P6 request whose record a later
+        # build cannot read is never silently read as another family's or as a v1 request.
         return P6_POLICY_ID
     return None
 
 
 def effective_policy_of_envelope(envelope: object) -> dict[str, Any] | None:
-    """The frozen Effective Policy a P6-capable request binds, strictly read; ``None`` when it binds none (or none
-    this build reads). A P6 discovery request also names its role; anything else names none."""
+    """The frozen Effective Policy a P6-capable request binds, strictly read; ``None`` when the request is not a
+    P6-capable one. A P6 discovery request also names its role; anything else names none.
+
+    RB6B-M5: a request that names the P6-capable policy and whose frozen record
+    does not read under this build (or whose role is wrong) is refused with
+    :data:`policy.CODE_EFFECTIVE_POLICY_UNREADABLE` - fail closed, never ``None``.
+    """
     if not isinstance(envelope, dict) or envelope.get("policy_id") != P6_POLICY_ID:
         return None
     try:
         found = policy.parse_effective_policy(envelope.get(policy.EFFECTIVE_POLICY_KEY), "a request's Effective Policy")
-    except ValidationError:
-        return None
+    except ValidationError as exc:
+        raise ValidationError(f"a P6-capable request's frozen Effective Policy does not read under this build ({exc}); "
+                              "it is never read as another family's request", code=policy.CODE_EFFECTIVE_POLICY_UNREADABLE
+                              ) from exc
     discovery = envelope.get(serialize.SCHEMA_KEY) == SCHEMA_DISCOVERY_REQUEST
     role = envelope.get(policy.DISCOVERY_ROLE_KEY)
     if (discovery and role not in policy.DISCOVERY_ROLES) or (not discovery and policy.DISCOVERY_ROLE_KEY in envelope):
-        return None
+        raise ValidationError("a P6-capable discovery request names its discovery role, and no other request names one",
+                              code=policy.CODE_EFFECTIVE_POLICY_UNREADABLE)
     return found
 
 
@@ -1090,7 +1123,10 @@ def envelope_policy_hash(envelope: object) -> str | None:
     if found is None:
         return None
     if found == P6_POLICY_ID:
-        return policy.effective_policy_hash(effective_policy_of_envelope(envelope) or {})
+        try:
+            return policy.effective_policy_hash(effective_policy_of_envelope(envelope) or {})
+        except ValidationError:
+            return None  # RB6B-M5: no hash is proven for an unreadable frozen record; every comparison fails closed
     return policy_hash(found)
 
 
@@ -1117,10 +1153,13 @@ def contract_of_envelope(envelope: object) -> str | None:
     never read as P4. Both policies of the P4-capable family (P4, P5) bind the
     same owner contract (GAP-A): which one a Run is is :func:`policy_of_envelope`'s.
     """
-    if policy_of_envelope(envelope) is None:
+    found = policy_of_envelope(envelope)
+    if found is None:
         return None
     contract = envelope.get("review_contract")  # type: ignore[union-attr]
-    return contract if contract in CONTRACTS else None
+    if contract not in CONTRACTS or contract_policy_problem(contract, found) is not None:
+        return None  # RB6B-M4: never a P4 request; validation names the binding (validate._policy_records)
+    return contract
 
 
 def policy_of_task_input(task_input: records.TaskInput) -> str | None:

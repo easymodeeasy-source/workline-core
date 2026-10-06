@@ -2289,6 +2289,14 @@ def _validate_profile_replacement(payload: dict[str, Any], previous: list[dict[s
         raise ValidationError("replace_review_profile replaces the Profile with different bytes; a no-op is not recorded")
     if any(effect_path(effect) == path for effect in previous):
         raise ValidationError(f"replace_review_profile path written twice in one mutation: {path}")
+    # RB6B-L6: what is recorded is a canonical Profile, byte-exact - pure, before anything is written
+    from .review import policy as review_policy
+
+    try:
+        review_policy.parse_profile_bytes(content.encode("utf-8"), "the replace_review_profile content")
+    except ValidationError as exc:
+        raise ValidationError(f"replace_review_profile content is not a canonical Project Profile: {exc}",
+                              code="review_policy_owner") from exc
     # Where no replace can be kept inside the Project, none is recorded either (the immutable create's capability).
     fsafe.require_immutable_create()
 
@@ -2636,6 +2644,17 @@ class MutationController:
             if review_paths.is_review_path(path):
                 raise ValidationError(
                     f"{path} is a canonical Review record and is written only by create_file, which never updates one"
+                )
+            # RB6B-L7: the P6 policy namespace in ANY ASCII letter case - a case-insensitive filesystem lands another
+            # spelling on the Profile. (The same pre-existing case gap for the other Review records is disclosed and
+            # left as it was: no other refusal is widened here.)
+            from .review.ownership import ascii_fold  # the frozen ASCII-only fold (P3 F3 §7.8.4)
+
+            if ascii_fold(path).startswith(review_paths.POLICY_DIR + "/"):
+                raise ValidationError(
+                    f"{path} is in the Project-local Review policy namespace, written only by the project-policy-change "
+                    "operation's create_file and replace_review_profile effects",
+                    code="review_policy_owner",
                 )
             if _in_recovery_namespace(path):
                 raise ValidationError(

@@ -1315,6 +1315,14 @@ def compare_and_replace(root: Path, parts: list[str], expected: bytes | None, da
 
     Returns :data:`CAS_REPLACED`, :data:`CAS_MATCHING` or :data:`CAS_MISMATCH`;
     nothing is written for the last two.
+
+    RB6B-L8: compare, then rename. The window between the no-follow read and
+    the rename is guarded by the Project operation lock every Workline writer
+    holds, not by this primitive: a subject writing the Profile outside that
+    lock inside the window is overwritten, never classified MISMATCH. Every
+    later reader still proves the bytes (the PersistedProjectionAdapter, the
+    lineage gate of a new Run and validation), so such a write never becomes
+    policy silently.
     """
     require_immutable_create()
     name = parts[-1]
