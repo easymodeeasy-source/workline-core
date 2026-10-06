@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
-from p5_helpers import p4_only_cycle
+from p5_helpers import p4_only_cycle, p5_only_cycle
 from workline.errors import StopError, ValidationError
 from workline.review import history, p4, paths, serialize
 from test_review_p4_adjudication import adjudicate, bound, disposition, report, returned
@@ -79,10 +79,13 @@ class PolicyFamilyTests(unittest.TestCase):
             p4.task_input(envelope=discovery(policy_id=p4.P5_POLICY_ID), **arguments)
 
     def test_a_new_first_run_binds_the_current_default_and_the_test_seam_is_the_only_way_back(self) -> None:
-        self.assertEqual(p4.P5_POLICY_ID, p4.new_run_policy())
+        # R6-1: the current default is the P6-capable family policy; the test-only seams are the only way back
+        self.assertEqual(p4.P6_POLICY_ID, p4.new_run_policy())
         with p4_only_cycle():
             self.assertEqual(p4.POLICY_ID, p4.new_run_policy())
-        self.assertEqual(p4.P5_POLICY_ID, p4.new_run_policy())
+        with p5_only_cycle():
+            self.assertEqual(p4.P5_POLICY_ID, p4.new_run_policy())
+        self.assertEqual(p4.P6_POLICY_ID, p4.new_run_policy())
 
 
 class RelationClaimTests(unittest.TestCase):

@@ -1737,7 +1737,8 @@ def _require_identities(store: ProjectStore, git: HermeticGit, material: ProofMa
         else work_context.context_hash(recomputed)
     if bound != first.review_context_hash:
         raise _proof_failed(item, "the Work Review Context no longer recomputes to the bound review_context_hash")
-    if (p4.policy_hash(policy) if p4_run else work_review.policy_hash()) != first.effective_policy_hash:
+    stored = p4.envelope_policy_hash(material.task_input.request_envelope) if p4_run else work_review.policy_hash()
+    if stored != first.effective_policy_hash:
         raise _proof_failed(item, "the Effective Policy is not the bound one")
     entries = work_review.entries_of(material.candidate)
     verified = work_verify.Verified(material.base["base_commit"], capability["resulting_tree"], len(entries))
@@ -3275,7 +3276,8 @@ def _recovery_currency(store: ProjectStore):
             else work_context.context_hash(recomputed)
         if bound != first.review_context_hash:
             return _Currency(False, True, "review_context_changed")
-        if (p4.policy_hash(policy) if p4_run else work_review.policy_hash()) != first.effective_policy_hash:
+        stored = p4.envelope_policy_hash(task_input.request_envelope) if p4_run else work_review.policy_hash()
+        if stored != first.effective_policy_hash:
             return _Currency(False, True, "review_policy_changed")
         return _Currency(True, False, "current")
 
@@ -3635,7 +3637,19 @@ def _p4_reserve(mutation: Mutation, run_id: str, work_id: str, bindings: list[p4
 
 
 def _p4_bindings(session: "_Session") -> list[p4.DiscoveryBinding]:
-    return sorted(session.review.discovery, key=lambda binding: binding.viewpoint)
+    """The discovery actors of the Run: the required slots, then (P6, §30.11) the holdout slots, each by viewpoint."""
+    return (sorted(session.review.discovery, key=lambda binding: binding.viewpoint)
+            + sorted(getattr(session.review, "holdout_discovery", ()), key=lambda binding: binding.viewpoint))
+
+
+def _p4_new_run_effective(session: "_Session", policy_id: str) -> dict[str, Any] | None:
+    """R6-1: the Effective Policy a NEW Work Review Run of family ``policy_id`` freezes (None for P4 / P5)."""
+    from .review import policy as review_policy
+
+    return review_policy.new_run_effective_policy(
+        ReviewStore(session.store), session.store.workline_root(), policy_id, session.review.discovery,
+        getattr(session.review, "holdout_discovery", ()),
+    )
 
 
 @dataclass(frozen=True)
@@ -3649,18 +3663,23 @@ class _P4Frozen:
     #: The Run's family policy (GAP-A) and, for P5, what its G1 writes besides its own records (§28.5, §28.14).
     policy: str = p4.POLICY_ID
     history: p4.HistoryWrites = field(default_factory=p4.HistoryWrites)
+    #: P6 (R6-1): the Effective Policy a P6-capable Run froze; None for a P4 / P5 Run.
+    effective: dict[str, Any] | None = None
 
 
 def _p4_freeze_material(
     session: "_Session", run: WorkRun, git: HermeticGit, candidate: dict[str, Any], snapshot: records.CandidateSnapshot,
     resulting: str, pre_base: str, *, generation: int, succession: dict[str, Any] | None,
     set_aside: list[dict[str, Any]], declared: bool, write_snapshot: bool, human_decision: p4.HumanDecision | None,
-    policy: str, history_writes: p4.HistoryWrites | None = None,
+    policy: str, history_writes: p4.HistoryWrites | None = None, effective: dict[str, Any] | None = None,
 ) -> _P4Frozen:
     """Context, isolated verification, discovery requests and Evidence of one P4 Run's Candidate (§27.8).
 
-    ``policy`` is the Run's explicit family policy (GAP-A); a P5 Run's requests also bind ``history_writes``.
+    ``policy`` is the Run's explicit family policy (GAP-A); a P5 Run's requests also bind ``history_writes``; a
+    P6 Run's (R6-1) also bind the Effective Policy it froze (``effective``) and each discovery task's role.
     """
+    from .review import policy as review_policy
+
     from .implementation import package_directory
 
     store = session.store
@@ -3680,13 +3699,18 @@ def _p4_freeze_material(
     task_ids = [str(session.mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot)))
                 for binding in _p4_bindings(session)]
     task_inputs = []
+    holdout = {binding.task_slot for binding in getattr(session.review, "holdout_discovery", ())}
     for task_id, binding in zip(task_ids, _p4_bindings(session)):
+        role = None
+        if effective is not None:
+            role = review_policy.ROLE_HOLDOUT if binding.task_slot in holdout else review_policy.ROLE_REQUIRED
         envelope = p4.discovery_request(
             review_contract=work_review.P4_CONTRACT, review_kind=work_review.REVIEW_KIND, viewpoint=binding.viewpoint,
             candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
             succession=succession, set_aside_runs=set_aside, human_decision=human_decision,
             evidence_ids=[f"work-isolated-verification:{verified.resulting_tree}"], policy_id=policy,
             set_aside_summaries=writes.summary_bindings(), decision_evidence=writes.decision_bindings(),
+            effective_policy=effective, discovery_role=role,
         )
         task_inputs.append(p4.task_input(
             task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
@@ -3696,8 +3720,8 @@ def _p4_freeze_material(
             policy_id=policy,
         ))
     evidence = _evidence(git, candidate, snapshot, task_inputs[0], inner, serialize.digest(context),
-                         p4.policy_hash(policy), activation, verified, declared=declared)
-    return _P4Frozen(candidate, snapshot, context, task_inputs, evidence, write_snapshot, policy, writes)
+                         p4.run_effective_policy_hash(policy, effective), activation, verified, declared=declared)
+    return _P4Frozen(candidate, snapshot, context, task_inputs, evidence, write_snapshot, policy, writes, effective)
 
 
 def freeze_and_review_p4(session: "_Session", view: ProjectView, work: Entity, outcome: Any) -> Sealed:
@@ -3709,6 +3733,10 @@ def freeze_and_review_p4(session: "_Session", view: ProjectView, work: Entity, o
     set_aside = [dict(item) for item in recovered.set_aside]
     # GAP-G: a first Run resumes no HUMAN_WAIT Run, so evidence here would be detached - refused before any effect
     p4.require_decision_evidence_cover(ReviewStore(store), set_aside, getattr(session.review, "decision_evidence", ()))
+    # R6-1, before the entry commit and any reservation: a NEW first Run is P6-capable; it resolves its Effective
+    # Policy (fail closed on an incompatible Profile) with its discovery actors held to required_slots / holdout
+    policy = p4.new_run_policy()
+    effective = _p4_new_run_effective(session, policy)
     result_paths = tuple(p.replace("\\", "/") for p in outcome.result_paths)
     deleted_paths = tuple(p.replace("\\", "/") for p in outcome.deleted_paths)
     git = hermetic_module.enter(store)
@@ -3739,15 +3767,15 @@ def freeze_and_review_p4(session: "_Session", view: ProjectView, work: Entity, o
     run = _p4_reserve(mutation, mutation.reserve_id(run_key(work.id), "review_run"), work.id, _p4_bindings(session))
     ownership.require_current(store, git, witnesses, pre_base)
     checkout.require_namespace_readable(store)
-    # GAP-A item 7: a first Run of a START with no Run yet binds the current P5-capable default
-    policy = p4.new_run_policy()
+    # GAP-A item 7 / R6-1: a first Run of a START with no Run yet binds the current default (P6-capable), resolved
+    # above before any effect
     writes = p4.HistoryWrites()
     if p4.history_contract_of_policy(policy) is not None:
         writes = p4.HistoryWrites(p4.set_aside_summaries(ReviewStore(store), set_aside))  # §28.5 set-aside summaries
     frozen = _p4_freeze_material(session, run, git, candidate, snapshot, resulting, pre_base, generation=1,
                                  succession=None, set_aside=set_aside, declared=bool(owned), write_snapshot=True,
                                  human_decision=getattr(session.review, "human_decision", None), policy=policy,
-                                 history_writes=writes)
+                                 history_writes=writes, effective=effective)
     _p4_accept(session, run, frozen)
     session._drop_refused_result(work.id)
     return _continue_p4(session, run)
@@ -3787,7 +3815,8 @@ def _p4_accept(session: "_Session", run: WorkRun, frozen: _P4Frozen) -> None:
         review_kind=work_review.REVIEW_KIND, target_identity=run.work_id,
         operation_identity=work_review.operation_identity(run.work_id),
         candidate_hash=frozen.snapshot.candidate_hash, review_context_hash=serialize.digest(frozen.context),
-        effective_policy_hash=p4.policy_hash(frozen.policy), evidence_digest=serialize.digest(frozen.evidence),
+        effective_policy_hash=p4.run_effective_policy_hash(frozen.policy, frozen.effective),
+        evidence_digest=serialize.digest(frozen.evidence),
         coverage_digest=serialize.digest(p4.coverage_record(required, [])),
         raw_report_set_digest=serialize.digest(p4.report_set_record([])),
         adjudication_digest=serialize.digest(p4.pending_adjudication_record()),
@@ -3914,7 +3943,7 @@ def _p4_launch_discovery(session: "_Session", run: WorkRun, chain: Any) -> None:
                                                        first.candidate_hash, first.review_context_hash)
         if problems:
             raise _reconcile("the accepted discovery task: " + "; ".join(problems), "review_task_invalid")
-    bindings = {binding.task_slot: binding for binding in session.review.discovery}
+    bindings = {binding.task_slot: binding for binding in _p4_bindings(session)}
     settled: list[dict[str, Any]] = []
     reports: dict[str, dict[str, Any]] = {}
     for task in tasks:
@@ -3953,7 +3982,7 @@ def _p4_launch_discovery(session: "_Session", run: WorkRun, chain: Any) -> None:
         raw_report_set_digest=serialize.digest(p4.report_set_record(settled)), settled_tasks=tuple(settled),
     )
     extra = [(review_paths.report_rel(task["result_digest"]), reports[task["task_id"]]) for task in settled]
-    if p4.policy_of_envelope(envelope) == p4.P5_POLICY_ID:
+    if p4.is_history_policy(p4.policy_of_envelope(envelope)):
         # GAP-E: a G2 that settles a discovery task failed makes discovery non-authorizing and final for the Run;
         # its immutable not_authorized Run summary is written in this same G2 settlement
         extra += p4.not_authorized_history(gate_two, int(envelope["candidate_generation"]))
@@ -4011,7 +4040,7 @@ def _p4_accept_adjudication(session: "_Session", run: WorkRun, chain: Any) -> No
         reports=[{"task_id": t, "result_digest": d} for t, d, _ in reports],
         prior=p4.NO_PRIOR if prior is None else prior.prior_record(),
         evidence_ids=[eid for _, _, report in reports for eid in report["coverage"]["evidence_ids"]],
-        policy_id=policy, prior_history=references,
+        policy_id=policy, prior_history=references, effective_policy=p4.effective_policy_of_envelope(envelope),
     )
     task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_ADJUDICATOR), "review_task")
     adjudicator = session.review.adjudicator
@@ -4216,7 +4245,7 @@ def _p4_accept_repair(session: "_Session", run: WorkRun, chain: Any) -> None:
         candidate_hash=fourth.candidate_hash, candidate_generation=int(envelope["candidate_generation"]),
         requirement=envelope["requirement"], repair_batch_id=batch_id, repair_batch_digest=serialize.digest(batch.to_record()),
         allowed_result_surface=batch.allowed_result_surface, strategy=batch.strategy, evidence_constraints=(),
-        policy_id=policy,
+        policy_id=policy, effective_policy=p4.effective_policy_of_envelope(envelope),
     )
     task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_REPAIR), "review_task")
     repair = session.review.repair
@@ -4303,6 +4332,7 @@ def _p4_repair(session: "_Session", run: WorkRun, chain: Any) -> None:
         evidence=(p4.evidence_reuse("work-isolated-verification", None, None, prior_identities=(),
                                     new_identities=(verified.resulting_tree,), assumption_invalidated=True),),
         kind_checks=(p4.P4Verification(work_review.P4_KIND_CHECK, "pass"),),
+        effective_policy=p4.effective_policy_of_envelope(envelope),
     )
     record = result.to_record()
     digest = serialize.digest(record)
@@ -4468,10 +4498,13 @@ def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) 
         resulting_tree.entries_from_records(work_review.entries_of(reconstruction.candidate)), reconstruction.payloads,
     )
     run.contract = work_review.P4_CONTRACT
+    # a P6 successor is a new Run: it freezes the Effective Policy current at its start (R6-1, §30.6)
+    effective = _p4_new_run_effective(session, policy)
     frozen = _p4_freeze_material(
         session, run, git, reconstruction.candidate, snapshot, resulting, pre_base, generation=generation,
         succession=succession, set_aside=set_aside, declared=bool(work_review.entries_of(reconstruction.candidate)),
         write_snapshot=write_snapshot, human_decision=decision, policy=policy, history_writes=writes,
+        effective=effective,
     )
     if succession is not None:
         problems = p4.linkage_problems(
@@ -4555,7 +4588,7 @@ def _p4_post_commit(session: "_Session", sealed: Sealed, git: HermeticGit, failu
             first = chain.generations[0]
             policy = _p4_task_policy(sealed.material.task_input)  # the Run's own stored family policy (GAP-A)
             stale = serialize.digest(work_review.context_record_p4(recomputed, policy)) != first.review_context_hash \
-                or p4.policy_hash(policy) != first.effective_policy_hash
+                or p4.envelope_policy_hash(sealed.material.task_input.request_envelope) != first.effective_policy_hash
         except StopError:
             stale = False
     review = ReviewStore(store)

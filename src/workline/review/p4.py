@@ -109,7 +109,9 @@ P5_POLICY_ID = history.P5_POLICY_ID
 P5_ADJUDICATION_INSTRUCTION = "review-v1-p5-adjudication-instruction-v1"
 #: The policy family a P4-capable owner dispatches on, oldest first.
 POLICY_IDS = (POLICY_ID, P5_POLICY_ID)
-#: What a NEW first Run of a P4-capable owner binds (GAP-A items 2 and 7).
+#: What a NEW first Run of a P4-capable owner binds (GAP-A items 2 and 7). P6 (R6-1): the P6-capable family policy,
+#: assigned below once its identity is defined; a cycle keeps its first Run's family, and an existing P4 / P5 Run
+#: is read only from its own stored identity.
 DEFAULT_POLICY_ID = P5_POLICY_ID
 #: P6 (§30.6, R6-1): the P6-capable family policy. Its Effective Policy is not a static record: a P6-capable Run
 #: freezes the normalized Effective Policy it resolved (GlobalPolicyBaseline + Profile or explicit absence) in its
@@ -120,6 +122,10 @@ P6_POLICY_ID = policy.P6_POLICY_ID
 FAMILY_POLICY_IDS = POLICY_IDS + (P6_POLICY_ID,)
 #: The family policies that bind the durable P5 history contract: P5, and P6 which keeps it unchanged.
 HISTORY_POLICY_IDS = (P5_POLICY_ID, P6_POLICY_ID)
+#: R6-1 (Orchestrator ruling on §30.6 / §30.41): every NEW first Run of a P4-capable Formal Review is P6-capable,
+#: with or without a Project Profile; it resolves and freezes its Effective Policy (GlobalPolicyBaseline + Profile
+#: or explicit absence). The P4-only and P5 identities stay exactly as they were, for the Runs that bind them.
+DEFAULT_POLICY_ID = P6_POLICY_ID
 
 TASK_KIND_DISCOVERY = "p4-discovery-v1"
 TASK_KIND_ADJUDICATION = "p4-adjudication-v1"
@@ -337,6 +343,32 @@ def binding_problems(
         problems.extend(_actor_problems(binding, name))
     if human_decision is not None:
         problems.extend(human_decision_problems(human_decision))
+    return problems
+
+
+def holdout_binding_problems(holdout: object, discovery: object) -> list[str]:
+    """What makes a selector's ``holdout_discovery`` invalid, before the lock (P6 §30.11, R6-1).
+
+    Shape only: a tuple of DiscoveryBinding, each a valid actor, every
+    viewpoint distinct from the required ones and from each other. Whether
+    the Run's Effective Policy selects them is decided at the Run's freeze.
+    """
+    if not isinstance(holdout, tuple):
+        return ["holdout_discovery must be a tuple of DiscoveryBinding"]
+    problems: list[str] = []
+    required = {item.viewpoint for item in discovery if type(item) is DiscoveryBinding} \
+        if isinstance(discovery, tuple) else set()
+    seen: set[str] = set()
+    for item in holdout:
+        if type(item) is not DiscoveryBinding:
+            problems.append(f"a holdout discovery actor is {type(item).__name__}, not a DiscoveryBinding")
+            continue
+        if not isinstance(item.viewpoint, str) or _VIEWPOINT.match(item.viewpoint) is None:
+            problems.append(f"holdout viewpoint {item.viewpoint!r} is not a lowercase machine name")
+        if item.viewpoint in required or item.viewpoint in seen:
+            problems.append(f"holdout viewpoint {item.viewpoint!r} is not a slot distinct from every other discovery slot")
+        seen.add(str(item.viewpoint))
+        problems.extend(_actor_problems(item, f"holdout discovery actor {item.viewpoint!r}"))
     return problems
 
 
@@ -745,7 +777,7 @@ def policy_named(policy_id: object) -> dict[str, Any] | None:
 
 
 def new_run_policy() -> str:
-    """The family policy a NEW first Run of a cycle binds: the current P5-capable default (GAP-A item 7).
+    """The family policy a NEW first Run of a cycle binds: the current default - P6-capable (GAP-A item 7, R6-1).
 
     Only a first Run with no predecessor in its cycle takes it; a repair or
     Human-decision successor keeps its cycle's stored policy, and an existing
@@ -1037,6 +1069,18 @@ def effective_policy_of_envelope(envelope: object) -> dict[str, Any] | None:
     if (discovery and role not in policy.DISCOVERY_ROLES) or (not discovery and policy.DISCOVERY_ROLE_KEY in envelope):
         return None
     return found
+
+
+def run_effective_policy_hash(policy_id: str, effective_policy: Mapping[str, Any] | None) -> str:
+    """The effective_policy_hash a NEW Run of family ``policy_id`` binds: the static hash (P4 / P5), or - P6 - the
+    digest of the Effective Policy it froze (which it must then carry)."""
+    if policy_id == P6_POLICY_ID:
+        if effective_policy is None:
+            raise ValidationError("a P6-capable Run binds the Effective Policy it froze", code="review_record_invalid")
+        return policy.effective_policy_hash(policy.parse_effective_policy(effective_policy, "the Run's Effective Policy"))
+    if effective_policy is not None:
+        raise ValidationError("only a P6-capable Run binds an Effective Policy record", code="review_record_invalid")
+    return policy_hash(policy_id)
 
 
 def envelope_policy_hash(envelope: object) -> str | None:
@@ -2097,14 +2141,32 @@ def repair_result(
     returned: P4RepairReturn,
     evidence: Sequence[EvidenceReuse],
     kind_checks: Sequence[P4Verification],
+    effective_policy: Mapping[str, Any] | None = None,
 ) -> records.P4RepairResult:
     """The immutable Repair Result of a successful repair (§27.20); STOPs when it cannot be ready.
 
     Readiness is positive: complete coverage (checked by the caller with
     :func:`repair_return_problems`) and zero residual required verification.
+
+    A P6-capable Run passes the Effective Policy it froze (§30.2 B, §30.10-§30.11,
+    R6-1): the required reverification is the P4 minimum of every impact level
+    ``extra_scope_steps`` widens to (capped at FOUNDATION, never below the P4
+    minimum), and an active lightening experiment's removed levels are holdout
+    checks - each must be present in the repair's verification before the Repair
+    Result is written, a failed one blocks, and their results stay in the
+    existing ``reverification.completed`` list (no schema change). Without an
+    Effective Policy the plan is exactly the P4 one.
     """
     assert returned.coverage_check is not None and returned.impact_class is not None
-    required = reverification_plan(returned.impact_class, [item.verification_id for item in kind_checks])
+    kind_ids = [item.verification_id for item in kind_checks]
+    holdout: tuple[str, ...] = ()
+    if effective_policy is None:
+        required = reverification_plan(returned.impact_class, kind_ids)
+    else:
+        levels, holdout_levels = policy.reverification_levels(effective_policy, returned.impact_class)
+        required = tuple(sorted(set().union(*(REVERIFICATION_MINIMUMS[level] for level in levels)) | set(kind_ids)))
+        held = set().union(*(REVERIFICATION_MINIMUMS[level] for level in holdout_levels)) if holdout_levels else set()
+        holdout = tuple(sorted(held - set(required)))
     reverification = reverification_record(required, tuple(returned.verification) + tuple(kind_checks))
     if reverification["residual"]:
         missing = sorted(set(required) - {item["id"] for item in reverification["completed"] if item["result"] == "pass"})
@@ -2113,6 +2175,21 @@ def repair_result(
             f"the {returned.impact_class} repair leaves required reverification not passed ({', '.join(missing)}); "
             "it cannot be ready for a successor Run, and nothing is settled",
         )
+    if holdout:
+        results: dict[str, set[str]] = {}
+        for item in tuple(returned.verification) + tuple(kind_checks):
+            results.setdefault(item.verification_id, set()).add(item.result)
+        unsettled = [identifier for identifier in holdout if identifier not in results]
+        if unsettled:
+            raise policy.stop(policy.CODE_HOLDOUT_UNSETTLED,
+                              f"the active lightening experiment's reverification holdout ({', '.join(unsettled)}) is not "
+                              "settled in the repair's verification; it settles before the successor authorization, "
+                              "and nothing is settled")
+        failed = [identifier for identifier in holdout if results[identifier] != {"pass"}]
+        if failed:
+            raise policy.stop(policy.CODE_HOLDOUT_FAILED,
+                              f"a reverification holdout check failed ({', '.join(failed)}): a supported defect the "
+                              "lightened policy would not have checked blocks, fail closed; nothing is settled")
     check = returned.coverage_check.to_record()
     record = {
         serialize.SCHEMA_KEY: records.SCHEMA_P4_REPAIR_RESULT, serialize.VERSION_KEY: records.VERSION,

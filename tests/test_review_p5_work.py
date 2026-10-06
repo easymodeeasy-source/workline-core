@@ -14,13 +14,26 @@ A P4-only cycle (the test-only seam ``p4_only_cycle``) keeps the frozen three-ef
 
 from __future__ import annotations
 
-from p5_helpers import first_envelope, p4_only_cycle
+from p5_helpers import first_envelope, p4_only_cycle, p5_only_cycle
 from test_review_p4_planning import Discovery, problem
 from test_review_p4_work import P4WorkCase, WorkRepairer, work_p4
 from workline import start_review as sr
 from workline.review import history, p4, paths
 from workline.review.store import ReviewStore
 
+
+
+#: R6-1 (TEST-ONLY seam, tests/p5_helpers.p5_only_cycle): production binds the P6-capable default to every NEW first
+#: Run; this module keeps testing P5 Runs exactly as pre-P6 code wrote them.
+_P5_SEAM = p5_only_cycle()
+
+
+def setUpModule() -> None:
+    _P5_SEAM.__enter__()
+
+
+def tearDownModule() -> None:
+    _P5_SEAM.__exit__(None, None, None)
 
 class P5WorkTests(P4WorkCase):
     def terminal_stage(self, record: dict) -> list[dict]:

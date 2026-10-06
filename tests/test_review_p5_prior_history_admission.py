@@ -29,7 +29,7 @@ from typing import Any
 import unittest
 from unittest import mock
 
-from p5_helpers import first_envelope, p4_only_cycle
+from p5_helpers import first_envelope, p4_only_cycle, p5_only_cycle
 from planning_helpers import design, git
 from test_review_p4_planning import Adjudicator, Discovery, P4PlanningCase, Repairer, p4_review, problem
 from test_review_p4_work import work_p4
@@ -52,6 +52,19 @@ TARGET = "w_01ARZ3NDEKTSV4RRFFQ69G5FAV"
 FAMILY_IDS = {paths.HISTORY_RUNS: SOURCE, paths.HISTORY_FINDINGS: "rfd_01ARZ3NDEKTSV4RRFFQ69G5FAV",
               paths.HISTORY_REPAIRS: "rrb_01ARZ3NDEKTSV4RRFFQ69G5FAV"}
 
+
+
+#: R6-1 (TEST-ONLY seam, tests/p5_helpers.p5_only_cycle): production binds the P6-capable default to every NEW first
+#: Run; this module keeps testing P5 Runs exactly as pre-P6 code wrote them.
+_P5_SEAM = p5_only_cycle()
+
+
+def setUpModule() -> None:
+    _P5_SEAM.__enter__()
+
+
+def tearDownModule() -> None:
+    _P5_SEAM.__exit__(None, None, None)
 
 class HistoryReader(Reader):
     """The owner-material fake reader, plus the history listing and digests the prior-history collection reads."""

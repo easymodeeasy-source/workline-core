@@ -45,6 +45,29 @@ def codes(found: list[tuple[str, str]]) -> list[str]:
     return [code for code, _ in found]
 
 
+class ChangeReader:
+    """The two change-record readers compatibility recovery uses, over in-memory records (R6-2 item 3)."""
+
+    def __init__(self, *changes: dict) -> None:
+        self.changes = {item["policy_change_id"]: item for item in changes}
+
+    def policy_change_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self.changes))
+
+    def read_policy_change(self, change_id: str) -> dict:
+        return self.changes[change_id]
+
+    def policy_change_exists(self, change_id: str) -> bool:
+        return change_id in self.changes
+
+
+def change_with_baseline(change_id: str, after: policy.ProjectProfile, record: dict, *, digest: str | None = None,
+                         surface: str = policy.SURFACE_REQUIRED_SLOTS, setting: int = 2) -> dict:
+    return {"policy_change_id": change_id, "after_profile_digest": after.digest, "global_baseline": record,
+            "global_baseline_digest": digest or serialize.digest(record), "affected_policy_surface": surface,
+            "after_setting": setting}
+
+
 def change(change_id: str, before_version: int | None, before_digest: str | None, after: policy.ProjectProfile) -> dict:
     return {"policy_change_id": change_id, "before_profile_version": before_version,
             "before_profile_digest": before_digest, "after_profile_version": after.profile_version,
@@ -105,7 +128,8 @@ class StrictProfileTests(unittest.TestCase):
             with self.subTest(fields=sorted(broken)):
                 self.assertIn(policy.CODE_PROFILE_INVALID, codes(policy.profile_problems(broken, "p")))
 
-    def test_overrides_are_sorted_unique_and_never_restate_the_global_setting(self) -> None:
+    def test_overrides_are_sorted_and_unique(self) -> None:
+        # the structural reader keeps the §30.5 rules only (FC-RB7-9 b): surface / class / range / id / sort / uniqueness
         record = profile().to_record()
         a = dict(record["overrides"][0])
         b = {"policy_surface_id": policy.SURFACE_EXTRA_SCOPE_STEPS, "strength_class": policy.CLASS_ADAPTIVE,
@@ -113,10 +137,8 @@ class StrictProfileTests(unittest.TestCase):
         self.assertEqual([], policy.profile_problems({**record, "overrides": [a, b]}, "p"))
         self.assertIn(policy.CODE_PROFILE_INVALID, codes(policy.profile_problems({**record, "overrides": [b, a]}, "p")))
         self.assertIn(policy.CODE_PROFILE_INVALID, codes(policy.profile_problems({**record, "overrides": [a, dict(a)]}, "p")))
-        restated = dict(a, setting=1)
-        self.assertIn(policy.CODE_PROFILE_INVALID, codes(policy.profile_problems({**record, "overrides": [restated]}, "p")))
-        wrong = dict(a, direction="lighten")
-        self.assertIn(policy.CODE_PROFILE_INVALID, codes(policy.profile_problems({**record, "overrides": [wrong]}, "p")))
+        self.assertIn(policy.CODE_PROFILE_INVALID,
+                      codes(policy.profile_problems({**record, "overrides": [dict(a, direction="sideways")]}, "p")))
         unsupported = dict(a, supporting_policy_change_id="rel_01ARZ3NDEKTSV4RRFFQ69G5FAV")
         self.assertIn(policy.CODE_PROFILE_INVALID,
                       codes(policy.profile_problems({**record, "overrides": [unsupported]}, "p")))
@@ -169,7 +191,7 @@ class CompatibilityTests(WorklineTestCase):
         with self.assertRaises(StopError) as raised:
             policy.resolve_policy_state(self.review, self.store.workline_root())
         self.assertEqual(policy.CODE_PROFILE_INCOMPATIBLE, raised.exception.code)
-        self.assertIn("no override is guessed, merged or dropped", str(raised.exception))
+        self.assertIn("policy maintenance / reconcile", str(raised.exception))
         self.assertIn(policy.CODE_PROFILE_INCOMPATIBLE, [problem.code for problem in validate_project(self.store)])
 
     def test_a_malformed_profile_fails_closed_and_is_a_validation_problem(self) -> None:
@@ -181,13 +203,67 @@ class CompatibilityTests(WorklineTestCase):
         self.assertEqual(policy.CODE_PROFILE_INVALID, raised.exception.code)
         self.assertIn(policy.CODE_PROFILE_INVALID, [problem.code for problem in validate_project(self.store)])
 
-    def test_a_workline_root_change_makes_the_profile_incompatible(self) -> None:
+    def test_a_text_only_root_edit_keeps_the_profile_compatible(self) -> None:
+        # R6-2 item 4: the canonical digest moves, the policy-semantic projection does not
         other = copy_workline_root(self.tmp / "root2")
         skill = other / ".claude" / "skills" / "review" / "SKILL.md"
         skill.write_bytes(skill.read_bytes() + b"\n")
+        edited = policy.load_global_baseline(other)
+        self.assertNotEqual(baseline().digest, edited.digest)
+        self.assertEqual(baseline().semantic_projection, edited.semantic_projection)
         found = profile()
-        self.assertIsNone(policy.compatibility_problem(found, baseline()))
-        self.assertIsNotNone(policy.compatibility_problem(found, policy.load_global_baseline(other)))
+        reader = ChangeReader(change_with_baseline(RPC, found, baseline().record))
+        self.assertIsNone(policy.compatibility_problem(found, baseline(), reader))
+        self.assertIsNone(policy.compatibility_problem(found, edited, reader))
+
+    def test_a_semantic_baseline_change_makes_the_profile_incompatible(self) -> None:
+        found = profile()
+        changed = serialize.canonical_data(baseline().record)
+        changed["surfaces"][0]["global_setting"] = 2
+        reader = ChangeReader(change_with_baseline(RPC, found, changed, digest=found.global_baseline_digest))
+        self.assertIn("cannot be recovered", policy.compatibility_problem(found, baseline(), reader))
+        other = dict(baseline().record, meta_rules_id="review-v1-p6-meta-rules-v9")
+        found = profile(digest=serialize.digest(other))
+        reader = ChangeReader(change_with_baseline(RPC, found, other))
+        self.assertIn("policy semantics", policy.compatibility_problem(found, baseline(), reader))
+
+    def test_each_override_is_judged_against_the_global_it_was_decided_under(self) -> None:
+        # FC-RB7-8 / -9: the restate / direction checks run in the evidence-backed compatibility decision, against the
+        # baseline record the override's supporting change binds - never in the structural reader, never skipped
+        for setting, direction, expected in ((1, "lighten", "restates"), (2, "lighten", "other side"),
+                                             (2, "strengthen", None)):
+            with self.subTest(setting=setting, direction=direction):
+                found = policy.ProjectProfile(
+                    1, None, baseline().digest, 1, policy.LOADER_SEMANTICS_IDENTITY,
+                    ({"policy_surface_id": policy.SURFACE_REQUIRED_SLOTS, "strength_class": policy.CLASS_DEFAULT,
+                      "setting": setting, "direction": direction, "supporting_policy_change_id": RPC},), (RPC,))
+                self.assertEqual([], policy.profile_problems(found.to_record(), "p"))
+                reader = ChangeReader(change_with_baseline(RPC, found, baseline().record, setting=setting))
+                problem = policy.compatibility_problem(found, baseline(), reader)
+                if expected is None:
+                    self.assertIsNone(problem)
+                else:
+                    self.assertIn(expected, problem)
+
+    def test_a_carried_override_keeps_its_own_global(self) -> None:
+        # FC-RB7-9 (c): a later Global default may differ; the override decided under its own Global stays valid
+        later = serialize.canonical_data(baseline().record)
+        later["surfaces"][0]["global_setting"] = 2  # what a later Global would say; this change predates it
+        found = profile()
+        reader = ChangeReader(change_with_baseline(RPC, found, baseline().record))
+        self.assertEqual([], policy.override_global_problems(found, reader))
+        reader_later = ChangeReader(change_with_baseline(RPC, found, later, digest=found.global_baseline_digest))
+        self.assertIn("restates", policy.override_global_problems(found, reader_later)[0])
+
+    def test_the_written_under_baseline_must_be_recovered_positively(self) -> None:
+        found = profile()
+        self.assertIn("0 applied", policy.compatibility_problem(found, baseline(), ChangeReader()))
+        twice = ChangeReader(change_with_baseline(RPC, found, baseline().record),
+                             change_with_baseline(RPC2, found, baseline().record))
+        self.assertIn("2 applied", policy.compatibility_problem(found, baseline(), twice))
+        foreign = profile(digest="a" * 64)
+        reader = ChangeReader(change_with_baseline(RPC, foreign, baseline().record))
+        self.assertIn("cannot be recovered", policy.compatibility_problem(foreign, baseline(), reader))
 
     def test_a_profile_entry_that_is_a_directory_or_an_unknown_entry_is_a_namespace_problem(self) -> None:
         (self.store.root / paths.POLICY_PROFILE_REL).mkdir(parents=True)

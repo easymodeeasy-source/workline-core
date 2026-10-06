@@ -741,8 +741,6 @@ def _persist(op: _Op, mutation: Mutation, destination: Any, run: _Run, chain: An
     binding = _require_binding(op, mutation)
     change_path = review_paths.policy_change_rel(run.policy_change_id)
     after = policy.ProjectProfile.from_record(dict(run.candidate["after_profile"]), "the reviewed after Profile")
-    change = policy.change_record(run.candidate, review_run_id=run.review_run_id, receipt_id=str(run.receipt_id))
-    expected = {change_path: serialize.canonical_bytes(change), review_paths.POLICY_PROFILE_REL: after.text().encode("utf-8")}
     # step 1 - the immutable change record and the exact Profile CAS, recorded together
     if not mutation.has_stage(STAGE_POLICY):
         problems = _receipt_problems(store, run, chain)
@@ -752,6 +750,9 @@ def _persist(op: _Op, mutation: Mutation, destination: Any, run: _Run, chain: An
                              policy.REASON_CHAIN_INVALID)
         state = _require_state_current(op, run)
         policy.require_candidate(run.candidate, state, review)
+        # R6-2: the change record binds the complete baseline record the Candidate was reviewed under
+        change = policy.change_record(run.candidate, review_run_id=run.review_run_id, receipt_id=str(run.receipt_id),
+                                      baseline_record=state.baseline.record)
         paths = _change_paths(run)
         gate.require_committable(store, paths)
         gitops.require_no_planning_transform(repo, paths)
@@ -761,6 +762,7 @@ def _persist(op: _Op, mutation: Mutation, destination: Any, run: _Run, chain: An
             Effect.create_file(change_path, serialize.canonical_text(change)),
             Effect.replace_review_profile(review_paths.POLICY_PROFILE_REL, after.text(), state.profile_digest),
         ])
+    expected = _expected_policy_state(mutation, run, change_path, after)
     mutation.apply()
     # step 2 - Kp: the base-exact local policy commit of exactly those two paths
     if not mutation.has_stage(STAGE_KP):
@@ -845,6 +847,43 @@ def _persist(op: _Op, mutation: Mutation, destination: Any, run: _Run, chain: An
     )
 
 
+def _expected_policy_state(mutation: Mutation, run: _Run, change_path: str,
+                           after: policy.ProjectProfile) -> dict[str, bytes]:
+    """The exact bytes the recorded policy-state stage puts at its two paths, proven to be this change's own.
+
+    The change record is read from the recorded stage itself (a resume never
+    rebuilds it against a later baseline) and must parse as this Candidate's
+    change record of this Run and Receipt; the Profile must be the reviewed
+    after Profile exactly.
+    """
+    recorded = {str(effect["payload"]["path"]): str(effect["payload"]["content"])
+                for effect in mutation.stage_effects(STAGE_POLICY)}
+    text = recorded.get(change_path)
+    try:
+        change = policy.parse_change(serialize.parse(text or "", "the recorded change record"),
+                                     "the recorded change record")
+    except ValidationError as exc:
+        raise _reconcile(f"the recorded policy change record does not read: {exc}", policy.REASON_PERSISTED_MISMATCH)
+    if (change["policy_change_id"], change["candidate_hash"], change["review_run_id"], change["receipt_id"],
+            change["after_profile_digest"]) != (run.policy_change_id, policy.candidate_hash(run.candidate),
+                                                run.review_run_id, run.receipt_id, after.digest) \
+            or serialize.canonical_text(change) != text:
+        raise _reconcile("the recorded policy change record is not this Candidate's change record",
+                         policy.REASON_PERSISTED_MISMATCH)
+    return {change_path: text.encode("utf-8"), review_paths.POLICY_PROFILE_REL: after.text().encode("utf-8")}
+
+
+def _bound_settings(mutation: Mutation, run: _Run) -> dict[str, int]:
+    """The Global settings the after Profile is bound to: those of the baseline record the recorded change record
+    binds (FC-RB7-8 positive evidence), never a code table."""
+    change_path = review_paths.policy_change_rel(run.policy_change_id)
+    for effect in mutation.stage_effects(STAGE_POLICY):
+        if effect["payload"]["path"] == change_path:
+            change = serialize.parse(str(effect["payload"]["content"]), "the recorded change record")
+            return policy.bound_global_settings(change["global_baseline"])
+    raise _reconcile("the policy change mutation recorded no change record", policy.REASON_PERSISTED_MISMATCH)
+
+
 def _record_problem(mutation: Mutation, expected: dict[str, bytes]) -> str | None:
     """The recorded policy-state stage writes exactly the expected two paths with exactly the expected bytes."""
     effects = mutation.stage_effects(STAGE_POLICY)
@@ -897,7 +936,8 @@ def _c2_kp(op: _Op, mutation: Mutation, run: _Run, expected: dict[str, bytes]) -
     if problem is not None:
         raise _proof_failed("K4", problem)
     committed_profile = gitcmd.blob_at(repo, kp, review_paths.POLICY_PROFILE_REL)
-    problem = policy.persisted_projection_problem(run.candidate["after_profile"], committed_profile)
+    problem = policy.persisted_projection_problem(run.candidate["after_profile"], committed_profile,
+                                                  _bound_settings(mutation, run))
     if problem is not None:
         raise _proof_failed("K5", problem)
     before_profile = gitcmd.blob_at(repo, parent, review_paths.POLICY_PROFILE_REL)
@@ -909,7 +949,7 @@ def _c2_kp(op: _Op, mutation: Mutation, run: _Run, expected: dict[str, bytes]) -
         loaded, _ = policy.parse_profile_bytes(committed_profile or b"", "the committed Profile")
     except (ValidationError, StopError) as exc:
         raise _proof_failed("K7", str(exc)) from exc
-    incompatible = policy.compatibility_problem(loaded, baseline)
+    incompatible = policy.compatibility_problem(loaded, baseline, ReviewStore(store))
     if incompatible is not None:
         raise _proof_failed("K7", incompatible)
     try:
@@ -954,7 +994,7 @@ def _consumption_record(op: _Op, mutation: Mutation, run: _Run, chain: Any, kp: 
         "after_profile_version": after.profile_version,
         "after_profile_digest": after.digest,
         "global_baseline_digest": run.candidate["global_baseline_digest"],
-        "normalized_projection_hash": policy.projection_hash(after),
+        "normalized_projection_hash": policy.projection_hash(after, _bound_settings(mutation, run)),
         "policy_commit": kp,
         "policy_parent": parent,
         "branch": (mutation.note(NOTE_BINDING) or {}).get("branch"),

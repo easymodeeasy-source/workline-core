@@ -808,8 +808,9 @@ def _clean_p4_run(
     try:
         consumptions = _consumption_paths_of(store, review, head, {str(item) for item in receipt_ids})
         record_paths = p4_record_paths(review, review_run_id, chain) + consumptions
-        if consumptions and p4.run_policy(review, chain) == p4.P5_POLICY_ID:
-            # §28.6: a consumed P5 Run's summary is made canonical by the same transition as its Consumption
+        if consumptions and p4.is_history_policy(p4.run_policy(review, chain)):
+            # §28.6: a consumed P5 (or P6, R6-1) Run's summary is made canonical by the same transition as its
+            # Consumption
             record_paths.append(paths.history_run_rel(review_run_id))
     except (ValidationError, ReconcileRequired) as exc:
         raise _incomplete(f"the records of P4 Review Run {review_run_id} do not read: {exc}") from exc

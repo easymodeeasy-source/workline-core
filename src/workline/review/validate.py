@@ -792,7 +792,7 @@ def _policy_compatibility(store: ProjectStore, review: ReviewStore) -> list[Revi
     except (ValidationError, StopError) as exc:
         return [ReviewProblem(policy.CODE_BASELINE_UNAVAILABLE, "the Global policy baseline cannot be derived to "
                                                                 f"check the Project Profile: {exc}")]
-    problem = policy.compatibility_problem(profile, baseline)
+    problem = policy.compatibility_problem(profile, baseline, review)
     if problem is None:
         return []
     return [ReviewProblem(policy.CODE_PROFILE_INCOMPATIBLE, f"the canonical Project Profile is incompatible: {problem} "

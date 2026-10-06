@@ -471,6 +471,7 @@ class RunSummary:
         _require_disposition_shape(
             described, disposition, adjudication_digest=adjudication_digest, finding_ids=finding_ids,
             repair_batch_id=repair_batch_id, receipt_id=receipt_id, consumption_id=consumption_id,
+            review_kind=record.get("review_kind"),
         )
         return RunSummary(
             review_run_id=records._require_id(record, "review_run_id", "review_run", described),
@@ -495,9 +496,16 @@ class RunSummary:
         )
 
 
+#: The Review kinds whose Runs are G4-terminal (P6 §30.14, FC-RB5-7): a REPAIR_REQUIRED adjudication issues no
+#: Receipt and accepts no repair, so their ``not_authorized`` summary is written at G4 and binds that adjudication.
+#: A later kind with no Repair Batch branch (RB5's Integration Review) is added here; every other kind keeps the
+#: GAP-E shape exactly (non-authorization final at the discovery settlement, no adjudication).
+G4_TERMINAL_REVIEW_KINDS: tuple[str, ...] = (records.POLICY_REVIEW_KIND,)
+
+
 def _require_disposition_shape(
     described: str, disposition: str, *, adjudication_digest: str | None, finding_ids: Sequence[str],
-    repair_batch_id: str | None, receipt_id: str | None, consumption_id: str | None,
+    repair_batch_id: str | None, receipt_id: str | None, consumption_id: str | None, review_kind: object = None,
 ) -> None:
     """What each disposition says about the Run on its own, before any source is read.
 
@@ -507,7 +515,10 @@ def _require_disposition_shape(
     human_wait                 an adjudication; no Receipt, no Repair Batch, no Consumption
     invalidated                the superseded Receipt; no Consumption, no Repair Batch
     not_authorized             written in the G2 settlement (GAP-E): no adjudication, no Finding,
-                               no Receipt, no Consumption, no Repair Batch
+                               no Receipt, no Consumption, no Repair Batch - or, for a G4-terminal
+                               kind (P6, G4_TERMINAL_REVIEW_KINDS), at the G4 that settles
+                               REPAIR_REQUIRED: that adjudication and its Findings, still no
+                               Receipt, Consumption or Repair Batch
     set_aside                  no Consumption
     authorized / historical_   recognized vocabulary only; no shape is defined, because no
     escape                     transition proves either (GAP-F, refused by source validation)
@@ -547,7 +558,7 @@ def _require_disposition_shape(
     elif disposition == DISPOSITION_NOT_AUTHORIZED:
         if receipt_id is not None or repair_batch_id is not None:
             raise refuse("names a Receipt or a Repair Batch")
-        if adjudication_digest is not None:
+        if adjudication_digest is not None and review_kind not in G4_TERMINAL_REVIEW_KINDS:
             raise refuse("binds an adjudication; non-authorization is final at the discovery settlement (GAP-E)")
 
 
@@ -1683,6 +1694,7 @@ def _g4_terminal(latest: records.GateGeneration, adjudication: records.P4Adjudic
     """
     return (
         adjudication is not None
+        and adjudication.review_kind in G4_TERMINAL_REVIEW_KINDS
         and latest.generation == 4
         and latest.adjudication_digest == serialize.digest(adjudication.to_record())
         and adjudication.outcome == records.REPAIR_REQUIRED

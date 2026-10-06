@@ -25,6 +25,18 @@ def p4_only_cycle() -> Iterator[None]:
         yield
 
 
+@contextmanager
+def p5_only_cycle() -> Iterator[None]:
+    """Every first Run created inside binds the P5 policy, as a Run created before P6 activation did.
+
+    TEST-ONLY, mirroring :func:`p4_only_cycle` (Orchestrator ruling R6-1): production code always binds the
+    P6-capable default to a new first Run; this seam lets the P5 tests keep testing P5 Runs exactly as pre-P6
+    code wrote them. No runtime selector, flag or environment switch exists for it.
+    """
+    with mock.patch.object(p4, "DEFAULT_POLICY_ID", p4.P5_POLICY_ID):
+        yield
+
+
 def first_envelope(review: ReviewStore, run_id: str) -> dict[str, Any]:
     chain = review.gate_chain(run_id)
     return review.read_task_input(str(chain.generations[0].accepted_tasks[0]["task_id"])).request_envelope

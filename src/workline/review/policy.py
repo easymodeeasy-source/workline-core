@@ -65,8 +65,23 @@ OPERATION = "project-policy-change"
 OPERATION_EVALUATION = "project-policy-evaluation"
 
 BASELINE_CONTRACT = "review-v1-p6-global-baseline-v1"
+#: The Global POLICY version of the derived baseline (FC-RB7-3): it counts Global policy changes - derived is 1,
+#: and RB7 increments it by one per Global change. Schema evolution goes through the record version / contract.
 BASELINE_VERSION = 1
 SOURCE_MODE_DERIVED = "derived-baseline"
+#: The closed sets a stored Effective Policy's baseline identity is read against (FC-RB7-2 b): RB7 extends these
+#: tables when it materializes Global policy, and every stored P6 Run envelope keeps reading.
+SOURCE_MODES = (SOURCE_MODE_DERIVED,)
+BASELINE_VERSIONS = (BASELINE_VERSION,)
+#: R6-2 / FC-RB7-5: the compatibility interpretation an Effective Policy binds. Before RB7: exact equality of the
+#: policy-semantic projection of the baseline a Profile was written under (recovered from its change record) and of
+#: the current one. RB7 adds its versioned total adapter here, without an Effective Policy schema v2.
+COMPATIBILITY_EXACT_DERIVED_SEMANTIC = "review-v1-p6-exact-derived-semantic-v1"
+COMPATIBILITY_INTERPRETATIONS = (COMPATIBILITY_EXACT_DERIVED_SEMANTIC,)
+#: FC-RB7-6: who an active experiment comes from, and the identity kind it is named by. Only Project-origin
+#: experiments (an applied Project Policy Change) exist before RB7; RB7 adds a Global origin here.
+ORIGIN_PROJECT = "project"
+EXPERIMENT_ORIGINS: Mapping[str, str] = {ORIGIN_PROJECT: "review_policy_change"}
 #: The loader / schema / default-semantics identity a Profile and the baseline bind (§15.9, §30.5).
 LOADER_SEMANTICS_IDENTITY = "review-v1-p6-policy-loader-v1"
 META_RULES_ID = "review-v1-p6-meta-rules-v1"
@@ -269,6 +284,8 @@ NON_ADAPTIVE: tuple[tuple[str, str], ...] = (
     ("consumption", "Review-v1 authorization/Consumption correctness"),
     ("capability", "Project-local capability approval boundary"),
     ("approval", "Project-local capability approval boundary"),
+    # RB8-FC-07: self-hosting is a Mutation/Git safety boundary, never a learned adaptation
+    ("self_hosting", "self-hosting (Mutation/Git safety invariants)"),
 )
 _SURFACE_ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+\Z")
 
@@ -298,6 +315,20 @@ def surface_problem(policy_surface_id: object) -> tuple[str, str] | None:
         f"{policy_surface_id!r} is not one of the registered adaptive surfaces "
         f"({', '.join(SURFACE_BY_ID)}); an unknown surface is not adaptable and no learned process adds one"
     )
+
+
+def bound_global_settings(baseline_record: Mapping[str, Any]) -> dict[str, int]:
+    """The Global setting of every surface, read from a baseline RECORD - positive runtime evidence (FC-RB7-1 / -8).
+
+    A Profile's Global settings are those of the baseline record its change
+    record binds (:func:`written_under`); the current baseline's come from the
+    baseline object. Global policy versions above the derived 1 are runtime
+    data RB7's loader / adapter resolves - never rows of a code table here.
+    """
+    found: dict[str, int] = {}
+    for item in baseline_record["surfaces"]:
+        found[str(item["policy_surface_id"])] = int(item["global_setting"])
+    return found
 
 
 def require_surface(policy_surface_id: object) -> PolicySurface:
@@ -394,7 +425,10 @@ META_RULES: dict[str, Any] = {
     "evaluation_results": list(EVALUATION_RESULTS),
     "evaluation_rule": "an evaluation never rewrites the Profile; adjust and rollback need a new reviewed Candidate; "
                        "inconclusive is not success",
-    "compatibility_rule": "before RB7, a Profile is applied only under exact derived-baseline compatibility; otherwise "
+    "compatibility_rule": "a Profile is applied only when its compatibility with the current Global baseline is "
+                          "positively proven: exact derived-baseline compatibility while the baseline source_mode is "
+                          "derived-baseline, the versioned total compatibility adapter once RB7 materializes Global "
+                          "policy; otherwise "
                           "no guess, no dropped override, no new Run under that Profile",
 }
 
@@ -444,6 +478,15 @@ class GlobalPolicyBaseline:
     def global_policy_identity(self) -> str:
         return str(self.record["global_policy_identity"])
 
+    @property
+    def semantic_projection(self) -> dict[str, Any]:
+        """The policy-semantic identity (R6-2): what exact derived-baseline compatibility compares."""
+        return semantic_projection(self.record)
+
+    @property
+    def semantic_digest(self) -> str:
+        return semantic_digest(self.record)
+
     def surface(self, policy_surface_id: str) -> dict[str, Any]:
         for item in self.record["surfaces"]:
             if item["policy_surface_id"] == policy_surface_id:
@@ -452,6 +495,59 @@ class GlobalPolicyBaseline:
 
     def global_setting(self, policy_surface_id: str) -> int:
         return int(self.surface(policy_surface_id)["global_setting"])
+
+
+SCHEMA_SEMANTIC = "review-p6-baseline-semantics"
+
+
+def semantic_projection(baseline_record: Mapping[str, Any]) -> dict[str, Any]:
+    """The normalized POLICY-SEMANTIC identity of a baseline record (R6-2 item 2).
+
+    Included: each surface's id, strength class, allowed range and Global
+    setting; the fixed meta-rules identity and digest; the loader semantics
+    identity; and the Global POLICY version. Excluded, as provenance and not
+    policy semantics: ``source_mode``, ``root_authority_digests`` and
+    ``source_policy_identities``. A text-only Workline-root edit changes the
+    canonical baseline digest and leaves this projection unchanged.
+    """
+    return serialize.canonical_data({
+        serialize.SCHEMA_KEY: SCHEMA_SEMANTIC, serialize.VERSION_KEY: RECORD_VERSION,
+        "baseline_version": baseline_record["baseline_version"],
+        "surfaces": [
+            {"policy_surface_id": item["policy_surface_id"], "strength_class": item["strength_class"],
+             "allowed_range": dict(item["allowed_range"]), "global_setting": item["global_setting"]}
+            for item in baseline_record["surfaces"]
+        ],
+        "meta_rules_id": baseline_record["meta_rules_id"],
+        "meta_rules_digest": baseline_record["meta_rules_digest"],
+        "loader_semantics_identity": baseline_record["loader_semantics_identity"],
+    })
+
+
+def semantic_digest(baseline_record: Mapping[str, Any]) -> str:
+    return serialize.digest(semantic_projection(baseline_record))
+
+
+def baseline_record_problems(record: object, described: str) -> list[str]:
+    """Structure only: a baseline record as a change record binds it (any Global policy version, any source mode).
+
+    Whether its policy semantics equal the current baseline's is the
+    compatibility decision's (:func:`compatibility_problem`), never this one's.
+    """
+    if not isinstance(record, dict) or set(record) != set(BASELINE_FIELDS):
+        return [f"{described} does not hold exactly the baseline record fields"]
+    if record.get(serialize.SCHEMA_KEY) != SCHEMA_BASELINE or record.get(serialize.VERSION_KEY) != RECORD_VERSION \
+            or record.get("contract") != BASELINE_CONTRACT:
+        return [f"{described} is not a {BASELINE_CONTRACT} baseline record"]
+    if type(record.get("baseline_version")) is not int or record["baseline_version"] < 1:
+        return [f"{described} names no positive Global policy version"]
+    surfaces = record.get("surfaces")
+    if not isinstance(surfaces, list) or any(
+        not isinstance(item, dict) or not {"policy_surface_id", "strength_class", "allowed_range", "global_setting"}
+        <= set(item) or not isinstance(item.get("allowed_range"), dict) for item in surfaces
+    ):
+        return [f"{described} surfaces are not surface records"]
+    return []
 
 
 def source_policy_identities() -> list[dict[str, str]]:
@@ -570,12 +666,8 @@ def _override_problems(item: object, described: str) -> list[tuple[str, str]]:
     if not surface.in_range(setting):
         found.append((CODE_SETTING_INVALID, f"{described} sets {surface.policy_surface_id} to {setting!r}, outside "
                                             f"{surface.minimum}..{surface.maximum}"))
-    elif setting == surface.global_setting:
-        found.append((CODE_PROFILE_INVALID, f"{described} restates the Global setting of {surface.policy_surface_id}; "
-                                            "an override exists only to differ from it"))
-    elif item["direction"] != (DIRECTION_STRENGTHEN if setting > surface.global_setting else DIRECTION_LIGHTEN):
-        found.append((CODE_PROFILE_INVALID, f"{described} says direction {item['direction']!r}, and its setting is "
-                                            "the other side of the Global setting"))
+    elif item["direction"] not in OVERRIDE_DIRECTIONS:
+        found.append((CODE_PROFILE_INVALID, f"{described} direction {item['direction']!r} is not strengthen or lighten"))
     if not isinstance(item["supporting_policy_change_id"], str) or not is_valid_id(
             item["supporting_policy_change_id"], "review_policy_change"):
         found.append((CODE_PROFILE_INVALID, f"{described} names no review_policy_change id"))
@@ -670,10 +762,9 @@ def profile_problems(record: object, described: str) -> list[tuple[str, str]]:
         found.append((CODE_LINEAGE_INVALID, f"{described} is version {version} and names no exact parent digest"))
     if not isinstance(record["global_baseline_digest"], str) or records.DIGEST_RE.match(record["global_baseline_digest"]) is None:
         found.append((CODE_PROFILE_INVALID, f"{described} global_baseline_digest is not a digest"))
-    if record["global_baseline_version"] != BASELINE_VERSION:
-        found.append((CODE_PROFILE_INCOMPATIBLE, f"{described} names Global baseline version "
-                                                 f"{record['global_baseline_version']!r}, which this loader cannot "
-                                                 "reconcile"))
+    if type(record["global_baseline_version"]) is not int or record["global_baseline_version"] < 1:
+        found.append((CODE_PROFILE_INVALID, f"{described} global_baseline_version is not a positive Global policy "
+                                            "version"))
     if record["loader_semantics_identity"] != LOADER_SEMANTICS_IDENTITY:
         found.append((CODE_PROFILE_INCOMPATIBLE, f"{described} binds loader semantics "
                                                  f"{record['loader_semantics_identity']!r}, not {LOADER_SEMANTICS_IDENTITY}"))
@@ -709,21 +800,115 @@ def parse_profile_bytes(raw: bytes, described: str) -> tuple[ProjectProfile, str
     return profile, text
 
 
-def compatibility_problem(profile: ProjectProfile, baseline: GlobalPolicyBaseline) -> str | None:
-    """Why ``profile`` cannot be applied under ``baseline`` (§30.7: exact derived-baseline compatibility), or ``None``."""
-    if profile.global_baseline_version != baseline.version:
-        return f"the Profile names Global baseline version {profile.global_baseline_version}, the current is {baseline.version}"
+def written_under(profile: ProjectProfile, reader: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """The baseline record ``profile`` was written under, recovered positively from immutable evidence (R6-2 item 3).
+
+    The applicable change record is the one whose ``after_profile_digest`` is
+    the Profile's digest - exactly one, found by exact digest, never "newest" -
+    and the baseline record it binds must digest to its own baseline digest and
+    to the Profile's. ``(record, None)``, or ``(None, why)`` for any missing,
+    ambiguous or unequal link.
+    """
+    digest = profile.digest
+    try:
+        matching = [change for change in (reader.read_policy_change(change_id) for change_id in reader.policy_change_ids())
+                    if change["after_profile_digest"] == digest]
+    except (ValidationError, KeyError, TypeError) as exc:
+        return None, f"the policy change records do not read ({exc})"
+    if len(matching) != 1:
+        return None, (f"{len(matching)} applied policy change record(s) produced the current Profile; exactly one "
+                      "must, found by its exact digest")
+    bound = matching[0]["global_baseline"]
+    if serialize.digest(bound) != matching[0]["global_baseline_digest"] \
+            or matching[0]["global_baseline_digest"] != profile.global_baseline_digest:
+        return None, ("the baseline record the Profile's change record binds does not digest to the Profile's "
+                      "global_baseline_digest")
+    if bound["baseline_version"] != profile.global_baseline_version:
+        return None, "the Profile's Global policy version is not the version of the baseline it was written under"
+    return dict(bound), None
+
+
+def compatibility_problem(profile: ProjectProfile, baseline: GlobalPolicyBaseline, reader: Any) -> str | None:
+    """Why ``profile`` cannot be applied under ``baseline``, or ``None`` - the ONLY compatibility decision (FC-RB7-5).
+
+    §30.7 before RB7, as R6-2 rules it: exact equality of the policy-semantic
+    projection of the baseline the Profile was written under (recovered from
+    its change record, :func:`written_under`) and of the current baseline. A
+    text-only Workline-root edit keeps a Profile compatible; a change to the
+    surfaces, meta-rules, loader semantics or Global policy version does not,
+    until RB7's versioned total adapter proves otherwise. Anything that cannot
+    be proven is incompatible: no guess, no merge, no dropped override.
+    """
     if profile.loader_semantics_identity != LOADER_SEMANTICS_IDENTITY:
         return "the Profile binds another loader semantics identity"
-    if profile.global_baseline_digest != baseline.digest:
-        return (f"the Profile was written under Global baseline {profile.global_baseline_digest}, and the current "
-                f"derived baseline is {baseline.digest}; before RB7 compatibility is exact, so no override is guessed, "
-                "merged or dropped")
+    bound, problem = written_under(profile, reader)
+    if bound is None:
+        return f"the baseline the Profile was written under cannot be recovered: {problem}"
+    problems = override_global_problems(profile, reader)
+    if problems:
+        return problems[0]
+    if semantic_projection(bound) != baseline.semantic_projection:
+        return ("the policy semantics of the Global baseline the Profile was written under are not the current "
+                "baseline's (exact derived-baseline compatibility); no override is guessed, merged or dropped")
     for item in profile.overrides:
         surface = baseline.surface(item["policy_surface_id"])
         if item["strength_class"] != surface["strength_class"]:
             return f"the Profile classifies {item['policy_surface_id']} differently from the Global baseline"
     return None
+
+
+def override_global_problems(profile: ProjectProfile, reader: Any) -> list[str]:
+    """Each override against the Global in force when THAT override was decided (FC-RB7-8 / -9).
+
+    That Global is the baseline record bound by the change record the
+    override's ``supporting_policy_change_id`` names - positive evidence,
+    never a code table and never the current Global: the change set this
+    exact setting on this surface, and the override neither restates that
+    Global setting nor sits on the other side of it from its direction. A
+    Project may stay stricter than a later Global default. Always performed,
+    by the reader-aware compatibility decision; never skipped.
+    """
+    found: list[str] = []
+    for item in profile.overrides:
+        surface_id = str(item["policy_surface_id"])
+        change_id = str(item["supporting_policy_change_id"])
+        try:
+            change = reader.read_policy_change(change_id) if reader.policy_change_exists(change_id) else None
+        except (ValidationError, KeyError, TypeError, AttributeError):
+            change = None
+        if change is None:
+            found.append(f"the override of {surface_id} names policy change {change_id}, which is not stored")
+            continue
+        if change["affected_policy_surface"] != surface_id or change["after_setting"] != item["setting"]:
+            found.append(f"the override of {surface_id} is not the setting its supporting policy change {change_id} "
+                         "decided")
+            continue
+        global_settings = bound_global_settings(change["global_baseline"])
+        if surface_id not in global_settings:
+            found.append(f"the Profile overrides {surface_id}, which the baseline it was decided under does not hold")
+            continue
+        global_setting = global_settings[surface_id]
+        if item["setting"] == global_setting:
+            found.append(f"the Profile restates the Global setting of {surface_id}; an override exists only to differ "
+                         "from it")
+        elif item["direction"] != (DIRECTION_STRENGTHEN if item["setting"] > global_setting else DIRECTION_LIGHTEN):
+            found.append(f"the Profile's override of {surface_id} says direction {item['direction']!r}, and its setting "
+                         "is the other side of the Global setting")
+    return found
+
+
+def profile_overlay(profile: ProjectProfile | None, baseline: GlobalPolicyBaseline) -> dict[str, int]:
+    """The ONE overlay of a Profile on the Global baseline (FC-RB7-5): every surface's effective setting.
+
+    The Global setting from the baseline object (FC-RB7-1), replaced by the
+    Profile's override where it holds one. An absent Profile is the baseline.
+    """
+    found: dict[str, int] = {}
+    for surface in SURFACES:
+        override = None if profile is None else profile.setting_of(surface.policy_surface_id)
+        found[surface.policy_surface_id] = baseline.global_setting(surface.policy_surface_id) if override is None \
+            else override
+    return found
 
 
 # --------------------------------------------------------------------------- active experiments and the Effective Policy (§30.6, §30.24)
@@ -737,8 +922,12 @@ class ActiveExperiment:
     direction: str
     holdout_setting: int | None
 
+    #: FC-RB7-6: Project-origin experiments only before RB7; the holdout aggregation is origin-agnostic.
+    origin: str = ORIGIN_PROJECT
+
     def to_record(self) -> dict[str, Any]:
         return {
+            "origin": self.origin,
             "policy_change_id": self.policy_change_id,
             "policy_surface_id": self.policy_surface_id,
             "direction": self.direction,
@@ -748,8 +937,9 @@ class ActiveExperiment:
 
 EFFECTIVE_FIELDS = (
     serialize.SCHEMA_KEY, serialize.VERSION_KEY, "policy_id", "family_policy_digest", "global_baseline", "profile",
-    "settings", "meta_rules_digest", "loader_semantics_identity", "active_experiments",
+    "compatibility", "settings", "meta_rules_digest", "loader_semantics_identity", "active_experiments",
 )
+ACTIVE_EXPERIMENT_FIELDS = ("origin", "policy_change_id", "policy_surface_id", "direction", "holdout_setting")
 
 
 def effective_policy_record(baseline: GlobalPolicyBaseline, profile: ProjectProfile | None,
@@ -757,10 +947,7 @@ def effective_policy_record(baseline: GlobalPolicyBaseline, profile: ProjectProf
     """The normalized Effective Policy: Global baseline + Profile or explicit absence (+ the active holdout plan)."""
     from . import p4
 
-    settings = {}
-    for surface in SURFACES:
-        override = None if profile is None else profile.setting_of(surface.policy_surface_id)
-        settings[surface.policy_surface_id] = surface.global_setting if override is None else override
+    settings = profile_overlay(profile, baseline)
     return serialize.canonical_data({
         serialize.SCHEMA_KEY: SCHEMA_EFFECTIVE,
         serialize.VERSION_KEY: RECORD_VERSION,
@@ -771,10 +958,12 @@ def effective_policy_record(baseline: GlobalPolicyBaseline, profile: ProjectProf
             "source_mode": baseline.source_mode,
         },
         "profile": None if profile is None else {"profile_version": profile.profile_version, "digest": profile.digest},
+        "compatibility": COMPATIBILITY_EXACT_DERIVED_SEMANTIC,
         "settings": settings,
         "meta_rules_digest": meta_rules_digest(),
         "loader_semantics_identity": LOADER_SEMANTICS_IDENTITY,
         "active_experiments": [item.to_record() for item in sorted(active, key=lambda e: (e.policy_surface_id,
+                                                                                         e.origin,
                                                                                          e.policy_change_id))],
     })
 
@@ -791,8 +980,8 @@ def parse_effective_policy(record: object, described: str) -> dict[str, Any]:
     baseline = records._require_mapping(found["global_baseline"], f"{described} global_baseline")
     records._require_exact_fields(baseline, ("contract", "baseline_version", "digest", "source_mode"),
                                   f"{described} global_baseline")
-    if baseline["contract"] != BASELINE_CONTRACT or baseline["baseline_version"] != BASELINE_VERSION \
-            or baseline["source_mode"] != SOURCE_MODE_DERIVED:
+    if baseline["contract"] != BASELINE_CONTRACT or baseline["baseline_version"] not in BASELINE_VERSIONS \
+            or baseline["source_mode"] not in SOURCE_MODES:
         raise _invalid(f"{described} binds a Global baseline this loader does not read")
     records._require_digest(baseline, "digest", f"{described} global_baseline")
     profile = found["profile"]
@@ -801,6 +990,8 @@ def parse_effective_policy(record: object, described: str) -> dict[str, Any]:
         records._require_exact_fields(profile, ("profile_version", "digest"), f"{described} profile")
         records._require_int(profile, "profile_version", f"{described} profile", minimum=1)
         records._require_digest(profile, "digest", f"{described} profile")
+    if found["compatibility"] not in COMPATIBILITY_INTERPRETATIONS:
+        raise _invalid(f"{described} binds a compatibility interpretation this build does not read")
     settings = records._require_mapping(found["settings"], f"{described} settings")
     if set(settings) != set(SURFACE_BY_ID):
         raise _invalid(f"{described} settings are not exactly the two registered surfaces")
@@ -813,16 +1004,18 @@ def parse_effective_policy(record: object, described: str) -> dict[str, Any]:
     keys = []
     for item in active:
         entry = records._require_mapping(item, f"{described} active experiment")
-        records._require_exact_fields(entry, ("policy_change_id", "policy_surface_id", "direction", "holdout_setting"),
-                                      f"{described} active experiment")
-        records._require_id(entry, "policy_change_id", "review_policy_change", f"{described} active experiment")
+        records._require_exact_fields(entry, ACTIVE_EXPERIMENT_FIELDS, f"{described} active experiment")
+        kind = EXPERIMENT_ORIGINS.get(entry["origin"])
+        if kind is None:
+            raise _invalid(f"{described} names an active experiment of an origin this build does not read")
+        records._require_id(entry, "policy_change_id", kind, f"{described} active experiment")
         surface = SURFACE_BY_ID.get(entry["policy_surface_id"])
         if surface is None or entry["direction"] not in CHANGE_DIRECTIONS:
             raise _invalid(f"{described} names an active experiment on no registered surface or direction")
         holdout = entry["holdout_setting"]
         if holdout is not None and (not surface.in_range(holdout) or holdout <= settings[surface.policy_surface_id]):
             raise _invalid(f"{described} holds a holdout that is not stronger than the effective setting")
-        keys.append((entry["policy_surface_id"], entry["policy_change_id"]))
+        keys.append((entry["policy_surface_id"], entry["origin"], entry["policy_change_id"]))
     if keys != sorted(set(keys)):
         raise _invalid(f"{described} active experiments are not sorted and duplicate-free")
     return serialize.canonical_data(found)
@@ -926,12 +1119,45 @@ def resolve_policy_state(reader: Any, workline_root: Path, *, require_compatible
         raise stop(CODE_PROFILE_INVALID, f"the canonical Project Profile does not read: {exc}; no new Review Run is "
                                          "started under it (policy maintenance / reconcile)") from exc
     if profile is not None and require_compatible:
-        problem = compatibility_problem(profile, baseline)
+        problem = compatibility_problem(profile, baseline, reader)
         if problem is not None:
             raise stop(CODE_PROFILE_INCOMPATIBLE, f"{problem}: no new Review Run is started under this Profile "
                                                   "(policy maintenance / reconcile)")
     active = active_experiments(reader, profile)
     return PolicyState(baseline, profile, active, effective_policy_record(baseline, profile, active))
+
+
+def new_run_effective_policy(reader: Any, workline_root: Path, policy_id: str, discovery: Sequence[Any],
+                             holdout: Sequence[Any] = ()) -> dict[str, Any] | None:
+    """The Effective Policy a NEW P4-capable Run freezes (R6-1), kind-generic (FC-RB5-4 / FC-RB5-5).
+
+    ``policy_id`` is the family policy the owner's dispatch chose for the Run
+    (a new first Run: the P6-capable default; a successor: its cycle's).
+    For a P6-capable Run: the current GlobalPolicyBaseline + Profile or its
+    explicit absence, fail closed on an incompatible Profile, and the bound
+    discovery actors held to ``required_slots`` and the holdout plan. For a P4
+    or P5 Run: ``None`` - and a holdout binding is refused, never ignored.
+    Everything is checked before any reservation or effect.
+    """
+    if policy_id != P6_POLICY_ID:
+        if holdout:
+            raise stop(CODE_HOLDOUT_NOT_APPLICABLE, f"a {policy_id} Run is not P6-capable, so no holdout discovery slot "
+                                                    "applies to it; nothing is reserved")
+        return None
+    state = resolve_policy_state(reader, workline_root)
+    problem = discovery_slots_problem(state.effective, discovery, holdout)
+    if problem is not None:
+        raise stop(*problem)
+    return state.effective
+
+
+def current_effective_policy_hash(reader: Any, workline_root: Path) -> str:
+    """The Effective Policy hash a NEW P6-capable Run of ANY P4-capable kind would freeze now (FC-RB5-4).
+
+    Pure and kind-generic: GlobalPolicyBaseline + the canonical Profile or its
+    explicit absence; an incompatible Profile fails closed.
+    """
+    return resolve_policy_state(reader, workline_root).effective_hash
 
 
 # --------------------------------------------------------------------------- P5 evidence references (§30.31)
@@ -1230,11 +1456,12 @@ def expected_after_profile(state: PolicyState, policy_change_id: str, surface: P
     before = state.profile
     overrides = [dict(item) for item in (() if before is None else before.overrides)
                  if item["policy_surface_id"] != surface.policy_surface_id]
-    if after_setting != surface.global_setting:
+    global_setting = state.baseline.global_setting(surface.policy_surface_id)
+    if after_setting != global_setting:
         overrides.append({
             "policy_surface_id": surface.policy_surface_id, "strength_class": surface.strength_class,
             "setting": after_setting,
-            "direction": DIRECTION_STRENGTHEN if after_setting > surface.global_setting else DIRECTION_LIGHTEN,
+            "direction": DIRECTION_STRENGTHEN if after_setting > global_setting else DIRECTION_LIGHTEN,
             "supporting_policy_change_id": policy_change_id,
         })
     overrides.sort(key=lambda item: item["policy_surface_id"])
@@ -1492,12 +1719,21 @@ CHANGE_FIELDS = (
     "global_baseline_digest", "affected_policy_surface", "strength_class", "direction", "before_setting",
     "after_setting", "evidence", "measurement_contract", "observation_window", "success_criteria",
     "rollback_threshold", "rollback_unit", "environment_identity", "overlap_classification", "holdout_plan",
-    "reevaluation", "expected_effect_summary",
+    "reevaluation", "expected_effect_summary", "global_baseline",
 )
 
 
-def change_record(candidate: Mapping[str, Any], *, review_run_id: str, receipt_id: str) -> dict[str, Any]:
-    """The immutable change record of an authorized Candidate, built from it exactly (§30.19)."""
+def change_record(candidate: Mapping[str, Any], *, review_run_id: str, receipt_id: str,
+                  baseline_record: Mapping[str, Any]) -> dict[str, Any]:
+    """The immutable change record of an authorized Candidate, built from it exactly (§30.19).
+
+    It also binds the complete normalized baseline record the Candidate was
+    reviewed under (§30.19 "at least"; R6-2 item 3): its digest is the
+    Candidate's, so the baseline a Profile was written under is recovered from
+    immutable evidence, never guessed.
+    """
+    if serialize.digest(dict(baseline_record)) != candidate["global_baseline_digest"]:
+        raise _invalid("the baseline record is not the one the Candidate was reviewed under")
     after = ProjectProfile.from_record(dict(candidate["after_profile"]), "the after Profile")
     record = serialize.canonical_data({
         serialize.SCHEMA_KEY: SCHEMA_CHANGE, serialize.VERSION_KEY: RECORD_VERSION,
@@ -1520,6 +1756,7 @@ def change_record(candidate: Mapping[str, Any], *, review_run_id: str, receipt_i
         "holdout_plan": None if candidate["holdout_plan"] is None else dict(candidate["holdout_plan"]),
         "reevaluation": candidate["reevaluation"],
         "expected_effect_summary": candidate["expected_effect"],
+        "global_baseline": dict(baseline_record),
     })
     parse_change(record, "the policy change record")
     return record
@@ -1545,6 +1782,11 @@ def parse_change(record: object, described: str) -> dict[str, Any]:
         raise _invalid(f"{described} skips a Profile version", code="review_record_invalid")
     records._require_digest(found, "after_profile_digest", described)
     records._require_digest(found, "global_baseline_digest", described)
+    problems = baseline_record_problems(found["global_baseline"], f"{described} global_baseline")
+    if problems:
+        raise _invalid(problems[0])
+    if serialize.digest(found["global_baseline"]) != found["global_baseline_digest"]:
+        raise _invalid(f"{described} binds a baseline record that does not digest to its global_baseline_digest")
     surface = SURFACE_BY_ID.get(found["affected_policy_surface"])
     if surface is None or found["strength_class"] != surface.strength_class:
         raise _invalid(f"{described} names no registered surface with its fixed class")
@@ -1824,7 +2066,7 @@ def discovery_slots_problem(effective: Mapping[str, Any], required: Sequence[Any
 
 # --------------------------------------------------------------------------- the persisted-policy projection (§30.21-§30.22)
 
-def normalized_projection(profile: ProjectProfile) -> dict[str, Any]:
+def normalized_projection(profile: ProjectProfile, global_settings: Mapping[str, int]) -> dict[str, Any]:
     """The semantic projection the PersistedProjectionAdapter compares: the Profile as the canonical loader reads it."""
     return serialize.canonical_data({
         "profile_version": profile.profile_version,
@@ -1834,17 +2076,19 @@ def normalized_projection(profile: ProjectProfile) -> dict[str, Any]:
         "loader_semantics_identity": profile.loader_semantics_identity,
         "settings": {surface.policy_surface_id: (profile.setting_of(surface.policy_surface_id)
                                                  if profile.setting_of(surface.policy_surface_id) is not None
-                                                 else surface.global_setting) for surface in SURFACES},
+                                                 else int(global_settings[surface.policy_surface_id]))
+                     for surface in SURFACES},
         "overrides": [dict(item) for item in profile.overrides],
         "active_experiment_refs": list(profile.active_experiment_refs),
     })
 
 
-def projection_hash(profile: ProjectProfile) -> str:
-    return serialize.digest(normalized_projection(profile))
+def projection_hash(profile: ProjectProfile, global_settings: Mapping[str, int]) -> str:
+    return serialize.digest(normalized_projection(profile, global_settings))
 
 
-def persisted_projection_problem(reviewed_after: Mapping[str, Any], persisted_raw: bytes | None) -> str | None:
+def persisted_projection_problem(reviewed_after: Mapping[str, Any], persisted_raw: bytes | None,
+                                 global_settings: Mapping[str, int]) -> str | None:
     """The PersistedProjectionAdapter (§30.22): ``None`` exactly when the committed bytes are the reviewed Profile.
 
     Both halves are required: the exact recorded bytes (no alternate byte shape
@@ -1860,7 +2104,7 @@ def persisted_projection_problem(reviewed_after: Mapping[str, Any], persisted_ra
         loaded, _ = parse_profile_bytes(persisted_raw, "the committed Project Profile")
     except ValidationError as exc:
         return f"the committed Profile does not load canonically: {exc}"
-    if normalized_projection(loaded) != normalized_projection(reviewed):
+    if normalized_projection(loaded, global_settings) != normalized_projection(reviewed, global_settings):
         return "the committed Profile does not round-trip to the reviewed after-state"
     return None
 
@@ -1961,7 +2205,7 @@ def policy_problems(reader: Any, workline_root: Path | None) -> list[tuple[str, 
             baseline = load_global_baseline(workline_root)
         except StopError as exc:
             return found + [(exc.code, str(exc))]
-        problem = compatibility_problem(profile, baseline)
+        problem = compatibility_problem(profile, baseline, reader)
         if problem is not None:
             found.append((CODE_PROFILE_INCOMPATIBLE, f"the canonical Project Profile is incompatible: {problem} "
                                                      "(policy maintenance / reconcile)"))

@@ -847,6 +847,11 @@ class PlanningReviewP4:
     #: Run this invocation resumes. Never part of P4 request bytes, never slot identity; a P4-only cycle
     #: takes none, and a P5 cycle resumed under a Human decision cannot launch without it.
     decision_evidence: tuple[p4.DecisionEvidence, ...] = ()
+    #: P6 (§30.10-§30.11, R6-1): the discovery holdout actors an active lightening experiment's frozen holdout plan
+    #: selects - distinct slots, each a reviewer identity/version distinct from every required one. Default empty, so
+    #: every earlier construction is unchanged; refused for a Run that is not P6-capable, and a Run whose Effective
+    #: Policy needs a holdout is refused without it.
+    holdout_discovery: tuple[p4.DiscoveryBinding, ...] = ()
 
 
 def validate_planning_review_p4(review: object) -> PlanningReviewP4:
@@ -860,6 +865,7 @@ def validate_planning_review_p4(review: object) -> PlanningReviewP4:
         problems.append(f"contract {review.contract!r} is not {P4_CONTRACT!r}")
     problems.extend(p4.binding_problems(review.discovery, review.adjudicator, review.repair, review.human_decision))
     problems.extend(p4.decision_evidence_problems(review.decision_evidence, review.human_decision))
+    problems.extend(p4.holdout_binding_problems(review.holdout_discovery, review.discovery))
     if problems:
         raise ValidationError("invalid PlanningReviewP4: " + "; ".join(problems), code="review_contract_invalid")
     return review
@@ -966,7 +972,7 @@ def task_input_problems_p4(task_input: records.TaskInput, snapshot_material: dic
         problems.append("the stored snapshot's material does not digest to the Run's candidate_hash")
     # the Run's own stored family policy (GAP-A): a P4-only TaskInput is checked against the P4 policy exactly
     # as before, a P5 one against the P5 policy - never against the current default
-    policy = envelope.get("policy_id")
-    if p4.policy_named(policy) is None or task_input.effective_policy_hash != p4.policy_hash(str(policy)):
+    # P6 (R6-1): a P6-capable TaskInput is checked against the Effective Policy its own request froze
+    if p4.envelope_policy_hash(envelope) is None or task_input.effective_policy_hash != p4.envelope_policy_hash(envelope):
         problems.append("the request envelope names no policy whose digest is the P4 Effective Policy")
     return problems

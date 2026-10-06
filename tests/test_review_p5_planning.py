@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from p5_helpers import at_head, committed_paths, first_envelope, p4_only_cycle
+from p5_helpers import at_head, committed_paths, first_envelope, p4_only_cycle, p5_only_cycle
 from test_review_p4_planning import Adjudicator, Discovery, P4PlanningCase, Repairer, p4_review, problem
 from workline import roadmap_review as rr
 from workline.review import history, p4, paths, serialize
@@ -25,6 +25,19 @@ from workline.review.store import ReviewStore
 LOW = p4.P4Claim("LOW", "low", "a minor wording note")
 IMPROVE = p4.P4Claim("MID", "improve", "a clearer phase name")
 
+
+
+#: R6-1 (TEST-ONLY seam, tests/p5_helpers.p5_only_cycle): production binds the P6-capable default to every NEW first
+#: Run; this module keeps testing P5 Runs exactly as pre-P6 code wrote them.
+_P5_SEAM = p5_only_cycle()
+
+
+def setUpModule() -> None:
+    _P5_SEAM.__enter__()
+
+
+def tearDownModule() -> None:
+    _P5_SEAM.__exit__(None, None, None)
 
 class P5PlanningTests(P4PlanningCase):
     def history_clean(self, store: Any) -> None:

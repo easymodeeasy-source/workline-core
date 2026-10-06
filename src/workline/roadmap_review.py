@@ -53,6 +53,7 @@ from .mutation import (
 from .phase_create import PhaseRelationSpec, PhaseSpec, phase_registration_effects, resolve_phase_relations
 from .review import checkout, committed, gate, history, p4, paths as review_paths, planning, records, serialize
 from .review import fsafe
+from .review import policy as review_policy
 from .review.planning import (
     PlanningReview,
     PlanningReviewFinding,
@@ -2821,7 +2822,6 @@ def p5_publication_problem(repo: Path, commit: str, summary_path: str, consumpti
     consumption_id = consumption_path[len(consumptions):-len(".yaml")]
     if not is_valid_id(run_id, "review_run") or not is_valid_id(consumption_id, "review_consumption"):
         return "the Run summary or the Consumption is not named by its Review ID"
-    p5_policy_hash = p4.policy_hash(p4.P5_POLICY_ID)
     try:
         at_commit = committed.CommittedReviewStore(repo, commit)
         consumption = at_commit.read_consumption(consumption_id)
@@ -2834,17 +2834,27 @@ def p5_publication_problem(repo: Path, commit: str, summary_path: str, consumpti
         if chain is None or not chain.generations[0].accepted_tasks:
             return f"{commit} holds no generation 1 of Review Run {run_id} that accepts a task"
         first = chain.generations[0]
+        # R6-1: a history-capable Run is P5 or P6 by its own stored identity; the Effective Policy it binds is its own
+        # stored one (P5's static hash, or the digest of the Effective Policy a P6 Run froze)
+        stored_policies: set[str | None] = set()
+        stored_hashes: set[str | None] = set()
         for task in first.accepted_tasks:
             task_input = at_commit.read_task_input(str(task["task_id"]))
             envelope = task_input.request_envelope
+            found_policy = p4.policy_of_task_input(task_input)
             if p4.contract_of_task_input(task_input) != planning.P4_CONTRACT \
-                    or p4.policy_of_task_input(task_input) != p4.P5_POLICY_ID \
-                    or envelope.get("policy_id") != p4.P5_POLICY_ID \
+                    or not p4.is_history_policy(found_policy) \
+                    or envelope.get("policy_id") != found_policy \
                     or envelope.get(history.HISTORY_CONTRACT_KEY) != history.HISTORY_CONTRACT:
                 return (f"TaskInput {task['task_id']} of Review Run {run_id} does not store the planning P4-family "
-                        f"contract with the P5 policy {p4.P5_POLICY_ID} and history contract {history.HISTORY_CONTRACT}")
+                        f"contract with a history-capable policy and history contract {history.HISTORY_CONTRACT}")
+            stored_policies.add(found_policy)
+            stored_hashes.add(p4.envelope_policy_hash(envelope))
+        if len(stored_policies) != 1 or len(stored_hashes) != 1:
+            return f"generation 1 of Review Run {run_id} does not bind one history-capable policy"
+        p5_policy_hash = stored_hashes.pop()
         if first.effective_policy_hash != p5_policy_hash:
-            return f"generation 1 of Review Run {run_id} does not bind the P5 Effective Policy"
+            return f"generation 1 of Review Run {run_id} does not bind its stored Effective Policy"
         summary = at_commit.read_history(review_paths.HISTORY_RUNS, run_id)
         if (summary.review_run_id, summary.durable_disposition, summary.consumption_id, summary.receipt_id,
                 summary.effective_policy_hash) != (run_id, history.DISPOSITION_CONSUMED, consumption_id,
@@ -3255,7 +3265,9 @@ def _p4_run(op: _Op, mutation: Mutation, run_id: str) -> _Run:
 
 
 def _p4_discovery_bindings(op: _Op) -> list[p4.DiscoveryBinding]:
-    return sorted(op.review.discovery, key=lambda binding: binding.viewpoint)
+    """The discovery actors of the Run: the required slots, then (P6, §30.11) the holdout slots, each by viewpoint."""
+    return (sorted(op.review.discovery, key=lambda binding: binding.viewpoint)
+            + sorted(op.review.holdout_discovery, key=lambda binding: binding.viewpoint))
 
 
 def _p4_requirement(op: _Op, view: ProjectView) -> dict[str, Any]:
@@ -3314,7 +3326,7 @@ def _expected_review_keys_p4(op: _Op, mutation: Mutation) -> set[str]:
     keys.add(run_key)
     run_id = mutation.reserved(run_key)
     if run_id is not None:
-        keys.update(gate.review_task_key(run_id, binding.task_slot) for binding in op.review.discovery)
+        keys.update(gate.review_task_key(run_id, binding.task_slot) for binding in _p4_discovery_bindings(op))
         receipt_key = gate.review_receipt_key(run_id, p4.SEAL_GENERATION)
         keys.add(receipt_key)
         receipt_id = mutation.reserved(receipt_key)
@@ -3369,19 +3381,25 @@ def _p4_task_inputs(
     op: _Op, run_id: str, task_ids: list[str], candidate: dict[str, Any], snapshot: records.CandidateSnapshot,
     context: dict[str, Any], requirement: dict[str, Any], generation: int, succession: dict[str, Any] | None,
     set_aside: list[dict[str, Any]], decision: p4.HumanDecision | None, evidence: dict[str, Any], policy: str,
-    history_writes: p4.HistoryWrites | None = None,
+    history_writes: p4.HistoryWrites | None = None, effective: dict[str, Any] | None = None,
 ) -> list[records.TaskInput]:
     """The discovery TaskInputs of a Run under its explicit family ``policy`` (GAP-A); a P5 Run's requests also
-    bind the history records its generation 1 writes (P-5)."""
+    bind the history records its generation 1 writes (P-5); a P6 Run's (R6-1) also bind the Effective Policy it
+    froze and each task's role - a required slot or a holdout slot."""
     writes = history_writes or p4.HistoryWrites()
+    holdout = {binding.task_slot for binding in op.review.holdout_discovery}
     found = []
     for task_id, binding in zip(task_ids, _p4_discovery_bindings(op)):
+        role = None
+        if effective is not None:
+            role = review_policy.ROLE_HOLDOUT if binding.task_slot in holdout else review_policy.ROLE_REQUIRED
         envelope = p4.discovery_request(
             review_contract=planning.P4_CONTRACT, review_kind=op.kind.review_kind, viewpoint=binding.viewpoint,
             candidate=candidate, context=context, requirement=requirement, candidate_generation=generation,
             succession=succession, set_aside_runs=set_aside, human_decision=decision,
             evidence_ids=[f"planning-evidence:{serialize.digest(evidence)}"], policy_id=policy,
             set_aside_summaries=writes.summary_bindings(), decision_evidence=writes.decision_bindings(),
+            effective_policy=effective, discovery_role=role,
         )
         found.append(p4.task_input(
             task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
@@ -3469,6 +3487,11 @@ def _setup_new_run_p4(op: _Op, mutation: Mutation, destination: Any, discovery: 
     set_aside = _p4_evidence_set_aside(op, list((mutation.note(NOTE_DISCOVERY) or {}).get("set_aside") or []))
     _require_known_reservations_p4(op, mutation)
     policy = _p4_cycle_policy(store, set_aside)
+    # R6-1, before ANY reservation or other effect: a P6-capable new Run resolves and freezes its Effective Policy
+    # (GlobalPolicyBaseline + Profile or explicit absence), fail closed on an incompatible Profile, with its bound
+    # discovery actors held to required_slots and the holdout plan; a P4 / P5 Run takes none and no holdout
+    effective = review_policy.new_run_effective_policy(ReviewStore(store), store.workline_root(), policy,
+                                                       op.review.discovery, op.review.holdout_discovery)
     # GAP-G / §28.18, before ANY reservation or other effect: every P5 HUMAN_WAIT Run this invocation resumes has
     # its evidence input, no evidence is detached, and each input holds against canonical records
     p4.require_decision_evidence_cover(ReviewStore(store), set_aside, op.review.decision_evidence)
@@ -3502,10 +3525,11 @@ def _setup_new_run_p4(op: _Op, mutation: Mutation, destination: Any, discovery: 
         publication.require_barrier_clear(store.root, head)
     _note_binding(store, mutation)
     task_inputs = _p4_task_inputs(op, run_id, task_ids, candidate, snapshot, context, requirement, 1, None, set_aside,
-                                  decision, evidence, policy, writes)
+                                  decision, evidence, policy, writes, effective)
     return _Run(run_id, task_ids[0], receipt_id, consumption_id, frozen={
         "candidate": candidate, "snapshot": snapshot, "task_inputs": task_inputs, "evidence": evidence,
         "context": context, "target": target, "write_snapshot": True, "policy": policy, "history": writes,
+        "effective": effective,
     })
 
 
@@ -3536,7 +3560,8 @@ def _p4_accept(op: _Op, mutation: Mutation, run: _Run) -> None:
         review_run_id=run.review_run_id, generation=1, previous_generation=None, previous_digest=None,
         review_kind=op.kind.review_kind, target_identity=frozen["target"], operation_identity=op.operation_identity,
         candidate_hash=planning.candidate_hash(candidate), review_context_hash=serialize.digest(frozen["context"]),
-        effective_policy_hash=p4.policy_hash(frozen["policy"]), evidence_digest=serialize.digest(frozen["evidence"]),
+        effective_policy_hash=p4.run_effective_policy_hash(frozen["policy"], frozen.get("effective")),
+        evidence_digest=serialize.digest(frozen["evidence"]),
         coverage_digest=serialize.digest(p4.coverage_record(required, [])),
         raw_report_set_digest=serialize.digest(p4.report_set_record([])),
         adjudication_digest=serialize.digest(p4.pending_adjudication_record()),
@@ -3579,7 +3604,8 @@ def _p4_currency(op: _Op, chain: Any, base: str, reserved: dict[str, str]) -> Cu
     policy = p4.policy_of_envelope(envelope)
     if policy is None:
         return Currency("mismatch", "the Run's request names no policy of the P4-capable family")
-    if p4.policy_hash(policy) != first.effective_policy_hash:
+    # P6 (R6-1): the Effective Policy the Run froze in its own request; an open Run is never re-resolved
+    if p4.envelope_policy_hash(envelope) != first.effective_policy_hash:
         return Currency("stale", planning.STALE_POLICY)
     try:
         view = committed_view(store, base)
@@ -3802,7 +3828,7 @@ def _p4_launch_discovery(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> 
         return _finish(op, mutation, run, STATUS_STALE, detail=found.detail)
     if not found.current:
         raise _reconcile(f"the Candidate does not reproduce: {found.detail}", "review_candidate_mismatch")
-    bindings = {binding.task_slot: binding for binding in op.review.discovery}
+    bindings = {binding.task_slot: binding for binding in _p4_discovery_bindings(op)}
     settled: list[dict[str, Any]] = []
     reports: dict[str, dict[str, Any]] = {}
     for task in tasks:
@@ -3845,7 +3871,7 @@ def _p4_launch_discovery(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> 
         raw_report_set_digest=serialize.digest(p4.report_set_record(settled)), settled_tasks=tuple(settled),
     )
     extra = [(review_paths.report_rel(task["result_digest"]), reports[task["task_id"]]) for task in settled]
-    if p4.policy_of_envelope(envelope) == p4.P5_POLICY_ID:
+    if p4.is_history_policy(p4.policy_of_envelope(envelope)):
         # GAP-E: a G2 that settles a discovery task failed makes discovery non-authorizing and final for the Run;
         # its immutable not_authorized Run summary is written in this same G2 settlement
         extra += p4.not_authorized_history(gate_two, int(envelope["candidate_generation"]))
@@ -3915,6 +3941,7 @@ def _p4_accept_adjudication(op: _Op, mutation: Mutation, run: _Run, chain: Any) 
         reports=[{"task_id": t, "result_digest": d} for t, d, _ in reports],
         prior=p4.NO_PRIOR if prior is None else prior.prior_record(), evidence_ids=evidence_ids, policy_id=policy,
         prior_history=_p4_prior_history(review, second, policy),
+        effective_policy=p4.effective_policy_of_envelope(envelope),
     )
     task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_ADJUDICATOR), "review_task")
     adjudicator = op.review.adjudicator
@@ -4094,7 +4121,7 @@ def _p4_accept_repair(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> Non
         requirement=envelope["requirement"], repair_batch_id=batch_id,
         repair_batch_digest=serialize.digest(batch.to_record()),
         allowed_result_surface=batch.allowed_result_surface, strategy=batch.strategy, evidence_constraints=(),
-        policy_id=policy,
+        policy_id=policy, effective_policy=p4.effective_policy_of_envelope(envelope),
     )
     task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_REPAIR), "review_task")
     repair = op.review.repair
@@ -4230,6 +4257,7 @@ def _p4_repair(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> ReviewedPl
         evidence=(p4.evidence_reuse("planning-evidence", None, None, prior_identities=(), new_identities=(),
                                     assumption_invalidated=False),),
         kind_checks=(p4.P4Verification(P4_KIND_CHECK, "pass"),),
+        effective_policy=p4.effective_policy_of_envelope(envelope),
     )
     record = result.to_record()
     digest = serialize.digest(record)
@@ -4311,10 +4339,13 @@ def _p4_begin_successor(op: _Op, mutation: Mutation, destination: Any, run: _Run
                                         phase_entry=not op.roadmap_kind, remote=destination is not None)
     task_ids = [str(mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot)))
                 for binding in _p4_discovery_bindings(op)]
-    # a repair successor stays in its cycle's stored family (GAP-A item 5)
+    # a repair successor stays in its cycle's stored family (GAP-A item 5); a P6 successor is a new Run and freezes
+    # the Effective Policy current at its start (R6-1, §30.6)
     policy = _p4_policy(store, predecessor)
+    effective = review_policy.new_run_effective_policy(review, store.workline_root(), policy, op.review.discovery,
+                                                       op.review.holdout_discovery)
     task_inputs = _p4_task_inputs(op, run.review_run_id, task_ids, candidate, snapshot, context, requirement,
-                                  generation, succession, set_aside, decision, evidence, policy)
+                                  generation, succession, set_aside, decision, evidence, policy, effective=effective)
     # G-1: Candidate N+1 is current only by positive proof, before its Run begins.
     first = predecessor.generations[0]
     problems = _p4_linkage_problems(op, task_inputs[0].request_envelope, snapshot.candidate_hash,
@@ -4330,7 +4361,7 @@ def _p4_begin_successor(op: _Op, mutation: Mutation, destination: Any, run: _Run
     run.frozen = {
         "candidate": candidate, "snapshot": snapshot, "task_inputs": task_inputs, "evidence": evidence,
         "context": context, "target": predecessor.generations[0].target_identity, "write_snapshot": write_snapshot,
-        "policy": policy,
+        "policy": policy, "effective": effective,
     }
     _p4_accept(op, mutation, run)
     run.frozen = None
@@ -4485,7 +4516,7 @@ def p4_planning_owned_paths(run: _Run, chain: Any, material: dict[str, Any], rev
         found += [review_paths.receipt_rel(str(run.receipt_id)), review_paths.supersession_rel(str(run.receipt_id))]
     if run.consumption_id:
         found.append(review_paths.consumption_rel(str(run.consumption_id)))
-    if review is not None and p4.run_policy(review, chain) == p4.P5_POLICY_ID:
+    if review is not None and p4.is_history_policy(p4.run_policy(review, chain)):
         found += p4.run_history_paths(review, run.review_run_id, chain)
         found.append(review_paths.history_run_rel(run.review_run_id))
     return sorted(set(found))

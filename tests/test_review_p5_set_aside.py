@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Any
 from unittest import mock
 
-from p5_helpers import committed_paths, first_envelope
+from p5_helpers import committed_paths, first_envelope, p5_only_cycle
 from planning_helpers import Crash, crash_at, git
 from test_review_p4_planning import Discovery, P4PlanningCase, p4_review
 from test_review_p4_work import P4WorkCase, work_p4
@@ -65,6 +65,19 @@ def adding_commits(repo: Any, relative: str) -> list[str]:
     """Every commit of HEAD's history that touches ``relative`` (one = written once, never rewritten)."""
     return git(repo, "log", "--format=%H", "--", relative).split()
 
+
+
+#: R6-1 (TEST-ONLY seam, tests/p5_helpers.p5_only_cycle): production binds the P6-capable default to every NEW first
+#: Run; this module keeps testing P5 Runs exactly as pre-P6 code wrote them.
+_P5_SEAM = p5_only_cycle()
+
+
+def setUpModule() -> None:
+    _P5_SEAM.__enter__()
+
+
+def tearDownModule() -> None:
+    _P5_SEAM.__exit__(None, None, None)
 
 class SetAsideAssertions:
     """The R-5 facts every owner proves, read from canonical records only."""

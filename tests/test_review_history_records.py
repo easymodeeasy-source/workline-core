@@ -229,8 +229,12 @@ class IdentityTests(unittest.TestCase):
         for module in (records, p4, planning, wc, work_context, work_invocation, checkout):
             for name, value in vars(module).items():
                 # RB4-OWNER: p4 re-exports the P5 policy identity for its family dispatch; it declares nothing new
-                if module is p4 and name in ("P5_POLICY_ID", "DEFAULT_POLICY_ID"):
+                if module is p4 and name == "P5_POLICY_ID":
                     self.assertEqual(history.P5_POLICY_ID, value)
+                    continue
+                # R6-1: a NEW first Run's default is the P6-capable family policy, re-exported from review.policy
+                if module is p4 and name in ("DEFAULT_POLICY_ID", "P6_POLICY_ID"):
+                    self.assertEqual(p4.P6_POLICY_ID, value)
                     continue
                 if name.isupper() and isinstance(value, str) and value.startswith("review-"):
                     others.add(value)

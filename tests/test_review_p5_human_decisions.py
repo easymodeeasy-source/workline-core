@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from p5_helpers import at_head, decision_evidence, first_envelope
+from p5_helpers import at_head, decision_evidence, first_envelope, p5_only_cycle
 from planning_helpers import plan
 from test_review_p4_planning import Discovery, P4PlanningCase, p4_review
 from test_review_p4_work import P4WorkCase
@@ -33,6 +33,19 @@ HUMAN = p4.P4Claim("HIGH", "human", "which scope?")
 CONFIRMED = p4.HumanDecision("hd-1", p4.DECISION_CONFIRMED)
 CHANGED = p4.HumanDecision("hd-2", p4.DECISION_CHANGED)
 
+
+
+#: R6-1 (TEST-ONLY seam, tests/p5_helpers.p5_only_cycle): production binds the P6-capable default to every NEW first
+#: Run; this module keeps testing P5 Runs exactly as pre-P6 code wrote them.
+_P5_SEAM = p5_only_cycle()
+
+
+def setUpModule() -> None:
+    _P5_SEAM.__enter__()
+
+
+def tearDownModule() -> None:
+    _P5_SEAM.__exit__(None, None, None)
 
 class LaunchWitness(Discovery):
     """A discovery actor that records, at its launch, whether the given history paths are already committed."""
