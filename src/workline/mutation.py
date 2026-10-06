@@ -2170,6 +2170,12 @@ def bind_policy_recovery(mutation: Mutation, bindings: list[tuple[str, str, str]
             "is recorded: reconcile required",
             reason="review_recovery_reservation_conflict",
         )
+    # ORCH-RB6-1-R7: the exactly identical binding a crashed call already saved (in its one save) is resumed as it
+    # is - every key bound to the same canonical ID, under the same note, no effect - never a reservation conflict
+    reserved = mutation.record.get("reserved_ids") or {}
+    if mutation.status == "pending" and not mutation.effects and mutation.note(note[0]) == note[1] \
+            and all(reserved.get(key) == identifier for key, identifier, _kind in bindings):
+        return
     _bind_recovered_reservations(mutation, bindings, set(), note, recovery_marker=False)
 
 

@@ -107,12 +107,15 @@ P6_PRODUCERS = {
     ("project_policy.py",): None,
     ("mutation.py",): {"_guard_policy_record", "_validate_profile_replacement", "_classify_profile_replacement",
                        "_replace_review_profile", "bind_policy_recovery", "_policy_publication"},
-    ("review", "recovery.py"): {"discover_kind"},
-    ("review", "publication.py"): {"policy_change_paths", "committed_policy_proof"},
+    ("review", "recovery.py"): {"discover_kind", "p4_reconstruction_problem"},
+    ("review", "publication.py"): {"policy_change_adders", "committed_policy_proof", "_prove_policy"},
 }
+#: ORCH-RB6-1-R11: the functions whose returned ``(code, message)`` a producer raises as ``stop(*problem)``.
+STARRED_SOURCES = {"surface_problem", "discovery_slots_problem"}
 #: The pre-P6 codes / reasons the P6 owner reuses unchanged (each exists at the base commit 61b0b9dd).
 SHARED_PRE_P6 = {"detached_head", "review_contract_invalid", "review_not_persisted", "review_persistence_unknown",
-                 "review_reviewer_failed", "review_reviewer_mismatch", "review_recovery_reservation_conflict"}
+                 "review_reviewer_failed", "review_reviewer_mismatch", "review_recovery_reservation_conflict",
+                 "review_recovery_incomplete", "review_record_invalid"}
 P6_OWNER_CODE = "review_policy_owner"
 _MODULES = {"policy": policy, "review_policy": policy, "p4": p4, "history": history}
 
@@ -132,6 +135,21 @@ def _resolve(node: ast.AST) -> set[str] | None:
     return None
 
 
+def _call_name(node: ast.Call) -> str | None:
+    return node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+
+
+def _starred_source(function: ast.AST, call: ast.Call) -> bool:
+    """Whether ``stop(*name)`` in ``function`` raises what one of :data:`STARRED_SOURCES` returned into ``name``."""
+    starred = call.args[0].value
+    if not isinstance(starred, ast.Name):
+        return False
+    return any(isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == starred.id
+                                                     for target in node.targets)
+               and isinstance(node.value, ast.Call) and _call_name(node.value) in STARRED_SOURCES
+               for node in ast.walk(function))
+
+
 def p6_raised() -> tuple[set[str], list[str]]:
     """Every reason / code the P6 producers raise, and what the scan cannot resolve (beyond pass-through helpers)."""
     found: set[str] = set()
@@ -144,27 +162,59 @@ def p6_raised() -> tuple[set[str], list[str]]:
         if functions is not None:
             assert {scope.name for scope in scopes} == functions, f"{path.name}: {functions}"
         for scope in scopes:
-            for node in ast.walk(scope):
-                if not isinstance(node, ast.Call):
-                    continue
-                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
-                values: list[ast.AST] = []
-                if name == "ReconcileRequired":
-                    values += [keyword.value for keyword in node.keywords if keyword.arg == "reason"]
-                elif name in ("StopError", "ValidationError"):
-                    values += [keyword.value for keyword in node.keywords if keyword.arg == "code"]
-                elif name in ("_reconcile", "reconcile", "_invalid") and len(node.args) >= 2:
-                    values.append(node.args[1])
-                elif name == "stop" and node.args and not isinstance(node.args[0], ast.Starred):
-                    values.append(node.args[0])
-                for value in values:
-                    if isinstance(value, ast.Name) and value.id in ("code", "reason"):
-                        continue  # a helper passing its caller's code / reason on: every call of it is scanned
-                    resolved = _resolve(value)
-                    if resolved is None:
-                        unresolved.append(f"{path.name}:{node.lineno}")
-                    else:
-                        found |= resolved
+            enclosing = [scope] if isinstance(scope, ast.FunctionDef) else [
+                node for node in ast.walk(scope) if isinstance(node, ast.FunctionDef)]
+            for function in enclosing:
+                for node in ast.walk(function):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    name = _call_name(node)
+                    values: list[ast.AST] = []
+                    if name == "ReconcileRequired":
+                        values += [keyword.value for keyword in node.keywords if keyword.arg == "reason"]
+                    elif name in ("StopError", "ValidationError"):
+                        values += [keyword.value for keyword in node.keywords if keyword.arg == "code"]
+                    elif name in ("_reconcile", "reconcile", "_invalid"):
+                        if len(node.args) >= 2:
+                            values.append(node.args[1])
+                        # ORCH-RB6-1-R11: a keyword code too
+                        values += [keyword.value for keyword in node.keywords if keyword.arg == "code"]
+                    elif name == "stop" and node.args:
+                        if isinstance(node.args[0], ast.Starred):
+                            # ORCH-RB6-1-R11: stop(*problem) - its codes are the starred source's (scanned below)
+                            if not _starred_source(function, node):
+                                unresolved.append(f"{path.name}:{node.lineno} (stop(*...) of an unknown source)")
+                            continue
+                        values.append(node.args[0])
+                    for value in values:
+                        if isinstance(value, ast.Name) and value.id in ("code", "reason"):
+                            continue  # a helper passing its caller's code / reason on: every call of it is scanned
+                        resolved = _resolve(value)
+                        if resolved is None:
+                            unresolved.append(f"{path.name}:{node.lineno}")
+                        else:
+                            found |= resolved
+    return found, unresolved
+
+
+def starred_source_codes() -> tuple[set[str], list[str]]:
+    """The codes :data:`STARRED_SOURCES` return as the first element of their ``(code, message)`` tuples."""
+    tree = ast.parse(WORKLINE_ROOT.joinpath("src", "workline", "review", "policy.py").read_text(encoding="utf-8"))
+    found: set[str] = set()
+    unresolved: list[str] = []
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name in STARRED_SOURCES]
+    assert {function.name for function in functions} == STARRED_SOURCES
+    for function in functions:
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Return) or node.value is None:
+                continue
+            if isinstance(node.value, ast.Constant) and node.value.value is None:
+                continue
+            resolved = _resolve(node.value.elts[0]) if isinstance(node.value, ast.Tuple) and node.value.elts else None
+            if resolved is None:
+                unresolved.append(f"policy.py:{node.lineno}")
+            else:
+                found |= resolved
     return found, unresolved
 
 
@@ -174,20 +224,26 @@ class P6CatalogueScanTests(unittest.TestCase):
     def test_every_code_and_reason_a_p6_producer_raises_is_catalogued(self) -> None:
         found, unresolved = p6_raised()
         self.assertEqual([], unresolved, "a reason / code the scan cannot resolve")
+        starred, starred_unresolved = starred_source_codes()
+        self.assertEqual([], starred_unresolved, "a starred source returns a code the scan cannot resolve")
+        found |= starred
         catalogue = set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS) | set(policy.VALIDATION_CODES)
         p6 = {value for value in found if value.startswith("review_p6_")}
         self.assertEqual(set(), p6 - catalogue, "a P6 code outside the policy.py catalogues")
         self.assertTrue({policy.REASON_RUN_UNRECOVERED, policy.REASON_PROFILE_BEFORE_MISMATCH,
-                         policy.CODE_LINEAGE_INVALID} <= p6)
+                         policy.CODE_LINEAGE_INVALID, policy.CODE_DISCOVERY_SLOTS_UNMET,
+                         policy.CODE_SURFACE_UNKNOWN} <= p6)
         other = found - p6 - {P6_OWNER_CODE}
-        shared = set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS) | set(history.STOP_CODES)             | set(history.RECONCILE_REASONS) | SHARED_PRE_P6
+        shared = (set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS) | set(history.STOP_CODES)
+                  | set(history.RECONCILE_REASONS) | SHARED_PRE_P6)
         self.assertEqual(set(), other - shared, "a non-P6 code a P6 producer raises that is not a pre-P6 code")
 
     def test_no_p6_code_collides_with_a_p2_p4_or_p5_code(self) -> None:
         from test_review_planning_fold_ins import CATALOGUE_CODES, CATALOGUE_REASONS
 
         p6 = set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS) | set(policy.VALIDATION_CODES) | {P6_OWNER_CODE}
-        earlier = CATALOGUE_CODES | CATALOGUE_REASONS | set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS)             | set(history.STOP_CODES) | set(history.RECONCILE_REASONS) | SHARED_PRE_P6
+        earlier = (CATALOGUE_CODES | CATALOGUE_REASONS | set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS)
+                   | set(history.STOP_CODES) | set(history.RECONCILE_REASONS) | SHARED_PRE_P6)
         self.assertEqual(set(), p6 & earlier)
         self.assertTrue(all(value.startswith("review_p6_") for value in p6 - {P6_OWNER_CODE}))
 

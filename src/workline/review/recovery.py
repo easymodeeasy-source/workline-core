@@ -956,6 +956,12 @@ def _classify_planning_p4(
     return None
 
 
+def p4_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str | None:
+    """The shared P4 reconstruction row (e) for a kind adapter (P6 ORCH-RB6-1-R3): exactly
+    :func:`_p4_reconstruction_problem` - every accepted task's provenance at its accepting generation."""
+    return _p4_reconstruction_problem(review, found)
+
+
 def _p4_reconstruction_problem(review: ReviewStore, found: MatchingRun) -> str | None:
     """Every accepted task's provenance at its accepting generation, and the discovery requests' bindings."""
     chain = found.chain

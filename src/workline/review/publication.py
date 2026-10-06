@@ -79,13 +79,13 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
             )
     # P6 (ORCH-RB6-1): every policy commit (Kp) of the history is proven too. A Workline Kp always follows its
     # Policy Review Run's Candidate snapshot, so the unchanged snapshot fast path already reaches here; a legacy-only
-    # push still pays exactly its one fast-path read.
+    # push still pays exactly its one fast-path read. One history read lists every policy change and its adders.
     try:
-        changes = policy_change_paths(Path(repo), commit)
+        adders = policy_change_adders(Path(repo), commit)
     except (ValidationError, StopError, CommittedReadError) as exc:
         return f"the policy changes of {commit}'s history cannot be read ({exc})"
-    for change_path in changes:
-        failed = committed_policy_proof(Path(repo), commit, change_path)
+    for change_path in sorted(adders):
+        failed = committed_policy_proof(Path(repo), commit, change_path, adders[change_path])
         if failed is not None:
             item, detail = failed
             return f"the policy commit adding {change_path} is not proven for {commit}: {item} fails ({detail})"
@@ -94,77 +94,182 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
 
 # --------------------------------------------------------------------------- P6 policy commits (ORCH-RB6-1)
 
-def policy_change_paths(repo: Path, commit: str) -> list[str]:
-    """Every policy change record path a commit of ``commit``'s history adds (each is one policy commit, Kp)."""
-    prefix = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}/"
-    found: set[str] = set()
-    for _adding, names in committed.added_in_history(repo, commit, [f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}"]):
-        found.update(name for name in names if name.startswith(prefix))
-    return sorted(found)
+def policy_change_adders(repo: Path, commit: str) -> dict[str, list[str]]:
+    """Every policy change record path a commit of ``commit``'s history adds, with the commits that add it.
 
-
-def committed_policy_proof(repo: Path, commit: str, change_path: str) -> tuple[str, str] | None:
-    """The committed proof of one policy commit (Kp), from committed objects alone; ``(item, detail)`` when it fails.
-
-    The C-2(Kp) facts a later push can re-prove without the owner's runtime
-    record: PK1 one adding commit with one parent; PK2 its delta is exactly
-    the change record (A) and the Profile (A / M), plain files; PK3 the change
-    record reads and is exactly the change record of the Candidate snapshot it
-    names, of its Run and Receipt, under the baseline record it binds; PK4 the
-    committed Profile is exactly the reviewed after Profile and round-trips;
-    PK5 the parent holds exactly the reviewed before Profile; PK6 the parent
-    holds the Run sealed at generation 5 with that Receipt, and the commit
-    holds no invalidation, Supersession or Consumption of it.
+    One add-history read over the policy change directory (ORCH-RB6-1-R10);
+    each change record is one policy commit (Kp).
     """
-    from . import policy
+    directory = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}"
+    found: dict[str, list[str]] = {}
+    for adding, names in committed.added_in_history(repo, commit, [directory]):
+        for name in names:
+            if name.startswith(directory + "/"):
+                found.setdefault(name, []).append(adding)
+    return found
 
+
+def committed_policy_proof(repo: Path, commit: str, change_path: str,
+                           adders: list[str] | None = None) -> tuple[str, str] | None:
+    """The committed proof of one policy commit (Kp) at ``commit``, from committed objects alone; ``(item, detail)``
+    of the first item that fails, ``None`` when every item holds.
+
+    The C-2(Kp) / C-2(Km) facts a later push re-proves without the owner's
+    runtime record (P6 §30.20 "no push before proof"; the P2 §18.8 committed
+    proof's method):
+
+    ```text
+    PK1  one commit of the history adds the change record; it has one parent P
+    PK2  its delta is exactly the change record (A) and the Profile (A / M), plain files
+    PK3  the change record is exactly the change record of the Candidate the Run's snapshot at P holds, of its Run,
+         Receipt and the baseline record it binds
+    PK4  the committed Profile is exactly the reviewed after Profile and round-trips through the canonical loader
+    PK5  P holds exactly the reviewed before Profile
+    PK6  P holds the Policy Review Run whole and sealed: Policy Review kind / target / contract, discovery ->
+         adjudication -> seal, every accepted task's provenance, generation 5 bound field by field to its Receipt
+         and to the Policy Change stage, the G1 Candidate the snapshot's
+    PK7  no invalidation or Supersession of the Receipt in the history, and no Consumption of it at Kp
+    PK8  a Consumption of the Receipt the pushed commit holds is the one v3 Policy Consumption, bound to the Receipt,
+         the Run, the change, Kp and P (absent: Kp alone is published, as its own owner publishes it, §30.20)
+    PK9  its metadata commit Km: the one commit adding it, on Kp's clean descendant, exactly the consumed Run summary
+         and the Consumption, the summary valid for that Consumption, Kp's change record and Profile unchanged
+    ```
+
+    Anything that cannot be read or answered is no proof: the item in progress fails (ORCH-RB6-1-R10).
+    """
+    progress = ["PK1"]
     try:
-        adders = committed.adding_commits(repo, commit, change_path)
-        if len(adders) != 1:
-            return "PK1", f"{change_path} is added by {len(adders)} commits of the history, not exactly one"
-        kp = adders[0]
-        parents = gitcmd.commit_parents(repo, kp) or []
-        if len(parents) != 1:
-            return "PK1", f"the policy commit {kp} has {len(parents)} parents"
-        parent = parents[0]
-        at_kp = committed.CommittedReviewStore(repo, kp)
-        change_id = change_path.rsplit("/", 1)[-1][: -len(".yaml")]
-        change = at_kp.read_policy_change(change_id)
-        delta = gitcmd.commit_delta(repo, parent, kp)
-        if delta is None:
-            return "PK2", f"Git cannot show the delta of {kp}"
-        wanted = {change_path: "A", paths.POLICY_PROFILE_REL: "A" if change["before_profile_digest"] is None else "M"}
-        if {item.path: item.status for item in delta} != wanted or any(item.new_mode != "100644" for item in delta):
-            return "PK2", f"{kp} is not exactly the change record and the Profile"
-        snapshot = at_kp.read_candidate_snapshot(str(change["candidate_hash"]))
-        candidate = dict(snapshot.material or {})
-        rebuilt = policy.change_record(candidate, review_run_id=str(change["review_run_id"]),
-                                       receipt_id=str(change["receipt_id"]), baseline_record=change["global_baseline"])
-        if serialize.canonical_bytes(rebuilt) != gitcmd.blob_at(repo, kp, change_path):
-            return "PK3", f"{change_path} is not exactly the change record of the Candidate it names"
-        problem = policy.persisted_projection_problem(candidate["after_profile"],
-                                                      gitcmd.blob_at(repo, kp, paths.POLICY_PROFILE_REL),
-                                                      policy.bound_global_settings(change["global_baseline"]))
-        if problem is not None:
-            return "PK4", problem
-        before = gitcmd.blob_at(repo, parent, paths.POLICY_PROFILE_REL)
-        if (None if before is None else serialize.digest_of_text(before.decode("utf-8"))) \
-                != candidate["before_profile"]["digest"]:
-            return "PK5", f"the parent of {kp} does not hold the exact reviewed before Profile"
-        at_parent = committed.CommittedReviewStore(repo, parent)
-        chain = at_parent.gate_chain(str(change["review_run_id"]))
-        if chain is None or len(chain.generations) != p4.SEAL_GENERATION or not chain.latest.sealed \
-                or chain.latest.receipt_id != change["receipt_id"] \
-                or chain.generations[0].candidate_hash != change["candidate_hash"]:
-            return "PK6", f"the parent of {kp} does not hold the Policy Review Run sealed with {change['receipt_id']}"
-        at_parent.read_receipt(str(change["receipt_id"]))
-        if at_kp.supersession_exists(str(change["receipt_id"])) \
-                or at_kp.entry(paths.gate_rel(str(change["review_run_id"]), p4.INVALIDATION_GENERATION)) is not None \
-                or any(found.receipt_id == change["receipt_id"] for found in at_kp.consumptions()):
-            return "PK6", f"{kp} holds an invalidation, Supersession or Consumption of its Receipt"
-    except (ValidationError, StopError, CommittedReadError, KeyError, TypeError, UnicodeDecodeError) as exc:
-        return "PK3", f"the policy commit's records do not read ({exc})"
+        _prove_policy(repo, commit, change_path, adders, progress)
+    except _Fail as failed:
+        return failed.item, failed.detail
+    except Exception as exc:  # anything unanswerable is no proof: the item under evaluation fails
+        return progress[-1], f"{type(exc).__name__}: {exc}"
     return None
+
+
+def _prove_policy(repo: Path, commit: str, change_path: str, adders: list[str] | None, progress: list[str]) -> None:
+    from . import policy
+    from .validate import GATE_RECEIPT_BINDING, RECEIPT_CONSUMPTION_BINDING
+
+    # PK1 - the policy commit and its one parent
+    kps = adders if adders is not None else _guard("PK1", lambda: committed.adding_commits(repo, commit, change_path))
+    _require(len(kps) == 1, "PK1", f"{change_path} is added by {len(kps)} commits of the history, not exactly one")
+    kp = kps[0]
+    parents = gitcmd.commit_parents(repo, kp) or []
+    _require(len(parents) == 1, "PK1", f"the policy commit {kp} has {len(parents)} parents")
+    parent = parents[0]
+
+    progress.append("PK2")
+    at_kp = _guard("PK2", lambda: committed.CommittedReviewStore(repo, kp))
+    change_id = change_path.rsplit("/", 1)[-1][: -len(".yaml")]
+    change = _guard("PK2", lambda: at_kp.read_policy_change(change_id))
+    delta = gitcmd.commit_delta(repo, parent, kp)
+    _require(delta is not None, "PK2", f"Git cannot show the delta of {kp}")
+    wanted = {change_path: "A", paths.POLICY_PROFILE_REL: "A" if change["before_profile_digest"] is None else "M"}
+    _require({item.path: item.status for item in delta} == wanted and all(item.new_mode == "100644" for item in delta),
+             "PK2", f"{kp} is not exactly the change record and the Profile")
+
+    progress.append("PK3")
+    at_parent = _guard("PK3", lambda: committed.CommittedReviewStore(repo, parent))
+    snapshot = _guard("PK3", lambda: at_parent.read_candidate_snapshot(str(change["candidate_hash"])))
+    candidate = dict(snapshot.material or {})
+    rebuilt = _guard("PK3", lambda: policy.change_record(
+        candidate, review_run_id=str(change["review_run_id"]), receipt_id=str(change["receipt_id"]),
+        baseline_record=change["global_baseline"]))
+    _require(serialize.canonical_bytes(rebuilt) == gitcmd.blob_at(repo, kp, change_path), "PK3",
+             f"{change_path} is not exactly the change record of the Candidate it names")
+
+    progress.append("PK4")
+    problem = _guard("PK4", lambda: policy.persisted_projection_problem(
+        candidate["after_profile"], gitcmd.blob_at(repo, kp, paths.POLICY_PROFILE_REL),
+        policy.bound_global_settings(change["global_baseline"])))
+    _require(problem is None, "PK4", problem or "")
+
+    progress.append("PK5")
+    before = gitcmd.blob_at(repo, parent, paths.POLICY_PROFILE_REL)
+    before_digest = None if before is None else serialize.digest_of_text(before.decode("utf-8"))
+    _require(before_digest == candidate["before_profile"]["digest"], "PK5",
+             f"the parent of {kp} does not hold the exact reviewed before Profile")
+
+    progress.append("PK6")
+    review_run_id, receipt_id = str(change["review_run_id"]), str(change["receipt_id"])
+    chain = _guard("PK6", lambda: at_parent.gate_chain(review_run_id))
+    _require(chain is not None, "PK6", f"the parent of {kp} holds no generation of {review_run_id}")
+    first, sealed = chain.generations[0], chain.latest
+    _require(len(chain.generations) == p4.SEAL_GENERATION and not p4.chain_problems(chain)
+             and p4.shape_of(chain) == p4.SHAPE_SEAL and sealed.sealed and sealed.receipt_id == receipt_id,
+             "PK6", f"the Run's chain at {parent} is not discovery -> adjudication -> seal with {receipt_id}")
+    contracts = _guard("PK6", lambda: p4.run_contracts(at_parent, chain))
+    _require(contracts == {policy.POLICY_CHANGE_CONTRACT} and first.review_kind == policy.REVIEW_KIND
+             and first.target_identity == policy.TARGET_IDENTITY
+             and sealed.authorized_operation_stage == policy.AUTHORIZED_OPERATION_STAGE
+             and first.candidate_hash == change["candidate_hash"] == policy.candidate_hash(candidate),
+             "PK6", "the Run is not the Policy Review of the change's Candidate under the Policy Change stage")
+    for task in sealed.accepted_tasks:
+        accepted = int(chain.accepted_at(str(task["task_id"])) or 0)
+        problems = _guard("PK6", lambda: at_parent.provenance_problems(task, accepted))
+        _require(not problems, "PK6", "; ".join(message for _, message in problems))
+    receipt = _guard("PK6", lambda: at_parent.read_receipt(receipt_id))
+    for gate_field, receipt_field in GATE_RECEIPT_BINDING:
+        _require(getattr(sealed, gate_field) == getattr(receipt, receipt_field), "PK6",
+                 f"the Receipt's {receipt_field} is not generation 5's {gate_field}")
+
+    progress.append("PK7")
+    invalidations = _guard("PK7", lambda: committed.added_in_history(
+        repo, commit, [paths.gate_rel(review_run_id, p4.INVALIDATION_GENERATION), paths.supersession_rel(receipt_id)]))
+    _require(not invalidations, "PK7", f"{commit}'s history adds a generation 6 or a Supersession of the Receipt")
+    _require(not any(found.receipt_id == receipt_id for found in _guard("PK7", at_kp.consumptions)), "PK7",
+             f"{kp} holds a Consumption of its own Receipt")
+
+    progress.append("PK8")
+    at_commit = _guard("PK8", lambda: committed.CommittedReviewStore(repo, commit))
+    naming = [found for found in _guard("PK8", at_commit.consumptions) if found.receipt_id == receipt_id]
+    if not naming:
+        return  # Kp alone, proven: what its own owner publishes before its Consumption (§30.20)
+    _require(len(naming) == 1, "PK8", f"{commit} holds {len(naming)} Consumptions of the Receipt")
+    consumption = naming[0]
+    _require(isinstance(consumption, records.PolicyConsumption), "PK8", "the Consumption is not a Policy Consumption")
+    for name in RECEIPT_CONSUMPTION_BINDING:
+        _require(getattr(receipt, name) == getattr(consumption, name), "PK8",
+                 f"the Consumption's {name} is not the Receipt's")
+    persisted = consumption.persisted_policy
+    _require(
+        persisted.get("policy_change_id") == change_id and persisted.get("policy_commit") == kp
+        and persisted.get("policy_parent") == parent
+        and persisted.get("after_profile_digest") == change["after_profile_digest"]
+        and persisted.get("before_profile_digest") == change["before_profile_digest"]
+        and persisted.get("global_baseline_digest") == change["global_baseline_digest"]
+        and isinstance(persisted.get("branch"), str) and persisted["branch"].startswith("refs/heads/"),
+        "PK8", "the Consumption's persisted policy does not bind the change, its policy commit and its parent")
+
+    progress.append("PK9")
+    consumption_path = paths.consumption_rel(consumption.consumption_id)
+    summary_path = paths.history_run_rel(review_run_id)
+    metadata = [listed for listed, names in _guard("PK9", lambda: committed.added_in_history(repo, commit, [consumption_path]))
+                if consumption_path in names]
+    _require(len(metadata) == 1, "PK9", f"{len(metadata)} commits add the Consumption")
+    km = metadata[0]
+    km_parents = gitcmd.commit_parents(repo, km) or []
+    _require(len(km_parents) == 1, "PK9", f"{km} does not have exactly one parent")
+    q = km_parents[0]
+    _require((q == kp or gitcmd.descends_from(repo, q, kp) is True)
+             and (q == kp or gitcmd.commits_touching(repo, kp, q, [change_path, paths.POLICY_PROFILE_REL]) == []),
+             "PK9", f"{km}'s parent is not the policy commit or its clean descendant")
+    km_delta = gitcmd.commit_delta(repo, q, km)
+    _require(km_delta is not None and sorted(item.path for item in km_delta) == sorted([consumption_path, summary_path])
+             and all(item.status == "A" and item.new_mode == "100644" for item in km_delta),
+             "PK9", "the metadata commit is not exactly the added Run summary and Consumption")
+    at_km = _guard("PK9", lambda: committed.CommittedReviewStore(repo, km))
+    _require(at_km.blob_id(consumption_path) == at_commit.blob_id(consumption_path), "PK9",
+             "the Consumption the metadata commit added is not the one the published commit holds")
+    summary = _guard("PK9", lambda: at_km.read_history(paths.HISTORY_RUNS, review_run_id))
+    problems = _guard("PK9", lambda: history.run_summary_problems(at_km, summary))
+    _require(not problems and summary.durable_disposition == history.DISPOSITION_CONSUMED
+             and summary.consumption_id == consumption.consumption_id,
+             "PK9", "the Run summary does not validate against the exact Consumption")
+    for path in (change_path, paths.POLICY_PROFILE_REL):
+        _require(gitcmd.blob_at(repo, km, path) == gitcmd.blob_at(repo, kp, path), "PK9",
+                 f"{km} does not hold the policy commit's {path}")
 
 
 # --------------------------------------------------------------------------- registered Runs
