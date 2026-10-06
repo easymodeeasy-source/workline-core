@@ -9,7 +9,8 @@ that writes what this module defines is :mod:`workline.project_policy`
 
 ```text
 surfaces      the fixed two-surface v1 registry; nothing learned adds a third (§30.2, §30.3)
-baseline      the canonical read-only GlobalPolicyBaseline loader, source_mode derived-baseline (§15.9, §30.4)
+baseline      the canonical read-only GlobalPolicyBaseline loader: derived-baseline, and the materialized
+              review-policy/global-policy.yaml record it reads once P7 materializes it (§15.9, §30.4, §31.3)
 profile       the strict canonical Project Profile, its lineage and its compatibility (§15.12, §30.5, §30.7)
 effective     the normalized Effective Policy a new P6-capable Run freezes (§15.13, §30.6)
 candidate     the normalized PolicyChangeCandidate and the fixed mechanical meta-verifier (§15.14-§15.19, §30.8-§30.10)
@@ -69,9 +70,13 @@ BASELINE_CONTRACT = "review-v1-p6-global-baseline-v1"
 #: and RB7 increments it by one per Global change. Schema evolution goes through the record version / contract.
 BASELINE_VERSION = 1
 SOURCE_MODE_DERIVED = "derived-baseline"
+#: P7 (§31.3): the same loader reading the tracked ``review-policy/global-policy.yaml`` once P7 materialized it.
+SOURCE_MODE_MATERIALIZED = "materialized-global-policy"
 #: The closed sets a stored Effective Policy's baseline identity is read against (FC-RB7-2 b): RB7 extends these
 #: tables when it materializes Global policy, and every stored P6 Run envelope keeps reading.
-SOURCE_MODES = (SOURCE_MODE_DERIVED,)
+SOURCE_MODES = (SOURCE_MODE_DERIVED, SOURCE_MODE_MATERIALIZED)
+#: The Global policy versions a DERIVED baseline is: only 1. A materialized Global policy version is runtime data
+#: (§31.22, RB7C-8) - any positive integer - never a row of a code table (:func:`baseline_version_admitted`).
 BASELINE_VERSIONS = (BASELINE_VERSION,)
 #: R6-2 / FC-RB7-5: the compatibility interpretation an Effective Policy binds. Before RB7: exact equality of the
 #: policy-semantic projection of the baseline a Profile was written under (recovered from its change record) and of
@@ -653,17 +658,55 @@ def load_global_baseline(workline_root: Path) -> GlobalPolicyBaseline:
     return GlobalPolicyBaseline(record)
 
 
+def baseline_version_admitted(version: object, source_mode: object) -> bool:
+    """Whether a baseline of ``source_mode`` can be at Global policy ``version`` (RB7C-8: the runtime version rule).
+
+    A derived baseline is exactly version 1 (:data:`BASELINE_VERSIONS`); a
+    materialized one is any positive integer, because later versions are runtime
+    data that a reviewed Global Policy Change creates, never a code table.
+    """
+    if type(version) is not int:
+        return False
+    if source_mode == SOURCE_MODE_DERIVED:
+        return version in BASELINE_VERSIONS
+    return source_mode == SOURCE_MODE_MATERIALIZED and version >= 1
+
+
 def parse_baseline(record: object, described: str) -> GlobalPolicyBaseline:
-    """A baseline record, strictly: exactly its fields, the fixed registry and meta-rules, derived mode."""
+    """A baseline record, strictly: exactly its fields, the fixed registry facts and meta-rules, in either mode.
+
+    ``derived-baseline``: Global policy version 1 and every surface exactly the
+    fixed registry with its code default. ``materialized-global-policy`` (RB7C-8):
+    any positive Global policy version, every surface's FIXED facts exactly the
+    registry's in order with only its Global setting as data - inside the
+    surface's range - and an exact ``global_policy_identity`` digest. A
+    truncated, extended, reordered or reclassified surface list is refused in
+    both modes.
+    """
     found = records._require_mapping(record, described)
     serialize.require_schema(found, SCHEMA_BASELINE, RECORD_VERSION, described)
     records._require_exact_fields(found, BASELINE_FIELDS, described)
-    if found.get("contract") != BASELINE_CONTRACT or found.get("baseline_version") != BASELINE_VERSION:
-        raise _invalid(f"{described} is not a {BASELINE_CONTRACT} version {BASELINE_VERSION} baseline")
-    if found.get("source_mode") != SOURCE_MODE_DERIVED:
-        raise _invalid(f"{described} source_mode is {found.get('source_mode')!r}, not {SOURCE_MODE_DERIVED}")
-    if found.get("surfaces") != [surface.to_record() for surface in SURFACES]:
-        raise _invalid(f"{described} does not carry exactly the fixed two-surface registry")
+    mode = found.get("source_mode")
+    if mode not in SOURCE_MODES:
+        raise _invalid(f"{described} source_mode is {mode!r}, not one of {', '.join(SOURCE_MODES)}")
+    if found.get("contract") != BASELINE_CONTRACT or not baseline_version_admitted(found.get("baseline_version"), mode):
+        raise _invalid(f"{described} is not a {BASELINE_CONTRACT} baseline at a Global policy version its {mode} mode "
+                       "reads")
+    surfaces = found.get("surfaces")
+    if mode == SOURCE_MODE_DERIVED:
+        if surfaces != [surface.to_record() for surface in SURFACES]:
+            raise _invalid(f"{described} does not carry exactly the fixed two-surface registry")
+    else:
+        if not isinstance(surfaces, list) or len(surfaces) != len(SURFACES) or any(
+            not isinstance(item, dict) or not surface.in_range(item.get("global_setting"))
+            or {**item, "global_setting": surface.global_setting} != surface.to_record()
+            for surface, item in zip(SURFACES, surfaces)
+        ):
+            raise _invalid(f"{described} does not carry exactly the fixed two-surface registry with an in-range Global "
+                           "setting")
+        identity = found.get("global_policy_identity")
+        if not isinstance(identity, str) or records.DIGEST_RE.match(identity) is None:
+            raise _invalid(f"{described} names no exact Global policy identity digest")
     if found.get("meta_rules_digest") != meta_rules_digest() or found.get("meta_rules_id") != META_RULES_ID:
         raise _invalid(f"{described} does not bind the fixed meta-rules")
     if found.get("loader_semantics_identity") != LOADER_SEMANTICS_IDENTITY:
@@ -679,7 +722,6 @@ def parse_baseline(record: object, described: str) -> GlobalPolicyBaseline:
 #: (§31.3), the baseline stays ``derived-baseline``; the record's form and its baseline projection are defined here,
 #: once, so the loader, the Global Policy Change Candidate and the committed-object proof read it the same way.
 GLOBAL_POLICY_REL = "review-policy/global-policy.yaml"
-SOURCE_MODE_MATERIALIZED = "materialized-global-policy"
 SCHEMA_GLOBAL_POLICY = "review-p7-global-policy"
 GLOBAL_POLICY_FIELDS = (
     serialize.SCHEMA_KEY, serialize.VERSION_KEY, "global_policy_version", "parent_global_policy_digest",
@@ -695,7 +737,9 @@ def parse_global_policy(record: object, described: str) -> dict[str, Any]:
     version 1 and an exact SHA-256 parent above it; the running loader
     semantics and fixed meta-rules identities; and ``settings`` holding each
     fixed surface exactly once, sorted by ``policy_surface_id``, each inside
-    its fixed range. Whether a record is the exact successor of another is
+    its fixed range - and at version 1 exactly the derived baseline's code
+    default (§31.2: version 1 is the zero-semantic-change materialization).
+    Whether a record is the exact successor of another is
     :func:`global_policy_successor_problem`'s question, never this one's.
     """
     found = records._require_mapping(record, described)
@@ -729,6 +773,11 @@ def parse_global_policy(record: object, described: str) -> dict[str, Any]:
             surface = SURFACE_BY_ID[expected]
             raise _invalid(f"{described} sets {expected} to {item['global_setting']!r}, outside "
                            f"{surface.minimum}..{surface.maximum}")
+        if version == 1 and item["global_setting"] != SURFACE_BY_ID[expected].global_setting:
+            # §31.2: version 1 is the zero-semantic-change materialization of the derived baseline, exactly; every
+            # other setting is a later version a reviewed Global Policy Change made
+            raise _invalid(f"{described} is Global policy version 1 and sets {expected} to {item['global_setting']!r}, "
+                           f"not the derived baseline's {SURFACE_BY_ID[expected].global_setting}")
     return serialize.canonical_data(found)
 
 
@@ -1201,8 +1250,8 @@ def parse_effective_policy(record: object, described: str) -> dict[str, Any]:
     baseline = records._require_mapping(found["global_baseline"], f"{described} global_baseline")
     records._require_exact_fields(baseline, ("contract", "baseline_version", "digest", "source_mode"),
                                   f"{described} global_baseline")
-    if baseline["contract"] != BASELINE_CONTRACT or baseline["baseline_version"] not in BASELINE_VERSIONS \
-            or baseline["source_mode"] not in SOURCE_MODES:
+    if baseline["contract"] != BASELINE_CONTRACT \
+            or not baseline_version_admitted(baseline["baseline_version"], baseline["source_mode"]):
         raise _invalid(f"{described} binds a Global baseline this loader does not read")
     records._require_digest(baseline, "digest", f"{described} global_baseline")
     profile = found["profile"]

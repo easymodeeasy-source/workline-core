@@ -1,0 +1,11 @@
+fixed_meta_rules_identity: review-v1-p6-meta-rules-v1
+global_policy_version: 1
+loader_semantics_identity: review-v1-p6-policy-loader-v1
+parent_global_policy_digest: null
+schema: review-p7-global-policy
+settings:
+  - global_setting: 1
+    policy_surface_id: review.discovery.required_slots
+  - global_setting: 0
+    policy_surface_id: review.reverification.extra_scope_steps
+version: 1
