@@ -36,9 +36,10 @@ from typing import Any
 
 from . import gitcmd, gitops
 from .errors import ReconcileRequired, StopError, ValidationError
-from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop
+from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop, bind_policy_recovery
 from .oplock import project_operation
 from .review import checkout, gate, history, p4, policy, records, serialize
+from .review import recovery as review_recovery
 from .review import committed as review_committed
 from .review import paths as review_paths
 from .review.store import ReviewStore
@@ -52,6 +53,8 @@ GENERATION_OPERATION = "review-generation"
 NOTE_BINDING = "policy_binding"
 NOTE_CANDIDATE = "policy_candidate"
 NOTE_PUBLICATION_PROOF = "policy_publication_proof"
+#: ORCH-RB6-1: the earlier Policy Review Run a mutation recovered from canonical records (its owner record was lost).
+NOTE_RECOVERED = "policy_recovered_run"
 PROOF_CONTRACT = "review-v1-p6-policy-proof-v1"
 
 STAGE_GENERATION = "review-generation"
@@ -202,7 +205,12 @@ class _Run:
 def _run(op: _Op, mutation: Mutation, destination: Any) -> PolicyChangeResult:
     if mutation.note(NOTE_CANDIDATE) is None:
         with abandon_on_stop(mutation):
-            _freeze(op, mutation)
+            _require_no_stranded_change(op)
+            recovered = _discover(op)
+            if recovered is None:
+                _freeze(op, mutation)
+            else:
+                _recover(op, mutation, recovered)
     run = _recorded_run(op, mutation)
     _resolve_pending_generation(op, mutation, run)
     while True:
@@ -240,6 +248,139 @@ def _run(op: _Op, mutation: Mutation, destination: Any) -> PolicyChangeResult:
         else:
             raise _reconcile(f"Policy Review Run {run.review_run_id} is at generation {latest}, which this owner never "
                              "writes", policy.REASON_CHAIN_INVALID)
+
+
+# --------------------------------------------------------------------------- recovery after runtime loss (ORCH-RB6-1)
+
+def _settled(review: ReviewStore, chain: Any) -> str | None:
+    """How an earlier Policy Review Run ended for good, or ``None`` when it is not settled.
+
+    ``not_authorized`` (a declining G2, or a G4 neither AUTHORIZATION_READY nor
+    HUMAN_WAIT), ``human_wait`` (G4) or ``consumed`` (its sealed Receipt holds its
+    Consumption). Everything else - an open G1-G3, an authorizing G4 not sealed,
+    a sealed Receipt not consumed - is not settled.
+    """
+    latest = chain.latest
+    if latest.generation == 2 and any(task["status"] != records.TASK_SETTLED_OK for task in latest.settled_tasks):
+        return "not_authorized"
+    if latest.generation == p4.ADJUDICATION_SETTLE_GENERATION:
+        found = review.read_adjudication(chain.review_run_id)
+        if found.outcome == records.HUMAN_WAIT:
+            return "human_wait"
+        return None if found.outcome == records.AUTHORIZATION_READY else "not_authorized"
+    if latest.generation == p4.SEAL_GENERATION and latest.sealed and latest.receipt_id \
+            and any(found.receipt_id == latest.receipt_id for found in review.consumptions()):
+        return "consumed"
+    return None
+
+
+def _classify(store: ProjectStore, review: ReviewStore, head: str | None, found: Any, named_aside: set[str],
+              currency: Any) -> str | None:
+    """The policy kind's row of canonical recovery discovery: a settled Run is set aside, any other is recoverable."""
+    if found.contract != policy.POLICY_CHANGE_CONTRACT:
+        raise _reconcile(f"Review Run {found.review_run_id} of the Policy Review kind binds contract {found.contract}",
+                         policy.REASON_CHAIN_INVALID)
+    try:
+        settled = _settled(review, found.chain)
+    except ValidationError as exc:
+        raise _reconcile(f"Policy Review Run {found.review_run_id} does not read: {exc}", policy.REASON_CHAIN_INVALID)
+    if settled is not None:
+        return settled
+    if found.review_run_id in named_aside:
+        return "set_aside"
+    return None
+
+
+_ADAPTER = review_recovery.RecoveryAdapter(shape=lambda chain: None, named=lambda review, found: [], classify=_classify)
+
+
+def _discover(op: _Op) -> Any:
+    """ORCH-RB6-1: canonical recovery discovery of this request's earlier Policy Review Run - the shared mechanics.
+
+    Runs only when no pending mutation of this invocation holds a frozen
+    Candidate (its owner record was lost, or it never froze). The Runs of the
+    Policy Review kind and this exact operation identity (``project-policy-
+    change:<request digest>``) in HEAD's history and the working tree are
+    proven whole; settled ones are set aside; exactly one recoverable Run is
+    resumed with its canonical IDs, several are ``review_recovery_ambiguous``,
+    a malformed one ``review_recovery_incomplete``. None: a new Run.
+    """
+    return review_recovery.discover_kind(op.store, policy.REVIEW_KIND, op.operation_identity, _ADAPTER).recoverable
+
+
+def _require_no_stranded_change(op: _Op) -> None:
+    """ORCH-RB6-1: no Policy Change starts while an applied change has no Consumption (any request).
+
+    A stored change record without its v3 Consumption is a policy-state stage
+    whose Kp / Km identity was not durably saved: it is never inferred from Git
+    history (no commit is adopted), never published by this owner, and no new
+    Candidate is built on top of it - ``review_p6_run_unrecovered``,
+    reconcile required (the manual reconciliation boundary).
+    """
+    review = ReviewStore(op.store)
+    consumed = {str(found.persisted_policy["policy_change_id"]) for found in review.consumptions()
+                if isinstance(found, records.PolicyConsumption)}
+    stranded = sorted(set(review.policy_change_ids()) - consumed)
+    if stranded:
+        raise _reconcile(f"policy change {', '.join(stranded)} is stored and has no Policy Consumption: its policy "
+                         "commit identity was never durably saved, so it is neither inferred from Git history nor "
+                         "built upon", policy.REASON_RUN_UNRECOVERED)
+
+
+def _recover(op: _Op, mutation: Mutation, found: Any) -> None:
+    """Resume the one recoverable earlier Run with its canonical IDs, before any effect (ORCH-RB6-1).
+
+    Its Candidate is its committed snapshot; its frozen Effective Policy is the
+    one its generation-1 requests bind; its policy change id, Run, discovery
+    tasks, adjudication task and (sealed) Receipt are bound from its records,
+    never generated. What it never made canonical (a Receipt not yet sealed,
+    the Consumption) is reserved as a fresh owner does. The discovery actors are
+    held to the frozen policy (RB6C-D2); every later step re-proves the exact
+    before-state, as any resume does.
+    """
+    store = op.store
+    review = ReviewStore(store)
+    chain = found.chain
+    run_id = found.review_run_id
+    candidate = dict(found.material or {})
+    if candidate.get("request_digest") != op.request_digest or chain.generations[0].operation_identity != op.operation_identity \
+            or policy.candidate_hash(candidate) != chain.generations[0].candidate_hash:
+        raise _reconcile(f"the recoverable Policy Review Run {run_id} is not this request's Candidate",
+                         policy.REASON_CHAIN_INVALID)
+    try:
+        effective = p4.run_effective_policy(review, chain)
+    except ValidationError as exc:
+        raise _reconcile(f"Policy Review Run {run_id}'s frozen Effective Policy does not read: {exc}",
+                         policy.REASON_CHAIN_INVALID) from exc
+    if effective is None:
+        raise _reconcile(f"Policy Review Run {run_id} binds no frozen Effective Policy", policy.REASON_CHAIN_INVALID)
+    problem = policy.discovery_slots_problem(effective, op.review.discovery, op.review.holdout_discovery)
+    if problem is not None:
+        raise policy.stop(*problem)
+    bindings = [
+        (f"{POLICY_CHANGE_KEY}:{op.request_digest}", str(candidate["policy_change_id"]), "review_policy_change"),
+        (gate.review_run_key(policy.REVIEW_KIND, policy.TARGET_IDENTITY), run_id, "review_run"),
+    ]
+    for task in chain.generations[0].accepted_tasks:
+        bindings.append((gate.review_task_key(run_id, str(task["task_slot"])), str(task["task_id"]), "review_task"))
+    for generation in chain.generations[1:]:
+        for task in generation.accepted_tasks:
+            if task["task_slot"] == p4.SLOT_ADJUDICATOR:
+                bindings.append((gate.review_task_key(run_id, p4.SLOT_ADJUDICATOR), str(task["task_id"]), "review_task"))
+    if chain.latest.sealed and chain.latest.receipt_id:
+        bindings.append((gate.review_receipt_key(run_id, p4.SEAL_GENERATION), str(chain.latest.receipt_id),
+                         "review_receipt"))
+    bind_policy_recovery(mutation, sorted(set(bindings)), (NOTE_RECOVERED, {"review_run_id": run_id}))
+    receipt_id = mutation.reserve_id(gate.review_receipt_key(run_id, p4.SEAL_GENERATION), "review_receipt")
+    mutation.reserve_id(gate.review_consumption_key(receipt_id), "review_consumption")
+    mutation.extend_scope(files=[review_paths.policy_change_rel(str(candidate["policy_change_id"]))])
+    branch = gitcmd.current_branch_ref(store.root)
+    head = gitcmd.head_commit(store.root)
+    if branch is None or head is None:
+        raise StopError("HEAD is on no branch or has no commit, so the policy change binding cannot be recorded: STOP",
+                        code="detached_head")
+    mutation.set_note(NOTE_BINDING, {"branch": branch, "head": head})
+    mutation.set_note(NOTE_CANDIDATE, {"candidate": candidate, "effective": effective})
 
 
 # --------------------------------------------------------------------------- the freeze (before any effect)

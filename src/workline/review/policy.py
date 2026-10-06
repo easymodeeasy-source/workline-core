@@ -180,12 +180,16 @@ REASON_PERSISTED_MISMATCH = "review_p6_persisted_mismatch"
 REASON_CHAIN_INVALID = "review_p6_chain_invalid"
 REASON_PUBLICATION_INVALID = "review_p6_publication_invalid"
 REASON_RECORD_CONFLICT = "review_p6_record_conflict"
+#: ORCH-RB6-1: a policy change applied (its change record stored) whose Consumption is not: its Kp / Km identity
+#: was never durably saved, so nothing infers it from Git history and no new Policy Change starts beside it.
+REASON_RUN_UNRECOVERED = "review_p6_run_unrecovered"
 RECONCILE_REASONS = (
     REASON_PROFILE_BEFORE_MISMATCH,
     REASON_PERSISTED_MISMATCH,
     REASON_CHAIN_INVALID,
     REASON_PUBLICATION_INVALID,
     REASON_RECORD_CONFLICT,
+    REASON_RUN_UNRECOVERED,
 )
 
 

@@ -2155,8 +2155,27 @@ def _require_publication_barrier(repo: Path, commit: str) -> None:
 _DOMAIN_KINDS = ("roadmap", "phase", "work", "relation")
 
 
+def bind_policy_recovery(mutation: Mutation, bindings: list[tuple[str, str, str]], note: tuple[str, Any]) -> None:
+    """ORCH-RB6-1: the same recovered-reservation binding, for a ``project-policy-change`` mutation whose owner record
+    was lost and whose one recoverable Policy Review Run canonical discovery found.
+
+    Only the policy owner's exact invocation (the policy publication contract),
+    pending, unbound and with no effect; the IDs are the Run's canonical ones,
+    never generated (:func:`_bind_recovered_reservations`). Review IDs name no
+    Project entity, so there are no domain IDs to check.
+    """
+    if mutation.owner not in POLICY_CHANGE_OWNERS or _publication_contract(mutation.invocation) != "policy":
+        raise ReconcileRequired(
+            f"mutation {mutation.id}: only a project-policy-change mutation binds a recovered Policy Review Run; nothing "
+            "is recorded: reconcile required",
+            reason="review_recovery_reservation_conflict",
+        )
+    _bind_recovered_reservations(mutation, bindings, set(), note, recovery_marker=False)
+
+
 def _bind_recovered_reservations(
-    mutation: Mutation, bindings: list[tuple[str, str, str]], used_ids: set[str], note: tuple[str, Any]
+    mutation: Mutation, bindings: list[tuple[str, str, str]], used_ids: set[str], note: tuple[str, Any],
+    *, recovery_marker: bool = True,
 ) -> None:
     """Record, into a recovery planning mutation, reservations that already exist canonically; never generate one.
 
@@ -2177,7 +2196,7 @@ def _bind_recovered_reservations(
             reason="review_recovery_reservation_conflict",
         )
 
-    if mutation.status != "pending" or "recovery_of_review_run_id" not in mutation.invocation:
+    if mutation.status != "pending" or (recovery_marker and "recovery_of_review_run_id" not in mutation.invocation):
         raise conflict("only a pending recovery planning mutation binds recovered reservations")
     if mutation.effects or (mutation.record.get("reserved_ids") or {}) or mutation.note(note[0]) is not None:
         raise conflict("it already holds a reservation, an effect or its recovery binding")

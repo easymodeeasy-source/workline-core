@@ -77,6 +77,93 @@ def barrier_problem(repo: Path, commit: str | None) -> str | None:
                 f"the review-v1 registration commit {run.registration_commit or '(not unique)'} of the Run with "
                 f"candidate {run.candidate_hash} is not proven for {commit}: {item} fails ({detail})"
             )
+    # P6 (ORCH-RB6-1): every policy commit (Kp) of the history is proven too. A Workline Kp always follows its
+    # Policy Review Run's Candidate snapshot, so the unchanged snapshot fast path already reaches here; a legacy-only
+    # push still pays exactly its one fast-path read.
+    try:
+        changes = policy_change_paths(Path(repo), commit)
+    except (ValidationError, StopError, CommittedReadError) as exc:
+        return f"the policy changes of {commit}'s history cannot be read ({exc})"
+    for change_path in changes:
+        failed = committed_policy_proof(Path(repo), commit, change_path)
+        if failed is not None:
+            item, detail = failed
+            return f"the policy commit adding {change_path} is not proven for {commit}: {item} fails ({detail})"
+    return None
+
+
+# --------------------------------------------------------------------------- P6 policy commits (ORCH-RB6-1)
+
+def policy_change_paths(repo: Path, commit: str) -> list[str]:
+    """Every policy change record path a commit of ``commit``'s history adds (each is one policy commit, Kp)."""
+    prefix = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}/"
+    found: set[str] = set()
+    for _adding, names in committed.added_in_history(repo, commit, [f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}"]):
+        found.update(name for name in names if name.startswith(prefix))
+    return sorted(found)
+
+
+def committed_policy_proof(repo: Path, commit: str, change_path: str) -> tuple[str, str] | None:
+    """The committed proof of one policy commit (Kp), from committed objects alone; ``(item, detail)`` when it fails.
+
+    The C-2(Kp) facts a later push can re-prove without the owner's runtime
+    record: PK1 one adding commit with one parent; PK2 its delta is exactly
+    the change record (A) and the Profile (A / M), plain files; PK3 the change
+    record reads and is exactly the change record of the Candidate snapshot it
+    names, of its Run and Receipt, under the baseline record it binds; PK4 the
+    committed Profile is exactly the reviewed after Profile and round-trips;
+    PK5 the parent holds exactly the reviewed before Profile; PK6 the parent
+    holds the Run sealed at generation 5 with that Receipt, and the commit
+    holds no invalidation, Supersession or Consumption of it.
+    """
+    from . import policy
+
+    try:
+        adders = committed.adding_commits(repo, commit, change_path)
+        if len(adders) != 1:
+            return "PK1", f"{change_path} is added by {len(adders)} commits of the history, not exactly one"
+        kp = adders[0]
+        parents = gitcmd.commit_parents(repo, kp) or []
+        if len(parents) != 1:
+            return "PK1", f"the policy commit {kp} has {len(parents)} parents"
+        parent = parents[0]
+        at_kp = committed.CommittedReviewStore(repo, kp)
+        change_id = change_path.rsplit("/", 1)[-1][: -len(".yaml")]
+        change = at_kp.read_policy_change(change_id)
+        delta = gitcmd.commit_delta(repo, parent, kp)
+        if delta is None:
+            return "PK2", f"Git cannot show the delta of {kp}"
+        wanted = {change_path: "A", paths.POLICY_PROFILE_REL: "A" if change["before_profile_digest"] is None else "M"}
+        if {item.path: item.status for item in delta} != wanted or any(item.new_mode != "100644" for item in delta):
+            return "PK2", f"{kp} is not exactly the change record and the Profile"
+        snapshot = at_kp.read_candidate_snapshot(str(change["candidate_hash"]))
+        candidate = dict(snapshot.material or {})
+        rebuilt = policy.change_record(candidate, review_run_id=str(change["review_run_id"]),
+                                       receipt_id=str(change["receipt_id"]), baseline_record=change["global_baseline"])
+        if serialize.canonical_bytes(rebuilt) != gitcmd.blob_at(repo, kp, change_path):
+            return "PK3", f"{change_path} is not exactly the change record of the Candidate it names"
+        problem = policy.persisted_projection_problem(candidate["after_profile"],
+                                                      gitcmd.blob_at(repo, kp, paths.POLICY_PROFILE_REL),
+                                                      policy.bound_global_settings(change["global_baseline"]))
+        if problem is not None:
+            return "PK4", problem
+        before = gitcmd.blob_at(repo, parent, paths.POLICY_PROFILE_REL)
+        if (None if before is None else serialize.digest_of_text(before.decode("utf-8"))) \
+                != candidate["before_profile"]["digest"]:
+            return "PK5", f"the parent of {kp} does not hold the exact reviewed before Profile"
+        at_parent = committed.CommittedReviewStore(repo, parent)
+        chain = at_parent.gate_chain(str(change["review_run_id"]))
+        if chain is None or len(chain.generations) != p4.SEAL_GENERATION or not chain.latest.sealed \
+                or chain.latest.receipt_id != change["receipt_id"] \
+                or chain.generations[0].candidate_hash != change["candidate_hash"]:
+            return "PK6", f"the parent of {kp} does not hold the Policy Review Run sealed with {change['receipt_id']}"
+        at_parent.read_receipt(str(change["receipt_id"]))
+        if at_kp.supersession_exists(str(change["receipt_id"])) \
+                or at_kp.entry(paths.gate_rel(str(change["review_run_id"]), p4.INVALIDATION_GENERATION)) is not None \
+                or any(found.receipt_id == change["receipt_id"] for found in at_kp.consumptions()):
+            return "PK6", f"{kp} holds an invalidation, Supersession or Consumption of its Receipt"
+    except (ValidationError, StopError, CommittedReadError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        return "PK3", f"the policy commit's records do not read ({exc})"
     return None
 
 

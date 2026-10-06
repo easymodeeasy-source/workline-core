@@ -124,6 +124,19 @@ def discover(
     return _discover(store, review_kind, operation_identity, currency, adapter)
 
 
+def discover_kind(store: ProjectStore, review_kind: str, operation_identity: str, adapter: RecoveryAdapter) -> Discovery:
+    """The same canonical discovery for a kind whose owner supplies its own classification (P6, ORCH-RB6-1).
+
+    Exactly :func:`_discover`: the matching Runs of ``review_kind`` and
+    ``operation_identity`` from HEAD's history and the working tree, each proven
+    whole under its own contract (P4-family Runs by :func:`_clean_p4_run`), the
+    explicit Human dispositions, the adapter's classification, and
+    ``review_recovery_ambiguous`` for more than one recoverable Run. No
+    currency is evaluated: the owner's adapter needs none.
+    """
+    return _discover(store, review_kind, operation_identity, lambda found: None, adapter)
+
+
 def discover_work(
     store: ProjectStore,
     operation_identity: str,

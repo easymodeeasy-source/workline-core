@@ -10,11 +10,12 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import unittest
 
 from helpers import WORKLINE_ROOT
-from workline.review import p4, policy, serialize
+from workline.review import history, p4, policy, serialize
 
 #: RB6B-M5 literal pins. Changing any of these changes what every stored P6 Run binds: a new identity is due.
 META_RULES_DIGEST = "01fb30c824b82a2dbb8aebd20943815d78dd2546f8610dba57e66517255e20a5"
@@ -98,6 +99,97 @@ class RulesAndRouterTests(unittest.TestCase):
         router = read(".claude", "skills", "project-router", "SKILL.md")
         self.assertLess(router.index("## 選択の失敗"), router.index("## 非canonicalな言い回し"))
         self.assertLess(router.index("## 非canonicalな言い回し"), router.index("## canonical implementation first"))
+
+
+#: The P6 producers: whole modules, or the P6 functions of shared modules (the scan the P2 catalogue sets P6 apart for).
+P6_PRODUCERS = {
+    ("review", "policy.py"): None,
+    ("project_policy.py",): None,
+    ("mutation.py",): {"_guard_policy_record", "_validate_profile_replacement", "_classify_profile_replacement",
+                       "_replace_review_profile", "bind_policy_recovery", "_policy_publication"},
+    ("review", "recovery.py"): {"discover_kind"},
+    ("review", "publication.py"): {"policy_change_paths", "committed_policy_proof"},
+}
+#: The pre-P6 codes / reasons the P6 owner reuses unchanged (each exists at the base commit 61b0b9dd).
+SHARED_PRE_P6 = {"detached_head", "review_contract_invalid", "review_not_persisted", "review_persistence_unknown",
+                 "review_reviewer_failed", "review_reviewer_mismatch", "review_recovery_reservation_conflict"}
+P6_OWNER_CODE = "review_policy_owner"
+_MODULES = {"policy": policy, "review_policy": policy, "p4": p4, "history": history}
+
+
+def _resolve(node: ast.AST) -> set[str] | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.IfExp):
+        body, orelse = _resolve(node.body), _resolve(node.orelse)
+        return None if body is None or orelse is None else body | orelse
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in _MODULES:
+        found = getattr(_MODULES[node.value.id], node.attr, None)
+        return {found} if isinstance(found, str) else None
+    if isinstance(node, ast.Name) and node.id.startswith(("CODE_", "REASON_")):
+        found = getattr(policy, node.id, None)
+        return {found} if isinstance(found, str) else None
+    return None
+
+
+def p6_raised() -> tuple[set[str], list[str]]:
+    """Every reason / code the P6 producers raise, and what the scan cannot resolve (beyond pass-through helpers)."""
+    found: set[str] = set()
+    unresolved: list[str] = []
+    for parts, functions in P6_PRODUCERS.items():
+        path = WORKLINE_ROOT.joinpath("src", "workline", *parts)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        scopes = [tree] if functions is None else [node for node in ast.walk(tree)
+                                                   if isinstance(node, ast.FunctionDef) and node.name in functions]
+        if functions is not None:
+            assert {scope.name for scope in scopes} == functions, f"{path.name}: {functions}"
+        for scope in scopes:
+            for node in ast.walk(scope):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+                values: list[ast.AST] = []
+                if name == "ReconcileRequired":
+                    values += [keyword.value for keyword in node.keywords if keyword.arg == "reason"]
+                elif name in ("StopError", "ValidationError"):
+                    values += [keyword.value for keyword in node.keywords if keyword.arg == "code"]
+                elif name in ("_reconcile", "reconcile", "_invalid") and len(node.args) >= 2:
+                    values.append(node.args[1])
+                elif name == "stop" and node.args and not isinstance(node.args[0], ast.Starred):
+                    values.append(node.args[0])
+                for value in values:
+                    if isinstance(value, ast.Name) and value.id in ("code", "reason"):
+                        continue  # a helper passing its caller's code / reason on: every call of it is scanned
+                    resolved = _resolve(value)
+                    if resolved is None:
+                        unresolved.append(f"{path.name}:{node.lineno}")
+                    else:
+                        found |= resolved
+    return found, unresolved
+
+
+class P6CatalogueScanTests(unittest.TestCase):
+    """The positive P6 equivalent of the P2 catalogue scan, which sets the P6 family apart (CP condition 1)."""
+
+    def test_every_code_and_reason_a_p6_producer_raises_is_catalogued(self) -> None:
+        found, unresolved = p6_raised()
+        self.assertEqual([], unresolved, "a reason / code the scan cannot resolve")
+        catalogue = set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS) | set(policy.VALIDATION_CODES)
+        p6 = {value for value in found if value.startswith("review_p6_")}
+        self.assertEqual(set(), p6 - catalogue, "a P6 code outside the policy.py catalogues")
+        self.assertTrue({policy.REASON_RUN_UNRECOVERED, policy.REASON_PROFILE_BEFORE_MISMATCH,
+                         policy.CODE_LINEAGE_INVALID} <= p6)
+        other = found - p6 - {P6_OWNER_CODE}
+        shared = set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS) | set(history.STOP_CODES)             | set(history.RECONCILE_REASONS) | SHARED_PRE_P6
+        self.assertEqual(set(), other - shared, "a non-P6 code a P6 producer raises that is not a pre-P6 code")
+
+    def test_no_p6_code_collides_with_a_p2_p4_or_p5_code(self) -> None:
+        from test_review_planning_fold_ins import CATALOGUE_CODES, CATALOGUE_REASONS
+
+        p6 = set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS) | set(policy.VALIDATION_CODES) | {P6_OWNER_CODE}
+        earlier = CATALOGUE_CODES | CATALOGUE_REASONS | set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS)             | set(history.STOP_CODES) | set(history.RECONCILE_REASONS) | SHARED_PRE_P6
+        self.assertEqual(set(), p6 & earlier)
+        self.assertTrue(all(value.startswith("review_p6_") for value in p6 - {P6_OWNER_CODE}))
 
 
 if __name__ == "__main__":

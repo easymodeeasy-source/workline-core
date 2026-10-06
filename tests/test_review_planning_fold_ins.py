@@ -49,6 +49,13 @@ CATALOGUE_CODES = {
     "review_record_noncanonical", "review_record_missing", "review_record_version", "review_gate_chain",
     "review_namespace_invalid", "review_projection_invalid", "review_dependency_invalid", "review_adapter_unresolved",
 }
+#: P6 (§30, catalogued in workline.review.policy): the Project-local policy family's own reasons and codes - the
+#: Profile CAS effect in mutation.py raises them - are not P2's, so the P2 scan sets them apart (pin updated
+#: deliberately by RB6; see the RB6 candidate package).
+from workline.review import policy as _p6_policy
+
+P6_REASONS = set(_p6_policy.RECONCILE_REASONS)
+P6_CODES = set(_p6_policy.STOP_CODES) | set(_p6_policy.VALIDATION_CODES) | {"review_policy_owner"}
 #: The modules P2 adds, or the parts it adds to live modules.
 P2_MODULES = [
     SRC / "roadmap_review.py", SRC / "committed_view.py", SRC / "review" / "planning.py", SRC / "review" / "recovery.py",
@@ -248,8 +255,8 @@ class ReasonAttributeTests(PlanningTestCase):
             reasons |= found_reasons
             codes |= {code for code in found_codes if code.startswith("review_")}
         self.assertTrue(reasons >= {"review_commit_unowned", "review_persisted_proof_failed"})
-        self.assertEqual(set(), reasons - CATALOGUE_REASONS, "a reason outside §25.1")
-        self.assertEqual(set(), codes - CATALOGUE_CODES, "a code outside §25.1")
+        self.assertEqual(set(), reasons - CATALOGUE_REASONS - P6_REASONS, "a reason outside §25.1")
+        self.assertEqual(set(), codes - CATALOGUE_CODES - P6_CODES, "a code outside §25.1")
 
     def test_every_reconcile_required_p2_raises_names_a_catalogue_reason(self) -> None:
         for path in P2_MODULES:
@@ -257,11 +264,12 @@ class ReasonAttributeTests(PlanningTestCase):
             with self.subTest(path.name):
                 self.assertEqual([], found.unresolved, "a reason the scan cannot resolve to catalogue text")
                 self.assertEqual([], found.reasonless, "a P2 ReconcileRequired without a reason")
-                self.assertEqual(set(), found.reasons - CATALOGUE_REASONS - {None}, "a reason outside §25.1")
+                self.assertEqual(set(), found.reasons - CATALOGUE_REASONS - P6_REASONS - {None}, "a reason outside §25.1")
                 if path in P2_ONLY_MODULES:
                     self.assertNotIn(None, found.reasons, "only live code keeps reason None")
         self.assertEqual({"review_publication_invalid", "review_publication_contract_invalid",
-                          "review_registration_base_moved", "review_recovery_reservation_conflict", None},
+                          "review_registration_base_moved", "review_recovery_reservation_conflict", None,
+                          "review_p6_profile_before_mismatch"},
                          _refusals(SRC / "mutation.py").reasons)
 
     def test_the_catalogue_is_the_contracts_and_covers_every_code_and_reason_it_names(self) -> None:
