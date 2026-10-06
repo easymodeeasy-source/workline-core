@@ -383,3 +383,58 @@ Per §36.21 and the Control Plane dispatch, the baseline candidate stops here:
 - The optimization path, including whether and how to freeze a §36.21 hypothesis under the §36.22 decision tree, is returned to the Control Plane.
 
 BL-007 is not closed. `BACKLOG.md` is not touched.
+
+
+---
+
+# §36.21 Frozen optimization hypothesis: RB2-H1
+
+This checkpoint freezes the optimization hypothesis **before** any production optimization byte exists in this history (§36.21). The hypothesis was frozen by the Control Plane after it accepted the baseline above (`MEASURED_TRIGGER_B`); it is committed here verbatim in substance. Everything above this line is the accepted baseline exactly as committed in `a626ac75`.
+
+| Item | Frozen value |
+|---|---|
+| ID | **RB2-H1** |
+| Measured bottleneck | `ProjectView.events_for` repeatedly scans the complete already-loaded immutable Event list, once per entity / state derivation. |
+| Expected mechanism | One per-ProjectView in-memory entity → Events index, built from the exact already-loaded Event sequence. It preserves Event object identity and log order. |
+| Exact intended production surface | `src/workline/state.py`, `ProjectView.events_for`. Nothing else. |
+| Expected Git / load effect | None: no Git command and no canonical load is added, removed or changed. |
+| Allowed decision-tree step | §36.22 step 4 only. The baseline showed steps 1–3 cannot remove the validate-project Trigger B (see below). |
+
+**Baseline support** (all from the accepted official series above):
+
+- cold status M median 1,463.2 ms; cold validate-project M median 705.6 ms;
+- the `events_for` measured candidate is **36.5%** of the M status median and **24.3%** of the M validate median;
+- Trigger B is robust in the wall scaling (M→L cold status 43.33×, conservative 42.42×; cold validate 30.17×, conservative 28.83×) and in stages F and G (status F 106.09×, G 74.92×, validate F 97.06× at M→L; F also at S→M).
+
+**Why step 4 now.** For validate-project, the baseline shows:
+
+- repeated `ProjectView.load` within one command: 0;
+- repeated `validate_structure`: 0;
+- repeated registry validation: 0;
+- repeated identical Git commands: 0.
+
+Yet validate-project still scales 30.17× from M to L. Steps 1–3 therefore cannot remove its Trigger B, and the first shared optimization able to explain both validate and status is the Event lookup index.
+
+**Semantic invariants (must hold exactly):**
+
+- `self.events` remains the canonical authority;
+- the same Event objects are returned, in the same order;
+- each call returns a new list;
+- an empty lookup is unchanged (`[]`);
+- status, validation and lifecycle semantics are unchanged;
+- no persistent state, no network, no cross-session authority.
+
+**Rollback / stop condition.** Do not land H1, and return to the Control Plane, if either holds:
+
+- a smoke run does not materially collapse the Event-scan super-linearity;
+- semantic equality fails.
+
+**Not authorized under RB2-H1:**
+
+- persistent cache, disk index, cache file or background indexing;
+- new canonical state, or an Event-format change;
+- any change to validation, status JSON, lifecycle, Git or B0/B1;
+- network;
+- `relations_to` / `relations_from` or `phase_works` indexing;
+- a broad ProjectView redesign;
+- §36.22 step 1–3 micro-optimizations.
