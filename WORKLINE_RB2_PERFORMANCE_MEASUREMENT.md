@@ -875,3 +875,78 @@ none - 18 before/after identity check(s) of every fixture (worktree bytes incl. 
 - L status: 6901.6, 6828.5, 6595.7, 6838.7, 6995.5, 7164.0, 6946.7, 6978.5, 7189.8, 6766.2, 6810.8, 6735.6, 6711.4, 6761.4, 6770.9
 - L validate: 2669.9, 2651.1, 2556.1, 2581.2, 2629.7, 2625.6, 2679.1, 2668.7, 2694.7, 2632.3, 2688.3, 2604.7, 2607.4, 2542.4, 2566.2
 
+
+---
+
+# BL-007 closeout (§36.35): MEASURED_OPTIMIZED
+
+This section closes BL-007 after the optimization landed. Everything above it is unchanged:
+
+- the accepted baseline;
+- the §36.21 hypothesis checkpoint;
+- the post-H1 evidence;
+- the verbatim harness summaries.
+
+The `FULL_SUITE_PENDING` line in the post-H1 section was the state at the optimization candidate. It was deliberately left unchanged so that the Full suite stays bound to that exact commit, and this section supersedes it.
+
+```
+RB2_H1_SUPPORTED
+MEASURED_OPTIMIZED
+FULL_SUITE_PASS
+GLOBAL_TRIGGER_B_POST_H1    = TRUE
+COLD_WALL_TRIGGER_B_POST_H1 = FALSE
+```
+
+## Landed optimization
+
+| Item | Value |
+|---|---|
+| Landed optimization commit | `78ecbf9bd5acd425bc3faa8fa8c8c677543c2f29` |
+| Landed optimization tree | `d05f8afa07f6f51a7444e7fb239d06b79e5661ba` |
+| Landing | fast-forward of `main` from `0c7b2690f71e860210096a3a8d6879bdfd2c65f4` |
+| Commit chain | five linear commits, no merge: `fa1efce3` (harness) → `a626ac75` (baseline) → `5aa5c417` (§36.21 hypothesis checkpoint) → `ca008f9d` (RB2-H1) → `78ecbf9b` (post-H1 evidence) |
+| Production runtime change | `src/workline/state.py`, `ProjectView.events_for` only (RB2-H1) |
+
+## Full regression suite on the exact optimization commit
+
+| Item | Value |
+|---|---|
+| Full suite | `RB2F-78ecbf9` |
+| Commit at start and end | `78ecbf9bd5acd425bc3faa8fa8c8c677543c2f29` / tree `d05f8afa07f6f51a7444e7fb239d06b79e5661ba`, clean worktree both times |
+| Files | 161/161 files rc=0 |
+| Collected | 3661 |
+| Passed | 3640 |
+| Skipped | 22 (platform-class only: symlink privilege, file mode bit, POSIX-only checks) |
+| Failed | 0 |
+| Subtests | 7117 subtests passed, 0 SUBFAILED |
+| Reruns | 0 |
+
+**Coverage.** The run used one pytest process per test file and is coverage-equivalent to `py -3 -B -m pytest tests -q`:
+
+- the canonical collect-only finds the same 3,661 tests in the same 161 files;
+- no test file is omitted.
+
+**Accounting.** Passed + skipped is one more than collected. The extra item is a single subtest-level skip, which pytest also counts as skipped while its parent test passes.
+
+## Provenance of the performance evidence
+
+- The official RB2-H1 performance series executed on `29c5a24d5fb2065f63cc51dcfb0168a138645015`.
+- `ca008f9d` and `78ecbf9b` carry byte-identical measured runtime surfaces: `src/`, `run-workline.py`, `registry.md`, `.claude/`, `tests/` and `benchmarks/` are identical to `29c5a24d`. Only this measurement summary differs.
+- No performance rerun was required, and none was made for the landed commits.
+
+## Residual and acceptance basis
+
+- **Residual stage Trigger B stays disclosed.** At M→L these stage rows remain above the frozen §36.18 threshold:
+  - status stage F 43.00×;
+  - status stage G 17.42×;
+  - validate-project stage F 33.11×.
+
+  So `GLOBAL_TRIGGER_B_POST_H1 = TRUE`. The cold-process wall rows for status (6.91×) and validate-project (4.65×) are below it, so `COLD_WALL_TRIGGER_B_POST_H1 = FALSE`.
+- **§36.25 acceptance basis.** Acceptance rests on a material improvement of the Trigger B shape, not on eliminating every stage-row trigger. The criteria met are:
+  - the intended Event-scan bottleneck fell materially (`events_for` 36.5% → 0.4% of the cold M status median);
+  - representative cold M improved beyond noise;
+  - the Trigger B scaling shape improved materially (wall 43.33× → 6.91× and 30.17× → 4.65×; stage F 106.09× → 43.00×, G 74.92× → 17.42×, validate F 97.06× → 33.11×);
+  - no required stage was skipped;
+  - §36.24 semantic equivalence held;
+  - the Full regression suite above passed.
+- **Not part of BL-007.** No further optimization is part of it: no other index, no `relations_to` / `phase_works` work, and no §36.22 step 1–3 cleanup.

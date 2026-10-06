@@ -39,7 +39,7 @@
 | BL-004 | Review finding classification / convergence | OPEN |
 | BL-005 | Review / achievement evidence durability | VERIFIED |
 | BL-006 | Read-only status/context command | OPEN |
-| BL-007 | Cold-start recovery performance | INVESTIGATE |
+| BL-007 | Cold-start recovery performance | RESOLVED |
 | BL-008 | Python interpreter resolution | RESOLVED |
 | BL-009 | Historical deleted Related / must_read semantics | RESOLVED |
 | BL-010 | Generated artifact hygiene | RESOLVED |
@@ -190,7 +190,7 @@
 
 - ID: BL-007
 - Title: Cold-start recovery performance
-- Status: INVESTIGATE
+- Status: RESOLVED
 - Kind: implementation, interface
 - Problem: fresh sessionでProjectの現在地を回復するまでに長い時間がかかる。bootstrap → registry validation → router → Skill読込 → 状態取得の各段と、実装内で繰り返される全entity読込・構造validation・Git status呼出しのどこに時間を要しているかは計測されていない。
 - Why it matters: 「fresh sessionが正本だけから現在地を回復できる」というWorklineの前提の実用性を下げ、長い回復時間は手順の省略や推測を誘発する。real-project migrationでは、fresh sessionからのrecoveryに要した時間の長さが（欠陥ではないが）改善候補として挙がった。
@@ -200,6 +200,7 @@
 - Human confirmation likely: no（routingの意味やauthorityを変えない高速化の場合）
 - Self-hosting prerequisite: no
 - Evidence class: real-project migration, code inspection
+- Resolution: 先に計測し、計測が裏付けた1点だけを最適化した。生成した規模S / M / LのbenchmarkProjectで、cold process（`py -3 -I -B`）の `status --json` と `validate-project` を段階別・規模別に計測した（bootstrap・registry validation・状態読込・構造validation・Git呼出しの所要と重複。`WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md`）。1回のcommand内で、`ProjectView.load`・`validate_structure`・registry validation・同一Git commandの繰り返しはいずれも0だった。M→Lの非線形性の主因は、読込済みの不変なEvent列をentity・状態導出ごとに全走査する `ProjectView.events_for` で、M規模のstatus中央値の36.5%を占めた。対策（RB2-H1）として、`ProjectView` ごとのメモリ内のentity → Event索引を `src/workline/state.py` の `ProjectView.events_for` だけに加えた。索引は読込済みのEvent列そのものから作り、Eventの同一性と順序を保つ。呼出しごとに新しいlistを返し、Event列が変われば作り直す。永続cache・disk上の索引・新しいcanonical state・Event形式の変更・Git呼出しの増減は無い。S / M / Lの同一fixtureで、status JSON・validate-projectの出力・admission事実・Git呼出し回数は最適化前と一致した。cold processの中央値は次のとおり改善した: statusはM 1,463.2 → 987.6 ms、L 63,406.6 → 6,828.5 ms。validate-projectはM 705.6 → 565.5 ms、L 21,290.8 → 2,629.7 ms。M→Lのwall倍率はstatusが43.33× → 6.91×、validate-projectが30.17× → 4.65×となり、cold wallのTrigger Bは解消した。段階F / Gの倍率（status F 43.00×、G 17.42×、validate-project F 33.11×）は閾値を超えたまま残り、計測文書に開示している。完了の判定（MEASURED_OPTIMIZED）は、すべての段階行のtriggerの解消に基づくものではない。根拠は次のとおりである: 意図した走査の削減、代表規模Mでのnoiseを超える改善、Trigger Bの倍率形状の実質的な改善、必須段階を省略していないこと、意味の等価性、完全なregression suiteのPASS（161 files・3,661 tests、failed 0）。最適化は `78ecbf9bd5acd425bc3faa8fa8c8c677543c2f29` としてlandし、完了の根拠は計測文書のBL-007 closeout sectionにある。速度の改善でありruleではないため、registryの意味・routing・authority・Skill手順は変えておらず、canonical authorityへの反映は要らない。残る段階F / Gの非線形性と、`relations_to` / `phase_works` 等の他の走査は本項目では扱わない。
 
 ### BL-008 Python interpreter resolution
 
