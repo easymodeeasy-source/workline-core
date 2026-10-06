@@ -191,7 +191,29 @@ class ProjectView:
 
     # events ---------------------------------------------------------------
     def events_for(self, entity_id: str) -> list[Event]:
-        return [event for event in self.events if event.entity == entity_id]
+        """The Events of one entity, in log order: exactly ``[e for e in self.events if e.entity == entity_id]``.
+
+        RB2-H1 (§36.22 step 4): read from one in-memory per-view index of this
+        view's own Event list instead of a full scan per call. The index is built
+        in one pass the first time it is needed and rebuilt whenever ``events``
+        is replaced or grows (``with_effects`` appends to its copy, ``replace``
+        makes a new view), so ``self.events`` stays the only authority. It holds
+        the same Event objects in the same order, is never persisted, and every
+        call returns a new list as before.
+        """
+        events = self.events
+        cached = self.__dict__.get("_events_by_entity")
+        if cached is None or cached[0] is not events or cached[1] != len(events):
+            index: dict[str, list[Event]] = {}
+            for event in events:
+                index.setdefault(event.entity, []).append(event)
+            cached = (events, len(events), index)
+            self.__dict__["_events_by_entity"] = cached
+        try:
+            found = cached[2].get(entity_id)
+        except TypeError:  # an argument no index key can equal: compare exactly as the full scan does
+            return [event for event in events if event.entity == entity_id]
+        return list(found) if found else []
 
     # work -----------------------------------------------------------------
     def work_state(self, work_id: str) -> WorkState:

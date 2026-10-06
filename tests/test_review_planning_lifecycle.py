@@ -17,8 +17,11 @@ from workline.review.store import ReviewStore
 from workline.state import ProjectView
 from workline.validate import validate_structure
 
-#: SHA-256 of ``src/workline/state.py`` at the implementation baseline de3681c (LF line ends).
-STATE_PY_BASELINE_SHA256 = "6f86107ceee1536b55ff0c85b2f1bd3fca17ee0b83e4ef38885d184be1d0e6da"
+#: SHA-256 of ``src/workline/state.py`` (LF line ends). Pinned at the implementation baseline de3681c
+#: (6f86107ceee1536b55ff0c85b2f1bd3fca17ee0b83e4ef38885d184be1d0e6da); re-pinned for the one authorized change
+#: since, the RB2-H1 in-memory ``events_for`` index (Control Plane-frozen, §36.22 step 4), which changes no derivation
+#: and keeps state.py free of Review.
+STATE_PY_BASELINE_SHA256 = "feea1dc4af4105a535d10bd11eb9b1ece762e28bcff88f5ba7ab040ced2dd772"
 EVENT_LOG = ".workline/events/events.jsonl"
 
 
