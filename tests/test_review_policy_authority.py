@@ -70,19 +70,30 @@ class OwnerSkillTests(unittest.TestCase):
     PHRASES = ("R6-1", p4.P6_POLICY_ID, "`holdout_discovery`", "`review_p6_discovery_slots_unmet`",
                "`review_p6_holdout_unbound`", "`review_p6_holdout_unsettled`", "`review_p6_holdout_failed`",
                "`review_p6_profile_incompatible`", "`review_p6_lineage_invalid`", "`review.reverification.extra_scope_steps`",
-               "open Runは途中でpolicyを変えない")
+               "open Runは途中でpolicyを変えない",
+               # RB6FR2B-1: a successor keeps the cycle's family policy and freezes its OWN Effective Policy (§30.6)
+               "修理の後継とHuman decisionでの新しいRunはcycleの最初のRunのpolicy（family）を保ち、自分のEffective Policyを"
+               "開始時に新しく解決して凍結する（cycleの最初のRunのEffective Policyは引き継がない）")
+    #: RB6FR2B-1: the clause the code contradicts never comes back.
+    FORBIDDEN = ("cycleの最初のRunのpolicyとそのEffective Policyを保ち",)
 
     def test_the_roadmap_skill_states_p6_inside_its_review_v1_section(self) -> None:
         planning = section(read(".claude", "skills", "roadmap", "SKILL.md"), "## Review-v1 planning", "## Mutation / Git")
         for phrase in self.PHRASES:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, planning)
+        for phrase in self.FORBIDDEN:
+            with self.subTest(forbidden=phrase):
+                self.assertNotIn(phrase, read(".claude", "skills", "roadmap", "SKILL.md"))
 
     def test_the_start_skill_states_p6_inside_its_review_v1_section(self) -> None:
         work = section(read(".claude", "skills", "start", "SKILL.md"), "## Review-v1 Work", "## outer continuation")
         for phrase in self.PHRASES:
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, work)
+        for phrase in self.FORBIDDEN:
+            with self.subTest(forbidden=phrase):
+                self.assertNotIn(phrase, read(".claude", "skills", "start", "SKILL.md"))
 
 
 class RulesAndRouterTests(unittest.TestCase):
@@ -108,30 +119,38 @@ P6_PRODUCERS = {
     ("mutation.py",): {"_guard_policy_record", "_validate_profile_replacement", "_classify_profile_replacement",
                        "_replace_review_profile", "bind_policy_recovery", "_policy_publication"},
     ("review", "recovery.py"): {"discover_kind", "p4_reconstruction_problem"},
-    ("review", "publication.py"): {"policy_change_adders", "committed_policy_proof", "_prove_policy",
-                                   "consumptions_mentioning"},
+    ("review", "publication.py"): {"policy_change_adders", "policy_namespace_adders", "committed_policy_proof",
+                                   "_prove_policy", "consumptions_mentioning", "committed_policy_state_problem"},
+    # RB6FR3-3: the P6 functions of p4.py (the frozen Effective Policy reader, the reverification holdout) and of
+    # review/validate.py (the policy record and compatibility Problems, which it constructs as ``ReviewProblem``)
+    ("review", "p4.py"): {"effective_policy_of_envelope", "repair_result"},
+    ("review", "validate.py"): {"_policy_records", "_policy_compatibility"},
 }
+#: Where a bare ``CODE_*`` / ``REASON_*`` name resolves: the scanned module's own constants (p4.py has its own).
+_LOCAL_CONSTANTS = {("review", "p4.py"): p4}
 #: ORCH-RB6-1-R11: the functions whose returned ``(code, message)`` a producer raises as ``stop(*problem)``.
 STARRED_SOURCES = {"surface_problem", "discovery_slots_problem"}
 #: The pre-P6 codes / reasons the P6 owner reuses unchanged (each exists at the base commit 61b0b9dd).
 SHARED_PRE_P6 = {"detached_head", "review_contract_invalid", "review_not_persisted", "review_persistence_unknown",
                  "review_reviewer_failed", "review_reviewer_mismatch", "review_recovery_reservation_conflict",
-                 "review_recovery_incomplete", "review_record_invalid"}
+                 "review_recovery_incomplete", "review_record_invalid",
+                 # RB6FR3-3: review/validate.py's pre-P6 record conflict Problem (21 uses at 61b0b9dd)
+                 "review_record_conflict"}
 P6_OWNER_CODE = "review_policy_owner"
 _MODULES = {"policy": policy, "review_policy": policy, "p4": p4, "history": history}
 
 
-def _resolve(node: ast.AST) -> set[str] | None:
+def _resolve(node: ast.AST, local: object = policy) -> set[str] | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return {node.value}
     if isinstance(node, ast.IfExp):
-        body, orelse = _resolve(node.body), _resolve(node.orelse)
+        body, orelse = _resolve(node.body, local), _resolve(node.orelse, local)
         return None if body is None or orelse is None else body | orelse
     if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in _MODULES:
         found = getattr(_MODULES[node.value.id], node.attr, None)
         return {found} if isinstance(found, str) else None
     if isinstance(node, ast.Name) and node.id.startswith(("CODE_", "REASON_")):
-        found = getattr(policy, node.id, None)
+        found = getattr(local, node.id, None)
         return {found} if isinstance(found, str) else None
     return None
 
@@ -205,10 +224,12 @@ def p6_raised() -> tuple[set[str], list[str]]:
                                 unresolved.append(f"{path.name}:{node.lineno} (stop(*...) of an unknown source)")
                             continue
                         values.append(node.args[0])
+                    elif name == "ReviewProblem" and node.args:
+                        values.append(node.args[0])  # RB6FR3-3: review/validate.py's Problem constructor
                     for value in values:
                         if isinstance(value, ast.Name) and value.id in ("code", "reason"):
                             continue  # a helper passing its caller's code / reason on: every call of it is scanned
-                        resolved = _resolve(value)
+                        resolved = _resolve(value, _LOCAL_CONSTANTS.get(parts, policy))
                         if resolved is None:
                             unresolved.append(f"{path.name}:{node.lineno}")
                         else:

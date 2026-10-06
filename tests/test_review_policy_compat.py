@@ -91,6 +91,26 @@ class FrozenPolicyTests(PolicyCase):
         self.assertEqual([], self.dirty())
 
 
+class StatusShadowRenderTests(WorklineTestCase):
+    """RB6FR3-2: the status human render of the shadow advisory is the detector's own ``render_lines()``, line for line
+    (status renders it from the JSON projection, so every evidence line - not only the first - is pinned)."""
+
+    def test_the_status_human_render_is_the_detectors_render_lines(self) -> None:
+        from test_shadow_authority import CLAIMING_SKILL
+        from workline import shadow_authority as sa
+        from workline.status import build_status, render_human
+
+        store = self.new_project("project")
+        skill = store.root / ".claude" / "skills" / "tracker" / "SKILL.md"
+        skill.parent.mkdir(parents=True, exist_ok=True)
+        skill.write_text(CLAIMING_SKILL, encoding="utf-8", newline="\n")
+        expected = ["  " + line for line in sa.detect_shadow_authority(store.root).render_lines()]
+        self.assertGreater(len(expected), 1, "the fixture yields evidence lines beyond the status line")
+        rendered = render_human(build_status(store.root)).splitlines()
+        start = rendered.index(expected[0])
+        self.assertEqual(expected, rendered[start:start + len(expected)])
+
+
 class NoBackfillTests(WorklineTestCase):
     def test_an_existing_project_needs_no_backfill_and_absence_is_valid(self) -> None:
         store = self.new_project()

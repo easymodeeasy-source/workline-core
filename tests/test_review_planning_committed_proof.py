@@ -565,10 +565,12 @@ class LegacyOnlyPushTests(PlanningTestCase):
         before = gitcmd.commit_parents(store.root, made)[0]
         # §18.7: before the Git stage is recorded (HEAD), at classification and right before the push (the commit made)
         self.assertEqual([before, made, made], calls)
-        # one path-limited read per commit: the same commit ID's answer is remembered within the process. RB6 round 4
-        # (CP R5 case E), a deliberate pin update: that one read names the policy change directory too
+        # one path-limited read per commit: the same commit ID's answer is remembered within the process. RB6 rounds
+        # 4-5 (CP R5 case E), deliberate pin updates: that one read names the policy change directory and the Profile
+        # path too
         self.assertEqual([("rev-list", "--full-history", "-n", "1", commit, "--", ".workline/review/candidate-snapshots/",
-                           ".workline/review/policy/changes/") for commit in (before, made)], reads)
+                           ".workline/review/policy/changes/", ".workline/review/policy/project-profile.yaml")
+                          for commit in (before, made)], reads)
         self.assertEqual(made, self.remote_head())
 
 

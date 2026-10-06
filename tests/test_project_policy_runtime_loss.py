@@ -429,6 +429,8 @@ class StrandedKpTests(_RuntimeLoss):
         change_path = paths.policy_change_rel(change_id)
         self.git("revert", "--no-edit", kp)
         self.assertIsNone(self.profile_bytes())
+        self.assertIsNone(publication.barrier_problem(self.root, self.commit_of()),
+                          "the revert takes the change record and the Profile back together: publishable (RB6FR1B-1)")
         self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first)
         self.assertEqual({change_path: [kp]}, {path: found for path, found in
                                                publication.policy_change_adders(self.root, self.commit_of()).items()},
@@ -511,6 +513,54 @@ class StrandedKpTests(_RuntimeLoss):
         self.assertEqual([], self.policy_consumptions())
         self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first)
         self.assertEqual(([run_id], (change_id,)), (self.policy_runs(), self.review_store.policy_change_ids()))
+
+
+class PolicyStateWindowLossTests(_RuntimeLoss):
+    """RB6FR1B-2 (§30.40 windows 10-12) with the runtime lost: the policy-state stage was (partly) applied to the
+    working tree and nothing was committed. The change record the working tree holds has no committed Consumption,
+    so every Policy Change stops at the manual reconciliation boundary; nothing is inferred, committed or pushed."""
+
+    template = "remote"
+
+    def lost_in(self, window: Any) -> tuple[str, str, list[Any]]:
+        with window, self.assertRaises(Interrupted):
+            self.change(self.first)
+        (run_id,) = self.policy_runs()
+        (change_id,) = self.review_store.policy_change_ids()
+        pushes = self.pushes()
+        self.lose_runtime()
+        return run_id, change_id, pushes
+
+    def assert_nothing_committed_or_pushed(self, run_id: str, change_id: str, pushes: list[Any]) -> None:
+        self.assertEqual(([run_id], (change_id,)), (self.policy_runs(), self.review_store.policy_change_ids()))
+        self.assertEqual(([], []), (self.commits_with(KP_SUBJECT), self.commits_with(KM_SUBJECT)), "no Kp, no Km")
+        self.assertEqual(pushes, self.pushes(), "no push")
+
+    def test_window_10_the_change_record_applied(self) -> None:
+        run_id, change_id, pushes = self.lost_in(after_effect("create_file", project_policy.STAGE_POLICY))
+        self.assertIsNone(self.profile_bytes())
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first, self.request(after=3))
+        self.assert_nothing_committed_or_pushed(run_id, change_id, pushes)
+
+    def test_window_11_the_profile_cas_applied(self) -> None:
+        """The working tree holds exactly the reviewed after Profile and its change record: the canonical reader
+        accepts it (new planning / Work Runs run under the authorized policy), and every Policy Change stops."""
+        run_id, change_id, pushes = self.lost_in(after_effect("replace_review_profile", project_policy.STAGE_POLICY))
+        self.assertEqual(1, self.state().profile_version)
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first, self.request(after=3))
+        self.assert_nothing_committed_or_pushed(run_id, change_id, pushes)
+
+    def test_window_12a_the_change_record_applied_the_profile_not(self) -> None:
+        """Partial application: the change record is on disk without its Profile - every Policy Change stops, and
+        canonical lineage denies every new Review Run (``review_p6_lineage_invalid``) until a person reconciles."""
+        run_id, change_id, pushes = self.lost_in(before_effect("replace_review_profile", project_policy.STAGE_POLICY))
+        self.assertIsNone(self.profile_bytes())
+        with self.assertRaises(StopError) as raised:
+            self.state()
+        self.assertEqual(policy.CODE_LINEAGE_INVALID, raised.exception.code)
+        self.assertIn("policy change records exist and the Project Profile is absent", str(raised.exception))
+        self.assert_refused(policy.REASON_RUN_UNRECOVERED, self.first, self.request(after=3))
+        self.assert_nothing_committed_or_pushed(run_id, change_id, pushes)
 
 
 class MalformedTests(_RuntimeLoss):
@@ -787,14 +837,16 @@ class UnbackedChangeRecordTests(_HandMadePolicy):
 class BarrierEquivalenceTests(_HandMadePolicy):
     """R5 item 4 (case A): a history with no policy change is decided exactly as main decides it.
 
-    The reference is the barrier with its P6 block neutralized (``policy_change_adders`` answering ``{}`` without a
-    read): ``publication.py`` adds to main's barrier only that block, after the fast path and planning proofs.
+    The reference is the barrier with its P6 block neutralized (``policy_namespace_adders`` answering ``{}`` without
+    a read): ``publication.py`` adds to main's barrier only that block, after the fast path and planning proofs.
     Against it the real barrier gives the byte-equal answer, makes every one of the reference's Git reads in the same
-    order, and adds at most one: the policy change directory's add-history read, which lists nothing. No committed
-    policy proof runs. The one fast-path read now names the policy change directory beside the Candidate-snapshot
-    directory (RB6 round 4, CP R5 case E: a deliberate pin change, still ONE read - pinned for legacy-only histories
-    by ``test_review_planning_publication.LegacyOnlyTests`` and ``test_review_planning_committed_proof.
-    LegacyOnlyPushTests``); a snapshot-free history holding a policy change reaches the policy proof (rows below).
+    order, and adds at most one: the add-history read of the policy change directory and the Profile path, which
+    lists nothing - so neither a policy proof nor the committed policy-state check runs. The one fast-path read now
+    names the policy change directory and the Profile path beside the Candidate-snapshot directory (RB6 rounds 4-5,
+    CP R5 case E: deliberate pin changes, still ONE read - pinned for legacy-only histories by
+    ``test_review_planning_publication.LegacyOnlyTests`` and ``test_review_planning_committed_proof.
+    LegacyOnlyPushTests``); a snapshot-free history holding a policy change or a Profile commit reaches the policy
+    proof (rows below).
     """
 
     template = "local"
@@ -802,7 +854,7 @@ class BarrierEquivalenceTests(_HandMadePolicy):
     def recorded(self, commit: str, *, neutral: bool) -> tuple[str | None, list[tuple[str, ...]], list[Any]]:
         calls: list[tuple[str, ...]] = []
         listed: list[Any] = []
-        real_run, real_bytes, real_adders = gitcmd.run_git, gitcmd.run_git_bytes, publication.policy_change_adders
+        real_run, real_bytes, real_adders = gitcmd.run_git, gitcmd.run_git_bytes, publication.policy_namespace_adders
 
         def run(repo: Any, *args: str, **kwargs: Any) -> Any:
             calls.append(tuple(args))
@@ -819,8 +871,10 @@ class BarrierEquivalenceTests(_HandMadePolicy):
 
         gitcmd.forget_object_answers()
         with mock.patch.object(gitcmd, "run_git", run), mock.patch.object(gitcmd, "run_git_bytes", run_bytes), \
-                mock.patch.object(publication, "policy_change_adders", adders), \
-                mock.patch.object(publication, "committed_policy_proof", side_effect=AssertionError("a policy proof ran")):
+                mock.patch.object(publication, "policy_namespace_adders", adders), \
+                mock.patch.object(publication, "committed_policy_proof", side_effect=AssertionError("a policy proof ran")), \
+                mock.patch.object(publication, "committed_policy_state_problem",
+                                  side_effect=AssertionError("a policy-state check ran")):
             problem = publication.barrier_problem(self.root, commit)
         return problem, calls, listed
 
@@ -834,12 +888,13 @@ class BarrierEquivalenceTests(_HandMadePolicy):
 
     def test_a_proven_planning_only_history_adds_one_empty_policy_read(self) -> None:
         head = self.commit_of()
-        self.assertEqual({}, publication.policy_change_adders(self.root, head))
+        self.assertEqual({}, publication.policy_namespace_adders(self.root, head))
         found, extra, listed = self.extra_reads(head)
         self.assertIsNone(found)
         directory = f"{paths.POLICY_DIR}/{paths.POLICY_CHANGES}"
         self.assertEqual([("log", "--full-history", "--no-renames", "--diff-merges=combined", "--diff-filter=A",
-                           "--name-only", "-z", "--format=%x01%H%x02", head, "--", directory)], extra)
+                           "--name-only", "-z", "--format=%x01%H%x02", head, "--", directory,
+                           paths.POLICY_PROFILE_REL)], extra)
         self.assertEqual([{}], listed)
 
     # ---------------------------------------------------------------- RB6 round 4: R5 case E (RB6FR1-1 / RB6FR2-1)
@@ -877,6 +932,32 @@ class BarrierEquivalenceTests(_HandMadePolicy):
         self.assertEqual([one_read + (made, "--", *publication.FAST_PATH_DIRECTORIES)], reads, "still ONE read")
         self.assertEqual(1, proof.call_count, "the policy proof ran for the one policy change")
         self.assertIn("PK3 fails", str(found))
+
+    def test_an_unrelated_push_over_a_hand_made_profile_only_commit_is_refused(self) -> None:
+        """RB6FR1B-1: a person commits only a well-formed Profile in a Project with no Review history. The one
+        fast-path read names the Profile path, so the barrier reaches the policy block; there is no change record to
+        prove, and the committed policy state is no canonical lineage (no applied change produced the Profile), so
+        the unrelated legacy push is refused and the destination keeps what it had (03128da published it)."""
+        _change_rel, _change_bytes, profile_bytes = self.hand_made_pair()
+        legacy = self.new_project("legacy", remote=True)
+        roadmap = rm.create_roadmap(legacy, plan("Legacy Roadmap"))
+        published = str(gitcmd.head_commit(legacy.root))
+        (legacy.root / paths.POLICY_PROFILE_REL).parent.mkdir(parents=True, exist_ok=True)
+        (legacy.root / paths.POLICY_PROFILE_REL).write_bytes(profile_bytes)
+        git(legacy.root, "add", "--", paths.POLICY_PROFILE_REL)
+        git(legacy.root, "commit", "-q", "-m", "docs: a person adds a Project Profile")
+        made = str(gitcmd.head_commit(legacy.root))
+        self.assertFalse(gitcmd.history_touches(legacy.root, made, publication.FAST_PATH_DIRECTORIES[:2]),
+                         "neither directory of 03128da's fast path is touched")
+        found, reads = self.fast_path_reads(legacy.root, made)
+        self.assertEqual([("rev-list", "--full-history", "-n", "1", made, "--", *publication.FAST_PATH_DIRECTORIES)],
+                         reads, "still ONE read")
+        self.assertIn("the committed policy state", str(found))
+        self.assertIn("no applied policy change produced the current Profile version 1", str(found))
+        with self.assertRaises(StopError) as raised:
+            rm.hold_roadmap(legacy, roadmap.roadmap_id)
+        self.assertEqual("review_publication_barrier", raised.exception.code)
+        self.assertEqual(published, self.legacy_remote_main(), "the destination keeps what it had")
 
     def test_an_unrelated_push_over_a_hand_made_policy_commit_is_refused(self) -> None:
         """R5 case E (RB6FR1-1 / RB6FR2-1): an ordinary legacy operation's push over a hand-made policy commit in a
@@ -922,6 +1003,37 @@ class CommittedPolicyProofTests(PolicyCase):
         self.assertIsNone(self.item(self.kp))
         self.assertIsNone(self.item(self.km))
         self.assertIsNone(publication.barrier_problem(self.root, self.km))
+
+    def test_a_profile_edit_on_top_of_a_proven_kp_and_km_is_refused(self) -> None:
+        """RB6FR1B-1: the genuine Kp / Km stay proven (PK1-PK9 pass), yet a later Profile overwrite or deletion without
+        a Kp leaves a committed policy state no canonical lineage accepts - the barrier refuses each (03128da
+        published them, and every clone then denied every new Review Run)."""
+        self.assertIsNone(publication.barrier_problem(self.root, self.km), "the genuine history is publishable")
+        overwritten = self.review_store.read_profile().to_record()
+        overwritten["overrides"] = [dict(overwritten["overrides"][0], setting=3)]
+        for name, change in (("an overwrite", {paths.POLICY_PROFILE_REL: serialize.canonical_bytes(overwritten)}),
+                             ("a deletion while the change record remains", {paths.POLICY_PROFILE_REL: None})):
+            with self.subTest(name):
+                forged = plumb_commit(self.store, self.km, change, f"a person makes {name} of the Profile")
+                self.assertIsNone(self.item(forged), "the genuine Kp / Km themselves stay proven")
+                problem = publication.barrier_problem(self.root, forged)
+                self.assertIn("the committed policy state", str(problem))
+
+    def test_genuine_states_stay_publishable(self) -> None:
+        """RB6FR1B-1 refuses no genuine state: after a second change and after a rollback, every Kp and Km and the
+        branch tip pass the barrier (each Kp commits the change record and the reviewed Profile together on a parent
+        holding the sealed Receipt)."""
+        second = self.applied(self.request(after=3, supersedes=(self.change_id,), overlap=policy.OVERLAP_KNOWN),
+                              two_reviewers())
+        rollback = self.applied(self.request(direction=policy.DIRECTION_ROLLBACK, after=2,
+                                             rolls_back=second.policy_change_id, overlap=policy.OVERLAP_KNOWN,
+                                             expected_effect="the earlier setting is restored"),
+                                policy_review(Discovery(), Discovery(viewpoint="safety", identity="discovery-two"),
+                                              Discovery(viewpoint="scope", identity="discovery-three")))
+        for commit in (str(second.policy_commit), str(second.metadata_commit), str(rollback.policy_commit),
+                       str(rollback.metadata_commit), self.commit_of()):
+            with self.subTest(commit=commit):
+                self.assertIsNone(publication.barrier_problem(self.root, commit))
 
     def test_pk1_a_change_record_added_twice(self) -> None:
         removed = plumb_commit(self.store, self.km, {self.change_path: None}, "a revert of the change record")
