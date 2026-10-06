@@ -81,6 +81,15 @@ class InitialMaterializationTests(unittest.TestCase):
         self.assertEqual(V1_DIGEST, loaded["global_policy_identity"])
         self.assertEqual(policy.semantic_projection(baseline.record), policy.semantic_projection(loaded))
 
+    def test_the_p7_loader_identities_are_declared_once_and_distinct(self) -> None:
+        self.assertEqual("materialized-global-policy", policy.SOURCE_MODE_MATERIALIZED)
+        self.assertNotEqual(policy.SOURCE_MODE_DERIVED, policy.SOURCE_MODE_MATERIALIZED)
+        self.assertEqual("review-v1-p7-total-adapter-v1", policy.COMPATIBILITY_TOTAL_ADAPTER_V1)
+        self.assertNotEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC, policy.COMPATIBILITY_TOTAL_ADAPTER_V1)
+        self.assertEqual(("global", "review_global_policy_change"), (policy.ORIGIN_GLOBAL, policy.GLOBAL_EXPERIMENT_KIND))
+        self.assertNotEqual(policy.ORIGIN_PROJECT, policy.ORIGIN_GLOBAL)
+        self.assertNotEqual(policy.SCHEMA_BASELINE, policy.SCHEMA_GLOBAL_POLICY)
+
     def test_only_version_1_is_materialized_from_a_baseline(self) -> None:
         later = policy.GlobalPolicyBaseline({**derived().record, "baseline_version": 2})
         with self.assertRaises(ValidationError):

@@ -71,6 +71,27 @@ def toplevel(path: Path) -> Path | None:
     return Path(text).resolve()
 
 
+def git_common_dir(repo: Path) -> Path | None:
+    """The resolved Git common directory of ``repo`` (read-only); None when ``repo`` is no repository.
+
+    Every worktree of one repository shares it. Workline-root policy maintenance
+    binds its filesystem identity into the opaque local repository identity
+    (P7 §31.13), never its path into a canonical record.
+    """
+    result = run_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir", check=False)
+    text = result.stdout.strip() if result.ok else ""
+    if not text:
+        return None
+    return Path(text).resolve()
+
+
+def object_format(repo: Path) -> str | None:
+    """The object format of ``repo`` (``sha1`` / ``sha256``; read-only); None when undeterminable."""
+    result = run_git(repo, "rev-parse", "--show-object-format", check=False)
+    text = result.stdout.strip() if result.ok else ""
+    return text or None
+
+
 def init_main(path: Path) -> None:
     run_git(path, "init", "-b", "main")
 

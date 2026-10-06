@@ -7,7 +7,9 @@ RB7-F foundation rows:
   order, now through the public primitive the root maintenance lock uses too;
 * the class B scratch (§31.8 / §31.30, RB7C-5): a Project's stays exactly where it
   was, and the root's class B entry uses root-runtime scratch and can never name
-  ``.workline/`` - no root operation creates the Project namespace.
+  ``.workline/`` - no root operation creates the Project namespace;
+* the two read-only Git facts the opaque root repository identity is built from
+  (§31.13): the common directory and the object format.
 
 The §31.59 rows that need the root owner (Project Review / Mutation Controller
 unchanged end to end, no ``.workline`` after every root operation) are added with
@@ -27,7 +29,7 @@ import unittest
 from unittest import mock
 
 from helpers import SRC, WorklineTestCase, git
-from workline import oplock
+from workline import gitcmd, oplock
 from workline.errors import StopError
 from workline.review import hermetic, paths as review_paths
 
@@ -209,6 +211,34 @@ class RootClassBEntryTests(WorklineTestCase):
         with self.assertRaises(StopError) as caught:
             hermetic.enter_root(self.root, ROOT_SCRATCH)
         self.assertEqual("review_no_config_file_invalid", caught.exception.code)
+
+
+class RootRepositoryFactsTests(WorklineTestCase):
+    """§31.13: the read-only Git facts root maintenance binds into its opaque local repository identity."""
+
+    def test_the_common_directory_and_object_format_are_read_without_writing(self) -> None:
+        root = self.new_dir("workline-root")
+        git(root, "init", "-b", "main")
+        git(root, "commit", "-q", "--allow-empty", "-m", "base")
+        before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
+        self.assertEqual((root / ".git").resolve(), gitcmd.git_common_dir(root))
+        self.assertEqual("sha1", gitcmd.object_format(root))
+        self.assertEqual(before, sorted(str(path.relative_to(root)) for path in root.rglob("*")))
+
+    def test_every_worktree_shares_the_common_directory(self) -> None:
+        root = self.new_dir("workline-root")
+        git(root, "init", "-b", "main")
+        git(root, "commit", "-q", "--allow-empty", "-m", "base")
+        other = self.tmp / "other-worktree"
+        git(root, "worktree", "add", "-q", "-b", "other", str(other))
+        self.assertEqual(gitcmd.git_common_dir(root), gitcmd.git_common_dir(other))
+        self.assertNotEqual(root.resolve(), other.resolve())
+
+    def test_outside_a_repository_there_is_no_answer(self) -> None:
+        outside = self.new_dir("not-a-repository")
+        with mock.patch.dict(os.environ, {"GIT_CEILING_DIRECTORIES": str(self.tmp)}):
+            self.assertIsNone(gitcmd.git_common_dir(outside))
+            self.assertIsNone(gitcmd.object_format(outside))
 
 
 if __name__ == "__main__":

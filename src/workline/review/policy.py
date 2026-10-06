@@ -78,10 +78,21 @@ BASELINE_VERSIONS = (BASELINE_VERSION,)
 #: the current one. RB7 adds its versioned total adapter here, without an Effective Policy schema v2.
 COMPATIBILITY_EXACT_DERIVED_SEMANTIC = "review-v1-p6-exact-derived-semantic-v1"
 COMPATIBILITY_INTERPRETATIONS = (COMPATIBILITY_EXACT_DERIVED_SEMANTIC,)
+#: P7 (§31.21, CP RB7-PREP item 4): the identity of the versioned total Profile compatibility adapter. It names the
+#: interpretation an Effective Policy binds only once a real Global change makes the two projections differ; equal
+#: projections - the initial materialization included - keep :data:`COMPATIBILITY_EXACT_DERIVED_SEMANTIC`. Declared
+#: here, once, so the adapter, its proofs and the closed table above name the same identity; the table admits it
+#: with the loader's materialized mode (RB7 step 4).
+COMPATIBILITY_TOTAL_ADAPTER_V1 = "review-v1-p7-total-adapter-v1"
 #: FC-RB7-6: who an active experiment comes from, and the identity kind it is named by. Only Project-origin
 #: experiments (an applied Project Policy Change) exist before RB7; RB7 adds a Global origin here.
 ORIGIN_PROJECT = "project"
 EXPERIMENT_ORIGINS: Mapping[str, str] = {ORIGIN_PROJECT: "review_policy_change"}
+#: P7 (§16.10 / §31.19, FC-RB7-6): a Global lightening's holdout experiment, named by its applied Global Policy
+#: Change (``review_global_policy_change``). Declared here once; :data:`EXPERIMENT_ORIGINS` admits it with the
+#: loader's materialized mode (RB7 step 4).
+ORIGIN_GLOBAL = "global"
+GLOBAL_EXPERIMENT_KIND = "review_global_policy_change"
 #: The loader / schema / default-semantics identity a Profile and the baseline bind (§15.9, §30.5).
 LOADER_SEMANTICS_IDENTITY = "review-v1-p6-policy-loader-v1"
 META_RULES_ID = "review-v1-p6-meta-rules-v1"
