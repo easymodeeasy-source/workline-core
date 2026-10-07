@@ -1024,6 +1024,63 @@ class DeferredReviewTests(IntegrationRunCase):
                 self.assertEqual([], MutationController(store).list_pending())
                 self.assertEqual([], validate_project(store))
 
+    def test_the_g4_settlement_of_both_g4_terminal_branches_is_resumed_once(self) -> None:
+        """RB5PR2-4 (§32.62 items 8 and 9): interrupted right after G4 settled DOMAIN_REPAIR_REQUIRED, or
+        CONFIRMATION_STRUCTURE_REQUIRED, the re-run START takes that branch exactly once: one settled Run (never
+        adjudicated again), one follow-up - one repair plan asked for and one fix Work with its v2 link, or one
+        deterministic confirmation and one successor Run - and nothing left pending."""
+        def settled_g4(n, *args, **kwargs) -> bool:
+            return args[2] == 4
+
+        with self.subTest("domain repair"):
+            store, phase_id, ids = self.marked_project("crash-g4-repair")
+            integration = ids["integration"]
+            adjudicator = Adjudicator()
+            selector = phase_review(Discovery(claim("problem")), adjudicator=adjudicator)
+            log: list = []
+            with crash_at(sr, "_integration_generation", after=True, when=settled_g4):
+                with self.assertRaises(Crash):
+                    self.integrate(store, integration, selector, executor=repairing_executor(store, log))
+            self.assertEqual([], [item for item in log if item[1] is not None], "no plan asked before the crash")
+            self.assertEqual("moved", self.integrate(store, integration, selector,
+                                                     executor=repairing_executor(store, log)).status)
+            (run_id,) = self.integration_runs(store, integration)
+            review = ReviewStore(store)
+            self.assertEqual(ri.BRANCH_DOMAIN_REPAIR_REQUIRED, review.read_adjudication(run_id).integration_disposition)
+            self.assertEqual(1, len(adjudicator.tasks), "G4 is never adjudicated again")
+            self.assertEqual(1, len([item for item in log if item[1] is not None]), "one repair plan asked")
+            view = ProjectView.load(store)
+            fixes = [w.id for w in view.effective_works(phase_id) if w.name == "Fix the integrated report"]
+            self.assertEqual(1, len(fixes))
+            links = [found for found in (review.read_history(review_paths.HISTORY_RELATIONS, relation_id)
+                                         for relation_id in review.history_ids(review_paths.HISTORY_RELATIONS))
+                     if found.relation_type == history.RELATION_FUTURE_WORK_LINK]
+            self.assertEqual([(fixes[0], run_id)], [(found.target.id, found.integration_provenance["source_review_run_id"])
+                                                     for found in links])
+            self.assertEqual([], MutationController(store).list_pending())
+            self.assertEqual([], validate_project(store))
+        with self.subTest("confirmation structure"):
+            store, phase_id, ids = self.marked_project("crash-g4-structure")
+            integration = ids["integration"]
+            selector = phase_review(Discovery(), adjudicator=Adjudicator(ri.HUMAN_CONFIRMATION_REQUIRED))
+            with crash_at(sr, "_integration_generation", after=True, when=settled_g4):
+                with self.assertRaises(Crash):
+                    self.integrate(store, integration, selector)
+            (first,) = self.integration_runs(store, integration)
+            self.assertEqual("completed", self.integrate(store, integration, selector).status)
+            review = ReviewStore(store)
+            self.assertEqual(ri.BRANCH_CONFIRMATION_STRUCTURE_REQUIRED,
+                             review.read_adjudication(first).integration_disposition)
+            self.assertEqual(history.DISPOSITION_NOT_AUTHORIZED, p4.final_disposition(review, review.gate_chain(first)))
+            runs = self.integration_runs(store, integration)
+            self.assertEqual(2, len(runs), "the settled Run and its one successor")
+            (successor,) = set(runs) - {first}
+            self.assertTrue(review.gate_chain(successor).latest.sealed)
+            view = ProjectView.load(store)
+            self.assertEqual(1, len([w for w in view.effective_works(phase_id) if w.work_kind == pi.CONFIRMATION_KIND]))
+            self.assertEqual([], MutationController(store).list_pending())
+            self.assertEqual([], validate_project(store))
+
     def test_a_verification_that_mutates_project_state_never_settles(self) -> None:
         """§32.29: START measures the Project state around every launch; a discovery that writes persistent state
         settles nothing (``result_paths=()`` is never proof), and the Run stays at G1."""
