@@ -554,7 +554,7 @@ class _Session:
         # RB5PR2-1: no Work is run under review-v1 Work Review whose completion could close its reviewed Phase's basis
         # - the named one resumed, or one an outer continuation or a resumed outer START reaches - before its executor
         # runs and before anything of this cycle is recorded.
-        _require_work_review_not_closing(view, work, self.review)
+        _require_work_review_not_closing(view, work, self.review, self.mutation)
         # A derivation belongs to the cycle that decided it, and a cycle runs with the Work
         # carrying its target. One opened here is a new cycle, which decides its own.
         opening = not (state.state == IN_PROGRESS and state.has_target)
@@ -1025,7 +1025,7 @@ class _Session:
         reviewing = _review_run_work(self.mutation)
         view = ProjectView.load(self.store)
         if reviewing is not None and reviewing in view.works and view.work_state(reviewing).state != COMPLETED:
-            _require_work_review_not_closing(view, view.works[reviewing], self.review)
+            _require_work_review_not_closing(view, view.works[reviewing], self.review, self.mutation)
         return self._terminal_reviewed(start_review.continue_selected(self, selected))
 
     def _terminal_reviewed(self, sealed: Any) -> StartResult:
@@ -3492,11 +3492,32 @@ def _work_review_closes_reviewed_phase(view: ProjectView, work: Entity) -> bool:
     return incomplete == [work.id]
 
 
-def _require_work_review_not_closing(view: ProjectView, work: Entity, review: Any) -> None:
-    """STOP ``phase_review_work_review_closes_reviewed_phase`` when review-v1 Work Review would complete ``work`` and
-    that completion could close its reviewed Phase's basis (RB5PR2-1). A START without ``review=`` never asks."""
+def _require_work_review_not_closing(view: ProjectView, work: Entity, review: Any,
+                                     pending: Mutation | None = None) -> None:
+    """Refuse review-v1 Work Review completing ``work`` when that completion could close its reviewed Phase's basis
+    (RB5PR2-1). A START without ``review=`` never asks.
+
+    Fresh (``pending`` None, the named-Work gate before any intent record): STOP
+    ``phase_review_work_review_closes_reviewed_phase`` - nothing was written, and an ordinary START completes the
+    Work. In-run (``pending`` the START mutation this invocation continues - its recorded cycle or its begun Work
+    Review Run): RB5RR-2, ``reconcile required`` with that reason, like every site of this module that leaves a record
+    exactly as it is - the kept record makes an ordinary START of the Work meet ``review_marker_mismatch``, so the
+    message names the record and its Human exit instead.
+    """
     if review is None or not _work_review_closes_reviewed_phase(view, work):
         return
+    if pending is not None:
+        raise ReconcileRequired(
+            f"START mutation {pending.id} keeps a review-v1 Work Review operation of {work.id} pending, and {work.id} "
+            f"is now the last incomplete Work of reviewed Phase {work.phase_id}: its completion would close the "
+            "Phase's current basis, whose phase_completion evidence the review-v1 Work Review terminal stage cannot "
+            f"record. The record is left exactly as it is and is not continued; an ordinary START of {work.id} meets "
+            f"this same record (review_marker_mismatch). Its exit is a Human reconciliation of mutation {pending.id}: "
+            "the Human recovery disposition (RB10 N4, dispose-recovery) sets a pending mutation aside only once RB1's "
+            "read-only classifier proves it pending_reconcile_required, which that classifier does not prove for a "
+            "START record: reconcile required",
+            reason=CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE,
+        )
     raise StopError(
         f"{work.id} is the last incomplete Work of reviewed Phase {work.phase_id}: its completion closes the Phase's "
         "current basis, whose phase_completion evidence the review-v1 Work Review terminal stage cannot record; it "

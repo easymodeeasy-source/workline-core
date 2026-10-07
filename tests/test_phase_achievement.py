@@ -878,7 +878,7 @@ class WorkReviewClosingTests(IntegrationRunCase):
         from planning_helpers import Crash
         from test_review_p4_work import work_p4
         from workline import start as st
-        from workline.errors import StopError
+        from workline.errors import ReconcileRequired, StopError
         from workline.mutation import MutationController
 
         store, phase_id, confirmation = self.confirmed("resumed")
@@ -891,9 +891,13 @@ class WorkReviewClosingTests(IntegrationRunCase):
                 st.start(store, confirmation, "single-work", dying, review=work_p4())
         (pending,) = MutationController(store).list_pending()
         log: list[str] = []
-        with self.assertRaises(StopError) as raised:
+        with self.assertRaises(ReconcileRequired) as raised:
             st.start(store, confirmation, "single-work", completing_executor(store, log), review=work_p4())
-        self.assertEqual(st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE, raised.exception.code)
+        # RB5RR-2: the kept record is reconcile required with the RB5PR2-1 reason, and the message names it
+        self.assertEqual(("reconcile_required", st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE),
+                         (raised.exception.code, raised.exception.reason))
+        self.assertIn(pending["mutation_id"], str(raised.exception))
+        self.assertIn("review_marker_mismatch", str(raised.exception))
         self.assertEqual([], log, "the executor never ran again")
         self.assertEqual([pending["mutation_id"]], [found["mutation_id"] for found in MutationController(store).list_pending()])
         self.untouched(store, confirmation, phase_id)
@@ -908,7 +912,7 @@ class WorkReviewClosingTests(IntegrationRunCase):
         from test_review_p4_planning import Discovery as WorkDiscovery
         from test_review_p4_work import work_p4
         from workline import start as st
-        from workline.errors import StopError
+        from workline.errors import ReconcileRequired, StopError
         from workline.mutation import MutationController
 
         store, phase_id, confirmation = self.confirmed("begun")
@@ -927,9 +931,11 @@ class WorkReviewClosingTests(IntegrationRunCase):
         (pending,) = MutationController(store).list_pending()
         self.assertTrue(ReviewStore(store).run_ids(), "the Work Review Run began")
         again = WorkDiscovery()
-        with self.assertRaises(StopError) as raised:
+        with self.assertRaises(ReconcileRequired) as raised:
             st.start(store, confirmation, "single-work", producing, review=work_p4(again))
-        self.assertEqual(st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE, raised.exception.code)
+        self.assertEqual(("reconcile_required", st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE),
+                         (raised.exception.code, raised.exception.reason))
+        self.assertIn(pending["mutation_id"], str(raised.exception))
         self.assertEqual([], again.tasks, "the Run is not continued")
         self.assertEqual([pending["mutation_id"]], [found["mutation_id"] for found in MutationController(store).list_pending()])
         self.untouched(store, confirmation, phase_id)
