@@ -40,13 +40,6 @@ from workline.review.namespace import (
 SOURCE = Path(namespace.__file__)
 DIGEST = "0123456789abcdef" * 4
 
-#: The P7 ID kinds the root layout names its records by (A-1, PSW ``dc635f6``).
-P7_KINDS = ("review_promotion_packet", "review_global_policy_change", "review_global_policy_evaluation")
-WAIT_PSW_DC635F6_IDS = (
-    "WAIT_PSW_DC635F6_IDS: the P7 ID kinds rpp / rgc / rge come from PSW dc635f6 (taken by RB7-F at eddf03f), "
-    "which this leaf's base ff0bd87 does not hold; integration removes this skip"
-)
-
 
 def outcome(function, *args):
     """What calling ``function(*args)`` does: its value, or the exception type, code and message it raises."""
@@ -410,6 +403,27 @@ class RootPolicyLayoutTests(unittest.TestCase):
                 self.assertTrue(directory.startswith(LAYOUT.root + "/"))
                 self.assertFalse(ROOT.is_review_path(directory + "/x.yaml"), "outside the root Review namespace")
 
+    def test_an_incoherent_layout_is_refused(self) -> None:
+        """RB7AL-1: every named path inside ``root``; the review dir is the root Review namespace's root."""
+        for label, values in (
+            ("review dir elsewhere in root", dict(review_dir="review-policy/other-review")),
+            ("review dir is the Project namespace", dict(review_dir=paths.REVIEW_DIR)),
+            ("family dir outside root", dict(changes_dir="elsewhere/changes")),
+            ("family dir is root itself", dict(evaluations_dir="review-policy")),
+            ("family dir through traversal", dict(patch_notes_dir="review-policy/../patch-notes")),
+            ("policy file outside root", dict(global_policy_rel="global-policy.yaml")),
+            ("policy file absolute", dict(global_policy_rel="/review-policy/global-policy.yaml")),
+            ("non-string dir", dict(promotion_packets_dir=None)),
+            ("another root", dict(root="other-policy")),
+            ("absolute root", dict(root="/review-policy")),
+        ):
+            with self.subTest(label):
+                with self.assertRaises(ValidationError) as raised:
+                    RootPolicyLayout(**values)
+                self.assertEqual("review_namespace_invalid", raised.exception.code)
+        self.assertEqual(LAYOUT, RootPolicyLayout(**{field.name: getattr(LAYOUT, field.name)
+                                                     for field in dataclasses.fields(LAYOUT)}))
+
     def test_the_owned_prefixes_are_the_closed_root_scope(self) -> None:
         self.assertEqual(("review-policy/review/", "review-policy/promotion-packets/", "review-policy/changes/",
                           "review-policy/evaluations/", "review-policy/patch-notes/", "review-policy/global-policy.yaml"),
@@ -454,7 +468,6 @@ class RootPolicyLayoutTests(unittest.TestCase):
                 self.assertIsNone(LAYOUT.family_of(relative))
 
 
-@unittest.skipUnless(all(kind in ids.PREFIXES for kind in P7_KINDS), WAIT_PSW_DC635F6_IDS)
 class RootPolicyLayoutIdTests(unittest.TestCase):
     """The four evidence families: one flat level, the family's own ID kind and suffix."""
 

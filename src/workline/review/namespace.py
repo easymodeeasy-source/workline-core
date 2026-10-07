@@ -458,6 +458,10 @@ class RootPolicyLayout:
     outside the root Review namespace: only the root controller's closed effects
     create them. :meth:`family_of` classifies exact shapes and refuses nothing,
     so a caller can refuse an effect whose path is not one of them.
+
+    A layout is coherent or it is refused at construction: every path it names
+    is a plain relative path inside ``root``, and ``review_dir`` is the root
+    Review namespace's own root.
     """
 
     root: str = ROOT_POLICY_DIR
@@ -467,6 +471,19 @@ class RootPolicyLayout:
     evaluations_dir: str = f"{ROOT_POLICY_DIR}/evaluations"
     patch_notes_dir: str = f"{ROOT_POLICY_DIR}/patch-notes"
     review_dir: str = ROOT_REVIEW_ROOT
+
+    def __post_init__(self) -> None:
+        _require_relative_root(self.root, "the root policy layout")
+        if self.review_dir != ROOT_POLICY_REVIEW_NAMESPACE.root:
+            raise _invalid(
+                f"the root policy layout review dir {self.review_dir!r} is not {ROOT_POLICY_REVIEW_NAMESPACE.root!r}"
+            )
+        for field in ("global_policy_rel", "promotion_packets_dir", "changes_dir", "evaluations_dir",
+                      "patch_notes_dir", "review_dir"):
+            value = getattr(self, field)
+            _require_relative_root(value, f"the root policy layout {field}")
+            if not value.startswith(self.root + "/"):
+                raise _invalid(f"the root policy layout {field} {value!r} is not inside {self.root!r}")
 
     def promotion_packet_rel(self, promotion_packet_id: str) -> str:
         _require_exact_id(promotion_packet_id, "review_promotion_packet")
@@ -484,12 +501,6 @@ class RootPolicyLayout:
         _require_exact_id(evaluation_id, "review_global_policy_evaluation")
         return f"{self.evaluations_dir}/{evaluation_id}.yaml"
 
-    def _review_namespace(self) -> ReviewNamespace:
-        if self.review_dir == ROOT_POLICY_REVIEW_NAMESPACE.root:
-            return ROOT_POLICY_REVIEW_NAMESPACE
-        return ReviewNamespace(ROOT_POLICY_NAMESPACE_NAME, self.review_dir, ROOT_SUBDIRS,
-                               history=False, policy=False, activation=False, repairs=False)
-
     def family_of(self, relative: object) -> str | None:
         """The root policy family ``relative`` is exactly a path of, or ``None``.
 
@@ -503,7 +514,7 @@ class RootPolicyLayout:
             return None
         if relative == self.global_policy_rel:
             return FAMILY_GLOBAL_POLICY
-        namespace = self._review_namespace()
+        namespace = ROOT_POLICY_REVIEW_NAMESPACE
         if namespace.is_review_path(relative):
             try:
                 namespace.require_record_path(relative)
