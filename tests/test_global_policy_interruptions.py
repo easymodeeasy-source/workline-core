@@ -16,10 +16,12 @@ simulated process death nothing catches) and the same request is run again:
   inferred from Git history (CP_EARLY L35); a completed change is never applied
   again.
 
-Plus the R8 root analogue (a G4 HUMAN_WAIT Run stays the same canonical Run
-through runtime loss, with no set-aside, Receipt, Kp or Consumption, stably), a
-blocking G4 that stays terminal, the static "one discovery core" check, and the
-strong form "no ``<root>/.workline`` at any point".
+Plus the window between a commit's ``update-ref`` and its ``ref_moved`` fact for
+Kp and Km, with and without a remote (RB7DL-3, Amendment 10 item 1), the R8 root
+analogue (a G4 HUMAN_WAIT Run stays the same canonical Run through runtime loss,
+with no set-aside, Receipt, Kp or Consumption, stably), a blocking G4 that stays
+terminal, the static "one discovery core" check, and the strong form "no
+``<root>/.workline`` at any point".
 """
 
 from __future__ import annotations
@@ -34,8 +36,8 @@ import unittest
 from unittest import mock
 
 from global_policy_helpers import (
-    FINDING_WAITS, KG_SUBJECT, KM_SUBJECT, KP_SUBJECT, Crash, Discovery, GlobalPolicyCase, authorize, claim, crash_at,
-    discovery_actors, maintenance, owner, root_review, wait_for,
+    KG_SUBJECT, KM_SUBJECT, KP_SUBJECT, Crash, Discovery, GlobalPolicyCase, authorize, claim, crash_at,
+    discovery_actors, maintenance, owner, root_review,
 )
 from helpers import SRC
 from workline import gitcmd
@@ -137,6 +139,22 @@ POINTS = (
     Point(23, "completion", lambda: crash_at(_mutation(), "complete"), SETTLED),
 )
 
+#: RB7DL-3 (Amendment 8 / Amendment 10 item 1): the crash lands BETWEEN the ``update-ref`` compare-and-swap and the
+#: ``ref_moved`` fact - the branch names the durably prepared commit and its move is not recorded. ``after=False`` on
+#: the ref_moved mark of Kp (the 6th commit: Kg1-Kg5, Kp) and of Km (the 7th), remote-less and with a remote. The
+#: resume admits exactly that prepared commit (its object proven) and finishes; after runtime loss Kp's window is the
+#: reconciliation boundary (its identity was never saved anywhere that survived) and Km's a completed change.
+CAS_WINDOW_POINTS = (
+    Point(15, "kp ref moved before its fact", lambda: crash_at(_mutation(), "mark_effect", when=_nth_ref_moved(6)),
+          UNRECOVERED),
+    Point(20, "km ref moved before its fact", lambda: crash_at(_mutation(), "mark_effect", when=_nth_ref_moved(7)),
+          SETTLED),
+    Point(15, "kp ref moved before its fact", lambda: crash_at(_mutation(), "mark_effect", when=_nth_ref_moved(6)),
+          UNRECOVERED, remote=True),
+    Point(20, "km ref moved before its fact", lambda: crash_at(_mutation(), "mark_effect", when=_nth_ref_moved(7)),
+          SETTLED, remote=True),
+)
+
 
 # --------------------------------------------------------------------------- the strong form: no .workline, ever
 
@@ -207,6 +225,22 @@ class InterruptionCase(GlobalPolicyCase):
         self.assertSingleApplied(result)
         self.assertSameIdentities(before, result)
 
+    def cas_window_resume(self, point: Point) -> None:
+        """The crash left the branch AT the prepared commit with its move unrecorded; the resume adopts exactly it."""
+        before = self.interrupted(point)
+        (pending,) = self.pending_records()
+        stage = "kp" if "kp" in point.name else "km"
+        (commit,) = [effect for effect in pending["effects"]
+                     if effect["kind"] == maintenance().EFFECT_COMMIT and effect["payload"]["stage"] == stage]
+        self.assertIs(False, commit["facts"]["ref_moved"], "the move is not recorded")
+        self.assertEqual(commit["facts"]["prepared_commit"], self.head(), "the branch already names the prepared commit")
+        with no_project_namespace(self.root):
+            result = self.change()
+        self.assertSingleApplied(result)
+        self.assertSameIdentities(before, result)
+        made = result.policy_commit if stage == "kp" else result.metadata_commit
+        self.assertEqual(commit["facts"]["prepared_commit"], made, "the very prepared commit, never a rebuilt one")
+
     def loss_point(self, point: Point) -> None:
         before = self.interrupted(point)
         runs = self.run_ids()
@@ -246,12 +280,10 @@ def _slug(point: Point) -> str:
     return f"{point.number:02d}_" + point.name.replace(" ", "_").replace("-", "_")
 
 
-@wait_for()
 class LocalInterruptionTests(InterruptionCase):
     """Every remote-less §31.58 point, resumed and after runtime loss."""
 
 
-@wait_for()
 class RemoteInterruptionTests(InterruptionCase):
     """The publication points (17, 18, 22) and a remote completion, resumed and after runtime loss."""
 
@@ -263,6 +295,10 @@ def _install() -> None:
         target = RemoteInterruptionTests if point.remote else LocalInterruptionTests
         setattr(target, f"test_{_slug(point)}_resumes", lambda self, p=point: self.resume_point(p))
         setattr(target, f"test_{_slug(point)}_after_runtime_loss", lambda self, p=point: self.loss_point(p))
+    for point in CAS_WINDOW_POINTS:
+        target = RemoteInterruptionTests if point.remote else LocalInterruptionTests
+        setattr(target, f"test_{_slug(point)}_resumes", lambda self, p=point: self.cas_window_resume(p))
+        setattr(target, f"test_{_slug(point)}_after_runtime_loss", lambda self, p=point: self.loss_point(p))
     completion = POINTS[-1]
     setattr(RemoteInterruptionTests, "test_23_completion_with_a_remote_resumes",
             lambda self: self.resume_point(completion))
@@ -271,15 +307,24 @@ def _install() -> None:
 _install()
 
 
-@wait_for()
 class AllPointsTests(unittest.TestCase):
     def test_the_matrix_names_all_23_points_once(self) -> None:
         self.assertEqual(list(range(1, 24)), [point.number for point in POINTS])
 
+    def test_the_cas_window_is_covered_for_kp_and_km_with_and_without_a_remote(self) -> None:
+        self.assertEqual({(15, False), (15, True), (20, False), (20, True)},
+                         {(point.number, point.remote) for point in CAS_WINDOW_POINTS})
+        self.assertEqual({(15, UNRECOVERED), (20, SETTLED)}, {(point.number, point.after_loss) for point in
+                                                              CAS_WINDOW_POINTS})
+        for point in CAS_WINDOW_POINTS:
+            with self.subTest(point=_slug(point), remote=point.remote):
+                for name in (f"test_{_slug(point)}_resumes", f"test_{_slug(point)}_after_runtime_loss"):
+                    target = RemoteInterruptionTests if point.remote else LocalInterruptionTests
+                    self.assertTrue(callable(getattr(target, name, None)))
+
 
 # --------------------------------------------------------------------------- R8: the root HUMAN_WAIT analogue
 
-@wait_for()
 class HumanWaitTests(InterruptionCase):
     def human_review(self) -> Any:
         return root_review(*discovery_actors(2, claim("human", "MID", "a requirement decision is needed")))
@@ -321,7 +366,6 @@ class HumanWaitTests(InterruptionCase):
         self.assertEqual([], lone.tasks)
 
 
-@wait_for(*FINDING_WAITS)
 class BlockingG4Tests(InterruptionCase):
     def test_a_blocking_g4_stays_terminal_and_a_retry_is_a_new_run(self) -> None:
         gp = owner()
@@ -358,8 +402,6 @@ class OneDiscoveryCoreTests(unittest.TestCase):
         self.assertEqual([], loops_over_chains)
 
     def test_root_maintenance_discovers_nothing(self) -> None:
-        if not MAINTENANCE_SOURCE.is_file():
-            self.skipTest("temporary skip WAIT_LEAF_RB7_B (root_maintenance.py is not in this tree)")
         text = MAINTENANCE_SOURCE.read_text(encoding="utf-8")
         for walk in self.WALKS + ("discover_kind_in(", "gate_chain("):
             with self.subTest(walk=walk):

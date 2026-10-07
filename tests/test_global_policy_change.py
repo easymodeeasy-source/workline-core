@@ -18,7 +18,10 @@ dirt blocks before any effect, the Kp three-path delta and its semantic
 round-trip, C-2 before any push, the exact refspec, Global Policy Consumption v4
 next to the older versions, the Km Consumption delta, remote-less mode, a root
 ignore rule on an owned path (RB7C-9), a hostile global configuration (RB7C-5),
-the identity-unconfigured root, and the unmocked I-RB7-2 change.
+the identity-unconfigured root, and the unmocked I-RB7-2 change. Leaf-review
+rows: a second request beside a pending Kp (RB7DL-1), publication readiness read
+before G4 / the seal (RB7DL-2), a HEAD without a materialized policy (RB7DL-5),
+the import DAG by containment (RB7DL-6).
 """
 
 from __future__ import annotations
@@ -30,8 +33,8 @@ import unittest
 from unittest import mock
 
 from global_policy_helpers import (
-    BRANCH, GLOBAL_POLICY_REL, IMPORT_WAITS, KG_SUBJECT, KM_SUBJECT, KP_SUBJECT, RUNTIME_DIR, SLOTS, Discovery,
-    GlobalPolicyCase, discovery_actors, maintenance, owner, root_review, run_remote_less_change, wait_for,
+    BRANCH, GLOBAL_POLICY_REL, KG_SUBJECT, KM_SUBJECT, KP_SUBJECT, RUNTIME_DIR, SLOTS, Crash, Discovery,
+    GlobalPolicyCase, crash_at, discovery_actors, maintenance, owner, root_review, run_remote_less_change,
 )
 from helpers import SRC, git
 from workline.review import policy, records, serialize
@@ -42,6 +45,8 @@ OWNER_TEXT = OWNER_SOURCE.read_text(encoding="utf-8")
 OWNER_TREE = ast.parse(OWNER_TEXT)
 
 FROZEN_STOP_CODES = ("review_p7_before_state_conflict", "review_p7_stale_candidate")
+#: The whole D catalogue (Amendment 10 item 2): the frozen two and the admitted HEAD-not-materialized STOP; nothing else.
+D_STOP_CODES = FROZEN_STOP_CODES + ("review_p7_global_policy_unavailable",)
 FROZEN_REASONS = ("review_p7_persisted_mismatch", "review_p7_publication_invalid", "review_p7_run_unrecovered",
                   "review_p7_record_conflict")
 
@@ -153,7 +158,20 @@ class ClassBCommitTests(unittest.TestCase):
         self.assertIn("workcommit.CommitTreePlan(", plan)
 
     def test_the_only_git_commands_are_reads_object_writes_and_the_ref_cas(self) -> None:
-        self.assertEqual({"ls-tree", "hash-object", "update-ref"}, set(_git_arguments(OWNER_TREE)))
+        self.assertEqual({"ls-tree", "cat-file", "hash-object", "update-ref"}, set(_git_arguments(OWNER_TREE)))
+
+    def test_a_ref_moved_before_its_fact_is_proven_as_an_object_never_rebuilt(self) -> None:
+        """Amendment 10 item 1: tree, one parent and message of the recorded prepared commit, read from the object;
+        the admission at resume and the finishing of the commit both require it."""
+        proof = _docstring_free(_function("_prepared_object_problem"))
+        for read in ('"cat-file", "-t"', '"cat-file", "commit"', "FACT_PREPARED_TREE", 'payload.get("parent")',
+                     'payload.get("message")'):
+            with self.subTest(read=read):
+                self.assertIn(read, proof)
+        self.assertIn("_prepared_object_problem(", _docstring_free(_function("_require_resume_basis")))
+        commit = _docstring_free(_function("_finish_commit"))
+        self.assertLess(commit.index("_prepared_object_problem("), commit.index("workcommit.build("),
+                        "an already-moved ref is proven first; only a commit never moved is built")
 
     def test_no_history_rewrite_and_no_working_tree_commit(self) -> None:
         constants = set(_string_constants(OWNER_TREE))
@@ -170,6 +188,54 @@ class ClassBCommitTests(unittest.TestCase):
 
 class BoundaryTests(unittest.TestCase):
     """No history surface, no Project controller / store / namespace, no second chain or discovery."""
+
+    #: §0 Import DAG for D, plus what Amendment 10 admits, by basis. Every relative import D makes is one of these.
+    DAG = frozenset({
+        # the three leaves D sits on: A, B, C
+        "review.namespace", "root_maintenance", "review.global_policy",
+        # D's own §0 line
+        "review.store", "review.committed", "review.validate", "review.recovery", "review.publication",
+        "review.workcommit", "review.hermetic", "gitcmd", "destination", "pushurl", "implementation", "review.planning",
+        # Amendment 10 item 4: read-only walk / read_file of the working-tree Global policy
+        "review.fsafe",
+        # the record layer the A / B / C lines rest on (errors, ids, policy, p4, records, serialize)
+        "errors", "ids", "review.p4", "review.policy", "review.records", "review.serialize",
+        # review.gate for its pure reservation key builders (§0 bars only next_generation_scope /
+        # pending_generation_mutations; the attribute subtest below pins the builders)
+        "review.gate",
+    })
+    #: The names D may use of the modules §0 admits only in part.
+    PARTIAL = {
+        "planning": {"loader_identity"},
+        "gate": {"review_run_key", "review_task_key", "review_receipt_key", "review_consumption_key",
+                 "review_finding_key"},
+        "fsafe": {"walk"},
+    }
+
+    def test_imports_are_contained_in_the_frozen_dag(self) -> None:
+        relative: set[str] = set()
+        for node in ast.walk(OWNER_TREE):
+            if isinstance(node, ast.ImportFrom) and node.level >= 1:
+                self.assertEqual(1, node.level, "D imports only from its own package")
+                if node.module is None:
+                    relative.update(alias.name for alias in node.names)
+                elif node.module == "review":
+                    relative.update(f"review.{alias.name}" for alias in node.names)
+                else:
+                    relative.add(node.module)
+                if node.module == "implementation":
+                    self.assertEqual(["package_directory"], [alias.name for alias in node.names])
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                names = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+                for name in names:
+                    self.assertFalse(name.split(".")[0] == "workline", f"{name}: D imports its package relatively")
+        self.assertLessEqual(relative, self.DAG, f"outside the §0 DAG: {sorted(relative - self.DAG)}")
+        for module, admitted in self.PARTIAL.items():
+            used = {node.attr for node in ast.walk(OWNER_TREE) if isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name) and node.value.id == module}
+            with self.subTest(module=module):
+                self.assertTrue(used, f"{module} is imported and used")
+                self.assertLessEqual(used, admitted)
 
     def test_imports_stay_inside_the_frozen_dag(self) -> None:
         imported: set[str] = set()
@@ -232,7 +298,7 @@ class CatalogueSourceTests(unittest.TestCase):
         self.assertEqual(set(assigned.values()), catalogued)
         stops = {assigned[name] for name in tuples["STOP_CODES"]}
         reasons = {assigned[name] for name in tuples["RECONCILE_REASONS"]}
-        self.assertTrue(set(FROZEN_STOP_CODES) <= stops)
+        self.assertEqual(set(D_STOP_CODES), stops, "the D catalogue exactly (no unreachable code is catalogued)")
         self.assertEqual(set(FROZEN_REASONS), reasons)
         self.assertFalse(stops & reasons)
         self.assertNotIn("review_p6_", OWNER_TEXT)
@@ -262,7 +328,6 @@ class CatalogueSourceTests(unittest.TestCase):
             self.assertIn(status, OWNER_TEXT)
 
 
-@wait_for(*IMPORT_WAITS)
 class CatalogueTests(unittest.TestCase):
     """The owner's ``stop`` / ``reconcile`` raise only catalogued values."""
 
@@ -294,7 +359,6 @@ class CatalogueTests(unittest.TestCase):
 
 # =========================================================================== end to end (§31.55)
 
-@wait_for()
 class RemoteLessChangeTests(GlobalPolicyCase):
     def test_kp_is_exactly_the_reviewed_three_paths_and_round_trips(self) -> None:
         base = self.head()
@@ -463,8 +527,6 @@ class RemoteLessChangeTests(GlobalPolicyCase):
 
     def test_a_moved_global_policy_is_a_before_state_conflict_with_nothing_opened(self) -> None:
         """The Candidate binds the exact committed Global policy; a moved one is never reviewed or written over."""
-        from global_policy_helpers import Crash, crash_at
-
         with crash_at(owner(), "_launch_discovery"):
             with self.assertRaises(Crash):
                 self.change()
@@ -484,8 +546,6 @@ class RemoteLessChangeTests(GlobalPolicyCase):
         self.assertEqual(runs, self.run_ids())
 
     def test_unexpected_head_movement_is_reconcile_never_a_rebase(self) -> None:
-        from global_policy_helpers import Crash, crash_at
-
         with crash_at(owner(), "_launch_discovery"):
             with self.assertRaises(Crash):
                 self.change()
@@ -499,8 +559,6 @@ class RemoteLessChangeTests(GlobalPolicyCase):
         self.assertEqual(1, len(self.pending_records()), "the pending mutation is reconciled, never rebased or reset")
 
     def test_a_second_request_while_one_is_pending_is_refused(self) -> None:
-        from global_policy_helpers import Crash, crash_at
-
         with crash_at(owner(), "_launch_discovery"):
             with self.assertRaises(Crash):
                 self.change()
@@ -508,8 +566,76 @@ class RemoteLessChangeTests(GlobalPolicyCase):
         self.stops("", lambda: self.change(other), reason=maintenance().REASON_MUTATION_CONFLICT)
         self.applied()  # the pending request resumes and finishes
 
+    def test_a_second_request_after_a_pending_kp_meets_the_single_writer_refusal(self) -> None:
+        """RB7DL-1: the change record of a Kp a PENDING root mutation recorded is that mutation's - its Kp identity
+        is durable - so another request meets the single-writer refusal, never the manual-reconciliation boundary."""
+        with crash_at(owner(), "_c2_kp"):
+            with self.assertRaises(Crash):
+                self.change()
+        (kp,) = self.commits_with(KP_SUBJECT)
+        self.assertEqual([], self.commits_with(KM_SUBJECT))
+        head = self.head()
+        self.stops("", lambda: self.change(self.request(after=3)), reason=maintenance().REASON_MUTATION_CONFLICT)
+        self.assertEqual(head, self.head())
+        self.assertEqual(1, len(self.pending_records()), "only the first request's mutation is pending")
+        result = self.applied()  # the pending request resumes from its recorded Kp and finishes
+        self.assertEqual(([kp], 2), (self.commits_with(KP_SUBJECT), result.global_policy_version))
+        self.assertEqual(result.metadata_commit, self.head())
 
-@wait_for()
+    def test_a_root_head_without_a_global_policy_stops_at_entry(self) -> None:
+        """RB7DL-5: a root whose HEAD commits no review-policy/global-policy.yaml is not materialized there
+        (§31.2 / §31.3); no Global Policy Change begins on it, and nothing is written or left pending."""
+        git(self.root, "rm", "-q", GLOBAL_POLICY_REL)
+        git(self.root, "commit", "-q", "-m", "a root without a materialized Global policy")
+        head = self.head()
+        self.stops(owner().CODE_GLOBAL_POLICY_UNAVAILABLE, self.change)
+        self.assertEqual(head, self.head())
+        self.assertEqual([], self.pending_records())
+        self.assertEqual([], self.runtime_records(), "no root mutation is even opened")
+        self.assertFalse((self.root / GLOBAL_POLICY_REL).exists(), "the owner never materializes the policy itself")
+        self.assertNoProjectNamespace()
+
+    def test_a_remote_added_mid_run_is_never_left_unpublished(self) -> None:
+        """RB7DL-2: the root was remote-less at entry and gains a remote while discovery runs; §31.28's publication
+        readiness is re-read before G4, so no Receipt, change or Kp is made for a root that now has a remote."""
+        late = self.tmp / "late-remote.git"
+        git(self.tmp, "init", "-q", "--bare", "-b", "main", str(late))
+        root = self.root
+
+        class AddingRemote(Discovery):
+            def __call__(self, task):
+                if not git(root, "remote").strip():
+                    git(root, "remote", "add", "origin", str(late))
+                return super().__call__(task)
+
+        review = root_review(AddingRemote(viewpoint="correctness", identity="discovery-1"),
+                             Discovery(viewpoint="safety", identity="discovery-2"))
+        self.stops("review_p7_authorization_required", lambda: self.change(review=review))
+        self.assertEqual([], self.tracked("review-policy/review/receipts/"))
+        self.assertEqual([], self.tracked("review-policy/changes/"))
+        self.assertEqual([], self.commits_with(KP_SUBJECT))
+        self.assertEqual("", git(late, "for-each-ref").strip(), "nothing reaches the remote")
+
+    def test_publication_readiness_is_read_now_against_the_frozen_binding(self) -> None:
+        """RB7DL-2: None remote-less as frozen; True only for exactly the frozen binding; False otherwise."""
+        gp = owner()
+        binding = maintenance().PublicationBinding("origin", BRANCH, "locator")
+        frozen = {"remote": "origin", "branch": BRANCH}
+        cases = (
+            (None, None, None),
+            (None, frozen, False),                  # the frozen remote is gone
+            (binding, frozen, True),
+            (binding, None, False),                 # a remote added after a remote-less freeze
+            (binding, {"remote": "upstream", "branch": BRANCH}, False),
+            (binding, {"remote": "origin", "branch": "refs/heads/other"}, False),
+        )
+        op = mock.Mock(root=self.root)
+        for found, frozen_binding, expected in cases:
+            with self.subTest(found=found, frozen=frozen_binding):
+                with mock.patch.object(maintenance(), "publication_binding", return_value=found):
+                    self.assertIs(expected, gp._publication_ready(op, frozen_binding))
+
+
 class ReviewerFloorEntryTests(GlobalPolicyCase):
     def test_too_few_distinct_reviewers_launch_nothing(self) -> None:
         head = self.head()
@@ -526,7 +652,6 @@ class ReviewerFloorEntryTests(GlobalPolicyCase):
         self.assertEqual([], one.tasks)
 
 
-@wait_for()
 class RemoteChangeTests(GlobalPolicyCase):
     remote = True
 
@@ -578,6 +703,27 @@ class RemoteChangeTests(GlobalPolicyCase):
         self.assertEqual([], self.remote_log())
         self.assertEqual(1, len(self.commits_with(KP_SUBJECT)), "Kp is made locally and never published unproven")
 
+    def test_a_revoked_authorization_stops_before_any_receipt_or_kp(self) -> None:
+        """RB7DL-2: the authorization is revoked while discovery runs; §31.28's publication readiness is re-read
+        before G4 and before the seal, so no Receipt, change record or Kp is made and nothing is pushed."""
+        authorization = self.root / RUNTIME_DIR / "maintenance-authorization.yaml"
+
+        class Revoking(Discovery):
+            def __call__(self, task):
+                if authorization.exists():
+                    authorization.unlink()
+                return super().__call__(task)
+
+        start = self.remote_tip()
+        review = root_review(Revoking(viewpoint="correctness", identity="discovery-1"),
+                             Discovery(viewpoint="safety", identity="discovery-2"))
+        self.stops("review_p7_authorization_required", lambda: self.change(review=review))
+        self.assertEqual([], self.tracked("review-policy/review/receipts/"))
+        self.assertEqual([], self.tracked("review-policy/changes/"))
+        self.assertEqual([], self.commits_with(KP_SUBJECT))
+        self.assertEqual([], self.remote_log())
+        self.assertEqual(start, self.remote_tip())
+
     def test_a_remote_with_no_authorization_does_not_start(self) -> None:
         (self.root / RUNTIME_DIR / "maintenance-authorization.yaml").unlink()
         head = self.head()
@@ -586,7 +732,6 @@ class RemoteChangeTests(GlobalPolicyCase):
         self.assertEqual([], self.pending_records())
 
 
-@wait_for()
 class UnmockedRootChangeTests(GlobalPolicyCase):
     """I-RB7-2: a change in a copied root through the copy's own implementation, nothing stood in for."""
 

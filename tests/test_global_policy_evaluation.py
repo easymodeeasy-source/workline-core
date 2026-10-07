@@ -20,7 +20,8 @@ change owner:
 
 ``retain`` / ``adjust`` / ``rollback`` rest on Relevant Opportunities OBSERVED
 under the change (a source Run that froze it as an active Global experiment):
-those rows wait for RB7-F's Global-origin experiments (``OBSERVED_WAITS``).
+those rows make such sources through RB7-F's Global-origin experiments
+(:func:`global_policy_helpers.observed_sources`).
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ import ast
 import unittest
 
 from global_policy_helpers import (
-    ENVIRONMENT, EVALUATION_SUBJECT, GLOBAL_POLICY_REL, KP_SUBJECT, OBSERVED_WAITS, SLOTS, GlobalPolicyCase,
+    ENVIRONMENT, EVALUATION_SUBJECT, GLOBAL_POLICY_REL, KP_SUBJECT, SLOTS, GlobalPolicyCase,
     change_request, discovery_actors, evaluation_environment, evaluation_request, maintenance, observed_sources,
-    owner, root_review, sources, wait_for,
+    owner, root_review, sources,
 )
 from helpers import SRC
 from workline.review import policy, serialize
@@ -55,7 +56,6 @@ class EvaluationOnlyStaticTests(unittest.TestCase):
             with self.subTest(other=other):
                 self.assertNotIn(other, body)
 
-    @wait_for("WAIT_LEAF_RB7_B")
     def test_the_evaluation_operation_can_never_replace_the_policy(self) -> None:
         found = maintenance()
         effects = found.OPERATION_EFFECTS[found.OPERATION_EVALUATION]
@@ -93,7 +93,6 @@ class _EvaluationCase(GlobalPolicyCase):
         return raised.exception
 
 
-@wait_for()
 class EvaluationTests(_EvaluationCase):
     def test_inconclusive_is_one_immutable_evaluation_never_success_and_no_policy_write(self) -> None:
         change = self.applied()
@@ -166,7 +165,6 @@ class EvaluationTests(_EvaluationCase):
                                                  review=root_review(reviewers=3)), "not_eligible")
 
 
-@wait_for()
 class CorrelationTests(_EvaluationCase):
     """§31.17 / §31.18: copies of one lineage are one cluster - one confirmation."""
 
@@ -177,7 +175,6 @@ class CorrelationTests(_EvaluationCase):
         self.assertEqual([], self.tracked("review-policy/promotion-packets/"))
 
 
-@wait_for()
 class EvaluationCorrelationTests(_EvaluationCase):
     def test_correlated_post_change_evidence_is_one_cluster(self) -> None:
         change = self.applied()
@@ -187,7 +184,6 @@ class EvaluationCorrelationTests(_EvaluationCase):
         self.assertEqual(1, len(stored["clusters"]["clusters"]), "correlated Projects are never many confirmations")
 
 
-@wait_for()
 class RemoteEvaluationTests(_EvaluationCase):
     remote = True
 
@@ -200,7 +196,6 @@ class RemoteEvaluationTests(_EvaluationCase):
         self.assertEqual(3, len(self.remote_log()), "Kp, Km, then the evaluation commit - each once")
 
 
-@wait_for(*OBSERVED_WAITS)
 class ObservedEvaluationTests(_EvaluationCase):
     """retain / adjust / rollback rest on opportunities observed under the change (§31.43)."""
 

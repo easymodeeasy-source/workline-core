@@ -21,11 +21,9 @@ production code.
 * **The actors.** Deterministic discovery / adjudication: a claim's code decides
   its outcome, so a retry asks and hears the same.
 
-**Temporary skips** (``WAIT_*``): a test that needs a shared piece not yet in this
-tree is skipped by :func:`wait_for` with the names of what it waits for. Each is
-lifted by the delivery it names (see :data:`WAITS`); integration lands them all,
-and RB7-D then removes the markers. They never skip in a tree that holds the
-pieces.
+No row is skipped: every shared piece the owner needs (RB7-A / B / C, PSW
+IR-RB7-1..6, RB7-F's materialized loader and Global-origin experiments) is in the
+tree the rows run in.
 """
 
 from __future__ import annotations
@@ -34,7 +32,6 @@ import atexit
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -43,16 +40,17 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Callable, Iterator, Mapping, Sequence
-import unittest
 from unittest import mock
 
 from helpers import WORKLINE_ROOT, copy_workline_root, cwd, git, rmtree
 from planning_helpers import PlanningTestCase, plan
+from workline import global_policy as _owner
 from workline import gitcmd, implementation
 from workline import roadmap as rm
-from workline.review import p4, policy, records, recovery, serialize
+from workline import root_maintenance as _maintenance
+from workline.review import global_policy as _semantics
+from workline.review import p4, policy, serialize
 from workline.review.committed import CommittedReviewStore
-from workline.review.store import ReviewStore
 
 GLOBAL_POLICY_REL = policy.GLOBAL_POLICY_REL
 RUNTIME_DIR = ".workline-root-runtime"
@@ -86,74 +84,21 @@ exit 0
 """
 
 
-# --------------------------------------------------------------------------- temporary skips (WAIT_*)
-
-def _module(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except ModuleNotFoundError:
-        return False
-
-
-def _materialized_loader() -> bool:
-    return getattr(policy, "SOURCE_MODE_MATERIALIZED", None) in getattr(policy, "SOURCE_MODES", ()) \
-        and (WORKLINE_ROOT / GLOBAL_POLICY_REL).is_file()
-
-
-#: Every shared piece an owner test may wait for, and how its presence is recognized.
-WAITS: dict[str, Callable[[], bool]] = {
-    "WAIT_LEAF_RB7_B": lambda: _module("workline.root_maintenance"),           # RB7-B root_maintenance.py
-    "WAIT_LEAF_RB7_C": lambda: _module("workline.review.global_policy"),       # RB7-C review/global_policy.py
-    # IR to RB7-B: the root reservation kinds admit review_finding (a root adjudication with Findings)
-    "WAIT_IR_RB7_B_FINDING": lambda: _module("workline.root_maintenance")
-    and "review_finding" in getattr(maintenance(), "RESERVATION_KINDS", ()),
-    "WAIT_PSW_IR_RB7_1": lambda: hasattr(records, "GlobalPolicyConsumption"),  # records: root contract, v4
-    "WAIT_PSW_IR_RB7_2": lambda: hasattr(p4, "ROOT_POLICY_ID"),                # p4: root non-history family policy
-    "WAIT_PSW_IR_RB7_3": lambda: hasattr(ReviewStore, "for_namespace"),        # namespace-parameterized readers
-    "WAIT_PSW_IR_RB7_4": lambda: hasattr(recovery, "discover_kind_in"),        # the one discovery core, root entry
-    "WAIT_RB7F_STEP4": _materialized_loader,                                    # the loader's materialized mode + v1 file
-    # RB7-F step 4 (Global-origin experiments in resolve_policy_state): a source Run can be OBSERVED under a Global
-    # change, which retain / adjust / rollback evaluations need (C: chronology is never causal evidence)
-    "WAIT_RB7F_GLOBAL_EXPERIMENTS": lambda: getattr(policy, "ORIGIN_GLOBAL", None)
-    in getattr(policy, "EXPERIMENT_ORIGINS", {}),
-}
-#: What importing :mod:`workline.global_policy` needs.
-IMPORT_WAITS = ("WAIT_LEAF_RB7_B", "WAIT_LEAF_RB7_C")
-#: What running the owner end to end needs (a root adjudication without Findings).
-OWNER_WAITS = tuple(name for name in WAITS if name not in ("WAIT_IR_RB7_B_FINDING", "WAIT_RB7F_GLOBAL_EXPERIMENTS"))
-#: ... and with Findings (a blocking Problem, a retained Improvement).
-FINDING_WAITS = OWNER_WAITS + ("WAIT_IR_RB7_B_FINDING",)
-#: ... and source Runs observed under an applied Global change (retain / adjust / rollback evaluations).
-OBSERVED_WAITS = OWNER_WAITS + ("WAIT_RB7F_GLOBAL_EXPERIMENTS",)
-
-
-def active_waits(*names: str) -> list[str]:
-    return [name for name in (names or OWNER_WAITS) if not WAITS[name]()]
-
-
-def wait_for(*names: str) -> Callable[[Any], Any]:
-    """Skip a test (or class) while any named shared piece is missing: ``temporary skip WAIT_...``."""
-    active = active_waits(*names)
-    return unittest.skipIf(bool(active), "temporary skip " + " ".join(active) + " (the shared piece is not in this tree)")
-
+# --------------------------------------------------------------------------- the modules under test
 
 def owner() -> Any:
-    """:mod:`workline.global_policy`, imported only by tests that do not wait for its imports."""
-    import workline.global_policy as found
-
-    return found
+    """:mod:`workline.global_policy` (RB7-D), the owner under test."""
+    return _owner
 
 
 def semantics() -> Any:
-    import workline.review.global_policy as found
-
-    return found
+    """:mod:`workline.review.global_policy` (RB7-C), the Review semantics the owner drives."""
+    return _semantics
 
 
 def maintenance() -> Any:
-    import workline.root_maintenance as found
-
-    return found
+    """:mod:`workline.root_maintenance` (RB7-B), the root runtime the owner runs under."""
+    return _maintenance
 
 
 class Crash(BaseException):
@@ -203,12 +148,6 @@ def _base() -> Path:
 _ROOT_TEMPLATE: list[Path] = []
 
 
-def _v1_bytes(root: Path) -> bytes:
-    """Global policy version 1: the derived baseline of ``root`` restated (§31.2), when the root carries none."""
-    record = policy.baseline_record(policy.baseline_authority_digests(root), policy.source_policy_identities())
-    return policy.global_policy_bytes(policy.global_policy_from_baseline(policy.parse_baseline(record, "the derived")))
-
-
 def configure_identity(root: Path) -> None:
     git(root, "config", "user.name", "workline-root-test")
     git(root, "config", "user.email", "root@example.invalid")
@@ -217,17 +156,11 @@ def configure_identity(root: Path) -> None:
 def _root_template() -> Path:
     if not _ROOT_TEMPLATE:
         target = _base() / "root-template"
-        root = copy_workline_root(target)
+        root = copy_workline_root(target)  # IR-RB7-6: it carries the root .gitignore and the tracked Global policy
         for relative in (".gitignore", GLOBAL_POLICY_REL):
-            source, copied = WORKLINE_ROOT / relative, root / relative
-            if source.is_file() and not copied.exists():
-                copied.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, copied)
-        policy_file = root / GLOBAL_POLICY_REL
-        if not policy_file.exists():
-            policy_file.parent.mkdir(parents=True, exist_ok=True)
-            policy_file.write_bytes(_v1_bytes(root))
-        ignore = (root / ".gitignore").read_text(encoding="utf-8") if (root / ".gitignore").exists() else ""
+            if (root / relative).read_bytes() != (WORKLINE_ROOT / relative).read_bytes():
+                raise AssertionError(f"the copied root does not carry this root's {relative} exactly")
+        ignore = (root / ".gitignore").read_text(encoding="utf-8")
         if f"{RUNTIME_DIR}/" not in ignore.splitlines():
             raise AssertionError("the copied root .gitignore does not ignore the root maintenance runtime")
         git(root, "init", "-q", "-b", "main")
@@ -266,10 +199,6 @@ def bound_to(root: Path) -> Iterator[Path]:
     with ExitStack() as stack:
         answer = lambda modules=None: Path(root)  # noqa: E731
         stack.enter_context(mock.patch.object(implementation, "running_workline_root", answer))
-        if _module("workline.root_maintenance"):
-            found = maintenance()
-            if hasattr(found, "running_workline_root"):
-                stack.enter_context(mock.patch.object(found, "running_workline_root", answer))
         stack.enter_context(cwd(Path(root)))
         yield Path(root)
 
@@ -811,11 +740,11 @@ def run_remote_less_change(root: Path, found: Sequence[Source], *, actors: str =
 
 
 __all__ = [
-    "Adjudicator", "BRANCH", "Crash", "Delta", "Discovery", "ENVIRONMENT", "EVALUATION_SUBJECT", "FAKE", "FINDING_WAITS", "GLOBAL_POLICY_REL",
-    "GlobalPolicyCase", "IMPORT_WAITS", "KG_SUBJECT", "KM_SUBJECT", "KP_SUBJECT", "MEASUREMENT", "MECHANISM", "MUTATIONS_DIR",
-    "OBSERVED_WAITS", "OWNER_WAITS", "observed_sources", "provenance", "evaluation_environment",
-    "PUSH_LOG", "REFUSE_FLAG", "RUNTIME_DIR", "SLOTS", "STEPS", "Source", "WAITS", "active_waits", "add_remote",
-    "authorize", "bound_to", "change_request", "claim", "configure_identity", "crash_at",
-    "discovery_actors", "evaluation_request", "maintenance", "materialized_root_copy", "owner", "push_locator",
-    "root_review", "run_remote_less_change", "semantics", "source_evidence", "sources", "wait_for",
+    "Adjudicator", "BRANCH", "Crash", "Delta", "Discovery", "ENVIRONMENT", "EVALUATION_SUBJECT", "FAKE",
+    "GLOBAL_POLICY_REL", "GlobalPolicyCase", "KG_SUBJECT", "KM_SUBJECT", "KP_SUBJECT", "MEASUREMENT", "MECHANISM",
+    "MUTATIONS_DIR", "PUSH_LOG", "REFUSE_FLAG", "RUNTIME_DIR", "SLOTS", "STEPS", "Source", "add_remote", "authorize",
+    "bound_to", "change_request", "claim", "configure_identity", "crash_at", "discovery_actors",
+    "evaluation_environment", "evaluation_request", "maintenance", "materialized_root_copy", "observed_sources",
+    "owner", "provenance", "push_locator", "root_review", "run_remote_less_change", "semantics", "source_evidence",
+    "sources",
 ]

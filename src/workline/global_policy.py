@@ -90,11 +90,9 @@ STATUS_HUMAN_WAIT = "human_wait"
 CODE_BEFORE_STATE_CONFLICT = "review_p7_before_state_conflict"
 #: After G5 and before Kp the frozen basis (Global policy, Packet evidence) went stale (§31.40).
 CODE_STALE_CANDIDATE = "review_p7_stale_candidate"
-#: HEAD holds no materialized Global policy the canonical loader reads as itself (§31.2 / §31.3).
+#: HEAD commits no ``review-policy/global-policy.yaml``: the root is not materialized there (§31.2 / §31.3).
 CODE_GLOBAL_POLICY_UNAVAILABLE = "review_p7_global_policy_unavailable"
-#: The proposed after-policy sets every surface exactly as the current one does: no Global version is made for it.
-CODE_UNCHANGED_POLICY = "review_p7_unchanged_policy"
-STOP_CODES = (CODE_BEFORE_STATE_CONFLICT, CODE_STALE_CANDIDATE, CODE_GLOBAL_POLICY_UNAVAILABLE, CODE_UNCHANGED_POLICY)
+STOP_CODES = (CODE_BEFORE_STATE_CONFLICT, CODE_STALE_CANDIDATE, CODE_GLOBAL_POLICY_UNAVAILABLE)
 
 REASON_PERSISTED_MISMATCH = "review_p7_persisted_mismatch"
 REASON_PUBLICATION_INVALID = "review_p7_publication_invalid"
@@ -408,7 +406,7 @@ def _committed_global_policy(root: Path, commit: str, *, loader: bool) -> dict[s
         baseline = policy.load_global_baseline(root)
         if baseline.source_mode != policy.SOURCE_MODE_MATERIALIZED \
                 or baseline.global_policy_identity != policy.global_policy_digest(found):
-            raise stop(CODE_GLOBAL_POLICY_UNAVAILABLE,
+            raise stop(CODE_BEFORE_STATE_CONFLICT,
                        f"the canonical loader reads {baseline.source_mode} Global policy {baseline.global_policy_identity}, "
                        f"not the materialized policy {commit} commits; nothing is written")
     return found
@@ -532,7 +530,8 @@ def _require_resume_basis(op: _Op, mutation: Any) -> None:
     for effect in mutation.effects():
         facts = _facts(effect)
         if effect.get("kind") == root_maintenance.EFFECT_COMMIT and facts.get(FACT_REF_MOVED) is not True \
-                and facts.get(FACT_PREPARED_COMMIT) and _payload(effect).get("parent") == expected:
+                and facts.get(FACT_PREPARED_COMMIT) and _payload(effect).get("parent") == expected \
+                and _prepared_object_problem(op, facts, _payload(effect)) is None:
             allowed.add(str(facts[FACT_PREPARED_COMMIT]))
     if op.entry.head not in allowed:
         raise reconcile(f"HEAD is {op.entry.head}, not the commit root mutation {mutation.mutation_id} expects "
@@ -699,10 +698,8 @@ def _freeze(op: _Op, mutation: Any) -> None:
         problems = ", ".join(str(item) for item in eligibility.get("problems") or ()) or "no eligibility basis"
         raise _c_stop("not_eligible", f"the promotion is not mechanically eligible ({problems}); nothing is reviewed "
                                       "or written")
+    # an unchanged setting never reaches here: C refuses it (review_p7_request_invalid, Amendment 10 item 2)
     after = review_global_policy.after_global_policy(before, record)
-    if policy.global_policy_settings(after) == policy.global_policy_settings(before):
-        raise stop(CODE_UNCHANGED_POLICY, "the proposed Global policy sets every surface exactly as the current one "
-                                          "does; no Global version, Packet or Review is made for it")
     problem = policy.global_policy_successor_problem(before, after)
     if problem is not None:
         raise reconcile(f"the proposed Global policy is not the exact successor of the current one: {problem}",
@@ -714,7 +711,8 @@ def _freeze(op: _Op, mutation: Any) -> None:
     )
     material = review_global_policy.candidate_material(packet, before, after, proof)
     _require_reviewers(op, material)
-    _require_meta_verified(op, material, source_problems=(), base=str(mutation.record["base"]))
+    _require_meta_verified(op, material, source_problems=(), base=str(mutation.record["base"]),
+                           publication=mutation.record.get("publication"))
     run_id = mutation.reserve_id(_run_key(), "review_run")
     for binding in _discovery_bindings(op):
         mutation.reserve_id(gate.review_task_key(run_id, binding.task_slot), "review_task")
@@ -843,19 +841,37 @@ def _rollback_facts(op: _Op, material: Mapping[str, Any], base: str) -> tuple[An
             _canonical_blob(op, base, _LAYOUT.global_evaluation_rel(str(exception["evaluation_id"]))))
 
 
+def _publication_ready(op: _Op, frozen: Mapping[str, Any] | None) -> bool | None:
+    """§31.28 "root publication readiness where required", read NOW against the frozen binding.
+
+    ``None`` for a root with no remote that was frozen remote-less; ``True``
+    when the root's current authorized binding is exactly the frozen one;
+    ``False`` otherwise - a remote added after a remote-less freeze, a
+    removed remote, another remote or branch. A remote whose authorization
+    is absent or no longer holds STOPs right here (``publication_binding``),
+    before anything the readiness gates is written.
+    """
+    binding = root_maintenance.publication_binding(op.root)
+    if binding is None:
+        return None if frozen is None else False
+    return frozen is not None and {"remote": binding.remote, "branch": binding.branch} == dict(frozen)
+
+
 def _require_meta_verified(op: _Op, material: Mapping[str, Any], *, source_problems: Sequence[str],
-                           base: str) -> None:
+                           base: str, publication: Mapping[str, Any] | None) -> None:
     """§31.28: every mechanical item, whatever any reviewer said; external approval never overrides one.
 
-    ``base`` is the mutation's frozen base (the entry HEAD before it is open):
-    the exact-rollback records are read from committed objects there.
+    ``base`` is the mutation's frozen base and ``publication`` its frozen
+    binding (the entry freeze's before it is open): the exact-rollback
+    records are read from committed objects at ``base``, and the publication
+    readiness is re-derived now against ``publication``.
     """
     rollback_change, rollback_evaluation = _rollback_facts(op, material, base)
     facts = {
         "current_before_global_digest": _current_global_digest(op),
         "sources_current": not source_problems,
         "source_problems": list(source_problems),
-        "publication_ready": None if op.entry.publication is None else True,
+        "publication_ready": _publication_ready(op, publication),
         "rollback_change": rollback_change,
         "rollback_evaluation": rollback_evaluation,
     }
@@ -927,6 +943,10 @@ def _require_no_stranded_change(op: _Op) -> None:
             changes[change_id] = str(review_global_policy.parse_change_record(data, relative)["receipt_id"])
         except (ValidationError, KeyError):
             changes.setdefault(change_id, None)
+    # a change a pending root mutation reserved is that mutation's, with its Kp identity durably recorded: the
+    # single-writer refusal (review_p7_root_mutation_conflict) reports that state, never the reconciliation boundary
+    for record in root_maintenance.pending_mutations(op.root):
+        changes.pop(str((record.get("reserved_ids") or {}).get(CHANGE_KEY)), None)
     if not changes:
         return
     consumptions = _committed_consumptions(op)
@@ -1015,7 +1035,8 @@ def _recover(op: _Op, found: Any) -> _Recovered:
     if not waiting:
         _require_reviewers(op, material)
         _require_before_state(op, material)
-        _require_meta_verified(op, material, source_problems=_source_problems(op, material), base=op.entry.head)
+        _require_meta_verified(op, material, source_problems=_source_problems(op, material), base=op.entry.head,
+                               publication=op.entry.publication_record)
     bindings = {
         PACKET_KEY: str(material["promotion_packet_id"]),
         CHANGE_KEY: str(material["global_policy_change_id"]),
@@ -1352,7 +1373,7 @@ def _adjudicate(op: _Op, mutation: Any, run: _Run, chain: Any) -> None:
     _validate_settlement(reader, run.review_run_id, task_id, digest, str(returned.adjudicator_identity))
     # §31.28: the fixed mechanical root meta-policy verification, whatever any reviewer said
     _require_meta_verified(op, run.material, source_problems=_source_problems(op, run.material),
-                           base=str(mutation.record["base"]))
+                           base=str(mutation.record["base"]), publication=mutation.record.get("publication"))
     settled = {"task_id": task_id, "status": records.TASK_SETTLED_OK, "result_digest": digest, "settled_generation": 4}
     gate_four = replace(
         third, generation=4, previous_generation=3, previous_digest=chain.latest_digest, adjudication_digest=digest,
@@ -1374,7 +1395,7 @@ def _seal(op: _Op, mutation: Any, run: _Run, chain: Any) -> None:
         raise _chain_invalid(f"root Review Run {run.review_run_id} is not converged: " + "; ".join(unmet))
     _require_before_state(op, run.material)
     _require_meta_verified(op, run.material, source_problems=_source_problems(op, run.material),
-                           base=str(mutation.record["base"]))
+                           base=str(mutation.record["base"]), publication=mutation.record.get("publication"))
     fourth = chain.latest
     receipt_id = mutation.reserve_id(gate.review_receipt_key(run.review_run_id, p4.SEAL_GENERATION), "review_receipt")
     run.receipt_id = receipt_id
@@ -1470,7 +1491,8 @@ def _persist(op: _Op, mutation: Any, run: _Run, chain: Any) -> GlobalPolicyChang
         if stale:
             raise stop(CODE_STALE_CANDIDATE, "the Promotion Packet's bound source evidence went stale after G5 ("
                        + "; ".join(stale) + "); no policy is written or published and a new Candidate is required")
-        _require_meta_verified(op, material, source_problems=(), base=str(mutation.record["base"]))
+        _require_meta_verified(op, material, source_problems=(), base=str(mutation.record["base"]),
+                               publication=mutation.record.get("publication"))
         change = review_global_policy.change_record(material, review_run_id=run.review_run_id,
                                                     receipt_id=str(run.receipt_id))
         before = policy.global_policy_bytes(material["before_global_policy"])
@@ -2037,14 +2059,41 @@ def _discard(index: Path) -> None:
             candidate.unlink()
 
 
+def _prepared_object_problem(op: _Op, facts: Mapping[str, Any], payload: Mapping[str, Any]) -> str | None:
+    """Amendment 10 item 1: the recorded prepared commit is exactly the object recorded - or why not.
+
+    Read from the stored object itself (class B): a commit, whose tree is the
+    recorded ``prepared_tree``, whose one and only parent is the recorded
+    expected parent, and whose message is the recorded message, byte for byte.
+    Nothing is rebuilt, rebased or adopted by message.
+    """
+    commit = str(facts.get(FACT_PREPARED_COMMIT))
+    kind = op.git.run_bytes("cat-file", "-t", commit)
+    found = op.git.run_bytes("cat-file", "commit", commit)
+    if not kind.ok or kind.stdout.strip() != b"commit" or not found.ok:
+        return f"{commit} is not a readable commit object"
+    header, separator, message = found.stdout.partition(b"\n\n")
+    lines = header.split(b"\n")
+    parents = [line[len(b"parent "):] for line in lines if line.startswith(b"parent ")]
+    if not separator or not lines or lines[0] != b"tree " + str(facts.get(FACT_PREPARED_TREE)).encode("ascii") \
+            or parents != [str(payload.get("parent")).encode("ascii")] \
+            or message != str(payload.get("message")).encode("utf-8"):
+        return f"{commit} is not the recorded prepared commit (its tree, parent or message differ)"
+    return None
+
+
 def _finish_commit(op: _Op, mutation: Any, index: int) -> None:
     """One class B root commit, made to the end: prepared, recorded, ref moved by CAS from its exact parent, read back.
 
-    The prepared commit is recorded before the ref moves. A rebuilt plan of
-    the same recorded bytes, parent, message, date and identity is the same
-    object; anything else is never adopted. A branch that is neither the
-    parent nor the prepared commit moved under the operation: reconcile, never
-    a rebase.
+    The prepared commit is recorded before the ref moves (RB7BL-1). When the
+    branch already names the recorded prepared commit - the move landed and
+    only its fact did not (Amendment 10 item 1) - that object is proven to be
+    exactly the recorded one and its move is recorded; nothing is rebuilt.
+    Otherwise the plan is built (a rebuild of the same recorded bytes, parent,
+    message, date and identity is the same object; anything else is never
+    adopted) and the ref moved by compare-and-swap from the exact parent. A
+    branch that is neither the parent nor the prepared commit moved under the
+    operation: reconcile, never a rebase.
     """
     effect = mutation.effects()[index]
     facts = _facts(effect)
@@ -2052,39 +2101,47 @@ def _finish_commit(op: _Op, mutation: Any, index: int) -> None:
         return
     payload = _payload(effect)
     ref, parent = str(payload["ref"]), str(payload["parent"])
-    plan = _commit_plan(op, mutation, payload)
-    isolated = _isolated_index(op, mutation, str(payload["stage"]))
-    try:
-        prepared = workcommit.build(op.git, plan, index=isolated, date=str(payload["date"]))
-    finally:
-        _discard(isolated)
     recorded = facts.get(FACT_PREPARED_COMMIT)
-    if recorded is not None and (recorded, facts.get(FACT_PREPARED_TREE)) != (prepared.commit, prepared.tree):
-        raise reconcile(f"the {payload['stage']} commit rebuilt from its record is {prepared.commit}, not the recorded "
-                        f"{recorded}; another object is never adopted", REASON_RECORD_CONFLICT)
-    prepared_facts = {FACT_PREPARED_COMMIT: prepared.commit, FACT_PREPARED_TREE: prepared.tree}
-    if recorded is None:
-        mutation.mark_effect(index, {**prepared_facts, FACT_REF_MOVED: False})
-    held = workcommit.ref_value(op.git, ref)
-    if held == parent:
-        moved = op.git.run("update-ref", ref, prepared.commit, parent, check=False)
-        if not moved.ok:
-            raise reconcile(f"{ref} is no longer {parent}, the exact parent the {payload['stage']} commit was built on "
-                            f"({moved.stderr.strip()}); it is never moved onto another tip", REASON_RECORD_CONFLICT)
-    elif held != prepared.commit:
-        raise reconcile(f"{ref} is at {held}, neither the exact parent {parent} nor the prepared {payload['stage']} "
-                        "commit; nothing is rebased, reset or amended", REASON_RECORD_CONFLICT)
-    if workcommit.ref_value(op.git, ref) != prepared.commit:
-        raise reconcile(f"{ref} was not read back holding the prepared commit {prepared.commit}", REASON_RECORD_CONFLICT)
-    workcommit.refresh_real_index(op.git, parent, prepared.commit)
+    if recorded is not None and workcommit.ref_value(op.git, ref) == recorded:
+        problem = _prepared_object_problem(op, facts, payload)
+        if problem is not None:
+            raise reconcile(f"{ref} names {recorded}, and {problem}; another object is never adopted",
+                            REASON_RECORD_CONFLICT)
+        prepared_facts = {FACT_PREPARED_COMMIT: str(recorded), FACT_PREPARED_TREE: str(facts[FACT_PREPARED_TREE])}
+    else:
+        plan = _commit_plan(op, mutation, payload)
+        isolated = _isolated_index(op, mutation, str(payload["stage"]))
+        try:
+            prepared = workcommit.build(op.git, plan, index=isolated, date=str(payload["date"]))
+        finally:
+            _discard(isolated)
+        if recorded is not None and (recorded, facts.get(FACT_PREPARED_TREE)) != (prepared.commit, prepared.tree):
+            raise reconcile(f"the {payload['stage']} commit rebuilt from its record is {prepared.commit}, not the "
+                            f"recorded {recorded}; another object is never adopted", REASON_RECORD_CONFLICT)
+        prepared_facts = {FACT_PREPARED_COMMIT: prepared.commit, FACT_PREPARED_TREE: prepared.tree}
+        if recorded is None:
+            mutation.mark_effect(index, {**prepared_facts, FACT_REF_MOVED: False})
+        held = workcommit.ref_value(op.git, ref)
+        if held == parent:
+            moved = op.git.run("update-ref", ref, prepared.commit, parent, check=False)
+            if not moved.ok:
+                raise reconcile(f"{ref} is no longer {parent}, the exact parent the {payload['stage']} commit was built "
+                                f"on ({moved.stderr.strip()}); it is never moved onto another tip", REASON_RECORD_CONFLICT)
+        elif held != prepared.commit:
+            raise reconcile(f"{ref} is at {held}, neither the exact parent {parent} nor the prepared {payload['stage']} "
+                            "commit; nothing is rebased, reset or amended", REASON_RECORD_CONFLICT)
+    commit = prepared_facts[FACT_PREPARED_COMMIT]
+    if workcommit.ref_value(op.git, ref) != commit:
+        raise reconcile(f"{ref} was not read back holding the prepared commit {commit}", REASON_RECORD_CONFLICT)
+    workcommit.refresh_real_index(op.git, parent, commit)
     mutation.mark_effect(index, {**prepared_facts, FACT_REF_MOVED: True})
     contents = _stage_bytes(mutation, str(payload["stage"]))
-    entries = gitcmd.tree_entries(op.root, prepared.commit, sorted(contents))
+    entries = gitcmd.tree_entries(op.root, commit, sorted(contents))
     by_path = {} if entries is None else {entry.path: entry for entry in entries}
     for path, data in contents.items():
         entry = by_path.get(path)
         if entry is None or entry.mode != _REGULAR or gitcmd.read_blob(op.root, entry.oid) != data:
-            raise stop("review_not_persisted", f"{prepared.commit} does not hold {path} as its recorded bytes: STOP")
+            raise stop("review_not_persisted", f"{commit} does not hold {path} as its recorded bytes: STOP")
 
 
 # =========================================================================== global-policy-evaluation (§31.41-§31.43)
@@ -2154,7 +2211,6 @@ __all__ = [
     "CODE_BEFORE_STATE_CONFLICT",
     "CODE_GLOBAL_POLICY_UNAVAILABLE",
     "CODE_STALE_CANDIDATE",
-    "CODE_UNCHANGED_POLICY",
     "CHANGE_KEY",
     "EVALUATION_KEY",
     "GlobalPolicyChangeResult",

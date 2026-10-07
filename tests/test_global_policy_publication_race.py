@@ -24,13 +24,12 @@ import unittest
 from unittest import mock
 
 from global_policy_helpers import (
-    BRANCH, KM_SUBJECT, KP_SUBJECT, REFUSE_FLAG, Crash, GlobalPolicyCase, crash_at, owner, wait_for,
+    BRANCH, KM_SUBJECT, KP_SUBJECT, REFUSE_FLAG, Crash, GlobalPolicyCase, crash_at, owner,
 )
 from helpers import git
 from workline import gitcmd
 
 
-@wait_for()
 class PublicationRaceTests(GlobalPolicyCase):
     remote = True
 
