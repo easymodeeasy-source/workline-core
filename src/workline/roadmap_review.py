@@ -4692,17 +4692,40 @@ def achievement_open_items(store: ProjectStore, view: ProjectView, roadmap_id: s
     answer is an unresolved HUMAN decision; any other Run that is not final
     (open, sealed and not consumed) is a blocking obligation. A final Run
     (consumed, not_authorized, set aside, ...) is history, never an obligation.
+    The HUMAN half is :func:`unresolved_human_waits` - the one owner status reads too.
     """
-    from .review import history, p4
+    from .review import p4
 
     review = ReviewStore(store)
+    answered = None
+    if human_decision_ref is not None and review.history_exists(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref):
+        answered = review.read_history(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref).affected_review_run_id
+    open_chains = _open_review_chains(review, view, roadmap_id)
+    human = [f"Review Run {run_id} waits on a Human requirement decision"
+             for run_id, _ in _human_waits(review, open_chains) if run_id != answered]
+    blocking = [f"Review Run {run_id} of {chain.generations[0].target_identity} is not final"
+                for run_id, chain in open_chains if p4.final_disposition(review, chain) is None]
+    return blocking, human
+
+
+def unresolved_human_waits(review: Any, view: ProjectView, roadmap_id: str) -> list[tuple[str, str]]:
+    """§32.44 / §32.51: the Roadmap's unresolved Human decisions, structured and read-only - ``(review_run_id,
+    target_id)`` of every P4-family Review Run over the Roadmap, one of its Phases or one of their Works that stands at
+    canonical G4 HUMAN_WAIT and that no Run's request set aside, in Run ID order. The HUMAN half of
+    :func:`achievement_open_items` (which also leaves out the one Run a decision's Human Decision Evidence answers);
+    ``review`` is the Project's ReviewStore. Nothing is written, locked or repaired."""
+    return _human_waits(review, _open_review_chains(review, view, roadmap_id))
+
+
+def _open_review_chains(review: Any, view: ProjectView, roadmap_id: str) -> list[tuple[str, Any]]:
+    """The P4-family Review Runs whose target is the Roadmap, one of its Phases or one of their Works, that no Run's
+    request set aside - ``(review_run_id, chain)`` in Run ID order."""
+    from .review import p4
+
     targets = {roadmap_id}
     for phase in view.roadmap_phases(roadmap_id):
         targets.add(phase.id)
         targets.update(work.id for work in view.phase_works(phase.id))
-    answered = None
-    if human_decision_ref is not None and review.history_exists(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref):
-        answered = review.read_history(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref).affected_review_run_id
     chains = {}
     for run_id in review.run_ids():
         chain = review.gate_chain(run_id)
@@ -4715,18 +4738,14 @@ def achievement_open_items(store: ProjectStore, view: ProjectView, roadmap_id: s
         task_id = str(chain.generations[0].accepted_tasks[0]["task_id"])
         named.update(str(item["review_run_id"]) for item in
                      review.read_task_input(task_id).request_envelope.get("set_aside_runs") or [])
-    blocking: list[str] = []
-    human: list[str] = []
-    for run_id, chain in sorted(chains.items()):
-        if run_id in named:
-            continue
-        final = p4.final_disposition(review, chain)
-        if final == history.DISPOSITION_HUMAN_WAIT:
-            if run_id != answered:
-                human.append(f"Review Run {run_id} waits on a Human requirement decision")
-        elif final is None:
-            blocking.append(f"Review Run {run_id} of {chain.generations[0].target_identity} is not final")
-    return blocking, human
+    return [(run_id, chain) for run_id, chain in sorted(chains.items()) if run_id not in named]
+
+
+def _human_waits(review: Any, open_chains: list[tuple[str, Any]]) -> list[tuple[str, str]]:
+    from .review import history, p4
+
+    return [(run_id, str(chain.generations[0].target_identity)) for run_id, chain in open_chains
+            if p4.final_disposition(review, chain) == history.DISPOSITION_HUMAN_WAIT]
 
 
 def roadmap_achievement_effect(store: ProjectStore, evidence: Any) -> tuple[str, Any]:

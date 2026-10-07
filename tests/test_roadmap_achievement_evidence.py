@@ -363,6 +363,51 @@ class RoadmapEvidenceTests(unittest.TestCase):
         self.assertTrue(ach.readback_problems(evidence, project.basis(), event))
 
 
+class OpenItemsOwnerTests(IntegrationRunCase):
+    """§32.44 / §32.51: ``roadmap_review.unresolved_human_waits`` is the one owner of the Roadmap's unresolved Human
+    decisions - structured, read-only - and ``achievement_open_items`` reads its HUMAN half from it, its prose and its
+    blocking half unchanged."""
+
+    def test_the_structured_owner_agrees_with_achievement_open_items(self) -> None:
+        from planning_helpers import Crash, crash_at
+        from rb5_run_helpers import Discovery, claim
+        from workline import roadmap_review as rr
+        from workline import start_review as sr
+        from workline.errors import StopError
+        from workline.review import p4
+        from workline.review.store import ReviewStore
+        from workline.state import ProjectView
+
+        with self.subTest("an integration Run waiting on a Human decision"):
+            store, phase_id, ids = self.marked_project("waiting")
+            with self.assertRaises(StopError) as raised:
+                self.integrate(store, ids["integration"], phase_review(Discovery(claim("human"))))
+            self.assertEqual(p4.CODE_HUMAN_WAIT, raised.exception.code)
+            (run_id,) = self.integration_runs(store, ids["integration"])
+            view, roadmap_id = ProjectView.load(store), self.roadmap_of(store, phase_id)
+            before = self.snapshot_state(store)
+            self.assertEqual([(run_id, ids["integration"])], rr.unresolved_human_waits(ReviewStore(store), view, roadmap_id))
+            self.assertEqual(([], [f"Review Run {run_id} waits on a Human requirement decision"]),
+                             rr.achievement_open_items(store, view, roadmap_id, None))
+            self.assertEqual(before, self.snapshot_state(store), "read-only")
+        with self.subTest("an open Run is blocking, never a Human decision"):
+            store, phase_id, ids = self.marked_project("open-run")
+            with crash_at(sr, "_integration_launch"):
+                with self.assertRaises(Crash):
+                    self.integrate(store, ids["integration"], phase_review())
+            (run_id,) = self.integration_runs(store, ids["integration"])
+            view, roadmap_id = ProjectView.load(store), self.roadmap_of(store, phase_id)
+            self.assertEqual([], rr.unresolved_human_waits(ReviewStore(store), view, roadmap_id))
+            self.assertEqual(([f"Review Run {run_id} of {ids['integration']} is not final"], []),
+                             rr.achievement_open_items(store, view, roadmap_id, None))
+        with self.subTest("a completed integration leaves neither"):
+            store, phase_id, ids = self.marked_project("settled")
+            self.assertEqual("completed", self.integrate(store, ids["integration"], phase_review()).status)
+            view, roadmap_id = ProjectView.load(store), self.roadmap_of(store, phase_id)
+            self.assertEqual([], rr.unresolved_human_waits(ReviewStore(store), view, roadmap_id))
+            self.assertEqual(([], []), rr.achievement_open_items(store, view, roadmap_id, None))
+
+
 class DeferredRoadmapTests(IntegrationRunCase):
     """I-8 (R31 / R32) on real Projects: a reviewed Phase whose integration ran through START's Phase Integration
     Review (its evidence written by the terminal stage), and the Roadmap owner's progression gate and achieved path."""
