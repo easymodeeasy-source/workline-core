@@ -1639,7 +1639,8 @@ def _root_maintenance_line(found: Mapping[str, Any]) -> str:
     root mutation. Presentation of the model only."""
     baseline = found["global_policy"]
     pending = found["pending_mutation"]
-    held = "none" if pending is None else " ".join(
+    # a pending mutation is a mapping or None (status_report); anything else degrades this one line (RB7PSWL-1)
+    held = "none" if not isinstance(pending, Mapping) else " ".join(
         str(pending[key]) for key in ("status", "operation", "mutation_id", "stage") if pending.get(key) is not None)
     return (f"global {baseline['source_mode']} v{baseline['version']} {baseline['digest']}, "
             f"authorization {found['authorization']['status']}, pending root mutation {held}")

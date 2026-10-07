@@ -98,3 +98,25 @@ class RootMaintenanceStatusTests(StatusCase):
                 rest = [item for item in lines if item != line]
                 others = rest if others is None else others
                 self.assertEqual(others, rest, "no other human line changes")
+
+    def test_a_pending_mutation_of_another_shape_degrades_only_the_root_line(self) -> None:
+        """RB7PSWL-1: ``pending_mutation`` that is neither a mapping nor None renders the root line (as "none") without
+        raising, and every other human line is unchanged."""
+        report = {
+            "status": "available",
+            "global_policy": {"source_mode": "materialized", "version": 2, "digest": "d" * 64},
+            "current_change_id": None, "evaluation_ids": [],
+            "authorization": {"status": "valid", "remote": "origin", "branch": "refs/heads/main"},
+            "pending_mutation": None, "next_boundary_adapter_identity": "x",
+        }
+        expected = ("  root maintenance: global materialized v2 " + "d" * 64
+                    + ", authorization valid, pending root mutation none")
+        with mock.patch.object(root_maintenance, "status_report", return_value=report):
+            base = status.render_human(self.model()).splitlines()
+        self.assertIn(expected, base)
+        for odd in (["rpm_01ARZ3NDEKTSV4RRFFQ69G5FAV"], "rpm_01ARZ3NDEKTSV4RRFFQ69G5FAV", 7):
+            with self.subTest(pending=odd):
+                with mock.patch.object(root_maintenance, "status_report",
+                                       return_value={**report, "pending_mutation": odd}):
+                    lines = status.render_human(self.model()).splitlines()
+                self.assertEqual(base, lines)
