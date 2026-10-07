@@ -15,6 +15,10 @@ found, because what was once added is what the barrier must account for.
 
 Nothing here reads a runtime record, a note, a remote or a working-tree file,
 and nothing evaluates an attribute: committed objects alone.
+
+P7 (§31.4 / §31.50): the reader is bound to one described Review namespace -
+a Project's (the default) or the Workline root's ``review-policy/review`` -
+and lists and reads only inside it; no ``ProjectStore`` is made for the root.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from .. import gitcmd
 from ..errors import ValidationError
 from ..store import ProjectStore
 from . import fsafe, paths, records, serialize
+from .namespace import PROJECT_REVIEW_NAMESPACE, ReviewNamespace
 from .records import CandidateSnapshot, GateGeneration
 from .store import GateChain, ReviewStore, _chain_invariants
 
@@ -46,11 +51,12 @@ class CommittedReviewStore(ReviewStore):
     is inherited unchanged.
     """
 
-    def __init__(self, repo: Path, commit: str) -> None:
-        super().__init__(ProjectStore(repo))
+    def __init__(self, repo: Path, commit: str, *, namespace: ReviewNamespace = PROJECT_REVIEW_NAMESPACE) -> None:
+        store = ProjectStore(repo) if namespace == PROJECT_REVIEW_NAMESPACE else None
+        self._bind(store.root if store is not None else Path(repo), namespace, store)
         self.repo = Path(repo)
         self.commit = commit
-        listed = gitcmd.tree_entries(self.repo, commit, [paths.REVIEW_DIR], recursive=True, trees=True)
+        listed = gitcmd.tree_entries(self.repo, commit, [self.namespace.root], recursive=True, trees=True)
         if listed is None:
             raise _unreadable(f"Git cannot list the Review records of {commit}")
         self._tree: dict[str, gitcmd.TreeEntry] = {entry.path: entry for entry in listed}
@@ -67,13 +73,13 @@ class CommittedReviewStore(ReviewStore):
         return found.oid
 
     def exists(self) -> bool:
-        return any(path.startswith(paths.REVIEW_DIR + "/") for path in self._tree)
+        return any(path.startswith(self.namespace.root + "/") for path in self._tree)
 
     def entries(self, relative_dir: str) -> list[fsafe.Entry] | None:
         prefix = relative_dir.rstrip("/") + "/"
-        if relative_dir != paths.REVIEW_DIR and self._tree.get(relative_dir, None) is None:
+        if relative_dir != self.namespace.root and self._tree.get(relative_dir, None) is None:
             return None
-        if relative_dir == paths.REVIEW_DIR and not self.exists():
+        if relative_dir == self.namespace.root and not self.exists():
             return None
         found: list[fsafe.Entry] = []
         for path, entry in sorted(self._tree.items()):
@@ -92,7 +98,7 @@ class CommittedReviewStore(ReviewStore):
         return found
 
     def read_bytes(self, relative: str) -> bytes | None:
-        paths.require_review_readable_path(relative)
+        self.namespace.require_readable_path(relative)
         found = self._tree.get(relative)
         if found is None:
             return None
@@ -107,7 +113,7 @@ class CommittedReviewStore(ReviewStore):
         return data
 
     def gate_chain(self, review_run_id: str) -> GateChain | None:
-        run_dir = paths.run_dir(review_run_id)
+        run_dir = self.namespace.run_dir(review_run_id)
         listed = self.entries(run_dir)
         if listed is None:
             return None
@@ -139,7 +145,7 @@ class CommittedReviewStore(ReviewStore):
         generations: list[GateGeneration] = []
         digests: list[str] = []
         for number in numbers:
-            relative = paths.gate_rel(review_run_id, number)
+            relative = self.namespace.gate_rel(review_run_id, number)
             raw = self.read_bytes(relative)
             if raw is None:
                 raise _unreadable(f"{self.commit} lost {relative} while it was read")
@@ -168,7 +174,7 @@ class CommittedReviewStore(ReviewStore):
         """The Runs in this tree whose generation 1 names ``candidate_hash``, read by the P1 reader."""
         found: list[str] = []
         for review_run_id in self.run_ids():
-            relative = paths.gate_rel(review_run_id, records.FIRST_GENERATION)
+            relative = self.namespace.gate_rel(review_run_id, records.FIRST_GENERATION)
             raw = self.read_bytes(relative)
             if raw is None:
                 continue

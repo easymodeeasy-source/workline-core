@@ -42,6 +42,7 @@ from ..errors import ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
 from . import fsafe, history, paths, records, serialize
+from .namespace import PROJECT_REVIEW_NAMESPACE, ReviewNamespace
 from .records import (
     CandidateSnapshot,
     Consumption,
@@ -215,11 +216,38 @@ def _chain_invariants(review_run_id: str, generations: list[GateGeneration]) -> 
 
 
 class ReviewStore:
-    """Canonical Review record access for one Project."""
+    """Canonical Review record access for one Review namespace.
+
+    ``ReviewStore(store)`` reads one Project's ``.workline/review`` - the
+    PROJECT namespace, exactly as always. P7 (§31.4 / §31.50):
+    :meth:`for_namespace` reads the same records, through the same parsers,
+    chain rules and uniqueness indexes, under another described namespace - the
+    Workline root's ``review-policy/review`` - with no ``ProjectStore`` for that
+    root. Every path comes from ``self.namespace``; a reader of a namespace
+    without a Project-only area (history, the policy namespace and its Profile,
+    activation, repairs) refuses to name it (``review_namespace_invalid``).
+    """
 
     def __init__(self, store: ProjectStore) -> None:
+        self._bind(store.root, PROJECT_REVIEW_NAMESPACE, store)
+
+    def _bind(self, root: Path, namespace: ReviewNamespace, store: ProjectStore | None) -> None:
+        if not isinstance(namespace, ReviewNamespace):
+            raise ValidationError(f"a Review reader reads one described Review namespace, not {namespace!r}",
+                                  code="review_namespace_invalid")
         self.store = store
-        self.root = store.root
+        self.root = root
+        self.namespace = namespace
+
+    @staticmethod
+    def for_namespace(root: Path, namespace: ReviewNamespace) -> "ReviewStore":
+        """The reader of ``namespace`` under the repository ``root``: the PROJECT one (a ``ProjectStore`` is bound,
+        exactly as ``ReviewStore(ProjectStore(root))``), or the root policy one (no ``ProjectStore``: the Workline
+        root is not a Project, and nothing here creates ``<root>/.workline``)."""
+        found = ReviewStore.__new__(ReviewStore)
+        project = namespace == PROJECT_REVIEW_NAMESPACE
+        found._bind(Path(root), namespace, ProjectStore(Path(root)) if project else None)
+        return found
 
     # paths ------------------------------------------------------------------
     def abs(self, relative: str) -> Path:
@@ -230,13 +258,13 @@ class ReviewStore:
         return fsafe.walk(self.root, relative_dir.split("/"))
 
     def exists(self) -> bool:
-        """Whether this Project has a Review namespace at all.
+        """Whether this Project (this namespace's repository) has the Review namespace at all.
 
         A Project that has never used Review has none, and that is a valid
         Project (``R1`` §11). Nothing here creates it. An indirection where the
         namespace would be is refused, not reported as absent.
         """
-        chain = self._walk(paths.REVIEW_DIR)
+        chain = self._walk(self.namespace.root)
         if chain is None:
             return False
         chain.close()
@@ -264,7 +292,7 @@ class ReviewStore:
     # reading ----------------------------------------------------------------
     def read_bytes(self, relative: str) -> bytes | None:
         """The exact stored bytes at ``relative``, read through the held no-follow chain; ``None`` if absent."""
-        paths.require_review_readable_path(relative)
+        self.namespace.require_readable_path(relative)
         parts = relative.split("/")
         chain = fsafe.walk(self.root, parts[:-1])
         if chain is None:
@@ -296,31 +324,31 @@ class ReviewStore:
     # gate generations -------------------------------------------------------
     def run_ids(self) -> tuple[str, ...]:
         """Every Review Run that has a gate directory, in sorted order."""
-        found_entries = self.entries(paths.GATES_DIR)
+        found_entries = self.entries(self.namespace.gates_dir)
         if found_entries is None:
             return ()
         found: list[str] = []
         for entry in found_entries:
             if entry.is_indirection:
                 raise ValidationError(
-                    f"{paths.GATES_DIR}/{entry.name} is a symlink, junction or other reparse point",
+                    f"{self.namespace.gates_dir}/{entry.name} is a symlink, junction or other reparse point",
                     code="review_containment",
                 )
             if not entry.is_dir:
                 raise ValidationError(
-                    f"{paths.GATES_DIR} holds {entry.name}, which is not a plain Review Run directory",
+                    f"{self.namespace.gates_dir} holds {entry.name}, which is not a plain Review Run directory",
                     code="review_namespace_invalid",
                 )
             if not is_valid_id(entry.name, "review_run"):
                 raise ValidationError(
-                    f"{paths.GATES_DIR} holds {entry.name}, which is not a review_run id",
+                    f"{self.namespace.gates_dir} holds {entry.name}, which is not a review_run id",
                     code="review_namespace_invalid",
                 )
             found.append(entry.name)
         return tuple(found)
 
     def read_gate(self, review_run_id: str, generation: int) -> GateGeneration:
-        relative = paths.gate_rel(review_run_id, generation)
+        relative = self.namespace.gate_rel(review_run_id, generation)
         found, _ = self._read_record(relative, f"Review gate {relative}", GateGeneration.from_record)
         self._require_gate_identity(found, review_run_id, generation, relative)
         return found
@@ -347,7 +375,7 @@ class ReviewStore:
         anything is returned: the latest generation on its own cannot show that
         the chain behind it is intact.
         """
-        chain = self._walk(paths.run_dir(review_run_id))
+        chain = self._walk(self.namespace.run_dir(review_run_id))
         if chain is None:
             return None
         with chain:
@@ -355,19 +383,19 @@ class ReviewStore:
             for entry in chain.last.entries():
                 if entry.name == paths.SERIALIZATION_TOKEN:
                     raise ValidationError(
-                        f"{paths.run_dir(review_run_id)} holds a physical {paths.SERIALIZATION_TOKEN}; "
+                        f"{self.namespace.run_dir(review_run_id)} holds a physical {paths.SERIALIZATION_TOKEN}; "
                         "that path is a scope-only token and is never created",
                         code="review_namespace_invalid",
                     )
                 if entry.is_indirection:
                     raise ValidationError(
-                        f"{paths.run_dir(review_run_id)}/{entry.name} is a symlink, junction or other reparse point",
+                        f"{self.namespace.run_dir(review_run_id)}/{entry.name} is a symlink, junction or other reparse point",
                         code="review_containment",
                     )
                 number = paths.generation_of_name(entry.name)
                 if number is None or not entry.is_file:
                     raise ValidationError(
-                        f"{paths.run_dir(review_run_id)} holds {entry.name}, which is not a gate generation file",
+                        f"{self.namespace.run_dir(review_run_id)} holds {entry.name}, which is not a gate generation file",
                         code="review_namespace_invalid",
                     )
                 numbers.append(number)
@@ -384,7 +412,7 @@ class ReviewStore:
             generations: list[GateGeneration] = []
             digests: list[str] = []
             for number in numbers:
-                relative = paths.gate_rel(review_run_id, number)
+                relative = self.namespace.gate_rel(review_run_id, number)
                 raw = chain.last.read_file(paths.generation_name(number))
                 if raw is None:
                     raise ValidationError(f"Review gate {relative} disappeared while it was read", code="review_gate_chain")
@@ -415,7 +443,7 @@ class ReviewStore:
 
     # receipts ---------------------------------------------------------------
     def read_receipt(self, receipt_id: str) -> Receipt:
-        relative = paths.receipt_rel(receipt_id)
+        relative = self.namespace.receipt_rel(receipt_id)
         found, _ = self._read_record(relative, f"Review receipt {relative}", Receipt.from_record)
         if found.receipt_id != receipt_id:
             raise ValidationError(
@@ -425,16 +453,16 @@ class ReviewStore:
         return found
 
     def receipt_exists(self, receipt_id: str) -> bool:
-        return self.read_bytes(paths.receipt_rel(receipt_id)) is not None
+        return self.read_bytes(self.namespace.receipt_rel(receipt_id)) is not None
 
     def receipt_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.RECEIPTS_DIR, "review_receipt")
+        return self._ids_in(self.namespace.receipts_dir, "review_receipt")
 
     # consumptions -----------------------------------------------------------
     def read_consumption(self, consumption_id: str) -> "Consumption | PlanningConsumption":
         """One stored Consumption: version 1 through the P1 reader, a Planning Consumption through version 2's, a
         Policy Consumption (P6) through version 3's."""
-        relative = paths.consumption_rel(consumption_id)
+        relative = self.namespace.consumption_rel(consumption_id)
         found, _ = self._read_record(relative, f"Review consumption {relative}", records.consumption_from_record)
         if found.consumption_id != consumption_id:
             raise ValidationError(
@@ -445,7 +473,7 @@ class ReviewStore:
         return found
 
     def consumption_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.CONSUMPTIONS_DIR, "review_consumption")
+        return self._ids_in(self.namespace.consumptions_dir, "review_consumption")
 
     def consumptions(self) -> "tuple[Consumption | PlanningConsumption, ...]":
         return tuple(self.read_consumption(found) for found in self.consumption_ids())
@@ -529,7 +557,7 @@ class ReviewStore:
 
     # supersessions ----------------------------------------------------------
     def read_supersession(self, superseded_receipt_id: str) -> Supersession:
-        relative = paths.supersession_rel(superseded_receipt_id)
+        relative = self.namespace.supersession_rel(superseded_receipt_id)
         found, _ = self._read_record(relative, f"Review supersession {relative}", Supersession.from_record)
         if found.superseded_receipt_id != superseded_receipt_id:
             raise ValidationError(
@@ -540,11 +568,11 @@ class ReviewStore:
         return found
 
     def supersession_exists(self, superseded_receipt_id: str) -> bool:
-        return self.read_bytes(paths.supersession_rel(superseded_receipt_id)) is not None
+        return self.read_bytes(self.namespace.supersession_rel(superseded_receipt_id)) is not None
 
     def superseded_receipt_ids(self) -> tuple[str, ...]:
         # A supersession is named after the Receipt it supersedes.
-        return self._ids_in(paths.SUPERSESSIONS_DIR, "review_receipt")
+        return self._ids_in(self.namespace.supersessions_dir, "review_receipt")
 
     # provenance -------------------------------------------------------------
     def read_candidate_snapshot(self, candidate_hash: str) -> CandidateSnapshot:
@@ -552,7 +580,7 @@ class ReviewStore:
         return found
 
     def _read_candidate_snapshot(self, candidate_hash: str) -> tuple[CandidateSnapshot, str]:
-        relative = paths.candidate_snapshot_rel(candidate_hash)
+        relative = self.namespace.candidate_snapshot_rel(candidate_hash)
         found, text = self._read_record(relative, f"Review candidate snapshot {relative}", CandidateSnapshot.from_record)
         if found.candidate_hash != candidate_hash:
             raise ValidationError(
@@ -563,14 +591,14 @@ class ReviewStore:
         return found, text
 
     def candidate_snapshot_exists(self, candidate_hash: str) -> bool:
-        return self.read_bytes(paths.candidate_snapshot_rel(candidate_hash)) is not None
+        return self.read_bytes(self.namespace.candidate_snapshot_rel(candidate_hash)) is not None
 
     def read_task_input(self, review_task_id: str) -> TaskInput:
         found, _ = self._read_task_input(review_task_id)
         return found
 
     def _read_task_input(self, review_task_id: str) -> tuple[TaskInput, str]:
-        relative = paths.task_input_rel(review_task_id)
+        relative = self.namespace.task_input_rel(review_task_id)
         found, text = self._read_record(relative, f"Review task input {relative}", TaskInput.from_record)
         if found.task_id != review_task_id:
             raise ValidationError(
@@ -580,10 +608,10 @@ class ReviewStore:
         return found, text
 
     def task_input_exists(self, review_task_id: str) -> bool:
-        return self.read_bytes(paths.task_input_rel(review_task_id)) is not None
+        return self.read_bytes(self.namespace.task_input_rel(review_task_id)) is not None
 
     def task_input_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.TASK_INPUTS_DIR, "review_task")
+        return self._ids_in(self.namespace.task_inputs_dir, "review_task")
 
     def candidate_snapshot_hashes(self) -> tuple[str, ...]:
         """Every stored Candidate snapshot, by the candidate hash its filename must be, in sorted order.
@@ -595,7 +623,7 @@ class ReviewStore:
         being missed because nothing happened to reference it (``R1`` §11).
         """
         return self._stems_in(
-            paths.CANDIDATE_SNAPSHOTS_DIR, lambda stem: records.DIGEST_RE.match(stem) is not None, "candidate_hash"
+            self.namespace.candidate_snapshots_dir, lambda stem: records.DIGEST_RE.match(stem) is not None, "candidate_hash"
         )
 
     def candidate_material_digest(self, candidate_hash: str) -> str:
@@ -700,7 +728,7 @@ class ReviewStore:
         return found
 
     def _read_report(self, result_digest: str) -> tuple[P4Report, str]:
-        relative = paths.report_rel(result_digest)
+        relative = self.namespace.report_rel(result_digest)
         found, text = self._read_identified(relative, "Review P4 report", P4Report.from_record)
         stored = serialize.digest_of_text(text)
         if stored != result_digest:
@@ -711,18 +739,18 @@ class ReviewStore:
         return found, text
 
     def report_exists(self, result_digest: str) -> bool:
-        return self.read_bytes(paths.report_rel(result_digest)) is not None
+        return self.read_bytes(self.namespace.report_rel(result_digest)) is not None
 
     def report_digests(self) -> tuple[str, ...]:
         """Every stored P4 report, by the result digest its filename must be, in sorted order."""
-        return self._stems_in(paths.REPORTS_DIR, lambda stem: records.DIGEST_RE.match(stem) is not None, "result digest")
+        return self._stems_in(self.namespace.reports_dir, lambda stem: records.DIGEST_RE.match(stem) is not None, "result digest")
 
     def read_adjudication(self, review_run_id: str) -> P4Adjudication:
         found, _ = self._read_adjudication(review_run_id)
         return found
 
     def _read_adjudication(self, review_run_id: str) -> tuple[P4Adjudication, str]:
-        relative = paths.adjudication_rel(review_run_id)
+        relative = self.namespace.adjudication_rel(review_run_id)
         found, text = self._read_identified(relative, "Review P4 adjudication", P4Adjudication.from_record)
         if found.review_run_id != review_run_id:
             raise ValidationError(
@@ -733,21 +761,21 @@ class ReviewStore:
         return found, text
 
     def adjudication_exists(self, review_run_id: str) -> bool:
-        return self.read_bytes(paths.adjudication_rel(review_run_id)) is not None
+        return self.read_bytes(self.namespace.adjudication_rel(review_run_id)) is not None
 
     def adjudication_digest(self, review_run_id: str) -> str:
         _, text = self._read_adjudication(review_run_id)
         return serialize.digest_of_text(text)
 
     def adjudication_run_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.ADJUDICATIONS_DIR, "review_run")
+        return self._ids_in(self.namespace.adjudications_dir, "review_run")
 
     def read_repair_batch(self, repair_batch_id: str) -> P4RepairBatch:
         found, _ = self._read_repair_batch(repair_batch_id)
         return found
 
     def _read_repair_batch(self, repair_batch_id: str) -> tuple[P4RepairBatch, str]:
-        relative = paths.repair_batch_rel(repair_batch_id)
+        relative = self.namespace.repair_batch_rel(repair_batch_id)
         found, text = self._read_identified(relative, "Review P4 Repair Batch", P4RepairBatch.from_record)
         if found.repair_batch_id != repair_batch_id:
             raise ValidationError(
@@ -757,21 +785,21 @@ class ReviewStore:
         return found, text
 
     def repair_batch_exists(self, repair_batch_id: str) -> bool:
-        return self.read_bytes(paths.repair_batch_rel(repair_batch_id)) is not None
+        return self.read_bytes(self.namespace.repair_batch_rel(repair_batch_id)) is not None
 
     def repair_batch_digest(self, repair_batch_id: str) -> str:
         _, text = self._read_repair_batch(repair_batch_id)
         return serialize.digest_of_text(text)
 
     def repair_batch_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.REPAIR_BATCHES_DIR, "review_repair_batch")
+        return self._ids_in(self.namespace.repair_batches_dir, "review_repair_batch")
 
     def read_repair_result(self, repair_batch_id: str) -> P4RepairResult:
         found, _ = self._read_repair_result(repair_batch_id)
         return found
 
     def _read_repair_result(self, repair_batch_id: str) -> tuple[P4RepairResult, str]:
-        relative = paths.repair_result_rel(repair_batch_id)
+        relative = self.namespace.repair_result_rel(repair_batch_id)
         found, text = self._read_identified(relative, "Review P4 Repair Result", P4RepairResult.from_record)
         if found.repair_batch_id != repair_batch_id:
             raise ValidationError(
@@ -782,7 +810,7 @@ class ReviewStore:
         return found, text
 
     def repair_result_exists(self, repair_batch_id: str) -> bool:
-        return self.read_bytes(paths.repair_result_rel(repair_batch_id)) is not None
+        return self.read_bytes(self.namespace.repair_result_rel(repair_batch_id)) is not None
 
     def repair_result_digest(self, repair_batch_id: str) -> str:
         _, text = self._read_repair_result(repair_batch_id)
@@ -790,7 +818,7 @@ class ReviewStore:
 
     def repair_result_ids(self) -> tuple[str, ...]:
         # A Repair Result is named after the Repair Batch it settles.
-        return self._ids_in(paths.REPAIR_RESULTS_DIR, "review_repair_batch")
+        return self._ids_in(self.namespace.repair_results_dir, "review_repair_batch")
 
     # P5 durable history (§28.16) ----------------------------------------------
     #
@@ -806,7 +834,7 @@ class ReviewStore:
         return found
 
     def _read_history(self, family: str, identifier: str) -> tuple[Any, str]:
-        relative = paths.history_rel(family, identifier)
+        relative = self.namespace.history_rel(family, identifier)
         found, text = self._read_record(
             relative, f"Review history {relative}",
             lambda record, described: history.parse_history(family, record, described),
@@ -820,7 +848,7 @@ class ReviewStore:
         return found, text
 
     def history_exists(self, family: str, identifier: str) -> bool:
-        return self.read_bytes(paths.history_rel(family, identifier)) is not None
+        return self.read_bytes(self.namespace.history_rel(family, identifier)) is not None
 
     def history_digest(self, family: str, identifier: str) -> str:
         """The canonical digest of one stored history record, over the exact bytes the reader accepted."""
@@ -829,7 +857,7 @@ class ReviewStore:
 
     def history_ids(self, family: str) -> tuple[str, ...]:
         """Every history record of ``family``, by identity; an absent family (or namespace) holds none."""
-        return self._ids_in(paths.history_family_dir(family), paths.HISTORY_FAMILY_KINDS[family])
+        return self._ids_in(self.namespace.history_family_dir(family), paths.HISTORY_FAMILY_KINDS[family])
 
     def run_history(self, review_run_id: str) -> Any:
         return self.read_history(paths.HISTORY_RUNS, review_run_id)
@@ -869,7 +897,7 @@ class ReviewStore:
 
     def read_profile_bytes(self) -> bytes | None:
         """The exact stored Project Profile bytes, or ``None`` when the Project has no Profile (valid: no override)."""
-        return self.read_bytes(paths.POLICY_PROFILE_REL)
+        return self.read_bytes(self.namespace.policy_profile_rel)
 
     def read_profile(self) -> Any:
         """The canonical Project Profile (:class:`workline.review.policy.ProjectProfile`), or ``None`` when absent."""
@@ -878,7 +906,7 @@ class ReviewStore:
         raw = self.read_profile_bytes()
         if raw is None:
             return None
-        found, _ = policy.parse_profile_bytes(raw, f"the Project Profile {paths.POLICY_PROFILE_REL}")
+        found, _ = policy.parse_profile_bytes(raw, f"the Project Profile {self.namespace.policy_profile_rel}")
         return found
 
     def profile_digest(self) -> str | None:
@@ -888,13 +916,13 @@ class ReviewStore:
         raw = self.read_profile_bytes()
         if raw is None:
             return None
-        _, text = policy.parse_profile_bytes(raw, f"the Project Profile {paths.POLICY_PROFILE_REL}")
+        _, text = policy.parse_profile_bytes(raw, f"the Project Profile {self.namespace.policy_profile_rel}")
         return serialize.digest_of_text(text)
 
     def _read_policy_record(self, family: str, identifier: str) -> tuple[dict[str, Any], str]:
         from . import policy
 
-        relative = paths.policy_record_rel(family, identifier)
+        relative = self.namespace.policy_record_rel(family, identifier)
         raw = self.read_bytes(relative)
         if raw is None:
             raise ValidationError(f"Review policy record not found: {relative}", code="review_record_missing")
@@ -915,32 +943,39 @@ class ReviewStore:
         return found
 
     def policy_change_exists(self, policy_change_id: str) -> bool:
-        return self.read_bytes(paths.policy_change_rel(policy_change_id)) is not None
+        return self.read_bytes(self.namespace.policy_record_rel(paths.POLICY_CHANGES, policy_change_id)) is not None
 
     def policy_change_digest(self, policy_change_id: str) -> str:
         _, text = self._read_policy_record(paths.POLICY_CHANGES, policy_change_id)
         return serialize.digest_of_text(text)
 
     def policy_change_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.policy_family_dir(paths.POLICY_CHANGES), "review_policy_change")
+        return self._ids_in(self.namespace.policy_family_dir(paths.POLICY_CHANGES), "review_policy_change")
 
     def read_policy_evaluation(self, evaluation_id: str) -> dict[str, Any]:
         found, _ = self._read_policy_record(paths.POLICY_EVALUATIONS, evaluation_id)
         return found
 
     def policy_evaluation_exists(self, evaluation_id: str) -> bool:
-        return self.read_bytes(paths.policy_evaluation_rel(evaluation_id)) is not None
+        return self.read_bytes(self.namespace.policy_record_rel(paths.POLICY_EVALUATIONS, evaluation_id)) is not None
 
     def policy_evaluation_digest(self, evaluation_id: str) -> str:
         _, text = self._read_policy_record(paths.POLICY_EVALUATIONS, evaluation_id)
         return serialize.digest_of_text(text)
 
     def policy_evaluation_ids(self) -> tuple[str, ...]:
-        return self._ids_in(paths.policy_family_dir(paths.POLICY_EVALUATIONS), "review_policy_evaluation")
+        return self._ids_in(self.namespace.policy_family_dir(paths.POLICY_EVALUATIONS), "review_policy_evaluation")
 
     # activation -------------------------------------------------------------
+    def _activation_rel(self) -> str:
+        """The Work-terminal activation record path; refused under a namespace with no activation area."""
+        if not self.namespace.activation:
+            raise ValidationError(f"the {self.namespace.name} Review namespace has no 'activation' area",
+                                  code="review_namespace_invalid")
+        return paths.WORK_TERMINAL_ACTIVATION_REL
+
     def activation_exists(self) -> bool:
-        return self.read_bytes(paths.WORK_TERMINAL_ACTIVATION_REL) is not None
+        return self.read_bytes(self._activation_rel()) is not None
 
     def read_activation(self) -> WorkTerminalActivation | None:
         """The Work-terminal activation record, or ``None`` when review-v1 is not activated.
@@ -950,7 +985,7 @@ class ReviewStore:
         validated now, and so that an absent record is a positive answer -
         "not activated" - rather than an unexamined gap.
         """
-        relative = paths.WORK_TERMINAL_ACTIVATION_REL
+        relative = self._activation_rel()
         raw = self.read_bytes(relative)
         if raw is None:
             return None

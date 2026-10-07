@@ -109,7 +109,15 @@ def validate_review(store: ProjectStore) -> list[ReviewProblem]:
 
 
 def review_problems(review: ReviewStore) -> list[ReviewProblem]:
-    """:func:`validate_review` over any P1 reader - the working tree's, or one commit's committed records."""
+    """:func:`validate_review` over any P1 reader - the working tree's, or one commit's committed records.
+
+    P7 (§31.4 / §31.50): over the reader's own Review namespace. Every chain,
+    Receipt, Consumption, Supersession, provenance and P4 rule is this one
+    implementation for every namespace; the passes over a Project-only area
+    (P5 history, activation, the P6 policy namespace, P4 repair records) run
+    only where the namespace has that area - a root policy reader holding one
+    is refused by its namespace shape, never read as if it were a Project.
+    """
     try:
         if not review.exists():
             return []  # a Project that has never used Review is a valid Project
@@ -130,9 +138,13 @@ def review_problems(review: ReviewStore) -> list[ReviewProblem]:
     problems.extend(_task_inputs(review))
     problems.extend(_provenance(review, chains))
     problems.extend(_p4_records(review, chains))
-    problems.extend(_history_records(review))
-    problems.extend(_activation(review))
-    problems.extend(_policy_records(review, chains))
+    namespace = review.namespace
+    if namespace.history:
+        problems.extend(_history_records(review))
+    if namespace.activation:
+        problems.extend(_activation(review))
+    if namespace.policy:
+        problems.extend(_policy_records(review, chains))
     return problems
 
 
@@ -144,23 +156,26 @@ def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
     """Only the known directories (P1's seven, P4's four, P5's history), each a plain directory - read without following.
 
     ``history/`` is the one area two levels deep (§28.3): it holds exactly the
-    five history family directories, each plain, and nothing else.
+    five history family directories, each plain, and nothing else. The known
+    directories are the reader's namespace's own (P7: the root policy Review
+    has no history, policy, activation or repair area, so one there is unknown).
     """
+    root, subdirs = review.namespace.root, review.namespace.subdirs
     try:
-        found = review.entries(paths.REVIEW_DIR) or []
+        found = review.entries(root) or []
     except ValidationError as exc:
         return [_problem(exc)]
     problems: list[ReviewProblem] = []
     for entry in found:
-        if entry.name not in paths.REVIEW_SUBDIRS:
-            problems.append(ReviewProblem("review_namespace_invalid", f"{paths.REVIEW_DIR} holds unknown entry {entry.name}"))
+        if entry.name not in subdirs:
+            problems.append(ReviewProblem("review_namespace_invalid", f"{root} holds unknown entry {entry.name}"))
         elif entry.is_indirection:
             problems.append(
-                ReviewProblem("review_containment", f"{paths.REVIEW_DIR}/{entry.name} is a symlink, junction or other reparse point")
+                ReviewProblem("review_containment", f"{root}/{entry.name} is a symlink, junction or other reparse point")
             )
         elif not entry.is_dir:
             problems.append(
-                ReviewProblem("review_namespace_invalid", f"{paths.REVIEW_DIR}/{entry.name} is a file where a directory belongs")
+                ReviewProblem("review_namespace_invalid", f"{root}/{entry.name} is a file where a directory belongs")
             )
         elif entry.name == "history":
             problems.extend(_history_shape(review))
@@ -232,7 +247,7 @@ def _chains(review: ReviewStore) -> tuple[dict[str, GateChain], list[ReviewProbl
             problems.append(
                 ReviewProblem(
                     "review_namespace_invalid",
-                    f"{paths.run_dir(review_run_id)} holds no gate generation; an empty Review Run directory "
+                    f"{review.namespace.run_dir(review_run_id)} holds no gate generation; an empty Review Run directory "
                     "is not a state a Review Run reaches",
                 )
             )
@@ -552,12 +567,13 @@ def _p4_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[Revie
 
     problems: list[ReviewProblem] = []
     stored: dict[str, dict[str, Any]] = {"report": {}, "adjudication": {}, "batch": {}, "result": {}}
-    for kind, list_ids, read in (
-        ("report", review.report_digests, review.read_report),
-        ("adjudication", review.adjudication_run_ids, review.read_adjudication),
-        ("batch", review.repair_batch_ids, review.read_repair_batch),
-        ("result", review.repair_result_ids, review.read_repair_result),
-    ):
+    kinds = [("report", review.report_digests, review.read_report),
+             ("adjudication", review.adjudication_run_ids, review.read_adjudication)]
+    if review.namespace.repairs:
+        # P7: a namespace with no repair area (the root policy Review: no Repair Batch branch) holds none
+        kinds += [("batch", review.repair_batch_ids, review.read_repair_batch),
+                  ("result", review.repair_result_ids, review.read_repair_result)]
+    for kind, list_ids, read in kinds:
         try:
             identifiers = list_ids()
         except ValidationError as exc:
