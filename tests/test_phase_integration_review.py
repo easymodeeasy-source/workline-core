@@ -940,6 +940,90 @@ class DeferredReviewTests(IntegrationRunCase):
                 self.assertEqual([], MutationController(store).list_pending())
                 self.assertEqual([], validate_project(store))
 
+    def test_the_interruption_matrix_of_one_reviewed_integration(self) -> None:
+        """R39 (§32.62 items 1-7 and 13-21; items 8-12 are the G4-terminal / follow-up / successor rows above, 22-28
+        test_roadmap_achievement_evidence's matrix): one reviewed integration completing its Phase, interrupted at each
+        point and finished by re-running the same START with the same selector. Every retry keeps the reserved IDs
+        (Run, Receipt, Consumption, evidence), makes no second Run / Receipt / Consumption / work_completed / evidence /
+        completion commit / publication, never falls back to the ordinary executor, and leaves HEAD published."""
+        from workline import roadmap_review as rr_module
+        from workline.mutation import Mutation, MutationController as Controller
+
+        def generation(number: int):
+            return lambda n, *args, **kwargs: args[2] == number
+
+        def finishing(number: int):
+            return lambda n, store, gen, *a, **k: (gen.invocation or {}).get("generation") == number
+
+        def completion_push(n, repo, *args, **kwargs) -> bool:
+            return git(repo, "log", "-1", "--format=%s").startswith("chore(workline): complete")
+
+        def terminal_effect(kind: str):
+            def when(n, controller, record) -> bool:
+                if record["kind"] == "create_file":
+                    return kind in record["payload"]["path"]
+                return record["kind"] == "append_event" and record["payload"]["record"]["type"] == kind
+            return when
+
+        points = (
+            ("1 opening lifecycle recorded", sr, "_integration_open", True, None),
+            ("2 Candidate frozen", sr, "_integration_freeze", True, None),
+            ("3 G1 recorded, not committed", rr_module, "_finish_generation", False, finishing(1)),
+            ("3 G1 committed", sr, "_integration_generation", True, generation(1)),
+            ("4 discovery returned before G2", sr, "_integration_generation", False, generation(2)),
+            ("5 G2 committed", sr, "_integration_generation", True, generation(2)),
+            ("6 G3 recorded, not committed", rr_module, "_finish_generation", False, finishing(3)),
+            ("6 G3 committed", sr, "_integration_generation", True, generation(3)),
+            ("7 adjudicator returned before G4", sr, "_integration_generation", False, generation(4)),
+            ("G4 committed", sr, "_integration_generation", True, generation(4)),
+            ("G5 committed", sr, "_integration_generation", True, generation(5)),
+            ("17 achievement ID reserved", Mutation, "reserve_id", True,
+             lambda n, mutation, key, kind, *a, **k: kind == "review_achievement"),
+            ("13 terminal stage recorded, not applied", Mutation, "apply", False,
+             lambda n, mutation, *a, **k: any(e["kind"] == "create_file" and "/consumptions/" in e["payload"]["path"]
+                                              and not e.get("applied") for e in mutation.effects)),
+            ("14 / 19 partial terminal apply (work_completed applied)", Controller, "apply_effect", True,
+             terminal_effect("work_completed")),
+            ("18 achievement record applied", Controller, "apply_effect", True, terminal_effect("/history/achievements/")),
+            ("15 / 20 terminal commit, not published", gitcmd, "push", False, completion_push),
+            ("16 terminal publication", gitcmd, "push", True, completion_push),
+            ("21 postcommit basis proof", sr, "completion_postcommit", False, None),
+        )
+        for name, target, attribute, after, when in points:
+            with self.subTest(name):
+                store, phase_id, ids = self.marked_project("p" + "".join(c for c in name if c.isalnum())[:24].lower(),
+                                                           remote=True)
+                integration = ids["integration"]
+                log: list[str] = []
+                with crash_at(target, attribute, after=after, when=when):
+                    with self.assertRaises(Crash):
+                        self.integrate(store, integration, phase_review(), log=log)
+                reserved = {key: value for record in MutationController(store).list_pending()
+                            for key, value in (record.get("reserved_ids") or {}).items()}
+                self.assertEqual("completed", self.integrate(store, integration, phase_review(), log=log).status)
+                self.assertNotIn(integration, log, "never run by the ordinary executor")
+                review = ReviewStore(store)
+                (run_id,) = self.integration_runs(store, integration)
+                chain = review.gate_chain(run_id)
+                self.assertTrue(chain.latest.sealed)
+                if any(value.startswith("rr_") for value in reserved.values()):
+                    self.assertIn(run_id, reserved.values(), "the reserved Run is the one finished")
+                (consumption,) = review.consumptions()
+                self.assertEqual(str(chain.latest.receipt_id), consumption.receipt_id)
+                completed = [e.id for e in ProjectView.load(store).events_for(integration) if e.type == "work_completed"]
+                self.assertEqual([consumption.terminal_event_id], completed)
+                (evidence,) = review.phase_completion_evidence()
+                self.assertEqual(phase_id, evidence.phase_id)
+                for value, kind in ((consumption.consumption_id, "rcs_"), (evidence.achievement_evidence_id, "rha_")):
+                    if any(item.startswith(kind) for item in reserved.values()):
+                        self.assertIn(value, reserved.values(), f"the reserved {kind} ID is the one kept")
+                subjects = self.subjects(store, 60)
+                display = ProjectView.load(store).works[integration].display
+                self.assertEqual(1, subjects.count(f"chore(workline): complete {display}"), subjects)
+                self.assertEqual(self.head(store), self.remote_head(store.root.name), "published once, HEAD == remote")
+                self.assertEqual([], MutationController(store).list_pending())
+                self.assertEqual([], validate_project(store))
+
     def test_a_verification_that_mutates_project_state_never_settles(self) -> None:
         """§32.29: START measures the Project state around every launch; a discovery that writes persistent state
         settles nothing (``result_paths=()`` is never proof), and the Run stays at G1."""
