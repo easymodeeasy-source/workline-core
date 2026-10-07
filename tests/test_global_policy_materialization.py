@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from helpers import WORKLINE_ROOT, WorklineTestCase, copy_workline_root
 from workline.errors import StopError, ValidationError
@@ -570,6 +571,81 @@ class GlobalChangeAdoptionTests(WorklineTestCase):
             policy.global_experiments(unrecorded, policy.load_global_baseline(unrecorded), None)
         self.assertEqual((), policy.global_experiments(WORKLINE_ROOT, policy.load_global_baseline(WORKLINE_ROOT), None),
                          "version 1 is no learned change")
+
+
+class ProfileReader(OverrideReader):
+    """A Project whose one Profile override was decided under Global v1, as a new Run's resolution reads it."""
+
+    def __init__(self, profile: policy.ProjectProfile, change: dict) -> None:
+        super().__init__(change)
+        self.profile = profile
+
+    def read_profile(self) -> policy.ProjectProfile:
+        return self.profile
+
+    def policy_evaluation_ids(self) -> tuple[str, ...]:
+        return ()
+
+
+def discovery_actors(count: int, prefix: str = "required") -> tuple:
+    from workline.review import p4
+
+    return tuple(p4.DiscoveryBinding(f"{prefix}-{index}", lambda task: None, f"{prefix}-reviewer-{index}", "v1")
+                 for index in range(count))
+
+
+class GlobalLighteningOverrideTests(WorklineTestCase):
+    """RB7CL-4 / FLAG-C3: a Global lightening 3 -> 2 of required_slots, and Project overrides of that surface.
+
+    Lineage: v1 (slots 1) -> v2 strengthens slots to 3 -> v3 lightens slots to 2 (holdout 3, the before setting).
+    An override AT (3) or ABOVE (4) the pre-change Global setting keeps its absolute value (§31.21), so the Global
+    lightening is no downward change there and freezes no holdout: the Run starts and its Effective Policy reads.
+    The Profile lineage proof (Receipt-backed change records) is P6's and is exercised by the P6 suites; it is held
+    constant here so that only the Global experiment decides.
+    """
+
+    root_at = GlobalChangeAdoptionTests.root_at
+    overriding = GlobalChangeAdoptionTests.overriding
+    loaded_v1 = GlobalChangeAdoptionTests.loaded_v1
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.v2 = policy.global_policy_record(2, V1_DIGEST, {SLOTS: 3, STEPS: 0})
+        self.v3 = policy.global_policy_record(3, policy.global_policy_digest(self.v2), {SLOTS: 2, STEPS: 0})
+        self.changes = [global_change(STRENGTHEN_ID, v1(), self.v2, "strengthen"),
+                        global_change(LIGHTEN_ID, self.v2, self.v3, "lighten")]
+        self.root = self.root_at(self.v3, self.changes)
+        lineage = mock.patch.object(policy, "require_lineage")
+        lineage.start()
+        self.addCleanup(lineage.stop)
+
+    def new_run(self, reader, holdout: tuple = ()) -> dict:
+        from workline.review import p4
+
+        needed = policy.setting(policy.resolve_policy_state(reader, self.root).effective, SLOTS)
+        return policy.new_run_effective_policy(reader, self.root, p4.P6_POLICY_ID, discovery_actors(needed), holdout)
+
+    def test_an_override_at_or_above_the_pre_change_setting_starts_its_run(self) -> None:
+        for setting in (3, 4):
+            with self.subTest(override=setting):
+                profile, reader = self.overriding(SLOTS, setting)
+                effective = self.new_run(ProfileReader(profile, reader.change))
+                self.assertEqual(effective, policy.parse_effective_policy(effective, "the frozen Effective Policy"))
+                self.assertEqual({SLOTS: setting, STEPS: 0}, effective["settings"])
+                self.assertEqual([], effective["active_experiments"], "the Global lightening does not govern it")
+                self.assertEqual(0, policy.required_holdout_slots(effective))
+                self.assertEqual(policy.COMPATIBILITY_TOTAL_ADAPTER_V1, effective["compatibility"])
+
+    def test_a_project_following_the_global_setting_needs_the_lightening_holdout(self) -> None:
+        with self.assertRaises(StopError) as raised:
+            self.new_run(NoProfileReader())
+        self.assertEqual(policy.CODE_HOLDOUT_UNBOUND, raised.exception.code)
+        effective = self.new_run(NoProfileReader(), holdout=discovery_actors(1, "holdout"))
+        self.assertEqual(effective, policy.parse_effective_policy(effective, "the frozen Effective Policy"))
+        self.assertEqual({SLOTS: 2, STEPS: 0}, effective["settings"])
+        self.assertEqual([{"origin": policy.ORIGIN_GLOBAL, "policy_change_id": LIGHTEN_ID, "policy_surface_id": SLOTS,
+                           "direction": "lighten", "holdout_setting": 3}], effective["active_experiments"])
+        self.assertEqual(1, policy.required_holdout_slots(effective))
 
 
 class SuccessorTests(unittest.TestCase):
