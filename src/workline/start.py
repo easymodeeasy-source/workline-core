@@ -217,6 +217,9 @@ class StartResult:
     phase_id: str | None = None
     detail: str = ""
     head: str | None = None
+    #: RB5PR2-3: the machine-readable code of a soft stop that a ruling names (Q-C1's phase_review_outer_with_work_
+    #: review when an outer review-v1 continuation reaches a marked integration); None otherwise.
+    code: str | None = None
 
 
 # --------------------------------------------------------------------------- helpers
@@ -492,6 +495,17 @@ class _Session:
                     "START runs review-v1 Work Review, whose mutation cannot carry the integration's ordinary "
                     "finalization and push: this continuation ends before it")
         return None
+
+    def unreviewable_code(self, work: Entity) -> str | None:
+        """RB5PR2-3 (CP ruling Q-C1): the code of the one soft stop the ruling names - an outer continuation that holds
+        both selectors under the reviewed semantics reaching a marked integration - else None. The stop stays soft
+        (the Work just finished is committed and this mutation still closes, the ``_next_or_ambiguous`` precedent);
+        the code makes it machine-readable."""
+        from .start_integration_review import SEMANTICS_REVIEWED
+
+        if self.review is None or self.phase_review is None or self.semantics != SEMANTICS_REVIEWED:
+            return None
+        return CODE_SELECTORS_OUTER if self.unreviewable_integration(work) is not None else None
 
     # git ---------------------------------------------------------------
     def _commit(self, prefix: str, message: str, paths: list[str], *, include_canonical: bool = True) -> None:
@@ -3800,7 +3814,8 @@ def _start_locked(
             elif current is None:
                 result = StartResult("completed", work_id, mutation.id, phase_id=phase_id)
             elif unreviewable is not None:
-                result = StartResult("stopped", work_id, mutation.id, phase_id=phase_id, detail=unreviewable)
+                result = StartResult("stopped", work_id, mutation.id, phase_id=phase_id, detail=unreviewable,
+                                     code=session.unreviewable_code(current))
             else:
                 result = session.run_work(current.id)
         else:
@@ -3831,14 +3846,15 @@ def _start_locked(
         unreviewable = session.unreviewable_integration(nxt)
         if unreviewable is not None:
             result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, unreviewable,
-                                 gitcmd.head_commit(store.root))
+                                 gitcmd.head_commit(store.root), code=session.unreviewable_code(nxt))
             break
         result = session.run_work(nxt.id)
 
     if result.status != "question_wait":
         _structure_or_stop(store, "postcheck")
         mutation.complete()
-    return StartResult(result.status, result.work_id, mutation.id, tuple(session.completed), phase_id, result.detail, result.head)
+    return StartResult(result.status, result.work_id, mutation.id, tuple(session.completed), phase_id, result.detail, result.head,
+                       code=result.code)
 
 
 # --------------------------------------------------------------------------- standalone plan exclusion

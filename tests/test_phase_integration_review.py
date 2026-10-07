@@ -1319,8 +1319,32 @@ class BothSelectorsTests(IntegrationRunCase):
                               phase_review=phase_review(), semantics=SEMANTICS_REVIEWED)
         reason = session.unreviewable_integration(ProjectView.load(store).works[ids["integration"]])
         self.assertIn("runs review-v1 Work Review", reason)
+        self.assertEqual(st.CODE_SELECTORS_OUTER, session.unreviewable_code(ProjectView.load(store).works[ids["integration"]]))
         session.review = None
         self.assertIsNone(session.unreviewable_integration(ProjectView.load(store).works[ids["integration"]]))
+        self.assertIsNone(session.unreviewable_code(ProjectView.load(store).works[ids["integration"]]))
+
+    def test_an_outer_review_continuation_reaching_a_marked_integration_carries_the_code(self) -> None:
+        """RB5PR2-3 (Q-C1), end to end through START: an outer review-v1 START holding both selectors whose
+        continuation reaches the marked integration ends softly - the Work it moved is committed, its mutation closes -
+        with ``phase_review_outer_with_work_review`` on the result, nothing of the integration recorded. The
+        continuation's choice is pinned to the integration (``_next_or_ambiguous``), since a review-v1 Work mutation
+        holds one completion and a derive's own fix Work is normally chosen first."""
+        from planning_helpers import CANONICAL_RULE
+
+        store, phase_id, ids = self.marked_project(complete_w1=False, remote=True, attributes=CANONICAL_RULE + "\n")
+        self.activate(store)
+        integration = ProjectView.load(store).works[ids["integration"]]
+        moving = st.Derive({"fix": st.DerivedWork("Fix W1", "W1 holds")}, move=True)
+        with mock.patch.object(st, "_next_or_ambiguous", return_value=(integration, None)):
+            result = st.start(store, ids["w1"], "outer", answering_executor(moving), review=self.work_review(),
+                              phase_review=phase_review())
+        self.assertEqual(("stopped", st.CODE_SELECTORS_OUTER), (result.status, result.code))
+        self.assertIn("runs review-v1 Work Review", result.detail)
+        self.assertEqual([], self.integration_runs(store, ids["integration"]))
+        self.assertEqual([], MutationController(store).list_pending(), "the outer START's mutation closed")
+        self.assertNotEqual("completed", ProjectView.load(store).work_state(ids["integration"]).state)
+        self.assertEqual([], [e for e in ProjectView.load(store).events_for(ids["integration"])])
 
     def test_an_ordinary_work_keeps_review_v1_with_both_selectors(self) -> None:
         """The other side of §32.14: an ordinary Work named with both selectors keeps ``review=`` exactly - here its
