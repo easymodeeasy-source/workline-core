@@ -57,7 +57,7 @@ from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
 from . import checkout, committed, gate, p4, paths, planning, records, serialize, work_review
-from .namespace import PROJECT_REVIEW_NAMESPACE, ReviewNamespace
+from .namespace import NAMESPACES, PROJECT_REVIEW_NAMESPACE, ReviewNamespace
 from .records import GateGeneration
 from .store import GateChain, ReviewStore
 
@@ -180,10 +180,14 @@ def discover_kind_in(
     repository ``Path`` where a Project discovery passes its ``ProjectStore``.
     A Project's Review is discovered by :func:`discover_kind` only.
     """
+    if not isinstance(namespace, ReviewNamespace) or namespace not in NAMESPACES:
+        # a descriptor is described, never constructed by a caller (namespace.NAMESPACES): catalogued P1 code
+        raise ValidationError(f"discover_kind_in reads one described Review namespace, not {namespace!r}",
+                              code="review_namespace_invalid")
     if namespace == PROJECT_REVIEW_NAMESPACE or namespace.history or namespace.policy or namespace.activation:
         # a namespace with Project-only areas (Human dispositions, history) is a Project's: discover_kind only
-        raise ValueError("a Project's Review namespace is discovered by discover_kind(store, ...), never by "
-                         "discover_kind_in")
+        raise ValidationError(f"the {namespace.name} Review namespace is discovered by discover_kind(store, ...), "
+                              "never by discover_kind_in", code="review_namespace_invalid")
     scope = _RootScope(Path(repo), namespace, pending)
     checkout.require_namespace_readable_in(scope.root, namespace)
     return _discover_in(scope, ReviewStore.for_namespace(scope.root, namespace), review_kind, operation_identity,
@@ -517,11 +521,13 @@ def _clean_run(
     if head is None:
         raise _incomplete(f"Review Run {review_run_id} is not committed: HEAD names no commit")
     contract = run_contract(review, chain)
+    if isinstance(store, _RootScope) and contract != records.P7_GLOBAL_POLICY_CHANGE_CONTRACT:
+        # a root policy Review Run binds the root contract by construction (§31.25): a v1-shaped Run, or one binding
+        # any other P4 contract (whose history paths are a Project's), is never proven or classified here (RB7PSW-1)
+        raise _incomplete(f"Review Run {review_run_id} binds {contract or 'no P4 contract'} in the "
+                          f"{store.namespace.name} Review namespace, not {records.P7_GLOBAL_POLICY_CHANGE_CONTRACT}")
     if contract is not None:
         return _clean_p4_run(store, review, head, review_run_id, chain, contract)
-    if isinstance(store, _RootScope):
-        # a root policy Review Run is P4-family by construction (§31.25); a v1-shaped one is never classified
-        raise _incomplete(f"Review Run {review_run_id} binds no P4 contract in its generation-1 TaskInputs")
     shape = shape_of(chain)
     if shape:
         raise _incomplete(f"Review Run {review_run_id} {shape}")

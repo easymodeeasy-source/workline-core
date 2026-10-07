@@ -19,11 +19,13 @@ import inspect
 from pathlib import Path
 from unittest import mock
 
-from helpers import WorklineTestCase, git
+from helpers import WORKLINE_ROOT, WorklineTestCase, git
 
-from workline.errors import ReconcileRequired, StopError
-from workline.review import checkout, p4, recovery, records, serialize
-from workline.review.namespace import PROJECT_REVIEW_NAMESPACE, ROOT_POLICY_REVIEW_NAMESPACE
+from workline.errors import ReconcileRequired, StopError, ValidationError
+from workline.review import checkout, p4, policy, recovery, records, serialize
+from workline.review.namespace import (
+    PROJECT_REVIEW_NAMESPACE, ROOT_POLICY_NAMESPACE_NAME, ROOT_POLICY_REVIEW_NAMESPACE, ROOT_SUBDIRS, ReviewNamespace,
+)
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore
 
@@ -40,23 +42,41 @@ PROJECT_ONLY_READERS = ("repair_batch_ids", "repair_result_ids", "read_repair_ba
                         "read_policy_change", "read_policy_evaluation", "read_activation")
 
 
-def root_run(review_run_id: str, task_id: str, operation: str = OPERATION) -> dict[str, dict]:
-    """A generation-1 root policy Review Run (the open acceptance of one discovery task) as its records."""
-    envelope = p4.discovery_request(
-        review_contract=CONTRACT, review_kind=KIND, viewpoint="correctness", candidate={"candidate_hash": CANDIDATE},
-        context={"context": "root"}, requirement={"requirement": "r"}, candidate_generation=1, succession=None,
-        set_aside_runs=(), human_decision=None, policy_id=p4.ROOT_POLICY_ID,
-    )
+def root_run(review_run_id: str, task_id: str, operation: str = OPERATION, *,
+             foreign_p6: bool = False) -> dict[str, dict]:
+    """A generation-1 root policy Review Run (the open acceptance of one discovery task) as its records.
+
+    ``foreign_p6`` (RB7PSW-1): a foreign root Run of the root kind and operation whose TaskInput binds the P6
+    policy-change contract and the P6-capable family policy, with one set-aside Run summary - a record RB7-D's closed
+    effects never produce, whose history path is a PROJECT path.
+    """
+    if foreign_p6:
+        policy_id = p4.P6_POLICY_ID
+        envelope = p4.discovery_request(
+            review_contract=records.P6_POLICY_CHANGE_CONTRACT, review_kind=KIND, viewpoint="correctness",
+            candidate={"candidate_hash": CANDIDATE}, context={"context": "root"}, requirement={"requirement": "r"},
+            candidate_generation=1, succession=None, set_aside_runs=(), human_decision=None, policy_id=policy_id,
+            set_aside_summaries=({"review_run_id": OTHER_RUN, "digest": "d" * 64},),
+            effective_policy=policy.effective_policy_record(policy.load_global_baseline(WORKLINE_ROOT), None, ()),
+            discovery_role=policy.ROLE_REQUIRED,
+        )
+    else:
+        policy_id = p4.ROOT_POLICY_ID
+        envelope = p4.discovery_request(
+            review_contract=CONTRACT, review_kind=KIND, viewpoint="correctness", candidate={"candidate_hash": CANDIDATE},
+            context={"context": "root"}, requirement={"requirement": "r"}, candidate_generation=1, succession=None,
+            set_aside_runs=(), human_decision=None, policy_id=policy_id,
+        )
     task = p4.task_input(
         task_id=task_id, task_slot=p4.discovery_slot("correctness"), task_kind=p4.TASK_KIND_DISCOVERY,
         actor_identity="reviewer-a", actor_version="1", envelope=envelope, candidate_hash=CANDIDATE,
         candidate_material_digest="c" * 64, review_context_hash=CONTEXT, accepted_generation=1,
-        policy_id=p4.ROOT_POLICY_ID,
+        policy_id=policy_id,
     )
     gate = records.GateGeneration(
         review_run_id=review_run_id, generation=1, previous_generation=None, previous_digest=None, review_kind=KIND,
         target_identity=records.GLOBAL_POLICY_TARGET_IDENTITY, operation_identity=operation, candidate_hash=CANDIDATE,
-        review_context_hash=CONTEXT, effective_policy_hash=p4.family_policy_hash(p4.ROOT_POLICY_ID),
+        review_context_hash=CONTEXT, effective_policy_hash=task.effective_policy_hash,
         evidence_digest=FILLER, coverage_digest=FILLER, raw_report_set_digest=FILLER, adjudication_digest=FILLER,
         obligation_digest=FILLER, accepted_tasks=(p4.accepted_descriptor(task),), settled_tasks=(),
         status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
@@ -151,6 +171,22 @@ class RootDiscoveryTests(RootCase):
             self.discover()
         self.assertEqual("review_recovery_ambiguous", raised.exception.reason)
 
+    def test_a_foreign_contract_under_the_root_is_incomplete_never_a_project_path(self) -> None:
+        """RB7PSW-1: a root Run binding a non-root contract (here P6, whose history paths are PROJECT paths) is
+        ``review_recovery_incomplete`` before any of its record paths is built - never a bare containment error."""
+        self.lay(root_run(RUN, TASK, foreign_p6=True))
+        self.assertEqual(records.P6_POLICY_CHANGE_CONTRACT,
+                         recovery.run_contract(ReviewStore.for_namespace(self.repo, ROOT),
+                                               ReviewStore.for_namespace(self.repo, ROOT).gate_chain(RUN)))
+        self.assertIsNone(checkout.require_namespace_readable_in(self.repo, ROOT), "every record reads strictly")
+        with mock.patch.object(p4, "run_history_paths", wraps=p4.run_history_paths) as history_paths:
+            with self.assertRaises(ReconcileRequired) as raised:
+                self.discover()
+        self.assertEqual("review_recovery_incomplete", raised.exception.reason)
+        self.assertIn(records.P6_POLICY_CHANGE_CONTRACT, str(raised.exception))
+        self.assertFalse(history_paths.called, "no Project history path is built under the root")
+        self.assertEqual([], self.classified)
+
     def test_an_uncommitted_root_run_is_incomplete(self) -> None:
         self.lay(root_run(RUN, TASK), commit=False)
         with self.assertRaises(ReconcileRequired) as raised:
@@ -174,10 +210,19 @@ class RootDiscoveryTests(RootCase):
         self.assertEqual("review_namespace_unreadable", raised.exception.code)
         self.assertEqual([], self.classified)
 
-    def test_a_project_namespace_is_never_discovered_by_the_root_entry(self) -> None:
-        with self.assertRaises(ValueError):
-            recovery.discover_kind_in(self.repo, PROJECT_REVIEW_NAMESPACE, KIND, OPERATION, self.adapter(),
-                                      pending=self.hook)
+    def test_only_the_described_root_namespace_is_discovered_by_the_root_entry(self) -> None:
+        """Note 1 of the RB7 batch review: the namespace is type- and membership-checked before any of its flags is
+        read, with the catalogued P1 code ``review_namespace_invalid`` (never a bare ValueError / AttributeError)."""
+        self.lay(root_run(RUN, TASK))
+        constructed = ReviewNamespace(ROOT_POLICY_NAMESPACE_NAME, "elsewhere/review", ROOT_SUBDIRS,
+                                      history=False, policy=False, activation=False, repairs=False)
+        for name, namespace in (("the PROJECT descriptor", PROJECT_REVIEW_NAMESPACE),
+                                ("a constructed, non-registered descriptor", constructed),
+                                ("not a descriptor", "review-policy/review"), ("None", None)):
+            with self.subTest(name), self.assertRaises(ValidationError) as raised:
+                recovery.discover_kind_in(self.repo, namespace, KIND, OPERATION, self.adapter(), pending=self.hook)
+            self.assertEqual("review_namespace_invalid", raised.exception.code)
+        self.assertEqual(([], []), (self.classified, self.pending_calls), "refused before anything is read")
 
     def test_the_project_entries_keep_their_signatures(self) -> None:
         self.assertEqual(["store", "review_kind", "operation_identity", "adapter"],
