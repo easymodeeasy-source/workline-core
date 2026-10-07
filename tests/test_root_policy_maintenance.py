@@ -1268,8 +1268,9 @@ class CommittabilityTests(RootCase):
 class StatusTests(RootCase):
     def setUp(self) -> None:
         super().setUp()
-        self.derived = policy.load_global_baseline(WORKLINE_ROOT)
-        patcher = mock.patch.object(policy, "load_global_baseline", return_value=self.derived)
+        # the real root's own baseline: the materialized Global policy v1 once P7 tracks it (RB7 step 4b)
+        self.current = policy.load_global_baseline(WORKLINE_ROOT)
+        patcher = mock.patch.object(policy, "load_global_baseline", return_value=self.current)
         self.loader = patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1280,22 +1281,31 @@ class StatusTests(RootCase):
             self.assertNotIn(secret, text)
             self.assertNotIn(secret.replace("\\", "\\\\"), text)
 
-    def test_the_exact_shape_of_a_fresh_root(self) -> None:
-        before = snapshot(self.root)
-        report = rm.status_report(self.root)
-        self.assertEqual(before, snapshot(self.root), "a status call creates nothing")
-        self.assertEqual(
-            {"status": "available",
-             "global_policy": {"source_mode": policy.SOURCE_MODE_DERIVED, "version": 1,
-                               "digest": policy.global_policy_digest(v1_global_policy())},
-             "current_change_id": None, "evaluation_ids": [],
-             "authorization": {"status": "not_required", "remote": None, "branch": None},
-             "pending_mutation": None,
-             "next_boundary_adapter_identity": policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC},
-            report)
-        self.assertFalse(os.path.lexists(self.root / rm.RUNTIME_DIR))
-        self.assertNoWorkline()
-        self.assertPrivate(report)
+    def test_the_exact_shape_of_a_fresh_root_in_either_source_mode(self) -> None:
+        # Global policy version 1 has ONE digest in both modes: the derived baseline restated is exactly the
+        # materialized v1 record, so the status names the same Global policy before and after the transition.
+        derived = policy.derived_global_baseline(WORKLINE_ROOT)
+        self.assertEqual((policy.SOURCE_MODE_DERIVED, policy.SOURCE_MODE_MATERIALIZED),
+                         (derived.source_mode, self.current.source_mode))
+        self.assertEqual(policy.global_policy_digest(v1_global_policy()), self.current.global_policy_identity)
+        for baseline in (derived, self.current):
+            with self.subTest(source_mode=baseline.source_mode):
+                self.loader.return_value = baseline
+                before = snapshot(self.root)
+                report = rm.status_report(self.root)
+                self.assertEqual(before, snapshot(self.root), "a status call creates nothing")
+                self.assertEqual(
+                    {"status": "available",
+                     "global_policy": {"source_mode": baseline.source_mode, "version": 1,
+                                       "digest": policy.global_policy_digest(v1_global_policy())},
+                     "current_change_id": None, "evaluation_ids": [],
+                     "authorization": {"status": "not_required", "remote": None, "branch": None},
+                     "pending_mutation": None,
+                     "next_boundary_adapter_identity": policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC},
+                    report)
+                self.assertFalse(os.path.lexists(self.root / rm.RUNTIME_DIR))
+                self.assertNoWorkline()
+                self.assertPrivate(report)
 
     def test_with_a_held_lock_a_pending_mutation_and_an_authorization(self) -> None:
         bare = self.add_remote()
@@ -1406,9 +1416,23 @@ class StatusTests(RootCase):
         path.write_bytes(serialize.canonical_bytes({"schema": "x", "version": 1, **record}))
 
 
+def p7_root_copy(dest: Path) -> Path:
+    """A copied Workline root carrying its tracked Global policy (P7 §31.2, RB7C-7): the loader requires the file.
+
+    ``copy_workline_root`` gains the file itself with RB7's shared helper change (IR-RB7-6); until then the copy is
+    completed here, and afterwards this adds nothing.
+    """
+    root = copy_workline_root(dest)
+    target = root.joinpath(*policy.GLOBAL_POLICY_REL.split("/"))
+    if not target.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(WORKLINE_ROOT.joinpath(*policy.GLOBAL_POLICY_REL.split("/")).read_bytes())
+    return root
+
+
 class RealRootStatusTests(WorklineTestCase):
     def test_a_copied_workline_root_reports_from_its_own_loader_and_creates_nothing(self) -> None:
-        root = copy_workline_root(self.tmp / "copied-root")
+        root = p7_root_copy(self.tmp / "copied-root")
         git(root, "init", "-q", "-b", "main")
         (root / ".gitignore").write_bytes(IGNORE_RULE.encode("utf-8"))
         git(root, "add", "-A")
@@ -1417,10 +1441,12 @@ class RealRootStatusTests(WorklineTestCase):
         report = rm.status_report(root)
         self.assertEqual(before, snapshot(root))
         baseline = policy.load_global_baseline(root)
-        self.assertEqual({"source_mode": baseline.source_mode, "version": baseline.version},
-                         {key: report["global_policy"][key] for key in ("source_mode", "version")})
+        self.assertEqual(policy.SOURCE_MODE_MATERIALIZED, baseline.source_mode)
+        self.assertEqual({"source_mode": baseline.source_mode, "version": baseline.version,
+                          "digest": baseline.global_policy_identity}, report["global_policy"])
         if baseline.version == 1:
             self.assertEqual(policy.global_policy_digest(v1_global_policy()), report["global_policy"]["digest"])
+            self.assertEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC, report["next_boundary_adapter_identity"])
         self.assertEqual({"status", "global_policy", "current_change_id", "evaluation_ids", "authorization",
                           "pending_mutation", "next_boundary_adapter_identity"}, set(report))
         self.assertFalse(os.path.lexists(root / ".workline"))
