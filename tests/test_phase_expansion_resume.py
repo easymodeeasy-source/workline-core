@@ -126,7 +126,9 @@ class DesignIdentityTests(ResumeCase):
         pending = self.interrupt("P0 intent opened")
 
         identity = pending["invocation"]["design"]
-        self.assertEqual(identity["version"], rm.DESIGN_IDENTITY_VERSION)
+        # RB5 I-7 (ruling OQ-D option B, OQ-A reading A): a legacy Phase entry records the legacy version 1;
+        # DESIGN_IDENTITY_VERSION names the RB5-capable (review-v1) version 2.
+        self.assertEqual(identity["version"], rm.LEGACY_DESIGN_IDENTITY_VERSION)
         self.assertEqual([w["key"] for w in identity["works"]], ["a", "b"])
         self.assertEqual(identity["works"][0]["name"], "Work A")
         self.assertEqual(identity["works"][0]["desired_state"], "A が成立する")

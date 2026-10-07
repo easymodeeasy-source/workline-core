@@ -253,7 +253,9 @@ class OneSerializerTests(_PreflightCase):
                 with self.assertRaises(Crash):
                     self.entry(the_design)
         self.assertTrue(seen, "the preflight ran the P1 serializer before anything was begun")
-        self.assertEqual(rm.design_identity(the_design), seen[0], "first on the request identity")
+        # RB5 I-7 (ruling OQ-D option B): a review-v1 Phase entry's request identity is the version 2 design
+        self.assertEqual(rm.design_identity(the_design, version=rm.DESIGN_IDENTITY_VERSION), seen[0],
+                         "first on the request identity")
 
     def test_the_reviewer_text_rule_runs_before_this_preflight(self) -> None:
         """Entry step 1 before step 4: both prove a caller value with the P1 serializer, and neither begins anything."""

@@ -51,6 +51,7 @@ from .mutation import (
     planned_write,
 )
 from .phase_create import PhaseRelationSpec, PhaseSpec, phase_registration_effects, resolve_phase_relations
+from .phase_integration import PHASE_REVIEW_CONTRACT_KEY
 from .review import checkout, committed, gate, history, p4, paths as review_paths, planning, records, serialize
 from .review import fsafe
 from .review import policy as review_policy
@@ -374,6 +375,11 @@ def phase_entry_candidate_content(
         "related": _related_content(design["integration"]["related"], reserved, "integration:related:integration"),
         "work_kind": "phase_integration_check",
     }
+    if PHASE_REVIEW_CONTRACT_KEY in design["integration"]:
+        # A version 2 design (rulings OQ-D option B / OQ-A): the Candidate binds the Phase Review contract of the
+        # integration it registers, so Review authorizes the marked integration itself. A version 1 design's entry
+        # is exactly what it always was.
+        integration[PHASE_REVIEW_CONTRACT_KEY] = design["integration"][PHASE_REVIEW_CONTRACT_KEY]
     confirmation = None
     if design["confirmation"] is not None:
         confirmation = {
@@ -714,7 +720,8 @@ def writer_input(material: dict[str, Any]) -> RoadmapWriterInput | PhaseEntryWri
             pairs("requires_completion"),
             None,
         )
-        stages = rm.phase_entry_stages(design, content["phase_id"], content["roadmap_id"])
+        stages = rm.phase_entry_stages(design, content["phase_id"], content["roadmap_id"],
+                                       phase_review_contract=content["integration"].get(PHASE_REVIEW_CONTRACT_KEY))
         tail = content["relations"][len(declared):]
         return PhaseEntryWriterInput(
             phase_id=content["phase_id"],
@@ -1088,7 +1095,18 @@ class RoadmapPlanAdapter(_PlanningAdapter):
 
 
 class PhaseEntryDesignAdapter(_PlanningAdapter):
-    """The Phase-entry semantic round-trip adapter (``phase-entry-design-adapter-v1``)."""
+    """The Phase-entry semantic round-trip adapter (``phase-entry-design-adapter-v1``).
+
+    RB5 (Control Plane ruling OQ-D option B) extends its persisted-side
+    normalization conservatively and backwards-compatibly, under the same
+    adapter identity: an integration's ``phase_review_contract`` is projected
+    exactly as ``confirmation_target`` is - only when the reviewed content or the
+    entity holds it. A version 1 Candidate of an unmarked entity therefore
+    normalizes exactly as it always did (the key on neither side), a version 2
+    Candidate's marked integration is observed, and the key on one side alone is
+    a mismatch. The Candidate side (``normalize_candidate``) is unchanged, so no
+    stored semantic projection digest changes.
+    """
 
     review_kind = planning.KIND_PHASE_ENTRY
 
@@ -1116,6 +1134,8 @@ class PhaseEntryDesignAdapter(_PlanningAdapter):
             normalized["key"] = reviewed["key"]
         if "confirmation_target" in reviewed or "confirmation_target" in entity.meta:
             normalized["confirmation_target"] = entity.meta.get("confirmation_target")
+        if PHASE_REVIEW_CONTRACT_KEY in reviewed or PHASE_REVIEW_CONTRACT_KEY in entity.meta:
+            normalized[PHASE_REVIEW_CONTRACT_KEY] = entity.phase_review_contract
         return normalized
 
     def normalize_persisted(self, loaded: tuple[PersistedResult, ProjectView]) -> Projection:
@@ -1780,6 +1800,97 @@ def _enter(op: _Op, pending: list[dict[str, Any]]) -> ReviewedPlanningResult:
 
 
 def _discover(op: _Op):
+    """Canonical recovery discovery of this invocation's Review Runs - and, for a fresh version 2 Phase entry that
+    finds none, the one narrow version 1 predecessor seam of Control Plane ruling OQ-D-R1.
+
+    A version 2 Phase entry (``roadmap.REVIEWED_DESIGN_IDENTITY_VERSION``)
+    computes a request identity no pre-RB5 Run of the same logical request
+    holds. So when the ordinary discovery of the current (version 2) operation
+    identity finds no Run at all - nothing recoverable and nothing set aside -
+    the Runs of the same request under its version 1 design identity are
+    discovered and classified by the SAME Planning recovery / currency
+    semantics (:func:`_v1_predecessor`). Every other invocation - a Roadmap
+    creation, a legacy design, a version 2 entry that finds a version 2 Run -
+    is exactly the ordinary discovery.
+    """
+    found = _discover_operation(op)
+    if found.recoverable is not None or found.set_aside or not _fresh_reviewed_phase_entry(op):
+        return found
+    return _v1_predecessor(op, found)
+
+
+def _fresh_reviewed_phase_entry(op: _Op) -> bool:
+    from . import roadmap as rm
+
+    return (not op.roadmap_kind and isinstance(op.request, dict)
+            and op.request.get("version") == rm.REVIEWED_DESIGN_IDENTITY_VERSION)
+
+
+def _v1_request(request: dict[str, Any]) -> dict[str, Any]:
+    """The version 1 design identity of the same logical Phase-entry request: ``roadmap.design_identity(design,
+    version=1)`` exactly - the version 2 shape less its version and its integration's Phase Review contract."""
+    from . import roadmap as rm
+
+    integration = {key: value for key, value in request["integration"].items() if key != PHASE_REVIEW_CONTRACT_KEY}
+    return {**request, "version": rm.LEGACY_DESIGN_IDENTITY_VERSION, "integration": integration}
+
+
+def _v1_predecessor(op: _Op, found: Any) -> Any:
+    """CONTROL_PLANE_RULING_RB5_OQ_D_R1 = SET_ASIDE_V1_THEN_START_FRESH_V2: a lost pre-RB5 owner's Run is set aside.
+
+    Reached only when the current version 2 discovery found no Run. The Runs
+    of this same Phase-entry request under its version 1 design identity are
+    discovered and classified by the existing Planning recovery and currency
+    semantics, unchanged (the shared discovery core, this kind's adapter, the
+    Run's own contract); nothing about such a Run is reinterpreted, rewritten
+    or converted - its Candidate stays the version 1 Candidate it is.
+
+    ```text
+    none                               the fresh version 2 Run, as with no predecessor at all
+    exactly one, set aside by those    it is set aside canonically by the fresh version 2 Run (its
+      semantics (stale after the       NOTE_DISCOVERY and G1 request name it, exactly as a set-aside
+      RB5 landing changed the          Run of the same identity is named), which then begins
+      Context, or settled)
+    exactly one, still recoverable     not safely classifiable: continuing it would force the fresh
+                                       invocation back into a version 1 successor, and a recoverable
+                                       Run is never set aside - fail closed
+    several                            ambiguous: no predecessor is guessed, none chosen by age or
+                                       time - fail closed
+    malformed / incomplete             the existing discovery fails closed itself
+    ```
+
+    Failing closed allocates no version 2 Run over the unresolved state: it is
+    raised before the planning mutation exists, or - on a resumed one - before
+    its discovery note and any reservation.
+    """
+    from dataclasses import replace as replaced
+
+    from .review.recovery import Discovery
+
+    legacy = _discover_operation(replaced(op, request=_v1_request(op.request)))
+    matching = sorted(([legacy.recoverable.review_run_id] if legacy.recoverable is not None else [])
+                      + [str(item["review_run_id"]) for item in legacy.set_aside])
+    if not matching:
+        return found
+    if len(matching) > 1:
+        raise _reconcile(
+            f"this Phase entry's request has {len(matching)} version 1 Review Runs of a lost owner "
+            f"({', '.join(matching)}); no predecessor is guessed and none is chosen by age, ID or time, and no new "
+            "Run is begun over them: reconcile required",
+            "review_recovery_ambiguous",
+        )
+    if legacy.recoverable is not None:
+        raise _reconcile(
+            f"the version 1 Review Run {legacy.recoverable.review_run_id} of this Phase entry's request lost its owner "
+            "and is still recoverable under this build; it is neither continued as a version 1 operation nor set "
+            "aside, and no new Run is begun over it: reconcile required",
+            "review_recovery_ambiguous",
+        )
+    return Discovery(None, tuple(sorted([*found.set_aside, *legacy.set_aside], key=lambda item: item["review_run_id"])))
+
+
+def _discover_operation(op: _Op):
+    """The ordinary canonical recovery discovery of ``op``'s operation identity, with its own currency."""
     from .review import recovery
 
     def run_currency(found: Any) -> Currency:
@@ -2182,7 +2293,8 @@ def _request_phase_stages(design: dict[str, Any], phase_id: str, roadmap_id: str
         tuple((pair["from"], pair["to"]) for pair in design["requires_completion"]),
         design.get("entry"),
     )
-    return rm.phase_entry_stages(rebuilt, phase_id, roadmap_id)
+    return rm.phase_entry_stages(rebuilt, phase_id, roadmap_id,
+                                 phase_review_contract=design["integration"].get(PHASE_REVIEW_CONTRACT_KEY))
 
 
 # --------------------------------------------------------------------------- setup: a recovery planning mutation
@@ -4142,6 +4254,14 @@ def _p4_accept_repair(op: _Op, mutation: Mutation, run: _Run, chain: Any) -> Non
     ], contract=planning.P4_CONTRACT, transition=p4.TRANSITION_ACCEPT)
 
 
+def _integration_contract(content: object) -> tuple[bool, object]:
+    """Whether a Phase-entry content's integration entry holds ``phase_review_contract``, and the value it holds."""
+    integration = content.get("integration") if isinstance(content, dict) else None
+    if not isinstance(integration, dict):
+        return (False, None)
+    return (PHASE_REVIEW_CONTRACT_KEY in integration, integration.get(PHASE_REVIEW_CONTRACT_KEY))
+
+
 def _p4_freeze_repaired(op: _Op, mutation: Mutation, source: dict[str, Any], proposal: object,
                         head: str) -> tuple[dict[str, Any], records.CandidateSnapshot]:
     """Candidate N+1 from a repair proposal, through the planning Candidate builder and validator (§27.16).
@@ -4163,6 +4283,10 @@ def _p4_freeze_repaired(op: _Op, mutation: Mutation, source: dict[str, Any], pro
     content = serialize.canonical_data(dict(proposal))  # type: ignore[arg-type]
     if not op.roadmap_kind:
         content.pop("canonical_first_work", None)
+        if _integration_contract(content) != _integration_contract(planning.candidate_content(source)):
+            # The Phase entry decided its integration's Phase Review contract in its design (§32.3, ruling OQ-D
+            # option B); a repair changes reviewed content, never that decision, so it can neither drop nor add it.
+            raise invalid("it changes the integration's phase_review_contract, which the Phase entry decided")
     try:
         base = declared_base(committed, content)
     except _NotInBase as missing:
@@ -4520,3 +4644,100 @@ def p4_planning_owned_paths(run: _Run, chain: Any, material: dict[str, Any], rev
         found += p4.run_history_paths(review, run.review_run_id, chain)
         found.append(review_paths.history_run_rel(run.review_run_id))
     return sorted(set(found))
+
+
+# =========================================================================== RB5: Roadmap achievement (§32.43 - §32.47)
+#
+# The Review-history half of Roadmap's achieved path, here because roadmap.py reaches no Review history itself
+# (the REACHING pin): what the decision cites validated against canonical records, the open Review obligations of
+# the Roadmap, and the one immutable record's canonical text.
+
+def achievement_reference_problems(store: ProjectStore, review_refs: tuple[str, ...] | list[str],
+                                   human_decision_ref: str | None) -> list[str]:
+    """RB5FB-1 / §32.44: whether every Review reference a structured achievement decision cites beyond the current
+    Phase evidence names a valid canonical record - a Review Run whose stored P5 Run summary validates against its
+    own chain, or the RB4 Human Decision Evidence ``human_decision_ref`` names, validated against its source.
+    Anything else is a problem; nothing is assumed."""
+    from .ids import is_valid_id
+    from .review import history
+
+    review = ReviewStore(store)
+    problems: list[str] = []
+    for ref in review_refs:
+        if not is_valid_id(str(ref), "review_run"):
+            problems.append(f"{ref} names no Review Run whose history the decision could cite")
+            continue
+        if not review.history_exists(review_paths.HISTORY_RUNS, str(ref)):
+            problems.append(f"Review Run {ref} has no stored P5 Run summary")
+            continue
+        found = history.run_summary_problems(review, review.read_history(review_paths.HISTORY_RUNS, str(ref)))
+        problems += [f"Review Run {ref}: {message}" for _, message in found]
+    if human_decision_ref is not None:
+        if not review.history_exists(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref):
+            problems.append(f"Human Decision Evidence {human_decision_ref} is not stored")
+        else:
+            evidence = review.read_history(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref)
+            problems += [f"Human Decision Evidence {human_decision_ref}: {message}"
+                         for _, message in history.human_decision_problems(review, evidence)]
+    return problems
+
+
+def achievement_open_items(store: ProjectStore, view: ProjectView, roadmap_id: str,
+                           human_decision_ref: str | None) -> tuple[list[str], list[str]]:
+    """§32.44: the open Review obligations of the Roadmap - ``(blocking, unresolved HUMAN)``.
+
+    Over the P4-family Review Runs whose target is the Roadmap, one of its
+    Phases or one of their Works: a Run at canonical G4 HUMAN_WAIT that no later
+    Run's request set aside and the decision's Human Decision Evidence does not
+    answer is an unresolved HUMAN decision; any other Run that is not final
+    (open, sealed and not consumed) is a blocking obligation. A final Run
+    (consumed, not_authorized, set aside, ...) is history, never an obligation.
+    """
+    from .review import history, p4
+
+    review = ReviewStore(store)
+    targets = {roadmap_id}
+    for phase in view.roadmap_phases(roadmap_id):
+        targets.add(phase.id)
+        targets.update(work.id for work in view.phase_works(phase.id))
+    answered = None
+    if human_decision_ref is not None and review.history_exists(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref):
+        answered = review.read_history(review_paths.HISTORY_HUMAN_DECISIONS, human_decision_ref).affected_review_run_id
+    chains = {}
+    for run_id in review.run_ids():
+        chain = review.gate_chain(run_id)
+        if chain is None or chain.generations[0].target_identity not in targets \
+                or not p4.run_contracts(review, chain) - {None}:
+            continue
+        chains[run_id] = chain
+    named = set()
+    for chain in chains.values():
+        task_id = str(chain.generations[0].accepted_tasks[0]["task_id"])
+        named.update(str(item["review_run_id"]) for item in
+                     review.read_task_input(task_id).request_envelope.get("set_aside_runs") or [])
+    blocking: list[str] = []
+    human: list[str] = []
+    for run_id, chain in sorted(chains.items()):
+        if run_id in named:
+            continue
+        final = p4.final_disposition(review, chain)
+        if final == history.DISPOSITION_HUMAN_WAIT:
+            if run_id != answered:
+                human.append(f"Review Run {run_id} waits on a Human requirement decision")
+        elif final is None:
+            blocking.append(f"Review Run {run_id} of {chain.generations[0].target_identity} is not final")
+    return blocking, human
+
+
+def roadmap_achievement_effect(store: ProjectStore, evidence: Any) -> tuple[str, Any]:
+    """The one immutable roadmap_achievement record of ``evidence`` (§32.32), as its path and create effect - refused
+    before anything is recorded unless the record reads back exactly and can be created, committed and checked out."""
+    from .mutation import Effect
+    from .review import checkout, fsafe, history
+
+    path = review_paths.history_achievement_rel(str(evidence.achievement_evidence_id))
+    fsafe.require_immutable_create()
+    gate.require_committable(store, [path])
+    gitops.require_no_planning_transform(store.root, [path])
+    checkout.require_checkout_capability(store, [path])
+    return path, Effect.create_file(path, serialize.canonical_text(history.achievement_record(evidence).to_record()))

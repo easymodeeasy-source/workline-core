@@ -15,6 +15,7 @@ from . import registry as registry_module
 from . import self_hosting
 from .errors import ValidationError
 from .ids import is_valid_id
+from .phase_integration import PHASE_REVIEW_CONTRACT_KEY, SUPPORTED_PHASE_REVIEW_CONTRACTS, coverage_order_problems
 from .state import EXCLUDED_STATES, ProjectView
 from .store import (
     CONDITION_KINDS,
@@ -126,6 +127,7 @@ def validate_structure(view: ProjectView) -> list[Problem]:
             if forbidden in phase.meta:
                 problems.append(Problem("phase_invalid", f"{phase.id}: forbidden field {forbidden}"))
 
+    marked = False
     for work in works.values():
         if not work.display:
             problems.append(Problem("work_invalid", f"{work.id}: display missing"))
@@ -151,6 +153,14 @@ def validate_structure(view: ProjectView) -> list[Problem]:
             problems.append(Problem("work_invalid", f"{work.id}: unknown work_kind {kind}"))
         if kind == "phase_integration_check" and work.phase_id is None:
             problems.append(Problem("work_invalid", f"{work.id}: integration must belong to a Phase"))
+        if PHASE_REVIEW_CONTRACT_KEY in work.meta:
+            # §32.2: decided by key presence, never by truthiness - a present-but-empty marker is not an absent one.
+            marked = True
+            marker = work.phase_review_contract
+            if kind != "phase_integration_check":
+                problems.append(Problem("work_invalid", f"{work.id}: phase_review_contract on non phase_integration_check Work"))
+            if not isinstance(marker, str) or marker not in SUPPORTED_PHASE_REVIEW_CONTRACTS:
+                problems.append(Problem("work_invalid", f"{work.id}: unsupported phase_review_contract {marker!r}"))
         target = work.meta.get("confirmation_target")
         if target is not None:
             if kind != "human_confirmation":
@@ -260,6 +270,13 @@ def validate_structure(view: ProjectView) -> list[Problem]:
         unfinished = view.unfinished_integrations(phase.id)
         if len(unfinished) > 1:
             problems.append(Problem("integration_invariant", f"{phase.id}: {len(unfinished)} unfinished integrations"))
+
+    # reviewed integration coverage order (ruling CPQ-01, deny-only) ------------
+    # Reported, never repaired. Only a Work carrying the marker key can be a
+    # reviewed integration, so a Project without one is not scanned and a legacy
+    # Project's result and cost stay exactly what they were.
+    if marked:
+        problems.extend(Problem(code, message) for code, message in coverage_order_problems(view))
 
     return problems
 

@@ -44,7 +44,9 @@ from .mutation import (
     unsettled_lifecycle,
 )
 from .oplock import project_operation
+from .phase_integration import PHASE_INTEGRATION_REVIEW_V1, PHASE_REVIEW_CONTRACT_KEY
 from .ops import (
+    ACHIEVEMENT_STAGE,
     Finalization,
     Replan,
     _plan_exclusion_ledgers,
@@ -603,8 +605,17 @@ class PhaseEntryStages:
     confirmation_spec: WorkSpec | None
 
 
-def phase_entry_stages(design: PhaseEntryDesign, phase_id: str, roadmap_id: str) -> PhaseEntryStages:
-    """What a Phase expansion registers, derived from ``design`` (``entry`` is not part of it)."""
+def phase_entry_stages(
+    design: PhaseEntryDesign, phase_id: str, roadmap_id: str, *, phase_review_contract: str | None = None
+) -> PhaseEntryStages:
+    """What a Phase expansion registers, derived from ``design`` (``entry`` is not part of it).
+
+    ``phase_review_contract`` is the Phase Review contract the generated
+    integration Work carries: the one a version 2 design identity binds
+    (:func:`design_identity`), read back from the reviewed record that holds it,
+    and ``None`` - the legacy, unmarked integration - otherwise. CREATE persists
+    and validates it; it never decides it.
+    """
     normal_specs = {
         key: WorkSpec(w.name, w.desired_state, phase_id=phase_id, roadmap_id=roadmap_id, related=tuple(w.related))
         for key, w in design.works.items()
@@ -618,6 +629,7 @@ def phase_entry_stages(design: PhaseEntryDesign, phase_id: str, roadmap_id: str)
         roadmap_id=roadmap_id,
         work_kind="phase_integration_check",
         related=tuple(design.integration.related),
+        phase_review_contract=phase_review_contract,
     )
     # The confirmation's target is the integration registered before it.
     confirmation_spec = None if design.human_confirmation is None else WorkSpec(
@@ -858,38 +870,99 @@ def _add_phases_locked(
 
 # --------------------------------------------------------------------------- startable Phase
 
+def _reviewed_roadmap(view: ProjectView, roadmap_id: str) -> bool:
+    """Whether any Phase of the Roadmap runs the reviewed completion mode (read from its integrations' markers)."""
+    from . import phase_integration as pi
+
+    return any(pi.completion_mode(view, phase.id) == pi.MODE_REVIEWED for phase in view.roadmap_phases(roadmap_id))
+
+
+def progression_ready_phases(store: ProjectStore, view: ProjectView, roadmap_id: str
+                             ) -> tuple[list[Entity], tuple[tuple[str, str, str], ...]]:
+    """RB5 (§32.41, RB8-FC-08): the startable Phases narrowed by progression-readiness, and the ones held back.
+
+    ``ProjectView.startable_phases`` stays pure and lifecycle-only; a candidate
+    whose ``requires_completion`` predecessor Phase is complete but not
+    progression-ready (a reviewed Phase without exactly one valid current-basis
+    phase_completion record) is held back, with that evidence obligation as the
+    reason - never reported as a lifecycle dependency. The one narrowing status
+    projects too (``achievement_reader.progression_narrowing``). A Roadmap with
+    no reviewed Phase is exactly what it was: nothing is read and nothing is
+    held back (legacy completion is ready under legacy rules).
+    """
+    candidates = view.startable_phases(roadmap_id)
+    if not _reviewed_roadmap(view, roadmap_id):
+        return candidates, ()
+    from .review import achievement_reader
+    from .review.store import ReviewStore
+
+    narrowing = achievement_reader.progression_narrowing(view, ReviewStore(store), candidates)
+    return list(narrowing.ready), tuple(narrowing.blocked)
+
+
 def startable_phases(store: ProjectStore, roadmap_id: str) -> list[Entity]:
     view = _stop_on_structure(store, "precheck")
     _require_active_roadmap(view, roadmap_id)
-    return view.startable_phases(roadmap_id)
+    return progression_ready_phases(store, view, roadmap_id)[0]
 
 
 def select_phase(store: ProjectStore, roadmap_id: str, explicit: str | None = None) -> Entity | None:
     """Select the Phase to enter.
 
     Returns None only when nothing was explicitly asked for and there is no
-    startable candidate (the achievement-check / diagnosis path).
+    startable candidate (the achievement-check / diagnosis path). RB5 (§32.41):
+    the candidates are progression-ready ones; a Phase held back by a reviewed
+    predecessor's open evidence obligation is not startable, and an explicit
+    choice of it says so.
     """
     view = _stop_on_structure(store, "precheck")
     _require_active_roadmap(view, roadmap_id)
-    candidates = view.startable_phases(roadmap_id)
+    candidates, blocked = progression_ready_phases(store, view, roadmap_id)
     # An explicit Phase is validated first: an invalid explicit choice means the
     # same thing whether or not other candidates exist.
     if explicit is not None:
         for phase in candidates:
             if phase.id == explicit:
                 return phase
+        held = [f"{predecessor}: {reason}" for candidate, predecessor, reason in blocked if candidate == explicit]
+        if held:
+            raise SpecViolation(f"{explicit} is not a startable Phase: its completed predecessor is not "
+                                "progression-ready (" + "; ".join(held) + ")")
         raise SpecViolation(f"{explicit} is not a startable Phase")
     # The plan decides, or nothing does: several equally planned Phases STOP
     # here rather than being separated by the order they were read in.
     return view.choose_startable(candidates, "Phase")
 
 
+def unready_reviewed_phases(store: ProjectStore, view: ProjectView, roadmap_id: str) -> list[tuple[str, str]]:
+    """RB5 (§32.42): the complete reviewed active Phases that are not progression-ready, with the reason (the basis
+    that lacks valid evidence). Empty for a Roadmap with no reviewed Phase (nothing is read)."""
+    if not _reviewed_roadmap(view, roadmap_id):
+        return []
+    from .review import achievement_reader
+    from .review.store import ReviewStore
+
+    reader = ReviewStore(store)
+    found = []
+    for phase in view.active_phases(roadmap_id):
+        if view.phase_state(phase.id) != COMPLETE:
+            continue
+        readiness = achievement_reader.phase_progression(view, reader, phase.id)
+        if not readiness.ready:
+            found.append((phase.id, readiness.reason))
+    return found
+
+
 def diagnose_no_candidate(store: ProjectStore, roadmap_id: str) -> str:
     view = ProjectView.load(store)
+    unready = unready_reviewed_phases(store, view, roadmap_id)
     if view.all_active_phases_complete(roadmap_id):
+        if unready:
+            # §32.42: not "run the achievement check" yet - which Phase / current basis lacks valid evidence
+            return "all active Phases complete, but the achievement evidence obligation is open: " + "; ".join(
+                f"{phase_id} {reason}" for phase_id, reason in unready)
         return "all active Phases complete: run the Roadmap achievement check"
-    reasons = []
+    reasons = [f"{phase_id} complete but not progression-ready: {reason}" for phase_id, reason in unready]
     for phase in view.active_phases(roadmap_id):
         state = view.phase_state(phase.id)
         if state == COMPLETE:
@@ -907,10 +980,25 @@ def diagnose_no_candidate(store: ProjectStore, roadmap_id: str) -> str:
 # The shape of the Phase-entry design as the mutation records it. Bumped only
 # when the recorded shape changes meaning; it is operation-local to Phase entry
 # and is not the intent record's own version.
-DESIGN_IDENTITY_VERSION = 1
+#
+# Version 2 (RB5, ``WORKLINE_COMPLETION_SPRINT`` §32.3; Control Plane rulings
+# OQ-D option B and OQ-A reading A) is the design of a fresh RB5-capable Phase
+# entry - one that opts into review-v1 planning: its integration entry binds the
+# exact Phase Review contract (``phase_review_contract``) the generated
+# integration Work carries, so Review authorizes the marked integration itself
+# and nothing injects the marker after Review. Version 1 stays the legacy shape:
+# the ``review=None`` Phase entry records it byte for byte as it always did, and
+# a pending entry is compared - and resumed, unmarked - in the version its own
+# record holds. No planning Review identity changes with it.
+LEGACY_DESIGN_IDENTITY_VERSION = 1
+#: The version whose integration entry binds the Phase Review contract.
+REVIEWED_DESIGN_IDENTITY_VERSION = 2
+#: What a fresh RB5-capable Phase entry records.
+DESIGN_IDENTITY_VERSION = REVIEWED_DESIGN_IDENTITY_VERSION
+DESIGN_IDENTITY_VERSIONS = (LEGACY_DESIGN_IDENTITY_VERSION, REVIEWED_DESIGN_IDENTITY_VERSION)
 
 
-def design_identity(design: PhaseEntryDesign) -> dict[str, Any]:
+def design_identity(design: PhaseEntryDesign, *, version: int = LEGACY_DESIGN_IDENTITY_VERSION) -> dict[str, Any]:
     """What this Phase expansion is expanding, in the form the mutation records.
 
     An interrupted expansion can only be continued if it is provable that the
@@ -926,7 +1014,13 @@ def design_identity(design: PhaseEntryDesign) -> dict[str, Any]:
     is a different plan, not the same one written differently. Sequences are
     lists of mappings because the recovery record's format does not nest
     sequences.
+
+    ``version`` is the shape it is recorded in (``DESIGN_IDENTITY_VERSIONS``):
+    the legacy version 1 unless the caller names the RB5-capable version 2,
+    whose integration entry also holds the Phase Review contract.
     """
+    if version not in DESIGN_IDENTITY_VERSIONS or type(version) is not int:
+        raise ValueError(f"unknown Phase-entry design identity version {version!r}")
 
     def related(specs: "tuple[RelatedSpec, ...]") -> list[dict[str, Any]]:
         return [{"type": r.type, "to": r.to, "condition": r.condition} for r in specs]
@@ -942,15 +1036,36 @@ def design_identity(design: PhaseEntryDesign) -> dict[str, Any]:
     def pairs(items: "tuple[tuple[str, str], ...]") -> list[dict[str, str]]:
         return [{"from": a, "to": b} for a, b in items]
 
+    integration = work(design.integration)
+    if version == REVIEWED_DESIGN_IDENTITY_VERSION:
+        integration[PHASE_REVIEW_CONTRACT_KEY] = PHASE_INTEGRATION_REVIEW_V1
     return {
-        "version": DESIGN_IDENTITY_VERSION,
+        "version": version,
         "works": [{"key": key, **work(w)} for key, w in design.works.items()],
-        "integration": work(design.integration),
+        "integration": integration,
         "confirmation": work(design.human_confirmation) if design.human_confirmation is not None else None,
         "planned_next": pairs(design.planned_next),
         "requires_completion": pairs(design.requires_completion),
         "entry": design.entry,
     }
+
+
+def _entry_design_version(pending: list[dict[str, Any]], review: Any) -> int:
+    """The design identity version a Phase entry invocation is compared and recorded in (rulings OQ-A / OQ-D).
+
+    An interrupted entry is compared in the version its own record holds, so a
+    pending pre-RB5 design - legacy or review-v1 - resumes as the plan it
+    recorded, with its unmarked integration, and is never upgraded; a record of
+    any other shape is left to :func:`_require_resumable`, which refuses it. A
+    fresh entry takes version 2 only when it opts into review-v1 planning (the
+    RB5-capable path); a ``review=None`` entry keeps the legacy version 1.
+    """
+    if len(pending) == 1:
+        recorded = (pending[0].get("invocation") or {}).get("design")
+        found = recorded.get("version") if isinstance(recorded, dict) else None
+        if type(found) is int and found in DESIGN_IDENTITY_VERSIONS:
+            return found
+    return DESIGN_IDENTITY_VERSION if review is not None else LEGACY_DESIGN_IDENTITY_VERSION
 
 
 def _pending_phase_entry(store: ProjectStore, phase_id: str) -> list[dict[str, Any]]:
@@ -1086,12 +1201,12 @@ def _enter_phase_locked(
                 code="phase_blocked",
             )
 
-    identity = design_identity(design)
+    interrupted = pending_entries if pending_entries is not None else _pending_phase_entry(store, phase_id)
+    identity = design_identity(design, version=_entry_design_version(interrupted, review))
     if review is not None:
         from . import roadmap_review
 
         roadmap_review.preflight_phase_entry_request(design, identity)
-    interrupted = pending_entries if pending_entries is not None else _pending_phase_entry(store, phase_id)
     if interrupted:
         # An expansion of this Phase is unfinished. It is continued only where
         # it is provably the same plan; otherwise it is left for reconciliation
@@ -1603,8 +1718,32 @@ def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, re
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, ["plan_excluded"]))
     mutation.apply()
     apply_replan(mutation, "replan", replan, removals, additions, work_ids)
+    if operation == "work-plan-exclude":
+        _plan_exclusion_evidence(store, mutation, entity_id, operation)
     head = _finalize(mutation, destination, message)
+    if operation == "work-plan-exclude":
+        from . import start_review
+
+        start_review.stage_evidence_postcommit(store, mutation, ACHIEVEMENT_STAGE)
     return OperationResult("plan_excluded", entity_id, mutation.id, head)
+
+
+def _plan_exclusion_evidence(store: ProjectStore, mutation: Mutation, work_id: str, operation: str) -> None:
+    """RB5 (§32.36 - §32.37, R30): when excluding the unstarted Work closes a reviewed Phase's basis again, its
+    phase_completion evidence - over the Project as the exclusion and its replan leave it, citing the covering
+    integration's consumed Review - in its own stage before the commit that carries the exclusion. The one creation
+    path START's owners use too (``start_review.replan_evidence_effects``); recorded once, and a legacy Phase records
+    nothing. A Phase exclusion never creates one (§32.36)."""
+    if mutation.has_stage(ACHIEVEMENT_STAGE):
+        return
+    from . import start_review
+
+    excluded = mutation.reserved("event:event:0")
+    effects = start_review.replan_evidence_effects(store, mutation, work_id, ACHIEVEMENT_STAGE,
+                                                   [excluded] if excluded else [], causing_operation=operation)
+    if effects:
+        mutation.add_effects(ACHIEVEMENT_STAGE, effects)
+        mutation.apply()
 
 
 def plan_exclude_phase(store: ProjectStore, phase_id: str, replan: Replan = Replan()) -> OperationResult:
@@ -1941,7 +2080,7 @@ class AchievementResult:
 JUDGEMENTS = ("achieved", "human_confirmation", "not_achieved", "desired_state_change")
 
 
-def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, detail: str = "") -> AchievementResult:
+def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: Any, detail: str = "") -> AchievementResult:
     """Explicit Roadmap achievement check.
 
     All active Phases complete is a precondition, never the conclusion. The
@@ -1950,13 +2089,23 @@ def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, d
     its precondition is evaluated on the state current under the Project
     execution lock, never on a read taken before the lock. The other judgements
     only report and take no lock.
+
+    RB5 (§32.43 - §32.48): ``judgement`` may be the structured
+    ``achievement.RoadmapAchievementDecision``. A Roadmap containing reviewed
+    Phases records ``achieved`` only through it (a legacy string is refused),
+    and only once every reviewed completed Phase is progression-ready; the
+    legacy string stays exactly what it was for a legacy-only Roadmap.
     """
+    from . import achievement as ach
+
+    if type(judgement) is ach.RoadmapAchievementDecision:
+        return _evaluate_structured(store, roadmap_id, judgement)
     if judgement not in JUDGEMENTS:
         raise ValidationError(f"unknown judgement: {judgement}")
     if judgement != "achieved":
         view = _stop_on_structure(store, "precheck")
         _require_active_roadmap(view, roadmap_id)
-        if not view.all_active_phases_complete(roadmap_id):
+        if not view.all_active_phases_complete(roadmap_id) or unready_reviewed_phases(store, view, roadmap_id):
             return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
         if judgement == "human_confirmation":
             return AchievementResult("human_confirmation_required", roadmap_id, detail=detail)
@@ -1976,6 +2125,10 @@ def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, d
         # its end below, or STOPs there; it is never left standing behind a report.
         if applied is None and not view.all_active_phases_complete(roadmap_id):
             return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
+        if applied is None and _reviewed_roadmap(view, roadmap_id):
+            # RB5 (§32.43): never by the legacy string for a Roadmap containing reviewed Phases; nothing is written
+            raise ValidationError(f"Roadmap {roadmap_id} contains reviewed Phases: achieved is recorded only through "
+                                  "the structured RoadmapAchievementDecision, not a legacy string judgement")
 
         def still_achievable(current: ProjectView) -> None:
             _require_active_roadmap(current, roadmap_id)
@@ -1984,6 +2137,109 @@ def evaluate_achievement(store: ProjectStore, roadmap_id: str, judgement: str, d
 
         result = _record_lifecycle(store, "roadmap-achievement", roadmap_id, "roadmap_achieved", still_achievable)
     return AchievementResult("achieved", roadmap_id, result.mutation_id, result.head, detail)
+
+
+def _achievement_basis(store: ProjectStore, view: ProjectView, roadmap_id: str, decision: Any) -> Any:
+    """§32.45: the Roadmap basis over ``view`` - the references the decision cites beyond the stored Phase evidence
+    bound as its Review refs, its Human Decision Evidence reference as given."""
+    from . import achievement as ach
+    from .review.store import ReviewStore
+
+    evidence = ReviewStore(store).phase_completion_evidence()
+    stored = {found.achievement_evidence_id for found in evidence}
+    refs = [ref for ref in decision.evidence_refs if ref not in stored]
+    return ach.roadmap_basis(view, roadmap_id, evidence, review_refs=refs,
+                             human_decision_ref=decision.human_decision_ref)
+
+
+def _evaluate_structured(store: ProjectStore, roadmap_id: str, decision: Any) -> AchievementResult:
+    """§32.43 - §32.48 for a structured RoadmapAchievementDecision.
+
+    Every judgement but ``achieved`` is read-only (not_ready / the judgement's
+    own status, nothing written, no lock). ``achieved`` freezes the basis it was
+    decided on, then under the roadmap-achievement operation rechecks it,
+    validates every reference, records the roadmap_achieved event and its
+    roadmap_achievement evidence as ONE recoverable stage, commits and pushes
+    exactly that, and reads event / evidence / basis back from the commit.
+    """
+    from . import achievement as ach
+
+    problems = decision.problems()
+    if problems:
+        raise ValidationError("invalid RoadmapAchievementDecision: " + "; ".join(problems))
+    input_validation.require_text(roadmap_id, "the Roadmap ID")
+    if not decision.records_event:
+        view = _stop_on_structure(store, "precheck")
+        _require_active_roadmap(view, roadmap_id)
+        if not view.all_active_phases_complete(roadmap_id) or unready_reviewed_phases(store, view, roadmap_id):
+            return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
+        return AchievementResult(decision.judgement, roadmap_id, detail=decision.public_safe_rationale)
+    identity = {"entity": roadmap_id, "decision": decision.to_record()}
+    input_validation.require_durable(identity, "the Roadmap achievement decision")
+    frozen = None
+    if not _achievement_recorded(store, identity):
+        # §32.62 item 22: the basis the decision was made on, frozen before the lock. A decision this request already
+        # recorded is finished from its record instead: its own applied event is not a refusal of it.
+        view = _stop_on_structure(store, "precheck")
+        _require_active_roadmap(view, roadmap_id)
+        frozen = _achievement_basis(store, view, roadmap_id, decision)
+    with project_operation(store, "roadmap-achievement", {"entity": roadmap_id}):
+        return _record_structured_achievement(store, roadmap_id, decision, frozen, identity)
+
+
+def _achievement_recorded(store: ProjectStore, identity: dict[str, Any]) -> bool:
+    """Whether this exact achievement request's own unfinished mutation already recorded its achievement stage."""
+    pending = _pending_for(store, "roadmap-achievement", identity)
+    return bool(pending) and any(effect.get("stage") == ACHIEVEMENT_STAGE for effect in pending[0].get("effects") or [])
+
+
+def _record_structured_achievement(store: ProjectStore, roadmap_id: str, decision: Any, frozen: Any,
+                                   identity: dict[str, Any]) -> AchievementResult:
+    """§32.46 under the Project execution lock: the specialized achieved path (never the generic lifecycle path)."""
+    from . import achievement as ach
+    from . import roadmap_review as rr
+    from . import start_review
+
+    recorded = _achievement_recorded(store, identity)
+    current = None
+    if not recorded:
+        if frozen is None:
+            raise ReconcileRequired(f"the roadmap-achievement request of {roadmap_id} was found recorded and is no "
+                                    "longer: reconcile required")
+        view = _stop_on_structure(store, "precheck")
+        _require_active_roadmap(view, roadmap_id)
+        current = _achievement_basis(store, view, roadmap_id, decision)
+        if not current.all_active_phases_complete or current.unready_phases:
+            return AchievementResult("not_ready", roadmap_id, detail=diagnose_no_candidate(store, roadmap_id))
+        blocking, human = rr.achievement_open_items(store, view, roadmap_id, decision.human_decision_ref)
+        refused = ach.achieved_precondition_problems(
+            frozen, current, decision, blocking_obligations=blocking, unresolved_human_decisions=human,
+            reference_problems=rr.achievement_reference_problems(store, current.review_refs, current.human_decision_ref),
+        )
+        if refused:
+            raise StopError(f"Roadmap {roadmap_id} is not achieved by this decision (§32.44): " + "; ".join(refused)
+                            + "; nothing was recorded", code="achievement_not_ready")
+    mutation, destination = _open(store, "roadmap-achievement", identity, [roadmap_id])
+    with abandon_on_stop(mutation):
+        if not mutation.has_stage(ACHIEVEMENT_STAGE):
+            if current is None:
+                raise ReconcileRequired(f"the roadmap-achievement mutation {mutation.id} of {roadmap_id} holds no "
+                                        "achievement stage to finish: reconcile required")
+            gitops.ensure_separable_before_effects(mutation, [EVENT_LOG])
+            event = event_effects(mutation, ACHIEVEMENT_STAGE, roadmap_id, [ach.ROADMAP_ACHIEVED_EVENT])
+            evidence_id = mutation.reserve_id(f"{ACHIEVEMENT_STAGE}:achievement", "review_achievement")
+            evidence = ach.build_roadmap_achievement_evidence(
+                evidence_id, current, decision, reserved_event_id=event[0].payload["record"]["id"],
+                causing_mutation_id=mutation.id,
+            )
+            evidence_path, created = rr.roadmap_achievement_effect(store, evidence)
+            mutation.extend_scope(files=[evidence_path])
+            mutation.add_effects(ACHIEVEMENT_STAGE, event + [created])
+    mutation.apply()
+    head = _finalize(mutation, destination, f"chore(workline): roadmap_achieved {roadmap_id}")
+    # §32.46 step 11: event, evidence and basis read back from the commit itself; nothing is repaired or replaced
+    start_review.roadmap_achievement_postcommit(store, mutation, roadmap_id, str(head), ACHIEVEMENT_STAGE)
+    return AchievementResult("achieved", roadmap_id, mutation.id, head, decision.public_safe_rationale)
 
 
 # --------------------------------------------------------------------------- handoff

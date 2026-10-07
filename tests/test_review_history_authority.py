@@ -105,8 +105,10 @@ class ScopeTests(unittest.TestCase):
 
     * GAP-B: ``history_problems`` (cross-source semantics) is wired into no gating validator, reader or
       operation - only P5 owners' explicit ``require_history_ready`` at P5 boundaries may refuse;
-    * GAP-D (a): ``future_work_link`` is called by the direct standalone CREATE alone (explicit
-      ``source_finding_id``), and by nothing in Review: P5 never creates or schedules a Work;
+    * GAP-D (a): ``future_work_link`` is called by the direct standalone CREATE (explicit ``source_finding_id``)
+      and - RB5 §32.26 / §32.50 - by START's Phase-integration repair (``start_review._record_fix_links``), which
+      writes the version 2 ``future_work_link`` of each fix Work it registers; nothing in Review writes one, and P5
+      still never creates or schedules a Work;
     * RB5 owns achievement: nothing calls ``rb5_reference`` or ``confirmed_relations`` yet (§28.21 / §28.22).
     """
 
@@ -136,7 +138,9 @@ class ScopeTests(unittest.TestCase):
             for node in ast.walk(ast.parse(text)):
                 if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "history"                         and node.attr == "future_work_link":
                     callers.add(path.name)
-        self.assertEqual({"create.py"}, callers)
+        # RB5 (§32.26 / §32.50, playbook R16 / pin row I-6): START's integration repair registers fix Works and
+        # writes their provenance link in the same owner transition (was: {"create.py"})
+        self.assertEqual({"create.py", "start_review.py"}, callers)
 
     def test_only_the_reader_validator_core_owners_and_planning_proof_reach_history(self) -> None:
         reaching = set()

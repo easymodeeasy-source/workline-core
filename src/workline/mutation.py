@@ -66,7 +66,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 from . import gitcmd, oplock, pushurl, yamlish
 from .context import pre_project_authorized, same_directory
@@ -2380,6 +2380,33 @@ def _replace_review_profile(store: ProjectStore, payload: dict[str, Any]) -> Non
         )
 
 
+
+def _initial_notes(notes: Mapping[str, Any]) -> dict[str, Any]:
+    """A new mutation's initial notes (IR-A): a mapping whose every key and value is durable - copied, never the
+    caller's object.
+
+    Each key with its value must survive the recovery record as itself - the
+    JSON normalization, ``yamlish`` dump and load, UTF-8 - which is the
+    project's RB10 N3(b) durable boundary
+    (:func:`workline.input_validation.require_durable`): an empty or non-text
+    key at any depth (the top level included), a float, a tuple, a lone
+    surrogate, a sequence inside a sequence, a value JSON cannot carry are each
+    refused with ``ValidationError`` ``input_unrepresentable``. Only ``notes``
+    that is not a mapping at all is a caller error (``TypeError``). Both are
+    raised before anything is saved, never as a raw serializer error out of the
+    save.
+    """
+    if not isinstance(notes, Mapping):
+        raise TypeError("a mutation's initial notes are a mapping")
+    from . import input_validation  # function-local, as start.py: input_validation reads the store layer
+
+    normalized: dict[Any, Any] = {}
+    for key, value in notes.items():
+        input_validation.require_durable({key: value}, f"the initial note {key!r}")  # the key and its value
+        normalized[key] = value
+    return json.loads(json.dumps(normalized, sort_keys=True, allow_nan=False))
+
+
 class MutationController:
     """Physical writer for a Project's canonical files."""
 
@@ -2468,7 +2495,9 @@ class MutationController:
             )
 
     # discovery ----------------------------------------------------------------
-    def open(self, owner: str, invocation: dict[str, Any], scope: WriteScope) -> Mutation:
+    def open(
+        self, owner: str, invocation: dict[str, Any], scope: WriteScope, *, notes: Mapping[str, Any] | None = None
+    ) -> Mutation:
         """Resume the unique matching pending mutation or begin a new one.
 
         * exactly one pending mutation with the same owner and invocation → resume
@@ -2483,6 +2512,13 @@ class MutationController:
         §35.7): no other owner begins or resumes anything until it is resumed
         and completed. The disposition owner itself never opens here; it has its
         one narrow path (:func:`workline.recovery_disposition.open_disposition_mutation`).
+
+        ``notes`` (RB5 §32.4, IR-A, the CP note-window ruling): JSON-safe notes
+        a NEW mutation's FIRST durable save already holds (:meth:`begin`), so no
+        crash leaves the record without them. A resumed (matched) mutation
+        ignores them: it is what it recorded, so a resumed note-less record
+        stays note-less. ``None`` - every existing caller - saves ``notes: {}``
+        exactly as before.
         """
         from .recovery_disposition import require_no_pending_disposition
 
@@ -2513,13 +2549,18 @@ class MutationController:
                 )
         if matches:
             mutation = Mutation(self, matches[0], resumed=True)
+        elif notes is None:
+            mutation = self.begin(owner, invocation, scope)  # every existing caller: the call exactly as before
         else:
-            mutation = self.begin(owner, invocation, scope)
+            mutation = self.begin(owner, invocation, scope, notes=notes)
         if owner not in PRE_PROJECT_OWNERS:
             oplock.note_mutation(self.store, mutation.id)
         return mutation
 
-    def begin(self, owner: str, invocation: dict[str, Any], scope: WriteScope) -> Mutation:
+    def begin(
+        self, owner: str, invocation: dict[str, Any], scope: WriteScope, *, notes: Mapping[str, Any] | None = None
+    ) -> Mutation:
+        """A new pending mutation, durably saved once; that first save holds ``notes`` (``{}`` when ``None``)."""
         mutation_id = new_id("mutation")
         record: dict[str, Any] = {
             "workline": INTENT_MARKER,
@@ -2532,7 +2573,7 @@ class MutationController:
             "invocation": json.loads(json.dumps(invocation, sort_keys=True)),
             "write_scope": scope.to_record(),
             "reserved_ids": {},
-            "notes": {},
+            "notes": {} if notes is None else _initial_notes(notes),
             "effects": [],
         }
         mutation = Mutation(self, record, resumed=False)

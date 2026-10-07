@@ -70,6 +70,7 @@ from .ops import (
     stage_name,
     validate_projection,
 )
+from .phase_integration import PHASE_REVIEW_CONTRACT_KEY
 from .registry import validate_registry
 from .selection import work_continuation
 from .state import (
@@ -198,6 +199,10 @@ class ExecutionContext:
     mutation_id: str
     mode: str
     attempt: int
+    #: RB5 (§32.25): the canonical blocking obligation set of a G4 DOMAIN_REPAIR_REQUIRED Phase Integration Run
+    #: (``review.integration.IntegrationRepairContext``) when START asks its executor to plan the integration's
+    #: domain repair - answered only by an IntegrationRepairPlan, a question or a hold. None everywhere else.
+    integration_repair: Any = None
 
 
 Executor = Callable[[ExecutionContext], Outcome]
@@ -430,6 +435,8 @@ class _Session:
         *,
         review: Any = None,
         activation: Any = None,
+        phase_review: Any = None,
+        semantics: str = "legacy",
     ) -> None:
         self.store = store
         self.mutation = mutation
@@ -450,6 +457,41 @@ class _Session:
         # proved under the lock before the mutation opened (F1 §6.4). None on the legacy path.
         self.review = review
         self.activation = activation
+        # RB5 (§32.4, §32.14): the Phase Integration Review selector this START was invoked with, and the Phase
+        # integration semantics its own record holds - read back from the mutation, never from the invocation.
+        self.phase_review = phase_review
+        self.semantics = semantics
+
+    def unreviewable_integration(self, work: Entity) -> str | None:
+        """Why the outer continuation stops before ``work`` instead of running it, or ``None``.
+
+        A marked integration is reviewed only by a START that holds the
+        ``phase_review`` selector under the reviewed semantics its own record
+        binds (§32.14 - §32.15). An outer continuation that reaches one without
+        both ends there - completing what it did - and never runs it: a
+        legacy operation (one resumed without the semantics note included) is
+        never upgraded. An unmarked integration and every other Work run as
+        before.
+        """
+        from .start_integration_review import SEMANTICS_REVIEWED
+
+        if work.work_kind != "phase_integration_check" or work.phase_review_contract is None:
+            return None
+        if self.phase_review is None:
+            return (f"integration {work.id} carries phase_review_contract {work.phase_review_contract}: its Phase "
+                    "Integration Review needs the phase_review selector, so this continuation ends before it")
+        if self.semantics != SEMANTICS_REVIEWED:
+            return (f"integration {work.id} carries phase_review_contract {work.phase_review_contract}, and this "
+                    "START mutation runs legacy Phase integration semantics: it is never reviewed under them, so this "
+                    "continuation ends before it")
+        if self.review is not None:
+            # RB5J-1 (§32.14, F3 §4.3): this outer START runs review-v1 Work Review, whose mutation commits only
+            # review-v1 Work commits and publishes only by its push-only stages - the integration's ordinary
+            # finalization and push (§32.31) cannot be made in it, and the frozen text joins the two nowhere
+            return (f"integration {work.id} carries phase_review_contract {work.phase_review_contract}, and this outer "
+                    "START runs review-v1 Work Review, whose mutation cannot carry the integration's ordinary "
+                    "finalization and push: this continuation ends before it")
+        return None
 
     # git ---------------------------------------------------------------
     def _commit(self, prefix: str, message: str, paths: list[str], *, include_canonical: bool = True) -> None:
@@ -485,9 +527,16 @@ class _Session:
             # Only a resumed START gets here, once replaying its recorded finalization has
             # committed and pushed the completion; one whose finalization was never
             # recorded is finished before any Work is run (:func:`_completion_to_finish`).
+            self._completion_postcommit(work_id)
             return StartResult("completed", work_id, self.mutation.id, phase_id=work.phase_id)
         if state.terminal:
             raise SpecViolation(f"Work {work_id} is {state.state}; terminal Works are not started")
+        # Before anything of this cycle is recorded and before the executor can run: a marked integration never
+        # takes this ordinary path (§32.14, §14.27).
+        if _phase_integration_gate(work, self.review, self.phase_review, self.semantics):
+            from . import start_review
+
+            return start_review.review_phase_integration(self, view, work)
         # A derivation belongs to the cycle that decided it, and a cycle runs with the Work
         # carrying its target. One opened here is a new cycle, which decides its own.
         opening = not (state.state == IN_PROGRESS and state.has_target)
@@ -924,8 +973,22 @@ class _Session:
             # message with anything in it is committed exactly as given.
             self._commit(f"{work.id}:results", _result_message(outcome.message, work), owned, include_canonical=False)
             self._drop_refused_result(work.id)
-        self._lifecycle(work, ["work_target_removed", "work_completed"])
+        self._completion_lifecycle(work)
         return self._finalize_completion(work)
+
+    def _completion_lifecycle(self, work: Entity) -> None:
+        """The completion's lifecycle stage: its two events - and, RB5 (§32.36 - §32.37), when this completion makes a
+        reviewed Phase generated-complete with no current-basis evidence, the phase_completion evidence in that SAME
+        stage, so the commit that finalizes the completion carries it. A legacy Phase records exactly the two events,
+        as it always did (its completion mode is read before any basis is computed)."""
+        stage = stage_name(self.mutation, f"{work.id}:lifecycle")
+        effects = event_effects(self.mutation, stage, work.id, list(_COMPLETION_EVENTS))
+        if work.phase_id is not None:
+            from . import start_review
+
+            effects += start_review.completion_evidence_effects(self.store, self.mutation, work, stage, effects)
+        self.mutation.add_effects(stage, effects)
+        self.mutation.apply()
 
     def finish_review(self, selected: Any) -> StartResult:
         """Continue what this review-v1 START already began, from its records (F3 §5.4, F4 §26.4).
@@ -957,8 +1020,18 @@ class _Session:
         after = ProjectView.load(self.store)
         if after.work_state(work.id).state != COMPLETED:
             raise StopError(f"{work.id} is not completed after finalization", code="postcheck_failed")
+        self._completion_postcommit(work.id)
         self.completed.append(work.id)
         return StartResult("completed", work.id, self.mutation.id, tuple(self.completed), work.phase_id, head=gitcmd.head_commit(self.store.root))
+
+    def _completion_postcommit(self, work_id: str) -> None:
+        """RB5 (§32.31, §32.39): after a completion that recorded Review records - a reviewed integration's terminal
+        stage, or the phase_completion evidence of an ordinary completion - is finalized, HEAD holds them byte for byte
+        and the evidence is HEAD's committed basis. A completion that recorded none (every legacy one) pays nothing
+        but a look at its own stage."""
+        from . import start_review
+
+        start_review.completion_postcommit(self.store, self.mutation, work_id)
 
     def finish_completion(self, work_id: str) -> StartResult:
         """Finalize a completion this mutation recorded and applied, doing none of it again.
@@ -1080,8 +1153,29 @@ class _Session:
         """
         apply_replan(self.mutation, prefix, replan, removals, additions, work_ids)
         _structure_or_stop(self.store, "cancel structural validation")
+        self._cancel_evidence(work, prefix)
         self._commit("commit", finalization_message(_CANCELLED, display), [])
+        self._completion_postcommit(work.id)
         return StartResult("cancelled", work.id, self.mutation.id, tuple(self.completed), work.phase_id, reason, gitcmd.head_commit(self.store.root))
+
+    def _cancel_evidence(self, work: Entity, prefix: str) -> None:
+        """RB5 (§32.36 - §32.37): when the cancel's applied effects close a reviewed Phase's basis, its phase_completion
+        evidence - built over the Project as the cancel leaves it - in its own ``<prefix>:achievement`` stage, before
+        the commit that carries the cancel. Recorded once; a legacy Phase records nothing."""
+        stage = f"{prefix}:achievement"
+        if self.mutation.has_stage(stage) or work.phase_id is None:
+            return
+        cancelled = [
+            effect["payload"]["record"]["id"] for effect in self.mutation.effects
+            if effect["kind"] == "append_event" and (effect["payload"].get("record") or {}).get("entity") == work.id
+            and effect["payload"]["record"].get("type") == "work_cancelled"
+        ]
+        from . import start_review
+
+        effects = start_review.replan_evidence_effects(self.store, self.mutation, work.id, stage, cancelled[-1:])
+        if effects:
+            self.mutation.add_effects(stage, effects)
+            self.mutation.apply()
 
     def finish_cancel(self, cancel: "_ProvenCancel") -> StartResult:
         """Carry a cancel this mutation recorded through what is left of it, deciding none of it again.
@@ -1124,7 +1218,16 @@ class _Session:
         judged = view if recorded is None else _own_effects_free_view(
             view, [effect for effect in self.mutation.stage_effects(recorded) if effect.get("applied")]
         )
-        specs, relations = _derivation_registration(view, judged, work, outcome)
+        _reviewed_derivation_checks(judged, work, outcome, self.semantics)
+        specs, relations = _derivation_registration(view, judged, work, outcome, semantics=self.semantics)
+        if recorded is None and specs.get("integration") is not None \
+                and specs["integration"].phase_review_contract is not None:
+            # §32.15: a reviewed integration is about to be registered - refused, before its registration effect,
+            # when this invocation holds no phase_review selector, so the operation resumes once it does.
+            from .start_integration_review import require_phase_review_for_registration
+
+            require_phase_review_for_registration(semantics=self.semantics,
+                                                  phase_review_supplied=self.phase_review is not None)
         if replay is None:
             # RB10 N3: a derivation decided now carries the executor's text. A name or desired state the
             # canonical reader would read back as something else, and a value the recovery record cannot
@@ -1448,12 +1551,32 @@ def _recorded_completion(mutation: Mutation, stage: str, work_id: str) -> bool:
 
         return isinstance(stage, str) and stage.rsplit(":", 1)[0] == f"{work_id}:lifecycle" and \
             start_review.is_terminal_stage(mutation, stage, work_id)
+    from .start_integration_review import SEMANTICS_REVIEWED
+
+    if _semantics_of(mutation) == SEMANTICS_REVIEWED:
+        from . import start_review
+
+        if start_review.is_integration_terminal_stage(mutation, stage, work_id):
+            # RB5 (§32.31): a reviewed integration's terminal stage - its consumed P5 summary, the two ordinary
+            # events, the version 5 Consumption bound to that work_completed and, when owed, the Phase completion
+            # evidence - recognized only in exactly that shape, at the stage its frozen Candidate names
+            return True
     effects = mutation.stage_effects(stage)
     events = _stage_events(mutation, stage)
+    kinds = [effect.get("kind") for effect in effects]
+    if kinds == ["append_event"] * len(_COMPLETION_EVENTS) + ["create_file"]:
+        # RB5 (§32.37): the phase_completion evidence this completion closed, in its own stage, under the ID
+        # reserved for that stage - and nothing else
+        from .review import paths as review_paths
+
+        evidence_id = mutation.reserved(f"{stage}:achievement")
+        if evidence_id is None or effects[-1]["payload"].get("path") != review_paths.history_achievement_rel(evidence_id):
+            return False
+        kinds = kinds[:-1]
     return (
         isinstance(stage, str)
         and stage.rsplit(":", 1)[0] == f"{work_id}:lifecycle"
-        and [effect.get("kind") for effect in effects] == ["append_event"] * len(_COMPLETION_EVENTS)
+        and kinds == ["append_event"] * len(_COMPLETION_EVENTS)
         and [(event.get("type"), event.get("entity")) for event in events] == [(t, work_id) for t in _COMPLETION_EVENTS]
         and all(mutation.reserved(f"{stage}:event:{index}") == event.get("id") for index, event in enumerate(events))
     )
@@ -1482,6 +1605,11 @@ def _in_head_event_log(store: ProjectStore, event_ids: list[str]) -> bool:
 #: The key of the ``work_cancelled`` effect's payload under which a cancel's decision is recorded.
 _CANCEL_DECISION = "cancel"
 _CANCEL_DECISION_VERSION = 1
+#: Control Plane ruling R-1 (RB5 R28): a decision whose replan registers a new Work with a ``phase_review_contract``
+#: binds it positively on every new Work entry, under this version. A version 1 decision has no such field and is
+#: rebuilt without it - never reinterpreted - so a recorded registration of a marked Work does not prove against it
+#: and its resume fails closed.
+_MARKED_CANCEL_DECISION_VERSION = 2
 _DECISION_FIELDS = frozenset({"version", "work_id", "prefix", "reason", "new_works", "add_relations", "remove_relations"})
 #: The finalization each of these recovery decisions ends in (``ops.finalization_message``).
 _CANCELLED, _HELD, _EXCLUDED = "cancel", "hold", "plan_excluded"
@@ -1489,6 +1617,7 @@ _NEW_WORK_FIELDS = frozenset({
     "key", "name", "desired_state", "phase_id", "roadmap_id", "work_kind", "confirmation_target", "related",
     "derivation_detail",
 })
+_MARKED_NEW_WORK_FIELDS = _NEW_WORK_FIELDS | {PHASE_REVIEW_CONTRACT_KEY}
 _RELATED_FIELDS = frozenset({"type", "to", "condition"})
 _ADDITION_FIELDS = frozenset({"type", "from", "to"})
 _EVENT_FIELDS = frozenset({"id", "type", "entity", "at"})
@@ -1517,8 +1646,75 @@ def _require_registrable(outcome: Derive) -> None:
             raise ValidationError("reserved Work key: integration")
 
 
+def _semantics_of(mutation: Mutation) -> str:
+    """The Phase integration semantics a START mutation runs under, read from its own record (§32.4).
+
+    A mutation without the note is legacy and is never upgraded; a note this
+    build does not read STOPs (``phase_integration_semantics_unknown``).
+    """
+    from .start_integration_review import OPERATION_NOTE_KEY, mutation_semantics
+
+    return mutation_semantics(mutation.note(OPERATION_NOTE_KEY))
+
+
+def _reviewed_derivation_checks(judged: ProjectView, work: Entity, outcome: Derive, semantics: str) -> None:
+    """The fail-closed checks of a derivation under reviewed semantics, made in ``_Session._derive`` itself.
+
+    Before the derivation is recorded and before its registration; never inside
+    :func:`_derivation_registration`, whose STOPs a replay check swallows
+    (playbook R23 (b)). Under legacy semantics nothing is checked here and
+    every result is exactly what it was.
+
+    ```text
+    one unfinished integration, unmarked, in a reviewed Phase     STOP phase_integration_unmarked_unfinished
+                                                                    (CPQ-06: kept, never wired onto it)
+    a reviewed target (a new reintegration, or the one unfinished   a normal Work with before_integration =
+      reviewed integration)                                          False is refused (§32.12)
+    the one unfinished reviewed integration                        a pre-existing closure gap STOPs
+                                                                    phase_integration_coverage_gap (CPQ-03)
+    ```
+    """
+    from . import phase_integration as pi
+    from .start_integration_review import (
+        SEMANTICS_REVIEWED,
+        require_no_pre_existing_closure_gap,
+        require_reintegration_design,
+        reviewed_derivation_problems,
+    )
+
+    if semantics != SEMANTICS_REVIEWED or work.phase_id is None:
+        return
+    phase_id = work.phase_id
+    normal = [key for key, derived in outcome.works.items() if derived.work_kind is None]
+    route, unfinished_id = pi.late_work_route(judged, phase_id)
+    if route == pi.ROUTE_STRUCTURAL_STOP:
+        return  # the derivation's own structural STOP is unchanged (_derivation_registration)
+    if route == pi.ROUTE_UNMARKED_UNFINISHED and (normal or outcome.integration is not None):
+        require_reintegration_design(judged, phase_id, has_design=outcome.integration is not None)
+    unfinished = judged.works.get(unfinished_id) if unfinished_id else None
+    reviewed_unfinished = unfinished is not None and pi.is_reviewed_integration(unfinished)
+    if (outcome.integration is not None and unfinished is None) or reviewed_unfinished:
+        problems = reviewed_derivation_problems(outcome.works, reviewed=True)
+        if problems:
+            raise ValidationError("; ".join(problems))
+    if reviewed_unfinished and outcome.integration is None and normal:
+        require_no_pre_existing_closure_gap(judged, phase_id, unfinished_id)
+
+
+def _planned_downstream(judged: ProjectView, phase_id: str, outcome: Derive) -> list[str]:
+    """The existing ``human_confirmation`` Works of the Phase this registration makes downstream of the new integration
+    by a direct ``integration -> confirmation`` edge (a Human NG returns to its confirmation, ruling R5-1)."""
+    found = []
+    for relation in outcome.relations:
+        target = judged.works.get(relation.to_ref)
+        if relation.type == "requires_completion" and relation.from_ref == "integration" and target is not None \
+                and target.work_kind == "human_confirmation" and target.phase_id == phase_id:
+            found.append(relation.to_ref)
+    return sorted(set(found))
+
+
 def _derivation_registration(
-    view: ProjectView, judged: ProjectView, work: Entity, outcome: Derive
+    view: ProjectView, judged: ProjectView, work: Entity, outcome: Derive, *, semantics: str = "legacy"
 ) -> tuple[dict[str, WorkSpec], list[RelationSpec]]:
     """The Works and relations ``outcome`` registers for ``work``: the registration that derivation decides.
 
@@ -1529,6 +1725,15 @@ def _derivation_registration(
     (:meth:`_Session._derive`). Registering a derivation and showing that a
     recorded stage is the registration it decides both build it here
     (:func:`_own_cycle_dependencies`), so the two cannot come apart.
+
+    Under the reviewed semantics a mutation's own record binds (§32.4,
+    :func:`_semantics_of`), a re-integration it creates is the marked integration
+    (``start_integration_review.marked_integration_spec``: Workline adds only the
+    fixed structural contract; name and desired state stay the executor's) and
+    gets the complete direct predecessor closure of its Phase, a pure function
+    of ``judged`` (§32.11 / §32.13; a Human NG's confirmation is planned
+    downstream, never a predecessor - ruling R5-1, RB5FA-3). Under legacy
+    semantics the registration is exactly what it was.
     """
     phase_id = work.phase_id
     roadmap_id = view.phases[phase_id].roadmap_id if phase_id else None
@@ -1569,6 +1774,15 @@ def _derivation_registration(
             for key in normal_keys:
                 if outcome.works[key].before_integration:
                     relations.append(RelationSpec("requires_completion", key, "integration"))
+            from .start_integration_review import SEMANTICS_REVIEWED
+
+            if semantics == SEMANTICS_REVIEWED:
+                from .start_integration_review import marked_integration_spec, reintegration_closure_relations
+
+                specs["integration"] = marked_integration_spec(specs["integration"])
+                relations += reintegration_closure_relations(
+                    judged, phase_id, "integration", planned_downstream=_planned_downstream(judged, phase_id, outcome)
+                )
         elif normal_keys:
             if len(unfinished) == 1:
                 for key in normal_keys:
@@ -1783,8 +1997,9 @@ def _cancel_decision(
     """
     replan = outcome.replan
     try:
+        marked = any(spec.phase_review_contract is not None for spec in replan.new_works.values())
         decision = {
-            "version": _CANCEL_DECISION_VERSION,
+            "version": _MARKED_CANCEL_DECISION_VERSION if marked else _CANCEL_DECISION_VERSION,
             "work_id": work_id,
             "prefix": prefix,
             "reason": outcome.reason,
@@ -1799,6 +2014,7 @@ def _cancel_decision(
                     "confirmation_target": spec.confirmation_target,
                     "related": [{"type": r.type, "to": r.to, "condition": r.condition} for r in spec.related],
                     "derivation_detail": spec.derivation_detail,
+                    **({PHASE_REVIEW_CONTRACT_KEY: spec.phase_review_contract} if marked else {}),
                 }
                 for key, spec in replan.new_works.items()
             ],
@@ -2087,14 +2303,16 @@ def _decision_problem(decision: object) -> str | None:
     """
     if not isinstance(decision, dict) or set(decision) not in (_DECISION_FIELDS, _DECISION_FIELDS | {DECIDED_DISPLAY}):
         return "fields other than a cancel decision's"
-    if type(decision["version"]) is not int or decision["version"] != _CANCEL_DECISION_VERSION:
+    if type(decision["version"]) is not int or decision["version"] not in (_CANCEL_DECISION_VERSION,
+                                                                            _MARKED_CANCEL_DECISION_VERSION):
         return f"version {decision['version']!r}, which this START does not read"
     if DECIDED_DISPLAY in decision and (not isinstance(decision[DECIDED_DISPLAY], str) or not decision[DECIDED_DISPLAY]):
         return "a display that is not a non-empty string"
     if not isinstance(decision["work_id"], str) or not isinstance(decision["prefix"], str):
         return "a Work or a prefix that is not text"
     new_works, additions, removals = decision["new_works"], decision["add_relations"], decision["remove_relations"]
-    if not isinstance(new_works, list) or not all(_decided_work(work) for work in new_works):
+    marked = decision["version"] == _MARKED_CANCEL_DECISION_VERSION
+    if not isinstance(new_works, list) or not all(_decided_work(work, marked=marked) for work in new_works):
         return "new Works in another form than a cancel decision records them"
     keys = [work["key"] for work in new_works]
     if len(set(keys)) != len(keys) or len({_canonical(key) for key in keys}) != len(keys):
@@ -2118,8 +2336,12 @@ def _names_one(value: object) -> bool:
     return value is None or isinstance(value, (str, int))
 
 
-def _decided_work(work: object) -> bool:
-    if not isinstance(work, dict) or set(work) != _NEW_WORK_FIELDS:
+def _decided_work(work: object, *, marked: bool = False) -> bool:
+    """Whether ``work`` is a new Work entry of a cancel decision of its version: a version 2 (``marked``) entry also
+    holds ``phase_review_contract``, as ``None`` or text (CREATE validates the value when it registers)."""
+    if not isinstance(work, dict) or set(work) != (_MARKED_NEW_WORK_FIELDS if marked else _NEW_WORK_FIELDS):
+        return False
+    if marked and not (work[PHASE_REVIEW_CONTRACT_KEY] is None or isinstance(work[PHASE_REVIEW_CONTRACT_KEY], str)):
         return False
     target = work["confirmation_target"]
     return (
@@ -2165,6 +2387,8 @@ def _decided_replan(decision: dict[str, Any]) -> Replan:
                 confirmation_target=work["confirmation_target"],
                 related=tuple(RelatedSpec(related["type"], related["to"], related["condition"]) for related in work["related"]),
                 derivation_detail=work["derivation_detail"],
+                # A version 1 decision holds no marker and is rebuilt without one (ruling R-1: no injection).
+                phase_review_contract=work.get(PHASE_REVIEW_CONTRACT_KEY),
             )
             for work in decision["new_works"]
         },
@@ -2222,6 +2446,18 @@ def _prove_cancel(
     after = stages[position + 1:]
     if after[: len(replanned)] != replanned[: len(after)]:
         raise refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} in that order")
+    evidence_stage = f"{prefix}:achievement"
+    if after[len(replanned): len(replanned) + 1] == [evidence_stage]:
+        # RB5 (§32.37): the phase_completion evidence the cancel closed, recorded after its replan and before its
+        # commit - exactly one immutable record under the ID reserved for that stage, and nothing else
+        from .review import paths as review_paths
+
+        evidence = read.by_stage[evidence_stage]
+        evidence_id = reserved.get(evidence_stage)
+        if not isinstance(evidence_id, str) or [effect["kind"] for effect in evidence] != ["create_file"] \
+                or evidence[0]["payload"].get("path") != review_paths.history_achievement_rel(evidence_id):
+            raise refuse(f"a {evidence_stage} stage other than the phase_completion evidence the cancel closes")
+        replanned = replanned + [evidence_stage]
     committed = len(after) > len(replanned)
     commit_stage: str | None = None
     if committed:
@@ -2874,7 +3110,8 @@ def _registration_already_committed(mutation: Mutation, work_id: str, stage: str
             return False
         _require_registrable(outcome)
         applied = [effect for effect in effects if effect.get("applied")]
-        specs, relations = _derivation_registration(view, _own_effects_free_view(view, applied), work, outcome)
+        specs, relations = _derivation_registration(view, _own_effects_free_view(view, applied), work, outcome,
+                                                    semantics=_semantics_of(mutation))
     except StopError:
         return False  # the decision's registration cannot be rebuilt on this Project: nothing is shown
     # A stage that is not the registration its decision makes is refused here, as the replay refuses it.
@@ -3092,7 +3329,8 @@ def _own_cycle_dependencies(
         try:
             _require_registrable(derivation.outcome)
             specs, relations = _derivation_registration(
-                view, _own_effects_free_view(view, applied), work, derivation.outcome
+                view, _own_effects_free_view(view, applied), work, derivation.outcome,
+                semantics=_semantics_of(mutation),
             )
         except StopError:
             return {}
@@ -3192,26 +3430,128 @@ def _recorded_registration(
     return work_ids, resolved
 
 
+#: RB5J-1 (§32.14 with F3 §4.3): an ``outer`` START holding both selectors that names a marked integration. Its
+#: ordinary Works would run review-v1 Work Review, whose mutation commits only review-v1 Work commits and publishes
+#: only by push-only stages, while the integration must finish by START's ordinary commit and push (§32.31); the
+#: frozen text does not say how one operation does both, so it is refused before anything is written.
+CODE_SELECTORS_OUTER = "phase_review_outer_with_work_review"
+
+
+def _work_review_applies(work: Entity, review: Any, phase_review: Any) -> bool:
+    """RB5 (§32.14): whether the Work Formal Review selector applies to the Work this START names.
+
+    With both selectors supplied each applies only to its own Review kind: a
+    marked integration is Phase Integration Review's alone (``entry_gate``'s
+    ``work_review_applies``); every other Work keeps ``review=`` exactly as
+    before. A gate refusal is not decided here - it is reported where it always
+    was, so the answer is then the unchanged one.
+    """
+    if review is None:
+        return False
+    if phase_review is None:
+        return True
+    from .start_integration_review import entry_gate
+
+    try:
+        return entry_gate(work, phase_review_supplied=True, work_review_supplied=True).work_review_applies
+    except StopError:
+        return True
+
+
+def _named_work(store: ProjectStore, work_id: str) -> Entity | None:
+    """The Work a START names, read only, or None when it does not resolve (reported under the lock, as always)."""
+    try:
+        return store.read_entity("work", work_id)
+    except ValidationError:
+        return None
+
+
+def _phase_integration_gate(work: Entity, review: Any, phase_review: Any = None, semantics: str | None = None) -> bool:
+    """The Phase integration entry gate (``WORKLINE_COMPLETION_SPRINT`` §32.14 - §32.15, §14.27), fail-closed.
+
+    Read from the Work's own canonical marker: an unmarked integration and every
+    other Work run exactly as before (False); an integration carrying
+    ``phase-integration-review-v1`` needs the Phase Integration Review selector
+    and never falls back to the ordinary executor path or to Work Formal Review
+    (``review=`` never substitutes for it) - STOP ``phase_review_required``
+    without it. With it, True: the Work goes to its Phase Integration Review.
+    A marker this build does not support STOPs too.
+
+    ``semantics`` is the operation's own Phase integration semantics, once its
+    mutation exists (``None`` before - the named Work's check under the lock,
+    ahead of any intent record). A marked integration is never reviewed under
+    legacy semantics: a ``phase_review`` START that resumed a note-less legacy
+    record STOPs ``phase_review_required`` here rather than upgrade it.
+    """
+    from .start_integration_review import (
+        CODE_PHASE_REVIEW_REQUIRED,
+        ROUTE_PHASE_INTEGRATION_REVIEW,
+        SEMANTICS_REVIEWED,
+        entry_gate,
+    )
+
+    gate = entry_gate(work, phase_review_supplied=phase_review is not None, work_review_supplied=review is not None)
+    if gate.route != ROUTE_PHASE_INTEGRATION_REVIEW:
+        return False
+    if review is not None:
+        # RB5J-1: never reviewed by an operation whose mutation is a review-v1 Work one (a single-work START has
+        # already dropped the selector that does not apply; an outer one naming the integration was refused)
+        raise StopError(f"integration {work.id} is reviewed by Phase Integration Review alone, and this START runs "
+                        "review-v1 Work Review; it is not run under it and nothing of it is begun",
+                        code=CODE_SELECTORS_OUTER)
+    if semantics is not None and semantics != SEMANTICS_REVIEWED:
+        raise StopError(f"integration {work.id} is a {work.phase_review_contract} integration and this START mutation "
+                        "runs legacy Phase integration semantics (it was begun without the semantics note); its Review "
+                        "is never run under them and the operation is never upgraded", code=CODE_PHASE_REVIEW_REQUIRED)
+    return True
+
+
 def start(
-    store: ProjectStore, work_id: str, mode: str, executor: Executor, *, review: object = None
+    store: ProjectStore, work_id: str, mode: str, executor: Executor, *, review: object = None,
+    phase_review: object = None,
 ) -> StartResult:
     if mode not in MODES:
         raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
     details: dict[str, Any] = {"work_id": work_id, "mode": mode}
+    if phase_review is not None:
+        # RB5 (§32.14): the Phase Integration Review selector is checked before the lock and writes nothing; it
+        # is no part of the START invocation (the semantics bind in the record, §32.4).
+        from . import start_review
+
+        phase_review = start_review.validate_phase_integration_review(phase_review)
+    # RB5J-1 (§32.14): with both selectors each applies only to its own Review kind. A marked integration a
+    # single-work START names is Phase Integration Review's alone: ``review=`` applies to nothing in that operation,
+    # so none of its entry refusals, its activation, its markers or its recovery is asked (decided again under the
+    # lock, before anything is written). An outer START naming one is refused here (CODE_SELECTORS_OUTER).
+    work_review_named = True
+    if review is not None and phase_review is not None:
+        named = _named_work(store, work_id)
+        if named is not None and not _work_review_applies(named, review, phase_review):
+            if mode != "single-work":
+                raise StopError(f"integration {work_id} is reviewed by Phase Integration Review alone, and an outer "
+                                "START that also runs review-v1 Work Review cannot finish it by its ordinary commit "
+                                "and push; nothing was begun", code=CODE_SELECTORS_OUTER)
+            work_review_named = False
     if review is not None:
         # review-v1 (F1-D1, F3 §5.1 steps 1-2b): the selector and every entry refusal come before the
         # lock and write nothing; the lock's holder description then names only the static contract
         # marker, never a caller value.
         from . import start_review
 
-        review = start_review.entry_gate(store, review)
-        details = start_review.lock_details(review)
+        if work_review_named:
+            review = start_review.entry_gate(store, review)
+            details = start_review.lock_details(review)
+        else:
+            review = start_review.validate_selector(review)
     # Project execution lock (rules/git): everything that decides a write is read
     # under it, the executor runs inside it, and it is released when START
     # returns. A question wait releases it too; the mutation stays pending for
     # the invocation that resumes it under a fresh lock.
     with project_operation(store, OWNER, details):
-        return _start_locked(store, work_id, mode, executor, review)
+        if phase_review is None:
+            # the call every START without the Phase Integration Review selector has always made
+            return _start_locked(store, work_id, mode, executor, review)
+        return _start_locked(store, work_id, mode, executor, review, phase_review, work_review_named=work_review_named)
 
 
 def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, review_contract: str | None) -> None:
@@ -3261,9 +3601,24 @@ def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, 
 
 
 def _start_locked(
-    store: ProjectStore, work_id: str, mode: str, executor: Executor, review: Any = None
+    store: ProjectStore, work_id: str, mode: str, executor: Executor, review: Any = None, phase_review: Any = None,
+    *, work_review_named: bool = True,
 ) -> StartResult:
     work = store.read_entity("work", work_id)  # stable resolve; no fallback
+    if review is not None and phase_review is not None:
+        # RB5J-1 (§32.14), decided again on the Work read under the lock, before anything is written
+        if not _work_review_applies(work, review, phase_review):
+            if mode != "single-work":
+                raise StopError(f"integration {work_id} is reviewed by Phase Integration Review alone, and an outer "
+                                "START that also runs review-v1 Work Review cannot finish it by its ordinary commit "
+                                "and push; nothing was begun", code=CODE_SELECTORS_OUTER)
+            review = None
+        elif not work_review_named:
+            # the named Work is not (any longer) a marked integration: review= applies to it after all, and its
+            # entry refusals are asked now - still before the mutation is opened
+            from . import start_review
+
+            review = start_review.entry_gate(store, review)
     _require_marker_compatible(store, work_id, mode, review_contract=None if review is None else review.contract)
     invocation = {"operation": OWNER, "work_id": work_id, "mode": mode}
     if review is not None:
@@ -3274,6 +3629,9 @@ def _start_locked(
     # shows that cancel part-way, and is judged as it stood when the cancel was decided.
     cancel = _cancel_to_finish(store, work, mode, invocation)
     view = cancel.view if cancel is not None else _structure_or_stop(store, "start precheck")
+    # The Phase integration entry gate for the named Work, on the structure just checked and before any intent
+    # record exists, so a refusal writes nothing (§32.14 - §32.15).
+    _phase_integration_gate(view.works.get(work_id, work), review, phase_review)
     gitops.ensure_git_ready(store.root)
     # Before the mutation exists: an unpinned or drifted push destination STOPs
     # here, with no intent record, no domain write and no network contact.
@@ -3289,7 +3647,18 @@ def _start_locked(
     # invocation identity = the required START inputs (stable Work ID and mode);
     # a pending START mutation on the same Work with another mode is a conflict → reconcile required.
     # A review-v1 START writes its two markers beside them, at this first durable write (F1-D2).
-    mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES))
+    # RB5 (§32.4, the CP note-window ruling, IR-A): a fresh START holding the phase_review selector binds the
+    # reviewed Phase integration semantics in that same FIRST durable save - the note is never saved after it, so no
+    # crash leaves a fresh reviewed operation that resumes as legacy. A resumed record keeps exactly what it holds
+    # (a note-less one stays legacy); a START without the selector passes no notes, so its record is the legacy one.
+    initial_notes = None
+    if phase_review is not None:
+        from .start_integration_review import fresh_operation_note
+
+        initial_notes = fresh_operation_note()
+    mutation = controller.open(OWNER, invocation, WriteScope(entities=(work_id,), files=LEDGER_FILES),
+                               notes=initial_notes)
+    semantics = _semantics_of(mutation)
     # review-v1: a STOP after this START began its Work Review Run keeps the record pending, so the next START
     # continues that Run (the Work Review Policy's error_disposition, F4 §11.16); legacy START is unchanged.
     with (start_review.abandon_unbegun_on_stop(mutation) if review is not None else abandon_on_stop(mutation)):
@@ -3316,7 +3685,8 @@ def _start_locked(
         if state.terminal and not mutation.resumed:
             raise SpecViolation(f"Work {work_id} is {state.state}")
 
-        session = _Session(store, mutation, destination, mode, executor, derivations, review=review, activation=activation)
+        session = _Session(store, mutation, destination, mode, executor, derivations, review=review, activation=activation,
+                           phase_review=phase_review, semantics=semantics)
         # review-v1: what this START already began - its Work Review Run, or a Class-A replacement of it - is
         # continued from its records through the one recovery selector, and never frozen again (F3 §5.4, F4 §26.4).
         reviewing = start_review.select_in_flight(mutation) if review is not None and mutation.resumed else None
@@ -3342,10 +3712,13 @@ def _start_locked(
             ambiguous: str | None = None
             if mode == "outer":
                 current, ambiguous = _next_or_ambiguous(session, ProjectView.load(store), phase_id, work, None)
+            unreviewable = session.unreviewable_integration(current) if mode == "outer" and current is not None else None
             if ambiguous is not None:
                 result = StartResult("stopped", work_id, mutation.id, phase_id=phase_id, detail=ambiguous)
             elif current is None:
                 result = StartResult("completed", work_id, mutation.id, phase_id=phase_id)
+            elif unreviewable is not None:
+                result = StartResult("stopped", work_id, mutation.id, phase_id=phase_id, detail=unreviewable)
             else:
                 result = session.run_work(current.id)
         else:
@@ -3373,6 +3746,11 @@ def _start_locked(
             break
         if result.status == "moved" and nxt.id == result.work_id:
             raise StopError(f"outer continuation makes no progress: {nxt.id} was re-selected right after branching", code="no_progress")
+        unreviewable = session.unreviewable_integration(nxt)
+        if unreviewable is not None:
+            result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, unreviewable,
+                                 gitcmd.head_commit(store.root))
+            break
         result = session.run_work(nxt.id)
 
     if result.status != "question_wait":

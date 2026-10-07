@@ -74,7 +74,7 @@ from .review import paths as review_paths
 from .review.hermetic import HermeticGit
 from .review.committed import CommittedReviewStore
 from .review.store import ReviewStore
-from .state import ProjectView
+from .state import ACTIVE, HELD, IN_PROGRESS, UNSTARTED, ProjectView
 from .store import WORK_DESIRED_HEADING, WORK_TERMINAL_EVENTS, Entity, Event, ProjectStore
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -185,6 +185,18 @@ def entry_gate(store: ProjectStore, review: object) -> work_review.WorkReview:
     attributes.require_work_attribute_source(store, git, head)
     attributes.require_attribute_pin_capability(store, git)
     return checked
+
+
+def validate_selector(review: object) -> Any:
+    """The ``review=`` argument validated as a selector only (F1-D1) - nothing about the Project is asked.
+
+    RB5 (§32.14): what START checks of a Work Formal Review selector that applies
+    to no Work of its operation - a single-work START naming a marked
+    integration with the Phase Integration Review selector too.
+    """
+    if work_review.is_p4(review):
+        return work_review.validate_work_review_p4(review)
+    return work_review.validate_work_review(review)
 
 
 def _has_remote(store: ProjectStore) -> bool:
@@ -3468,6 +3480,1932 @@ STATE_P4 = "p4_cycle"
 #: The START mutation's durable G-4 bindings: waiting Review Run ID -> the Human decision that exits its wait
 #: (P4-R7). One binding per waiting Run, never one per mutation: a pending START may wait more than once.
 NOTE_P4_DECISIONS = "p4_human_decisions"
+
+
+# =========================================================================== Phase Integration Review (RB5 §32.14 -)
+
+@dataclass(frozen=True)
+class PhaseIntegrationReview:
+    """The Phase Integration Review selector: ``start(..., phase_review=PhaseIntegrationReview(...))`` (§32.14).
+
+    A separate selector, never an overload of the Work Formal Review ``review=``
+    (whose semantics and activation are unchanged). It carries the P4 / P6
+    discovery and adjudicator actor identities and versions of the
+    ``review-v1-phase-integration-p4-v1`` contract, and - as RB6's Policy Review -
+    no repair actor: a Phase Integration Run has no Repair Batch branch (domain
+    repair is START's normal fix Work, §14.14). ``human_decision`` /
+    ``decision_evidence`` are the G4 HUMAN_WAIT continuation inputs (R8);
+    ``holdout_discovery`` the P6 holdout slots (R6-1). None of it is START slot
+    identity: the START invocation is the same with or without it.
+    """
+
+    discovery: tuple[p4.DiscoveryBinding, ...]
+    adjudicator: p4.ActorBinding
+    human_decision: p4.HumanDecision | None = None
+    contract: str = records.P4_PHASE_INTEGRATION_CONTRACT
+    decision_evidence: tuple[p4.DecisionEvidence, ...] = ()
+    holdout_discovery: tuple[p4.DiscoveryBinding, ...] = ()
+
+
+def validate_phase_integration_review(phase_review: object) -> PhaseIntegrationReview:
+    """The ``phase_review`` argument, validated before the lock and before any Project state is read (§32.14)."""
+    if type(phase_review) is not PhaseIntegrationReview:
+        raise ValidationError(f"phase_review must be a PhaseIntegrationReview, not {type(phase_review).__name__}",
+                              code="review_contract_invalid")
+    problems: list[str] = []
+    if phase_review.contract != records.P4_PHASE_INTEGRATION_CONTRACT:
+        problems.append(f"contract {phase_review.contract!r} is not {records.P4_PHASE_INTEGRATION_CONTRACT!r}")
+    # No repair actor: as RB6's Policy Review selector, the adjudicator stands in the shared check's repair slot.
+    problems.extend(p4.binding_problems(phase_review.discovery, phase_review.adjudicator, phase_review.adjudicator,
+                                        phase_review.human_decision))
+    problems.extend(p4.decision_evidence_problems(phase_review.decision_evidence, phase_review.human_decision))
+    problems.extend(p4.holdout_binding_problems(phase_review.holdout_discovery, phase_review.discovery))
+    if problems:
+        raise ValidationError("invalid PhaseIntegrationReview: " + "; ".join(problems), code="review_contract_invalid")
+    return phase_review
+
+
+# --------------------------------------------------------------------------- the Run flow (I-5: §32.16 - §32.22, §32.29 - §32.31)
+#
+# START's own driver of the one Phase Integration Review Run of a marked integration it runs, under the registered
+# contract review-v1-phase-integration-p4-v1, modelled on the P6 Policy Review owner - discovery -> adjudication ->
+# seal, never a Repair Batch branch:
+#
+#   precheck (ordinary) -> R22 discovery (a fresh Run only) -> freeze (the Candidate over committed HEAD, its Context
+#   and Effective Policy, durable in the START record) -> the integration's own opening lifecycle -> G1 accepted ->
+#   G2 settled -> G3 adjudication accepted -> G4 settled with the one §32.22 disposition -> G5 sealed (Receipt),
+#   AUTHORIZATION_READY only -> the terminal gate -> ONE terminal stage -> START's ordinary <Work>:finalize
+#
+# A G4 HUMAN_WAIT keeps the Run and the START pending (R8). A G4-terminal disposition (ruling OQ-C) ends the Run at
+# G4 - final not_authorized, its P5 summary written in that G4, no Receipt - and START stops before any further
+# effect; what START does next (domain repair planning, the confirmation structure) is I-6's.
+
+#: The frozen material of each Integration Run this START mutation holds, keyed by Run (durable before its G1).
+NOTE_INTEGRATION_FREEZE = "phase_integration_freeze"
+#: The owner-measured Project-state digests around each actor launch of a Run (§14.10, §32.29), keyed by Run and
+#: settling generation: the positive proof that the verification left persistent state untouched.
+NOTE_INTEGRATION_MEASURED = "phase_integration_measured"
+#: This START's durable Human-decision bindings, waiting Integration Run -> decision record (P4-R7, R8): bound
+#: before the successor Run is reserved, one decision per waiting Run.
+NOTE_INTEGRATION_DECISIONS = "phase_integration_human_decisions"
+#: §32.19: the operation identity of an Integration Run is its integration Work's, whatever START mode runs it.
+INTEGRATION_OPERATION = "start-phase-integration"
+INTEGRATION_PROJECTION = "phase-integration-candidate-v1"
+SCHEMA_INTEGRATION_CONTEXT = "review-phase-integration-context"
+#: The verification adapter's identity and its declared side-effect contract (§32.29): verification-only, nothing
+#: persistent allowed anywhere. The before / after proof is START's own measurement, never the adapter's report.
+INTEGRATION_ADAPTER = "phase-integration-review-v1-p4"
+#: What START does after each G4-terminal Integration Run, keyed by Run (R26, §32.23 / §32.25): decided once, kept
+#: before its first effect, and finished from the record on resume - never decided again.
+NOTE_INTEGRATION_FOLLOWUPS = "phase_integration_followups"
+FOLLOWUP_REPAIR = "domain_repair"
+FOLLOWUP_STRUCTURE = "confirmation_structure"
+#: An ordinary completion makes a reviewed Phase generated-complete and no covering integration's consumed Review
+#: can be cited (§32.35): no evidence is fabricated, nothing is recorded.
+CODE_PHASE_EVIDENCE_UNAVAILABLE = "phase_evidence_unavailable"
+#: The reconcile reason of phase_completion evidence a completion recorded that is not HEAD's committed basis (§32.39).
+REASON_ACHIEVEMENT_BASIS_MISMATCH = "review_achievement_basis_mismatch"
+#: The executor's answer to a domain repair context is not an IntegrationRepairPlan START accepts (§32.25).
+CODE_INTEGRATION_REPAIR_PLAN_INVALID = "phase_integration_repair_plan_invalid"
+#: The public-safe rationale of every future_work_link START's integration repair records (§32.26 / §32.50).
+FIX_LINK_RATIONALE = "START's integration repair plan registered this fix Work for the Finding; provenance only."
+#: A verification actor changed persistent Project state across its launch: nothing is settled.
+CODE_INTEGRATION_SIDE_EFFECT = "phase_integration_verification_side_effect"
+
+
+@dataclass(frozen=True)
+class IntegrationAdjudicationReturn:
+    """What the Phase Integration adjudicator returns (§32.21): the P4 adjudication and the ONE Phase outcome.
+
+    The P4 part is normalized exactly as every P4 adjudication is; the Phase
+    outcome (a ``review.integration.PhaseOutcome``, or its record) names the
+    canonical Phase objective by its desired-state digest and never restates
+    it. Both are judged together (``review.integration.integration_branch``)
+    before anything is settled.
+    """
+
+    adjudication: p4.P4AdjudicationReturn
+    phase_outcome: Any
+
+
+@dataclass
+class IntegrationRun:
+    """One Integration Review Run this START holds, with the material it froze for it."""
+
+    work_id: str
+    review_run_id: str
+    candidate: dict[str, Any]
+    context: dict[str, Any]
+    effective: dict[str, Any] | None
+    policy: str
+    set_aside: tuple[dict[str, str], ...] = ()
+    receipt_id: str | None = None
+
+
+def integration_operation_identity(work_id: str) -> str:
+    """``start-phase-integration:`` + the digest of the integration's request identity (§32.19)."""
+    from .review import integration as ri
+
+    return f"{INTEGRATION_OPERATION}:{serialize.digest({'review_kind': ri.REVIEW_KIND, 'target_identity': work_id})}"
+
+
+def integration_context(store: ProjectStore) -> dict[str, Any]:
+    """The Phase Integration Review Context: the contract, the adapter, the running loader and the Global policy
+    baseline it reviews under - recomputed at freeze, then bound by digest."""
+    from .implementation import package_directory
+    from .review import integration as ri
+    from .review import planning
+    from .review import policy as review_policy
+
+    root = store.workline_root()
+    return serialize.canonical_data({
+        serialize.SCHEMA_KEY: SCHEMA_INTEGRATION_CONTEXT, serialize.VERSION_KEY: 1,
+        "review_kind": ri.REVIEW_KIND, "contract": records.P4_PHASE_INTEGRATION_CONTRACT,
+        "adapter_identity": INTEGRATION_ADAPTER, "projection_semantics_version": INTEGRATION_PROJECTION,
+        "loader_identity": planning.loader_identity(package_directory(root)),
+        "global_baseline_digest": review_policy.load_global_baseline(root).digest,
+    })
+
+
+def integration_requirement(candidate: dict[str, Any]) -> dict[str, Any]:
+    """The decided requirement an Integration Run is adjudicated against: the canonical Phase and integration
+    objectives, by digest only - reviewer prose never restates them (§32.21)."""
+    from .review import integration as ri
+
+    return p4.requirement_record(ri.REVIEW_KIND, {
+        "phase_id": candidate["phase_id"], "phase_desired_state_digest": candidate["phase_desired_state_digest"],
+        "integration_id": candidate["integration"]["work_id"],
+        "integration_desired_state_digest": candidate["integration"]["desired_state_digest"],
+    })
+
+
+def current_integration_requirement(store: ProjectStore, work_id: str) -> dict[str, Any]:
+    """The integration's decided requirement as HEAD's committed objects hold it now - what a Human decision about
+    a waiting Run is proven against (GAP-G), and what a Candidate frozen at HEAD binds."""
+    from .review import integration as ri
+    from .store import PHASE_DESIRED_HEADING
+
+    git = hermetic_module.enter(store)
+    view = committed_view_at(store, git, _head(git)[1])
+    work = view.works.get(work_id)
+    phase = None if work is None else view.phases.get(str(work.phase_id))
+    if work is None or phase is None:
+        raise _integration_reconcile(f"HEAD's committed view holds no integration {work_id} in a Phase")
+
+    def digest(text: str | None) -> str | None:
+        return None if text is None else serialize.digest_of_text(text)
+
+    return p4.requirement_record(ri.REVIEW_KIND, {
+        "phase_id": phase.id, "phase_desired_state_digest": digest(phase.section(PHASE_DESIRED_HEADING)),
+        "integration_id": work_id, "integration_desired_state_digest": digest(work.section(WORK_DESIRED_HEADING)),
+    })
+
+
+def _integration_snapshot(candidate: dict[str, Any]) -> records.CandidateSnapshot:
+    from .review import integration as ri
+
+    return records.CandidateSnapshot(candidate_hash=ri.candidate_hash(candidate),
+                                     reconstruction_mode=records.RECONSTRUCTION_SNAPSHOT,
+                                     projection_semantics_version=INTEGRATION_PROJECTION, material=dict(candidate),
+                                     builder=None)
+
+
+def _integration_bindings(session: "_Session") -> list[p4.DiscoveryBinding]:
+    """The discovery actors: the required slots, then the holdout slots, each by viewpoint (as P6, §30.11)."""
+    selector = session.phase_review
+    return (sorted(selector.discovery, key=lambda binding: binding.viewpoint)
+            + sorted(selector.holdout_discovery, key=lambda binding: binding.viewpoint))
+
+
+def _integration_reconcile(message: str, reason: str = p4.REASON_CHAIN_INVALID) -> ReconcileRequired:
+    return _reconcile(message, reason)
+
+
+# --------------------------------------------------------------------------- R22: earlier Runs of the integration
+
+def _integration_waiting(review: ReviewStore, chain: Any) -> bool:
+    """Whether the Run stands at canonical G4 HUMAN_WAIT (R8: the same canonical Run, never settled)."""
+    return chain.latest.generation == p4.ADJUDICATION_SETTLE_GENERATION and review.adjudication_exists(
+        chain.review_run_id) and review.read_adjudication(chain.review_run_id).outcome == records.HUMAN_WAIT
+
+
+def _integration_settled(review: ReviewStore, chain: Any) -> str | None:
+    """How an earlier Integration Run ended for good: ``consumed`` or ``not_authorized`` (a declining G2, or a
+    G4-terminal disposition - ruling OQ-C); ``None`` otherwise. A G4 HUMAN_WAIT is never settled (R8)."""
+    found = p4.final_disposition(review, chain)
+    return None if found == history.DISPOSITION_HUMAN_WAIT else found
+
+
+def integration_recovery(store: ProjectStore, work_id: str) -> Any:
+    """R22: canonical recovery discovery of the earlier Integration Runs of ``work_id``, before a fresh Run begins.
+
+    The shared core (``recovery.discover_kind``) with this kind's adapter; it
+    writes nothing. Called only by a START that holds no Integration Run of
+    the Work yet, so every matching Run is another START's:
+
+    ```text
+    not the Phase Integration contract                  reconcile (review_chain_invalid)
+    consumed / not_authorized (G2 declined, G4-terminal) set aside - settled; never authorizable again (OQ-C)
+                                                          and never named by the new Run (MC-7)
+    named by another matching Run                        set aside
+    G4 HUMAN_WAIT                                        recoverable: the same canonical waiting Run (R8),
+                                                          returned - never replaced, never set aside unasked
+    any other (open G1 - G3, an authorizing G4, a seal   review_recovery_incomplete: an Integration Run is
+      not consumed)                                       resumed only from the START record that holds it
+    ```
+    """
+    from .review import integration as ri
+    from .review import recovery
+
+    def classify(store_: ProjectStore, review: ReviewStore, head: str | None, found: Any, named_aside: set[str],
+                 currency: Any) -> str | None:
+        if found.contract != records.P4_PHASE_INTEGRATION_CONTRACT:
+            raise _integration_reconcile(f"Review Run {found.review_run_id} of the Phase Integration kind binds "
+                                         f"contract {found.contract}")
+        first = found.chain.generations[0]
+        if first.target_identity != work_id or p4.shape_of(found.chain) == p4.SHAPE_REPAIR \
+                or found.chain.latest.generation > p4.SEAL_GENERATION:
+            raise _integration_reconcile(f"Integration Review Run {found.review_run_id} is not a discovery -> "
+                                         f"adjudication -> seal Run of {work_id}")
+        try:
+            settled = _integration_settled(review, found.chain)
+            waiting = _integration_waiting(review, found.chain)
+        except ValidationError as exc:
+            raise _reconcile(f"Integration Review Run {found.review_run_id} does not reconstruct: {exc}",
+                             "review_recovery_incomplete") from exc
+        if settled is not None:
+            return settled
+        if found.review_run_id in named_aside:
+            return "set_aside"
+        problem = recovery.p4_reconstruction_problem(review, found)
+        if problem:
+            raise _reconcile(f"Integration Review Run {found.review_run_id} does not reconstruct: {problem}",
+                             "review_recovery_incomplete")
+        if waiting:
+            return None
+        raise _reconcile(
+            f"Integration Review Run {found.review_run_id} of {work_id} is open and no START this invocation holds "
+            "holds it; it is never replaced by a new Run and never recovered as authorizable here",
+            "review_recovery_incomplete",
+        )
+
+    adapter = recovery.RecoveryAdapter(
+        shape=lambda chain: "binds no Phase Integration contract in its generation-1 TaskInputs",
+        named=lambda review, found: [str(item["review_run_id"]) for item in (
+            review.read_task_input(found.task_id).request_envelope.get("set_aside_runs") or [])],
+        classify=classify,
+    )
+    return recovery.discover_kind(store, ri.REVIEW_KIND, integration_operation_identity(work_id), adapter)
+
+
+# --------------------------------------------------------------------------- precheck, freeze and the opening
+
+def _integration_precheck(session: "_Session", view: ProjectView, work: Entity) -> None:
+    """START's ordinary entry checks of the Work, before anything of it is recorded (the executor is never asked)."""
+    phase = view.phases.get(work.phase_id) if work.phase_id else None
+    if phase is None:
+        raise StopError(f"integration {work.id} belongs to no Phase", code="phase_inactive")
+    if view.phase_lifecycle(phase.id) != ACTIVE:
+        raise StopError(f"Phase {phase.id} is {view.phase_lifecycle(phase.id)}", code="phase_inactive")
+    if view.roadmap_lifecycle(phase.roadmap_id or "") != ACTIVE:
+        raise StopError(f"Roadmap {phase.roadmap_id} is {view.roadmap_lifecycle(phase.roadmap_id or '')}",
+                        code="roadmap_inactive")
+    unsatisfied = view.unsatisfied_dependencies(work.id)
+    if unsatisfied:
+        raise StopError(f"Work {work.id} has unresolved requires_completion: "
+                        + ", ".join(f"{relation.from_id} ({label})" for relation, label in unsatisfied),
+                        code="dependency_unsatisfied")
+
+
+def _integration_runs(mutation: Mutation, work_id: str) -> list[str]:
+    """The Integration Runs this START mutation holds for ``work_id``, first to current: its first Run, then each
+    Human-decision successor by its exact successor reservation (R8, P4-R7)."""
+    from .review import integration as ri
+
+    first = mutation.reserved(gate.review_run_key(ri.REVIEW_KIND, work_id))
+    if first is None:
+        return []
+    found = [first]
+    while True:
+        successor = mutation.reserved(gate.review_successor_run_key(found[-1]))
+        if successor is None:
+            return found
+        if successor in found:
+            raise _integration_reconcile(f"the successor reservations of Integration Review Run {found[-1]} are not "
+                                         "one chain", p4.REASON_SUCCESSOR_CONFLICT)
+        found.append(successor)
+
+
+# --------------------------------------------------------------------------- R8 / P4-R7: the Human decision
+
+def _integration_decision_bindings(mutation: Mutation) -> dict[str, dict[str, Any]]:
+    found = mutation.note(NOTE_INTEGRATION_DECISIONS)
+    if found is None:
+        return {}
+    if not isinstance(found, dict) or not all(isinstance(key, str) and isinstance(value, dict)
+                                              for key, value in found.items()):
+        raise _integration_reconcile(f"START mutation {mutation.id}'s Human-decision bindings are not a waiting-Run "
+                                     "mapping", p4.REASON_LINKAGE_INVALID)
+    return dict(found)
+
+
+def _integration_decision_exits(session: "_Session", waiting_run_id: str, chain: Any) -> bool:
+    """Whether the invocation's Human decision exits ``waiting_run_id``'s wait - read only, nothing bound."""
+    decision = session.phase_review.human_decision
+    if decision is None:
+        return False
+    record = decision.to_record()
+    bindings = _integration_decision_bindings(session.mutation)
+    if waiting_run_id in bindings:
+        return bindings[waiting_run_id] == record
+    if any(found.get("decision_id") == decision.decision_id for found in bindings.values()):
+        return False
+    return _integration_envelope(ReviewStore(session.store), chain).get("human_decision") != record
+
+
+def _integration_require_evidence(session: "_Session", waiting_run_id: str, chain: Any, work_id: str) -> None:
+    """GAP-G, before any binding, reservation or other effect: the Human Decision Evidence of the wait this decision
+    exits - exactly that Run, proven against canonical records and the current requirement; nothing detached."""
+    from .review import integration as ri
+
+    evidence = session.phase_review.decision_evidence
+    exits = _integration_decision_exits(session, waiting_run_id, chain)
+    resumed = [{"review_run_id": waiting_run_id, "reason": p4.SET_ASIDE_HUMAN_DECISION}] if exits else []
+    review = ReviewStore(session.store)
+    p4.require_decision_evidence_cover(review, resumed, evidence)
+    if exits:
+        requirement = current_integration_requirement(session.store, work_id)
+        for item in evidence:
+            p4.prove_decision_evidence(review, item, review_kind=ri.REVIEW_KIND, target_identity=work_id,
+                                       current_requirement=requirement)
+
+
+def _integration_bind_decision(session: "_Session", waiting_run_id: str, chain: Any) -> p4.HumanDecision | None:
+    """P4-R7 for an Integration Run: the decision that exits ``waiting_run_id``'s HUMAN_WAIT, bound durably before
+    the successor is reserved; the same decision again is idempotent, another one for a bound wait is refused, and a
+    decision that already exits another wait, or that the waiting Run's own request carried, exits nothing."""
+    decision = session.phase_review.human_decision
+    if decision is None:
+        return None
+    record = decision.to_record()
+    bindings = _integration_decision_bindings(session.mutation)
+    bound = bindings.get(waiting_run_id)
+    if bound is not None:
+        if bound != record:
+            raise p4.stop(p4.CODE_HUMAN_DECISION_INVALID,
+                          f"START mutation {session.mutation.id} already binds Human decision "
+                          f"{bound.get('decision_id')!r} to the wait of Integration Review Run {waiting_run_id}, and "
+                          f"this invocation carries {decision.decision_id!r} for it; the binding is left unchanged")
+        return decision
+    for other, found in sorted(bindings.items()):
+        if found.get("decision_id") != decision.decision_id:
+            continue
+        if found != record:
+            raise p4.stop(p4.CODE_HUMAN_DECISION_INVALID,
+                          f"Human decision {decision.decision_id!r} is bound to the wait of Integration Review Run "
+                          f"{other} with another disposition; one decision identity is one decision")
+        return None
+    if _integration_envelope(ReviewStore(session.store), chain).get("human_decision") == record:
+        return None
+    session.mutation.set_note(NOTE_INTEGRATION_DECISIONS, {**bindings, waiting_run_id: record})
+    return decision
+
+
+def _unfrozen_set_aside(store: ProjectStore, mutation: Mutation, runs: list[str]) -> tuple[dict[str, str], ...]:
+    """What the current Run of ``runs`` sets aside, when it is reserved and not frozen yet.
+
+    A successor of a waiting Run names it (``human_decision``); a successor of a
+    G4-terminal Run - after the confirmation structure or a domain repair -
+    names nothing (MC-7: a final Run is never set aside). A first Run names the
+    waiting Run of another (lost) START whose wait this START's bound decision
+    exits - the bindings are durable before any reservation (P4-R7).
+    """
+    if len(runs) > 1:
+        predecessor = ReviewStore(store).gate_chain(runs[-2])
+        if predecessor is not None and _integration_waiting(ReviewStore(store), predecessor):
+            return ({"review_run_id": runs[-2], "reason": p4.SET_ASIDE_HUMAN_DECISION},)
+        return ()
+    bound = sorted(set(_integration_decision_bindings(mutation)) - set(runs))
+    return tuple({"review_run_id": run_id, "reason": p4.SET_ASIDE_HUMAN_DECISION} for run_id in bound)
+
+
+def _integration_exit_wait(session: "_Session", waiting_run_id: str, chain: Any, work_id: str) -> tuple[dict[str, str], ...]:
+    """R8: a G4 HUMAN_WAIT Run stays the same canonical Run until an explicit Human decision exits it - proven,
+    then bound, before anything is reserved for its successor. Without one, START stays pending at that wait."""
+    history.require_history_ready(ReviewStore(session.store), waiting_run_id, history.BOUNDARY_HUMAN_WAIT,
+                                  history_contract=history.HISTORY_CONTRACT)
+    _integration_require_evidence(session, waiting_run_id, chain, work_id)
+    if _integration_bind_decision(session, waiting_run_id, chain) is None:
+        raise p4.stop(p4.CODE_HUMAN_WAIT,
+                      f"Integration Review Run {waiting_run_id} of {work_id} waits on a Human requirement decision at "
+                      "generation 4; it stays the same canonical Run, nothing guesses the decision, and no other Run "
+                      "of the integration begins beside it (R8)")
+    return ({"review_run_id": waiting_run_id, "reason": p4.SET_ASIDE_HUMAN_DECISION},)
+
+
+def _integration_own_opening(mutation: Mutation, work_id: str) -> list[dict[str, Any]]:
+    """The integration's own opening lifecycle effects this START recorded (§32.17), in recorded order."""
+    from .review import integration as ri
+
+    found = []
+    for effect in mutation.effects:
+        record = (effect.get("payload") or {}).get("record") if effect.get("kind") == "append_event" else None
+        if isinstance(record, dict) and record.get("entity") == work_id and record.get("type") in ri.OPENING_EVENTS \
+                and str(effect.get("stage", "")).rsplit(":", 1)[0] == f"{work_id}:lifecycle":
+            found.append(effect)
+    return found
+
+
+def _projected_opening(mutation: Mutation, candidate: dict[str, Any]) -> list[dict[str, Any]]:
+    """The recorded opening effects the Candidate binds as START's own uncommitted lifecycle projection, by event ID."""
+    ids = [entry["event_id"] for entry in candidate["owning_operation"]["lifecycle_projection"]]
+    found = {}
+    for effect in mutation.effects:
+        record = (effect.get("payload") or {}).get("record") if effect.get("kind") == "append_event" else None
+        if isinstance(record, dict) and record.get("id") in ids:
+            found[record["id"]] = effect
+    return [found[event_id] for event_id in ids if event_id in found]
+
+
+def _opening_types(view: ProjectView, work_id: str) -> list[str]:
+    """What START's ordinary path opens for the Work in its state (``run_work``'s target / lifecycle step)."""
+    state = view.work_state(work_id)
+    if state.state == UNSTARTED:
+        return ["work_started", "work_target_added"]
+    if state.state == HELD:
+        return ["work_resumed", "work_target_added"]
+    if state.state == IN_PROGRESS and not state.has_target:
+        return ["work_target_added"]
+    return []
+
+
+def _integration_freeze(session: "_Session", view: ProjectView, work: Entity, run_id: str,
+                        set_aside: tuple[dict[str, str], ...]) -> dict[str, Any]:
+    """§32.17 - §32.18: the Candidate over committed HEAD, its Context and frozen Effective Policy - once per Run.
+
+    Decided before the Run's first effect and kept in the START record, so a
+    resume continues the same Candidate. START's own opening of the integration
+    is bound as the lifecycle projection (the event IDs are reserved first),
+    never as basis; any other structural difference between the working state
+    and HEAD refuses the freeze (``review_base_uncommitted``) before anything of
+    the integration is recorded.
+    """
+    from . import start_integration_review as sir
+    from .ops import _own_effects_free_view, new_event
+    from .review import achievement_reader
+    from .review import policy as review_policy
+
+    store, mutation = session.store, session.mutation
+    frozen = (mutation.note(NOTE_INTEGRATION_FREEZE) or {}).get(run_id)
+    if frozen is not None:
+        return frozen
+    git = hermetic_module.enter(store)
+    branch, base = _head(git)
+    committed = committed_view_at(store, git, base)
+    # START's own opening of the integration that HEAD does not hold yet - an opening an earlier cycle of this
+    # mutation committed (a repair's move) is basis, never projection
+    held = {event.id for event in committed.events}
+    opening = [effect for effect in _integration_own_opening(mutation, work.id)
+               if effect["payload"]["record"]["id"] not in held]
+    recorded = int(stage_name(mutation, f"{work.id}:lifecycle").rsplit(":", 1)[1])
+    if opening:
+        projection = [(str(effect["payload"]["record"]["id"]), str(effect["payload"]["record"]["type"]))
+                      for effect in opening]
+        terminal_stage = f"{work.id}:lifecycle:{recorded}"
+    else:
+        stage = f"{work.id}:lifecycle:{recorded}"
+        projection = [(new_event(mutation, f"{stage}:event:{index}", kind, work.id).id, kind)
+                      for index, kind in enumerate(_opening_types(view, work.id))]
+        terminal_stage = f"{work.id}:lifecycle:{recorded + 1}"
+    working = _own_effects_free_view(ProjectView.load(store), opening)
+    differences = sir.unowned_structural_difference(committed, working, str(work.phase_id), work.id)
+    if differences:
+        raise StopError("the Phase Integration Candidate is frozen over committed canonical state only, and the "
+                        "working structure differs from HEAD's: " + "; ".join(differences) + "; nothing of the "
+                        "integration was begun", code="review_base_uncommitted")
+    policy_id = p4.new_run_policy()
+    review = ReviewStore(store)
+    selector = session.phase_review
+    # R6-1 / R19: resolved ONCE, before any reservation, with the selector's discovery and holdout actors
+    effective = review_policy.new_run_effective_policy(review, store.workline_root(), policy_id, selector.discovery,
+                                                       selector.holdout_discovery)
+    context = integration_context(store)
+    phase_id = str(work.phase_id)
+    try:
+        candidate = sir.build_candidate(
+            committed, phase_id, work.id, base_commit=base, branch=branch, owning_mutation_id=mutation.id,
+            terminal_stage=terminal_stage, lifecycle_projection=projection,
+            work_review_refs=_integration_work_review_refs(review, committed, phase_id),
+            review_context_digest=serialize.digest(context),
+            effective_policy_hash=p4.run_effective_policy_hash(policy_id, effective), candidate_generation=1,
+            achievement_evidence_refs=achievement_reader.candidate_achievement_refs(committed, review, phase_id),
+        )
+    except ValidationError as exc:
+        raise StopError(f"no Phase Integration Candidate of {work.id} is frozen: {exc}; nothing of the integration "
+                        "was begun", code=exc.code or "review_candidate_unrepresentable") from exc
+    record = {"candidate": candidate, "context": context, "effective": effective, "policy": policy_id,
+              "set_aside": [dict(item) for item in set_aside]}
+    mutation.set_note(NOTE_INTEGRATION_FREEZE, {**(mutation.note(NOTE_INTEGRATION_FREEZE) or {}), run_id: record})
+    return record
+
+
+def _integration_work_review_refs(review: ReviewStore, committed: ProjectView, phase_id: str
+                                  ) -> list[tuple[str, str, str]]:
+    """§14.5 / §32.18: the validated P5 Work Review references of the Phase's effective Works - each consumed Work
+    Review Run of one of them whose stored consumed P5 Run summary validates against its own chain, adjudication,
+    Receipt and Consumption, by that summary's digest. A pre-P5 Run has none; nothing is backfilled."""
+    effective = {found.id for found in committed.effective_works(phase_id)}
+    refs: list[tuple[str, str, str]] = []
+    for consumption in review.consumptions():
+        if getattr(consumption, "review_kind", None) != work_review.REVIEW_KIND \
+                or consumption.target_identity not in effective:
+            continue
+        run_id = consumption.review_run_id
+        chain = review.gate_chain(run_id)
+        if chain is None or not p4.run_contracts(review, chain) - {None} \
+                or p4.history_contract_of_policy(p4.run_policy(review, chain)) is None \
+                or not review.history_exists(review_paths.HISTORY_RUNS, run_id):
+            continue  # a v1 or P4-only Work Review Run binds no P5 history
+        summary = review.read_history(review_paths.HISTORY_RUNS, run_id)
+        if summary.durable_disposition == history.DISPOSITION_CONSUMED \
+                and not history.run_summary_problems(review, summary):
+            refs.append((consumption.target_identity, run_id, review.history_digest(review_paths.HISTORY_RUNS, run_id)))
+    return sorted(refs)
+
+
+def _integration_open(session: "_Session", view: ProjectView, work: Entity, run_id: str,
+                      frozen: dict[str, Any]) -> None:
+    """Record the integration's own opening lifecycle exactly as the frozen Candidate projects it (idempotent)."""
+    mutation = session.mutation
+    projection = frozen["candidate"]["owning_operation"]["lifecycle_projection"]
+    opening = _projected_opening(mutation, frozen["candidate"])
+    if opening:
+        found = [(effect["payload"]["record"]["id"], effect["payload"]["record"]["type"]) for effect in opening]
+        if found != [(entry["event_id"], entry["type"]) for entry in projection]:
+            raise _integration_reconcile(f"the opening lifecycle START recorded for {work.id} is not the one the "
+                                         f"Candidate of Integration Review Run {run_id} binds")
+        return
+    from .mutation import utc_now
+
+    stage = stage_name(mutation, f"{work.id}:lifecycle")
+    effects = []
+    for index, entry in enumerate(projection):
+        if mutation.reserved(f"{stage}:event:{index}") != entry["event_id"]:
+            raise _integration_reconcile(f"the opening event {entry['event_id']} of {work.id} is not the one "
+                                         f"reserved for {stage}")
+        effects.append(Effect.append_event(Event(entry["event_id"], entry["type"], work.id, utc_now())))
+    mutation.extend_scope(entities=[work.id])
+    mutation.add_effects(stage, effects)
+    mutation.apply()
+
+
+def _integration_successor(session: "_Session", view: ProjectView, work: Entity, waiting_run_id: str,
+                           set_aside: tuple[dict[str, str], ...]) -> IntegrationRun:
+    """The Human-decision successor of this START's own waiting Run: reserved after the decision is bound, then a
+    new Candidate frozen over committed HEAD (the opening START already recorded is its lifecycle projection)."""
+    mutation = session.mutation
+    run_id = mutation.reserve_id(gate.review_successor_run_key(waiting_run_id), "review_run")
+    frozen = _integration_freeze(session, view, work, run_id, set_aside)
+    for binding in _integration_bindings(session):
+        mutation.reserve_id(gate.review_task_key(run_id, binding.task_slot), "review_task")
+    return _integration_held(mutation, work.id, run_id, frozen)
+
+
+def _integration_held(mutation: Mutation, work_id: str, run_id: str, frozen: dict[str, Any]) -> IntegrationRun:
+    return IntegrationRun(work_id, run_id, frozen["candidate"], frozen["context"], frozen["effective"],
+                          str(frozen["policy"]), tuple(dict(item) for item in frozen.get("set_aside") or ()),
+                          mutation.reserved(gate.review_receipt_key(run_id, p4.SEAL_GENERATION)))
+
+
+def _integration_run(session: "_Session", view: ProjectView, work: Entity) -> IntegrationRun:
+    """The Run this START holds for ``work``: reserved, frozen and opened on first use (§32.15 - §32.17)."""
+    from .review import integration as ri
+
+    store, mutation = session.store, session.mutation
+    if not fsafe.immutable_create_supported():
+        raise StopError("a Phase Integration Review writes immutable Review records, which this platform cannot keep "
+                        "inside the Project; nothing of the integration was begun", code="review_create_unsupported")
+    held = _integration_runs(mutation, work.id)
+    set_aside: tuple[dict[str, str], ...] = ()
+    if not held:
+        # R22, before anything of the integration is reserved or recorded: an earlier Run is settled (never named),
+        # waiting at G4 HUMAN_WAIT (the same canonical Run: returned, R8), or open elsewhere (incomplete)
+        discovered = integration_recovery(store, work.id)
+        if discovered.recoverable is not None:
+            set_aside = _integration_exit_wait(session, discovered.recoverable.review_run_id,
+                                               discovered.recoverable.chain, work.id)
+        _integration_precheck(session, view, work)
+        gitops.ensure_separable_before_effects(mutation, [EVENT_LOG])
+        gitops.narrow_preexisting_dirty(mutation, store.root)
+    if held and _repair_moved(mutation, held[-1]):
+        # the repaired Run's cycle ended with its move; the integration is entered again after its fix Works: a new
+        # Run of the same integration over a new Candidate, never naming the final one (§32.27, MC-7)
+        _integration_precheck(session, view, work)
+        held = held + [mutation.reserve_id(gate.review_successor_run_key(held[-1]), "review_run")]
+    if held:
+        set_aside = _unfrozen_set_aside(store, mutation, held)
+    run_id = held[-1] if held else mutation.reserve_id(gate.review_run_key(ri.REVIEW_KIND, work.id), "review_run")
+    frozen = _integration_freeze(session, view, work, run_id, set_aside)
+    for binding in _integration_bindings(session):
+        mutation.reserve_id(gate.review_task_key(run_id, binding.task_slot), "review_task")
+    _integration_open(session, view, work, run_id, frozen)
+    return _integration_held(mutation, work.id, run_id, frozen)
+
+
+# --------------------------------------------------------------------------- generation mutations
+
+def _integration_generation(session: "_Session", run: IntegrationRun, generation: int, transition: str,
+                            gate_record: records.GateGeneration, extra: list[tuple[str, dict[str, Any]]],
+                            receipt_id: str | None = None) -> None:
+    """Open, record, commit and prove persisted the generation mutation writing ``gate_record`` (and ``extra``).
+
+    Its durable ``review_kind`` is the Phase Integration kind, so the one
+    generation dispatch (``roadmap_review._finish_generation``) commits only its
+    Review record paths with the review-v1 planning commit primitive - never the
+    Work one - while START's own uncommitted lifecycle stays out of it.
+    """
+    from .review import integration as ri
+    from .roadmap_review import _finish_generation as finish
+
+    store, mutation = session.store, session.mutation
+    scope = gate.next_generation_scope(store, run.review_run_id)
+    if scope.generation != generation:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id}'s next generation is "
+                                     f"{scope.generation}, not {generation}")
+    if transition == p4.TRANSITION_ACCEPT:
+        writes = list(extra) + [(scope.gate_path, gate_record.to_record())]
+    else:
+        writes = [(scope.gate_path, gate_record.to_record())] + list(extra)
+    invocation = {
+        "operation": OPERATION_GENERATION, "review_contract": records.P4_PHASE_INTEGRATION_CONTRACT,
+        "start_mutation_id": mutation.id, "review_kind": ri.REVIEW_KIND, "review_run_id": run.review_run_id,
+        "generation": generation, "transition": transition, "candidate_hash": gate_record.candidate_hash,
+        "review_context_hash": gate_record.review_context_hash,
+        "effective_policy_hash": gate_record.effective_policy_hash,
+        "obligation_digest": gate_record.obligation_digest, "receipt_id": receipt_id,
+    }
+    record_paths = [path for path, _ in writes]
+    gen = MutationController(store).open(OWNER, invocation,
+                                         WriteScope(files=tuple(scope.files) + tuple(path for path, _ in extra)))
+    with abandon_on_stop(gen):
+        gitops.record_preexisting_dirty(gen, store.root)
+        gitops.ensure_separable_before_effects(gen, record_paths)
+        if not gen.has_stage(STAGE_GENERATION):
+            gate.require_committable(store, record_paths)
+            gitops.require_no_planning_transform(store.root, record_paths)
+            checkout.require_checkout_capability(store, record_paths)
+            gen.add_effects(STAGE_GENERATION, [Effect.create_file(path, serialize.canonical_text(record))
+                                               for path, record in writes])
+    finish(store, gen)
+
+
+def _integration_resolve_pending(session: "_Session", run: IntegrationRun) -> None:
+    """A pending generation mutation of this Run is resumed first, and nothing else is (§11.8 step 3)."""
+    from .review import integration as ri
+    from .roadmap_review import _finish_generation as finish
+
+    store, mutation = session.store, session.mutation
+    pending = gate.pending_generation_mutations(store, run.review_run_id)
+    if not pending:
+        return
+    if len(pending) > 1:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id} has {len(pending)} pending "
+                                     "generation mutations", "review_generation_owner_conflict")
+    record = pending[0]
+    found = record.get("invocation") or {}
+    if (record.get("owner") != OWNER or found.get("operation") != OPERATION_GENERATION
+            or found.get("review_kind") != ri.REVIEW_KIND or found.get("start_mutation_id") != mutation.id
+            or found.get("review_run_id") != run.review_run_id
+            or found.get("review_contract") != records.P4_PHASE_INTEGRATION_CONTRACT):
+        raise _integration_reconcile(f"the pending generation mutation {record.get('mutation_id')} of Integration "
+                                     f"Review Run {run.review_run_id} is not this START mutation's ({mutation.id})",
+                                     "review_generation_owner_conflict")
+    gen = MutationController(store).open(OWNER, found, WriteScope.from_record(record.get("write_scope") or {}))
+    if not gen.effects:
+        gen.abandon()
+        return
+    generation = found.get("generation")
+    chain = _integration_chain(store, run)
+    next_number = records.FIRST_GENERATION if chain is None else chain.next_generation
+    recorded = {effect["payload"]["path"]: effect["payload"]["content"] for effect in gen.stage_effects(STAGE_GENERATION)}
+    fits = generation == next_number
+    if not fits and chain is not None and generation == chain.latest.generation:
+        gate_path = review_paths.gate_rel(run.review_run_id, int(generation))
+        stored = ReviewStore(store).read_bytes(gate_path)
+        fits = stored is not None and gate_path in recorded and stored == recorded[gate_path].encode("utf-8")
+    allowed = p4.TRANSITIONS.get(int(generation), ()) if type(generation) is int else ()
+    if not fits or found.get("transition") not in allowed or (type(generation) is int and generation > p4.SEAL_GENERATION):
+        raise _integration_reconcile(f"the pending generation mutation {gen.id} writes generation {generation} of "
+                                     f"Integration Review Run {run.review_run_id}, which is not its next transition")
+    finish(store, gen)
+
+
+def _integration_chain(store: ProjectStore, run: IntegrationRun) -> Any:
+    try:
+        return ReviewStore(store).gate_chain(run.review_run_id)
+    except ValidationError as exc:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id}'s chain does not validate: "
+                                     f"{exc}") from exc
+
+
+# --------------------------------------------------------------------------- currency and side effects
+
+def _integration_current_problems(session: "_Session", run: IntegrationRun) -> list[str]:
+    """Why the frozen Candidate is no longer current (§32.30); empty when it is.
+
+    HEAD is on the Candidate's branch and descends from its base, every commit
+    since changed Review records only, the committed structure at HEAD and the
+    working structure (less START's own opening) are still the Candidate's,
+    and the integration still carries its marker.
+    """
+    from . import phase_integration as pi
+    from . import start_integration_review as sir
+    from .ops import _own_effects_free_view
+
+    store, mutation = session.store, session.mutation
+    base = run.candidate["base"]
+    git = hermetic_module.enter(store)
+    branch, head = _head(git)
+    if branch != base["branch"]:
+        return [f"HEAD is on {branch}, not the Candidate's {base['branch']}"]
+    problems: list[str] = []
+    if head != base["commit"]:
+        descends = ancestry.raw_descends_from(git, head, base["commit"])
+        if descends is not True:
+            return [f"HEAD {head} is not shown to descend from the Candidate's base {base['commit']}"]
+        outside = sorted(entry.path for entry in _delta(git, base["commit"], head)
+                         if not entry.path.startswith(f"{review_paths.REVIEW_DIR}/"))
+        if outside:
+            problems.append("commits since the Candidate's base changed " + ", ".join(outside))
+    phase_id = str(run.candidate["phase_id"])
+    committed = committed_view_at(store, git, head)
+    working = _own_effects_free_view(ProjectView.load(store), _projected_opening(mutation, run.candidate))
+    problems += sir.unowned_structural_difference(committed, working, phase_id, run.work_id)
+    work = working.works.get(run.work_id)
+    if work is None or not pi.is_reviewed_integration(work) \
+            or work.phase_review_contract != run.candidate["integration"]["phase_review_contract"]:
+        problems.append(f"{run.work_id} no longer carries the marker its Candidate binds")
+    return problems
+
+
+def _project_state_digest(store: ProjectStore) -> str:
+    """START's own measurement of persistent Project state (§14.10 owner-measured proof): HEAD, and every path Git
+    sees changed or untracked with the exact bytes it holds (the Mutation Controller's own content digest: bytes as on
+    disk, a link by its target, absence as absence) - runtime records excluded."""
+    from .mutation import _content_digest
+    from .store import RUNTIME_DIR
+
+    repo = store.root
+    entries = []
+    for entry in sorted(gitcmd.status_entries(repo), key=lambda found: found.path):
+        if entry.path.startswith(RUNTIME_DIR + "/"):
+            continue
+        held = _content_digest(repo.joinpath(*entry.path.split("/")))
+        entries.append({"path": entry.path, "status": entry.index + entry.worktree,
+                        "content": "unreadable" if held is None else held})
+    return serialize.digest({"head": gitcmd.head_commit(repo), "entries": entries})
+
+
+def _measured(session: "_Session", run: IntegrationRun, generation: int, before: str) -> None:
+    """Record the before / after measurement of the launches settled at ``generation``; refuse any change."""
+    after = _project_state_digest(session.store)
+    if after != before:
+        raise StopError(f"a verification actor of Integration Review Run {run.review_run_id} changed persistent "
+                        "Project state across its launch (a verification-only Review mutates nothing); nothing is "
+                        "settled", code=CODE_INTEGRATION_SIDE_EFFECT)
+    notes = dict(session.mutation.note(NOTE_INTEGRATION_MEASURED) or {})
+    measured = dict(notes.get(run.review_run_id) or {})
+    measured[str(generation)] = {"before": before, "after": after}
+    notes[run.review_run_id] = measured
+    session.mutation.set_note(NOTE_INTEGRATION_MEASURED, notes)
+
+
+def _side_effect_problems(session: "_Session", run: IntegrationRun) -> tuple[str, ...] | None:
+    """§32.29: the verification-only proof of every launch the Run settled, or ``None`` when one is not measured."""
+    from .review import integration as ri
+
+    measured = (session.mutation.note(NOTE_INTEGRATION_MEASURED) or {}).get(run.review_run_id) or {}
+    git = hermetic_module.enter(session.store)
+    tree = resulting_tree.root_tree_id(git, run.candidate["base"]["commit"])
+    declaration = p4.IntegrationDeclaration(INTEGRATION_ADAPTER, (), (), (), None, False)
+    problems: list[str] = []
+    for generation in (p4.DISCOVERY_SETTLE_GENERATION, p4.ADJUDICATION_SETTLE_GENERATION):
+        found = measured.get(str(generation))
+        if not isinstance(found, dict):
+            return None
+        proof = ri.OwnerMeasuredProof(OWNER, str(found.get("before")), str(found.get("after")), (), ())
+        problems += ri.verification_only_problems(declaration, p4.IntegrationObservation(), proof,
+                                                  candidate_base_tree=tree)
+    return tuple(problems)
+
+
+# --------------------------------------------------------------------------- G1 .. G5
+
+def _integration_accept(session: "_Session", run: IntegrationRun) -> None:
+    """G1: the Candidate snapshot, every discovery TaskInput (required + holdout) and the open gate, together."""
+    from .review import integration as ri
+    from .review import policy as review_policy
+
+    store, mutation = session.store, session.mutation
+    candidate, context = run.candidate, run.context
+    snapshot = _integration_snapshot(candidate)
+    requirement = integration_requirement(candidate)
+    review = ReviewStore(store)
+    decision = None
+    writes = p4.HistoryWrites(p4.set_aside_summaries(review, run.set_aside))
+    if any(item["reason"] == p4.SET_ASIDE_HUMAN_DECISION for item in run.set_aside):
+        # §28.14 / GAP-G: the Human decision this Run continues under, and its Human Decision Evidence, persisted
+        # in this G1 - before any external launch
+        decision = session.phase_review.human_decision
+        writes = p4.HistoryWrites(writes.summaries, tuple(
+            p4.decision_evidence_record(
+                review, item, mutation.reserve_id(history.review_decision_key(item.affected_review_run_id),
+                                                  "review_decision"),
+                review_kind=ri.REVIEW_KIND, target_identity=run.work_id, current_requirement=requirement,
+            )
+            for item in session.phase_review.decision_evidence
+        ))
+    evidence = serialize.canonical_data({"candidate_hash": snapshot.candidate_hash,
+                                         "review_context_hash": serialize.digest(context)})
+    holdout = {binding.task_slot for binding in session.phase_review.holdout_discovery}
+    task_inputs: list[records.TaskInput] = []
+    for binding in _integration_bindings(session):
+        task_id = mutation.reserved(gate.review_task_key(run.review_run_id, binding.task_slot))
+        if task_id is None:
+            raise _integration_reconcile(f"discovery slot {binding.task_slot} has no reserved task")
+        envelope = p4.discovery_request(
+            review_contract=records.P4_PHASE_INTEGRATION_CONTRACT, review_kind=ri.REVIEW_KIND,
+            viewpoint=binding.viewpoint, candidate=candidate, context=context, requirement=requirement,
+            candidate_generation=1, succession=None, set_aside_runs=run.set_aside, human_decision=decision,
+            evidence_ids=[f"phase-integration-candidate:{snapshot.candidate_hash}"], policy_id=run.policy,
+            set_aside_summaries=writes.summary_bindings(), decision_evidence=writes.decision_bindings(),
+            effective_policy=run.effective,
+            discovery_role=review_policy.ROLE_HOLDOUT if binding.task_slot in holdout else review_policy.ROLE_REQUIRED,
+        )
+        task_inputs.append(p4.task_input(
+            task_id=task_id, task_slot=binding.task_slot, task_kind=p4.TASK_KIND_DISCOVERY,
+            actor_identity=binding.identity, actor_version=binding.version, envelope=envelope,
+            candidate_hash=snapshot.candidate_hash, candidate_material_digest=serialize.digest(snapshot.to_record()),
+            review_context_hash=serialize.digest(context), accepted_generation=p4.DISCOVERY_ACCEPT_GENERATION,
+            policy_id=run.policy,
+        ))
+    required = [(found.task_slot, found.task_id) for found in task_inputs]
+    gate_one = records.GateGeneration(
+        review_run_id=run.review_run_id, generation=1, previous_generation=None, previous_digest=None,
+        review_kind=ri.REVIEW_KIND, target_identity=run.work_id,
+        operation_identity=integration_operation_identity(run.work_id), candidate_hash=snapshot.candidate_hash,
+        review_context_hash=serialize.digest(context),
+        effective_policy_hash=p4.run_effective_policy_hash(run.policy, run.effective),
+        evidence_digest=serialize.digest(evidence), coverage_digest=serialize.digest(p4.coverage_record(required, [])),
+        raw_report_set_digest=serialize.digest(p4.report_set_record([])),
+        adjudication_digest=serialize.digest(p4.pending_adjudication_record()),
+        obligation_digest=serialize.digest(p4.obligations_record(None)),
+        accepted_tasks=tuple(p4.accepted_descriptor(found) for found in task_inputs), settled_tasks=(),
+        status=records.GATE_STATUS_OPEN, receipt_id=None, authorized_operation_stage=None,
+    )
+    extra: list[tuple[str, dict[str, Any]]] = []
+    if not ReviewStore(store).candidate_snapshot_exists(snapshot.candidate_hash):
+        extra.append((review_paths.candidate_snapshot_rel(snapshot.candidate_hash), snapshot.to_record()))
+    extra += [(review_paths.task_input_rel(found.task_id), found.to_record()) for found in task_inputs]
+    extra += writes.extra()
+    _integration_generation(session, run, 1, p4.TRANSITION_ACCEPT, gate_one, extra)
+
+
+def _integration_launch(session: "_Session", run: IntegrationRun, chain: Any) -> None:
+    """G1 -> G2: every accepted discovery task launched to its bound actor (state measured around), then G2."""
+    store = session.store
+    review = ReviewStore(store)
+    first = chain.latest
+    tasks = list(first.accepted_tasks)
+    envelope = _integration_envelope(review, chain)
+    gate.require_persisted(store, [review_paths.candidate_snapshot_rel(first.candidate_hash),
+                                   review_paths.gate_rel(run.review_run_id, 1)]
+                           + [review_paths.task_input_rel(str(task["task_id"])) for task in tasks]
+                           + p4.first_generation_history_paths(envelope))
+    # §28.18 successor_launch: no external launch under a Human decision before its evidence is canonical
+    p4.require_first_generation_history(review, run.review_run_id, envelope)
+    for task in tasks:
+        problems = [message for _, message in review.provenance_problems(task, 1)]
+        if problems:
+            raise _integration_reconcile("the accepted discovery task's provenance: " + "; ".join(problems),
+                                         "review_task_invalid")
+    current = _integration_current_problems(session, run)
+    if current:
+        raise _integration_reconcile("the Phase Integration Candidate is no longer current: " + "; ".join(current)
+                                     + "; nothing is launched", "review_candidate_mismatch")
+    bindings = {binding.task_slot: binding for binding in _integration_bindings(session)}
+    settled: list[dict[str, Any]] = []
+    reports: dict[str, dict[str, Any]] = {}
+    before = _project_state_digest(store)
+    for task in tasks:
+        task_id = str(task["task_id"])
+        binding = bindings.get(str(task["task_slot"]))
+        if binding is None or (binding.identity, binding.version) != (task["reviewer_identity"], task["reviewer_version"]):
+            raise StopError(f"discovery task {task_id} ({task['task_slot']}) was accepted for {task['reviewer_identity']} "
+                            f"{task['reviewer_version']}, and this invocation binds no such actor; nothing is launched",
+                            code="review_reviewer_mismatch")
+        task_input = review.read_task_input(task_id)
+        launched = p4.P4DiscoveryTask(
+            task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind,
+            review_kind=first.review_kind, viewpoint=binding.viewpoint,
+            request_envelope=serialize.canonical_data(task_input.request_envelope),
+            request_digest=task_input.request_digest, candidate_hash=task_input.candidate_hash,
+            review_context_hash=task_input.review_context_hash, effective_policy_hash=task_input.effective_policy_hash,
+        )
+        try:
+            returned = binding.actor(launched)
+        except Exception as exc:
+            raise StopError(f"the discovery actor raised for task {task_id}: {exc}; nothing is settled",
+                            code="review_reviewer_failed") from exc
+        report = p4.report_record(returned, task, review_kind=first.review_kind,
+                                  review_contract=records.P4_PHASE_INTEGRATION_CONTRACT)
+        result_digest = serialize.digest(report)
+        gate.validate_settlement(store, run.review_run_id, task_id, result_digest, str(returned.reviewer_identity))
+        settled.append({"task_id": task_id, "status": p4.settled_status(report), "result_digest": result_digest,
+                        "settled_generation": 2})
+        reports[task_id] = report
+    _measured(session, run, p4.DISCOVERY_SETTLE_GENERATION, before)
+    required = [(str(task["task_slot"]), str(task["task_id"])) for task in tasks]
+    gate_two = replace(
+        first, generation=2, previous_generation=1, previous_digest=chain.latest_digest,
+        coverage_digest=serialize.digest(p4.coverage_record(required, settled, reports)),
+        raw_report_set_digest=serialize.digest(p4.report_set_record(settled)), settled_tasks=tuple(settled),
+    )
+    extra = [(review_paths.report_rel(task["result_digest"]), reports[task["task_id"]]) for task in settled]
+    # GAP-E: a declined discovery task makes the Run non-authorizing and final in this same G2
+    extra += p4.not_authorized_history(gate_two, 1)
+    _integration_generation(session, run, 2, p4.TRANSITION_SETTLE, gate_two, extra)
+
+
+def _integration_reports(review: ReviewStore, chain: Any) -> list[tuple[str, str, dict[str, Any]]]:
+    discovery_ids = {str(task["task_id"]) for task in p4.discovery_tasks(chain)}
+    found = []
+    for task in chain.generation(2).settled_tasks:
+        if str(task["task_id"]) in discovery_ids:
+            digest = str(task["result_digest"])
+            found.append((str(task["task_id"]), digest, serialize.canonical_data(review.read_report(digest).to_record())))
+    return found
+
+
+def _integration_envelope(review: ReviewStore, chain: Any) -> dict[str, Any]:
+    return review.read_task_input(str(chain.generations[0].accepted_tasks[0]["task_id"])).request_envelope
+
+
+def _integration_accept_adjudication(session: "_Session", run: IntegrationRun, chain: Any) -> None:
+    """G3: one adjudication TaskInput built from canonical material only, accepted before any launch."""
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    second = chain.latest
+    envelope = _integration_envelope(review, chain)
+    reports = _integration_reports(review, chain)
+    request = p4.adjudication_request(
+        review_contract=records.P4_PHASE_INTEGRATION_CONTRACT, review_kind=second.review_kind,
+        review_run_id=run.review_run_id, candidate_hash=second.candidate_hash, candidate_generation=1,
+        review_context_hash=second.review_context_hash, requirement=envelope["requirement"],
+        reports=[{"task_id": t, "result_digest": d} for t, d, _ in reports], prior=p4.NO_PRIOR,
+        evidence_ids=[eid for _, _, report in reports for eid in report["coverage"]["evidence_ids"]],
+        policy_id=run.policy,
+        prior_history=p4.prior_history_references(review, second.review_kind, second.target_identity,
+                                                  run.review_run_id),
+        effective_policy=run.effective,
+    )
+    task_id = mutation.reserve_id(gate.review_task_key(run.review_run_id, p4.SLOT_ADJUDICATOR), "review_task")
+    adjudicator = session.phase_review.adjudicator
+    task_input = p4.task_input(
+        task_id=task_id, task_slot=p4.SLOT_ADJUDICATOR, task_kind=p4.TASK_KIND_ADJUDICATION,
+        actor_identity=adjudicator.identity, actor_version=adjudicator.version, envelope=request,
+        candidate_hash=second.candidate_hash,
+        candidate_material_digest=review.candidate_material_digest(second.candidate_hash),
+        review_context_hash=second.review_context_hash, accepted_generation=p4.ADJUDICATION_ACCEPT_GENERATION,
+        policy_id=run.policy,
+    )
+    gate_three = replace(second, generation=3, previous_generation=2, previous_digest=chain.latest_digest,
+                         accepted_tasks=second.accepted_tasks + (p4.accepted_descriptor(task_input),))
+    _integration_generation(session, run, 3, p4.TRANSITION_ACCEPT, gate_three,
+                            [(review_paths.task_input_rel(task_id), task_input.to_record())])
+
+
+def _integration_disposition(run: IntegrationRun, normalized: Any, outcome: Any, current: list[str]) -> str:
+    """§32.22 in the frozen order (rulings CPQ-04 / OQ-C): HUMAN_WAIT, DOMAIN_REPAIR_REQUIRED,
+    CONFIRMATION_STRUCTURE_REQUIRED, AUTHORIZATION_READY - or the step-4 refusal code, which is the Run's terminal
+    G4 disposition (never a corrupt record). An inconsistent adjudication derives nothing (ValidationError)."""
+    from .review import integration as ri
+
+    try:
+        return ri.integration_branch(
+            p4_outcome=p4.derive_outcome(normalized), phase_outcome=outcome,
+            candidate_desired_state_digest=str(run.candidate["phase_desired_state_digest"]),
+            blocking_problems=sum(1 for draft in normalized.drafts if draft.blocking),
+            human_obligations=int(p4.obligations(normalized)["human"]),
+            valid_downstream_confirmation=bool(ri.downstream_confirmation_ids_of(run.candidate)),
+            invalid_uncovered=ri.invalid_uncovered_of(run.candidate), evidence_current=not current,
+        )
+    except ValidationError as exc:
+        if exc.code in (ri.CODE_UNCOVERED, ri.CODE_NOT_AUTHORIZABLE):
+            return str(exc.code)
+        raise
+
+
+def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any) -> None:
+    """G3 -> G4: the adjudicator, launched only to its bound identity (state measured around); the P4 adjudication
+    normalized, the Phase outcome judged with it, the one G4 disposition derived; G4 with its P5 history."""
+    from .review import integration as ri
+
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    third = chain.latest
+    descriptor = p4.adjudication_task(chain)
+    if descriptor is None:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id} accepted no adjudication")
+    task_id = str(descriptor["task_id"])
+    reports = _integration_reports(review, chain)
+    gate.require_persisted(store, [review_paths.task_input_rel(task_id), review_paths.gate_rel(run.review_run_id, 3)]
+                           + [review_paths.report_rel(digest) for _, digest, _ in reports])
+    problems = review.provenance_problems(descriptor, 3)
+    if problems:
+        raise _integration_reconcile("the accepted adjudication task's provenance: "
+                                     + "; ".join(message for _, message in problems), "review_task_invalid")
+    binding = session.phase_review.adjudicator
+    if (binding.identity, binding.version) != (descriptor["reviewer_identity"], descriptor["reviewer_version"]):
+        raise StopError(f"adjudication task {task_id} was accepted for {descriptor['reviewer_identity']} "
+                        f"{descriptor['reviewer_version']}, and this invocation binds {binding.identity} "
+                        f"{binding.version}; the adjudicator is not launched", code="review_reviewer_mismatch")
+    task_input = review.read_task_input(task_id)
+    references = list(task_input.request_envelope.get("prior_history") or [])
+    launched = p4.P4AdjudicationTask(
+        task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind, review_kind=third.review_kind,
+        request_envelope=serialize.canonical_data(task_input.request_envelope), request_digest=task_input.request_digest,
+        candidate_hash=third.candidate_hash, review_context_hash=third.review_context_hash,
+        effective_policy_hash=third.effective_policy_hash, candidate=dict(run.candidate),
+        reports=tuple(report for _, _, report in reports), prior_findings=(), prior_repair_batch=None,
+        prior_repair_result=None, prior_history=p4.prior_history_records(review, references),
+    )
+    before = _project_state_digest(store)
+    try:
+        returned = binding.actor(launched)
+    except Exception as exc:
+        raise p4.stop(p4.CODE_ADJUDICATOR_FAILED,
+                      f"the adjudicator raised for task {task_id}: {exc}; nothing is settled") from exc
+    if type(returned) is not IntegrationAdjudicationReturn:
+        raise p4.stop(p4.CODE_ADJUDICATION_INVALID,
+                      f"the Phase Integration adjudicator returned {type(returned).__name__}, not an "
+                      "IntegrationAdjudicationReturn (the P4 adjudication and its one Phase outcome); nothing is settled")
+    normalized = p4.normalize_adjudication(returned.adjudication, descriptor, reports, None)
+    try:
+        outcome = returned.phase_outcome if type(returned.phase_outcome) is ri.PhaseOutcome \
+            else ri.PhaseOutcome.from_record(returned.phase_outcome)
+        disposition = _integration_disposition(run, normalized, outcome, _integration_current_problems(session, run))
+    except ValidationError as exc:
+        raise p4.stop(p4.CODE_ADJUDICATION_INVALID,
+                      f"the Phase Integration adjudication is not valid: {exc}; nothing is settled") from exc
+    _measured(session, run, p4.ADJUDICATION_SETTLE_GENERATION, before)
+    finding_ids = [mutation.reserve_id(gate.review_finding_key(run.review_run_id, ordinal), "review_finding")
+                   for ordinal in range(1, len(normalized.drafts) + 1)]
+    adjudication = p4.adjudication(
+        normalized, finding_ids, review_run_id=run.review_run_id, gate_record=third, candidate_generation=1,
+        review_contract=records.P4_PHASE_INTEGRATION_CONTRACT, descriptor=descriptor, reports=reports, prior=None,
+        policy_id=run.policy, phase_outcome=outcome, integration_disposition=disposition,
+    )
+    drafts = p4.relation_drafts(returned.adjudication, adjudication, references, policy_id=run.policy)
+    relation_ids = [mutation.reserve_id(history.review_relation_key(run.review_run_id, ordinal), "review_relation")
+                    for ordinal in range(1, len(drafts) + 1)]
+    record = adjudication.to_record()
+    digest = serialize.digest(record)
+    gate.validate_settlement(store, run.review_run_id, task_id, digest, str(returned.adjudication.adjudicator_identity))
+    settled = {"task_id": task_id, "status": records.TASK_SETTLED_OK, "result_digest": digest, "settled_generation": 4}
+    gate_four = replace(
+        third, generation=4, previous_generation=3, previous_digest=chain.latest_digest, adjudication_digest=digest,
+        obligation_digest=serialize.digest(p4.obligations_record(adjudication)),
+        settled_tasks=third.settled_tasks + (settled,),
+    )
+    extra = [(review_paths.adjudication_rel(run.review_run_id), record)]
+    # §28.8 / §28.12 / §28.5, ruling OQ-C: the Finding summaries, the relations and - for HUMAN_WAIT and every
+    # G4-terminal disposition - the Run summary, in this same G4
+    extra += p4.g4_history(adjudication, gate_four, drafts, relation_ids, references).extra()
+    _integration_generation(session, run, 4, p4.TRANSITION_SETTLE, gate_four, extra)
+    history.require_history_ready(ReviewStore(store), run.review_run_id, history.BOUNDARY_FINDINGS,
+                                  history_contract=history.HISTORY_CONTRACT)
+
+
+def _integration_seal(session: "_Session", run: IntegrationRun, chain: Any) -> None:
+    """G5: the Receipt - only for an AUTHORIZATION_READY disposition, the full convergence and a current Candidate."""
+    from .review import integration as ri
+
+    review = ReviewStore(session.store)
+    found = review.read_adjudication(run.review_run_id)
+    if found.integration_disposition != ri.BRANCH_AUTHORIZATION_READY:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id} is "
+                                     f"{found.integration_disposition}; only AUTHORIZATION_READY seals")
+    unmet = p4.convergence_from_records(review, run.review_run_id, chain, _integration_envelope(review, chain),
+                                        evidence_current=True)
+    if unmet:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id} is not converged: " + "; ".join(unmet))
+    current = _integration_current_problems(session, run)
+    if current:
+        raise _integration_reconcile("the Phase Integration Candidate is no longer current: " + "; ".join(current)
+                                     + "; no Receipt issues", "review_candidate_mismatch")
+    fourth = chain.latest
+    receipt_id = session.mutation.reserve_id(gate.review_receipt_key(run.review_run_id, p4.SEAL_GENERATION),
+                                             "review_receipt")
+    run.receipt_id = receipt_id
+    gate_five = replace(fourth, generation=5, previous_generation=4, previous_digest=chain.latest_digest,
+                        status=records.GATE_STATUS_SEALED, receipt_id=receipt_id,
+                        authorized_operation_stage=ri.AUTHORIZED_OPERATION_STAGE)
+    receipt = records.Receipt(
+        receipt_id=receipt_id, review_run_id=run.review_run_id, review_generation=p4.SEAL_GENERATION,
+        review_kind=fourth.review_kind, target_identity=fourth.target_identity,
+        operation_identity=fourth.operation_identity, authorized_candidate_hash=fourth.candidate_hash,
+        review_context_hash=fourth.review_context_hash, effective_policy_hash=fourth.effective_policy_hash,
+        coverage_hash=fourth.coverage_digest, adjudication_hash=fourth.adjudication_digest,
+        obligation_digest=fourth.obligation_digest, unresolved_obligations=0,
+        authorized_operation_stage=ri.AUTHORIZED_OPERATION_STAGE,
+    )
+    _integration_generation(session, run, 5, p4.TRANSITION_SEAL, gate_five,
+                            [(review_paths.receipt_rel(receipt_id), receipt.to_record())], receipt_id=receipt_id)
+
+
+# --------------------------------------------------------------------------- the terminal stage (§32.30 - §32.31)
+
+def _frozen_terminal(mutation: Mutation, work_id: str) -> tuple[str, dict[str, Any]] | None:
+    """The terminal stage the frozen Candidate of this START's current Run of ``work_id`` names, with its record."""
+    runs = _integration_runs(mutation, work_id)
+    frozen = (mutation.note(NOTE_INTEGRATION_FREEZE) or {}).get(runs[-1]) if runs else None
+    if not isinstance(frozen, dict):
+        return None
+    stage = ((frozen.get("candidate") or {}).get("owning_operation") or {}).get("terminal_stage")
+    return (stage, frozen) if isinstance(stage, str) else None
+
+
+def is_integration_terminal_stage(mutation: Mutation, stage: str, work_id: str) -> bool:
+    """Whether ``stage`` is exactly the terminal stage this START records for its reviewed integration ``work_id``
+    (``start._recorded_completion``): the stage its frozen Candidate names, holding the P5 Run summary, the ordinary
+    ``work_target_removed`` / ``work_completed`` under the IDs reserved for them, the version 5 Consumption and,
+    when owed, the Phase completion evidence - in that order, and nothing else."""
+    found = _frozen_terminal(mutation, work_id)
+    if found is None or found[0] != stage:
+        return False
+    effects = mutation.stage_effects(stage)
+    kinds = [effect.get("kind") for effect in effects]
+    if kinds not in (["create_file", "append_event", "append_event", "create_file"],
+                     ["create_file", "append_event", "append_event", "create_file", "create_file"]):
+        return False
+    events = [effect["payload"]["record"] for effect in effects if effect.get("kind") == "append_event"]
+    return [(event.get("type"), event.get("entity")) for event in events] == [
+        ("work_target_removed", work_id), ("work_completed", work_id)] and all(
+        mutation.reserved(f"{stage}:event:{index}") == event.get("id") for index, event in enumerate(events))
+
+
+def _integration_terminal_gate(session: "_Session", work: Entity, run: IntegrationRun, chain: Any,
+                               receipt: records.Receipt) -> list[str]:
+    """§14.16 + §32.30, every fact established under the START lock (none has a passing default)."""
+    from . import phase_integration as pi
+    from . import start_integration_review as sir
+    from .review import integration as ri
+    from .validate import validate_structure
+
+    store = session.store
+    review = ReviewStore(store)
+    view = ProjectView.load(store)
+    current = _integration_current_problems(session, run)
+    adjudication = review.read_adjudication(run.review_run_id)
+    latest = chain.latest
+    chains = {}
+    for found_id in sorted(review.run_ids()):
+        other = review.gate_chain(found_id)
+        first = None if other is None else other.generations[0]
+        if first is not None and (first.review_kind, first.target_identity) == (ri.REVIEW_KIND, work.id):
+            chains[found_id] = other
+    # a Run set aside by an Integration Run's own request (a decided HUMAN_WAIT) is no longer pending beside it
+    named = {str(item["review_run_id"]) for other in chains.values()
+             for item in _integration_envelope(review, other).get("set_aside_runs") or []}
+    others = [found_id for found_id, other in chains.items() if found_id != run.review_run_id
+              and found_id not in named and _integration_settled(review, other) is None]
+    readiness = history.readiness_problems(review, run.review_run_id, history.BOUNDARY_FINDINGS,
+                                           history_contract=history.HISTORY_CONTRACT)
+    current_work = view.works.get(work.id)
+    facts = sir.TerminalGateFacts(
+        ordinary_precheck_passed=not view.unsatisfied_dependencies(work.id),
+        marker_matches=current_work is not None and pi.is_reviewed_integration(current_work)
+        and current_work.phase_review_contract == run.candidate["integration"]["phase_review_contract"],
+        candidate_current=not current, structural_validation_passed=not validate_structure(view),
+        structural_coverage_current=not current, phase_basis_invalidated=bool(current),
+        review_complete=latest.sealed and latest.generation == p4.SEAL_GENERATION,
+        review_evidence_current=not current, branch=str(adjudication.integration_disposition),
+        phase_outcome=str((adjudication.phase_outcome or {}).get("outcome")),
+        downstream_confirmation_modeled=bool(ri.downstream_confirmation_ids_of(run.candidate)),
+        blocking_problems=sum(1 for finding in adjudication.findings if finding["blocking"]),
+        dispositions_valid=not p4.convergence_from_records(review, run.review_run_id, chain,
+                                                           _integration_envelope(review, chain), evidence_current=True),
+        receipt_authorizes_candidate=(
+            latest.receipt_id == receipt.receipt_id and receipt.review_run_id == run.review_run_id
+            and receipt.authorized_candidate_hash == ri.candidate_hash(run.candidate)
+            and receipt.review_kind == ri.REVIEW_KIND and receipt.target_identity == work.id
+            and receipt.authorized_operation_stage == ri.AUTHORIZED_OPERATION_STAGE),
+        history_obligations_valid=not readiness, incompatible_pending_successor=bool(others),
+        side_effect_problems=_side_effect_problems(session, run),
+        conflicts=tuple(
+            ([f"Receipt {receipt.receipt_id} is already consumed"]
+             if review.consumption_by_receipt().get(receipt.receipt_id) is not None else [])
+            + ([f"Receipt {receipt.receipt_id} is superseded"] if review.supersession_exists(receipt.receipt_id) else [])
+            + [f"Integration Review Run {other} of {work.id} is pending beside it" for other in others]),
+        unclosed_obligations=tuple(f"{count} open HUMAN obligation(s)" for count in
+                                   [int((adjudication.obligations or {}).get("human") or 0)] if count),
+    )
+    return sir.terminal_gate_problems(facts)
+
+
+def _integration_terminal(session: "_Session", work: Entity, run: IntegrationRun, chain: Any) -> Any:
+    """§32.30 - §32.31: the terminal gate, then ONE recorded stage, then START's ordinary completion finalization.
+
+    The stage holds, in order: the consumed P5 Run summary, the integration's
+    ordinary ``work_target_removed`` and unmarked ``work_completed`` (the
+    Receipt authorizes this stage only), the version 5 Integration Consumption
+    bound to exactly that ``work_completed`` event ID - every ID reserved before
+    the stage is recorded, so a resume binds the same pair - and, when this
+    terminal transition makes the reviewed Phase generated-complete, the Phase
+    completion evidence (§32.35 - §32.37). Its finalization is START's ordinary
+    ``<Work>:finalize`` commit and push; a resume that finds the stage recorded
+    and unfinalized finishes it from the record (``start._completion_to_finish``).
+    """
+    from . import achievement as ach
+    from .ops import new_event
+    from .review import integration as ri
+
+    store, mutation = session.store, session.mutation
+    review = ReviewStore(store)
+    stage = str(run.candidate["owning_operation"]["terminal_stage"])
+    if not mutation.has_stage(stage):
+        if stage_name(mutation, f"{work.id}:lifecycle") != stage:
+            raise _integration_reconcile(f"the next lifecycle stage of {work.id} is no longer the terminal stage its "
+                                         f"Candidate names ({stage})", "review_candidate_mismatch")
+        receipt = review.read_receipt(str(run.receipt_id))
+        refused = _integration_terminal_gate(session, work, run, chain, receipt)
+        if refused:
+            raise StopError(f"integration {work.id} may not record its terminal stage (§32.30): " + "; ".join(refused),
+                            code=ri.CODE_NOT_AUTHORIZABLE)
+        consumption_id = mutation.reserve_id(gate.review_consumption_key(receipt.receipt_id), "review_consumption")
+        removed = new_event(mutation, f"{stage}:event:0", "work_target_removed", work.id)
+        completed = new_event(mutation, f"{stage}:event:1", "work_completed", work.id)
+        consumption = records.IntegrationConsumption(
+            consumption_id, receipt.receipt_id, receipt.review_run_id, receipt.review_generation, receipt.review_kind,
+            receipt.authorized_candidate_hash, receipt.operation_identity, mutation.id, completed.id, completed.type,
+            work.id,
+        )
+        sealed = chain.generation(p4.SEAL_GENERATION)
+        summary = history.consumed_run_summary(sealed, receipt, consumption_id,
+                                               candidate_generation=p4.run_candidate_generation(review, chain),
+                                               adjudication=p4.bound_adjudication(review, chain))
+        summary_path = review_paths.history_run_rel(run.review_run_id)
+        consumption_path = review_paths.consumption_rel(consumption_id)
+        effects = [
+            Effect.create_file(summary_path, serialize.canonical_text(summary.to_record())),
+            Effect.append_event(removed),
+            Effect.append_event(completed),
+            Effect.create_file(consumption_path, serialize.canonical_text(consumption.to_record())),
+        ]
+        paths = [summary_path, consumption_path]
+        view = ProjectView.load(store)
+        # the projection carries the very events the stage records, so the basis it binds is HEAD's after finalization
+        projected = replace(view, events=list(view.events) + [removed, completed])
+        phase_id = str(run.candidate["phase_id"])
+        existing = review.phase_completion_evidence()
+        if ach.phase_evidence_obligation(projected, phase_id, existing).required:
+            adjudication = review.read_adjudication(run.review_run_id)
+            outcome = ri.PhaseOutcome.from_record(adjudication.phase_outcome)
+            evidence_id = mutation.reserve_id(f"{stage}:achievement", "review_achievement")
+            # CPQ-05A: four distinct digests, each of its own record - the TERMINAL gate generation (never the Run
+            # summary), the Receipt, the Consumption - and the separate consumed P5 summary reference
+            ref = ach.IntegrationRunRef(
+                work.id, run.review_run_id, receipt.authorized_candidate_hash, chain.latest_digest, receipt.receipt_id,
+                review.receipt_digest(receipt.receipt_id), consumption_id, serialize.digest(consumption.to_record()),
+                serialize.digest(summary.to_record()),
+            )
+            sources = [message for _, message in history.integration_run_ref_problems(
+                review, ref, outcome, consumption=consumption, run_summary=summary)]
+            evidence = ach.phase_completion_evidence_for(
+                projected, phase_id, existing, achievement_evidence_id=evidence_id, covering_integration_id=work.id,
+                integration_review=ref, phase_outcome=outcome, source_ref_problems=sources,
+                evaluators=[(str(task["task_slot"]), str(task["reviewer_identity"]), str(task["reviewer_version"]))
+                            for task in sealed.accepted_tasks],
+                rationale=outcome.rationale, causing_mutation_id=mutation.id, causing_operation=OWNER,
+                causing_event_ids=[completed.id],
+                work_review_refs=[(item["work_id"], item["review_run_id"], item["run_summary_digest"])
+                                  for item in run.candidate["work_review_refs"]],
+            )
+            if evidence is not None:
+                evidence_path = review_paths.history_achievement_rel(evidence_id)
+                effects.append(Effect.create_file(
+                    evidence_path, serialize.canonical_text(history.achievement_record(evidence).to_record())))
+                paths.append(evidence_path)
+        gate.require_committable(store, paths)
+        gitops.require_no_planning_transform(store.root, paths)
+        checkout.require_checkout_capability(store, paths)
+        missing = [path for path in paths if path not in mutation.scope.files]
+        if missing:
+            mutation.extend_scope(files=missing)
+        mutation.add_effects(stage, effects)
+    mutation.apply()
+    history.require_history_ready(review, run.review_run_id, history.BOUNDARY_CONSUMPTION,
+                                  history_contract=history.HISTORY_CONTRACT,
+                                  consumption_id=mutation.reserved(gate.review_consumption_key(str(run.receipt_id))))
+    return session.finish_completion(work.id)
+
+
+# --------------------------------------------------------------------------- R26: after a G4-terminal Run
+
+def _followups(mutation: Mutation) -> dict[str, dict[str, Any]]:
+    found = mutation.note(NOTE_INTEGRATION_FOLLOWUPS)
+    if found is None:
+        return {}
+    if not isinstance(found, dict) or not all(isinstance(key, str) and isinstance(value, dict)
+                                              for key, value in found.items()):
+        raise _integration_reconcile(f"START mutation {mutation.id}'s Integration follow-ups are not a Run mapping")
+    return dict(found)
+
+
+def _set_followup(mutation: Mutation, run_id: str, entry: dict[str, Any] | None) -> None:
+    found = _followups(mutation)
+    if entry is None:
+        found.pop(run_id, None)
+    else:
+        found[run_id] = entry
+    mutation.set_note(NOTE_INTEGRATION_FOLLOWUPS, found)
+
+
+def _recorded_stages(mutation: Mutation) -> list[str]:
+    stages: list[str] = []
+    for effect in mutation.effects:
+        if effect["stage"] not in stages:
+            stages.append(effect["stage"])
+    return stages
+
+
+def _repair_move(mutation: Mutation, run_id: str) -> tuple[str, str] | None:
+    """The removal and the commit that ended the repaired cycle of ``run_id``, when both are recorded."""
+    entry = _followups(mutation).get(run_id)
+    if not entry or entry.get("kind") != FOLLOWUP_REPAIR or not mutation.has_stage(str(entry.get("stage"))):
+        return None
+    stages = _recorded_stages(mutation)
+    after = stages[stages.index(str(entry["stage"])) + 1:]
+    work_id = str(entry.get("work_id"))
+    removal = next((name for name in after if name.startswith(f"{work_id}:lifecycle:") and any(
+        (effect["payload"].get("record") or {}).get("type") == "work_target_removed"
+        for effect in mutation.stage_effects(name) if effect["kind"] == "append_event")), None)
+    if removal is None:
+        return None
+    commit = next((name for name in after[after.index(removal) + 1:] if name.startswith("commit:")), None)
+    return None if commit is None else (removal, commit)
+
+
+def _repair_moved(mutation: Mutation, run_id: str) -> bool:
+    return _repair_move(mutation, run_id) is not None
+
+
+def _prior_repair_links(review: ReviewStore, view: ProjectView, work_id: str) -> tuple[Any, ...]:
+    """§32.26: the prior supported repair links of this integration, from validated P5 future_work_link provenance."""
+    from .review import integration as ri
+
+    links = []
+    for relation_id in review.history_ids(review_paths.HISTORY_RELATIONS):
+        found = review.read_history(review_paths.HISTORY_RELATIONS, relation_id)
+        provenance = found.integration_provenance
+        if found.relation_type != history.RELATION_FUTURE_WORK_LINK or provenance is None:
+            continue
+        chain = review.gate_chain(str(provenance["source_review_run_id"]))
+        if chain is None or chain.generations[0].target_identity != work_id \
+                or history.relation_problems(review, found, work_ids=set(view.works)):
+            continue
+        finding = review.read_history(review_paths.HISTORY_FINDINGS, found.source.id)
+        links.append(ri.PriorRepairLink(finding.semantic_surface, str(provenance["strategy_id"]), finding.finding_id,
+                                        str(provenance["source_review_run_id"]), found.target.id))
+    return tuple(sorted(links, key=lambda link: (link.source_review_run_id, link.source_finding_id,
+                                                 link.target_work_id)))
+
+
+def integration_repair_context(store: ProjectStore, work_id: str, review_run_id: str) -> Any:
+    """§32.25 - §32.26: the canonical blocking obligation set of a DOMAIN_REPAIR_REQUIRED Run, from its G4 records only:
+    its blocking Findings with their semantic surfaces, the unmet objective obligations of its Phase outcome, the
+    validated prior repair links of the integration and whether STRATEGY_CHANGE is required."""
+    from .review import integration as ri
+
+    review = ReviewStore(store)
+    adjudication = review.read_adjudication(review_run_id)
+    if adjudication.integration_disposition != ri.BRANCH_DOMAIN_REPAIR_REQUIRED:
+        raise _integration_reconcile(f"Integration Review Run {review_run_id} is {adjudication.integration_disposition}, "
+                                     "not DOMAIN_REPAIR_REQUIRED")
+    blocking = tuple(sorted((str(finding["finding_id"]), str(finding["semantic_surface"]))
+                            for finding in adjudication.findings if finding["blocking"]))
+    outcome = adjudication.phase_outcome or {}
+    context = ri.IntegrationRepairContext(
+        work_id, review_run_id, blocking, tuple(outcome.get("unmet_objective_obligations") or ()),
+        _prior_repair_links(review, ProjectView.load(store), work_id),
+        bool((adjudication.obligations or {}).get("strategy_change_required")),
+    )
+    problems = context.problems()
+    if problems:
+        raise _integration_reconcile(f"the canonical records of Integration Review Run {review_run_id} make no domain "
+                                     "repair context: " + "; ".join(problems), "review_record_invalid")
+    return context
+
+
+def _ask_repair(session: "_Session", work: Entity, context: Any) -> Any:
+    """START's executor in the dedicated integration-repair planning context - only after G4 (§32.25)."""
+    from . import start as st
+
+    store = session.store
+    view = ProjectView.load(store)
+    work = view.works[work.id]
+    phase = view.phases.get(str(work.phase_id))
+    roadmap = view.roadmaps.get(phase.roadmap_id or "") if phase is not None else None
+    found = st.ExecutionContext(store, view, work, view.work_state(work.id), phase, roadmap,
+                                st.reading_plan(store, view, work), session.mutation.id, session.mode, 1,
+                                integration_repair=context)
+    return session.executor(found)
+
+
+def _integration_domain_repair(session: "_Session", view: ProjectView, work: Entity, run: IntegrationRun) -> Any:
+    """R26 / §32.25 - §32.27: a DOMAIN_REPAIR_REQUIRED Run is repaired through START's normal fix Works.
+
+    START hands its executor the canonical blocking obligation set and accepts
+    only an IntegrationRepairPlan over its own ``Derive`` (moving the target off,
+    no second integration, normal fix Works before the integration) - or the
+    existing question / hold behaviour; nothing completes past the blocking
+    Findings. The plan is kept before its registration, then registered through
+    START's derivation (CREATE), the target removed and the move committed;
+    the integration stays in progress and is entered again after its fixes,
+    with a new Candidate and Run (:func:`_integration_run`). A resume finishes
+    the kept plan from the record and never asks again.
+    """
+    from . import input_validation
+    from . import start as st
+    from . import start_integration_review as sir
+
+    store, mutation = session.store, session.mutation
+    entry = _followups(mutation).get(run.review_run_id)
+    if entry is None:
+        context = integration_repair_context(store, work.id, run.review_run_id)
+        outcome = _ask_repair(session, work, context)
+        if isinstance(outcome, st.QuestionWait):
+            return st.StartResult("question_wait", work.id, mutation.id, phase_id=work.phase_id, detail=outcome.question)
+        if isinstance(outcome, st.Hold):
+            session._record_hold(work, outcome)
+            session._commit("commit", st.finalization_message(st._HELD, work.display), [])
+            return st.StartResult("held", work.id, mutation.id, phase_id=work.phase_id, detail=outcome.reason,
+                                  head=gitcmd.head_commit(store.root))
+        refused = sir.repair_outcome_problems(outcome, context)
+        if refused:
+            raise StopError(f"the repair plan for integration {work.id} is refused: " + "; ".join(refused)
+                            + "; nothing of it was recorded", code=CODE_INTEGRATION_REPAIR_PLAN_INVALID)
+        kept = st._recorded_outcome(outcome.derive)
+        if kept is None or st._outcome_from_record(kept) != outcome.derive:
+            raise StopError(f"the repair plan for integration {work.id} cannot be kept in the record exactly; nothing "
+                            "of it was recorded", code="input_unrepresentable")
+        current = ProjectView.load(store)
+        specs, relations = st._derivation_registration(current, current, current.works[work.id], outcome.derive,
+                                                       semantics=session.semantics)
+        input_validation.require_work_specs(specs, "integration fix work")
+        input_validation.require_relations(relations, specs, "integration fix relation")
+        input_validation.require_works_text(specs, "integration fix work")
+        entry = {"kind": FOLLOWUP_REPAIR, "work_id": work.id, "strategy_id": outcome.strategy_id, "derive": kept,
+                 "stage": stage_name(mutation, f"{work.id}:derive"), "display": work.display,
+                 "blocking_finding_ids": list(context.blocking_finding_ids),
+                 "provenance": stage_name(mutation, f"{work.id}:repair-provenance")}
+        _set_followup(mutation, run.review_run_id, entry)
+    stage = str(entry["stage"])
+    derive = st._outcome_from_record(entry["derive"])
+    replay = st._ProvenDerivation(work.id, stage, derive, "derive", mutation.has_stage(stage), entry.get("display"))
+    current = ProjectView.load(store)
+    try:
+        work_ids = session._derive(current, current.works[work.id], derive, replay)
+    except BaseException:
+        if not mutation.has_stage(stage):
+            _set_followup(mutation, run.review_run_id, None)  # nothing of the plan was carried out: asked again
+        raise
+    _record_fix_links(session, run.review_run_id, entry, work_ids)
+    if ProjectView.load(store).work_state(work.id).has_target:
+        session._lifecycle(current.works[work.id], ["work_target_removed"])
+    session._commit("commit", st._move_message(str(entry.get("display") or work.display), "derive"), [])
+    state = ProjectView.load(store).work_state(work.id)
+    if state.terminal or state.has_target:
+        raise StopError(f"{work.id} is {state.state} and still carries its target after the repair move",
+                        code="postcheck_failed")
+    return st.StartResult("moved", work.id, mutation.id, tuple(session.completed), work.phase_id,
+                          head=gitcmd.head_commit(store.root))
+
+
+def _record_fix_links(session: "_Session", run_id: str, entry: dict[str, Any], work_ids: dict[str, str]) -> None:
+    """§32.26 / §32.50 (R16): the version 2 ``future_work_link`` of each (blocking Finding, fix Work) START's repair
+    plan registered - the source Integration Run and the strategy identity as provenance - in their own stage between
+    the registration and the move, so the move commit carries them. Provenance only: they put no Work in a
+    completion set and make Review no Work owner. A plan resting only on unmet objective obligations (no blocking
+    Finding) links nothing. Recorded once; a resume replays the recorded stage."""
+    from .review import integration as ri
+
+    store, mutation = session.store, session.mutation
+    stage = entry.get("provenance")
+    findings = sorted(str(finding_id) for finding_id in entry.get("blocking_finding_ids") or [])
+    if not isinstance(stage, str) or not findings or mutation.has_stage(stage):
+        return
+    review = ReviewStore(store)
+    strategy = str(entry["strategy_id"])
+    effects, paths = [], []
+    for finding_id in findings:
+        source = review.read_history(review_paths.HISTORY_FINDINGS, finding_id)
+        for ordinal, key in enumerate(sorted(work_ids), start=1):
+            problems = ri.IntegrationFixProvenance(run_id, finding_id, strategy, work_ids[key]).problems()
+            if problems:
+                raise _integration_reconcile(f"the fix provenance of {work_ids[key]} is invalid: " + "; ".join(problems),
+                                             "review_record_invalid")
+            relation_id = mutation.reserve_id(history.review_relation_key(finding_id, ordinal), "review_relation")
+            relation = history.future_work_link(
+                relation_id, source, work_ids[key], status=history.CAUSAL_SUPPORTED, rationale=FIX_LINK_RATIONALE,
+                supporting_evidence_digests=[source.adjudication_digest],
+                integration_provenance={"source_review_run_id": run_id, "strategy_id": strategy},
+            )
+            path = review_paths.history_relation_rel(relation_id)
+            effects.append(Effect.create_file(path, serialize.canonical_text(relation.to_record())))
+            paths.append(path)
+    gate.require_committable(store, paths)
+    gitops.require_no_planning_transform(store.root, paths)
+    checkout.require_checkout_capability(store, paths)
+    missing = [path for path in paths if path not in mutation.scope.files]
+    if missing:
+        mutation.extend_scope(files=missing)
+    mutation.add_effects(stage, effects)
+    mutation.apply()
+
+
+def _integration_confirmation_structure(session: "_Session", view: ProjectView, work: Entity,
+                                        run: IntegrationRun) -> IntegrationRun:
+    """§32.23: CONFIRMATION_STRUCTURE_REQUIRED - exactly one deterministic confirmation through CREATE, committed,
+    then a successor Run of the same integration over a new Candidate that binds it.
+
+    Reviewer text never reaches the structure (``confirmation_structure``); one
+    valid downstream confirmation already there means none is created; several
+    generated duplicates are a reconcile failure. The structure commit carries
+    only the registration's own paths, so START's opening of the integration
+    stays its uncommitted lifecycle projection. The successor never names the
+    final Run (MC-7). Decided once and finished from the record on resume.
+    """
+    from . import start_integration_review as sir
+    from .create import register_works
+    from .ops import _owned_paths
+
+    store, mutation = session.store, session.mutation
+    phase_id = str(run.candidate["phase_id"])
+    entry = _followups(mutation).get(run.review_run_id)
+    if entry is None:
+        decision, _ = sir.confirmation_decision(ProjectView.load(store), phase_id, work.id)
+        entry = {"kind": FOLLOWUP_STRUCTURE, "work_id": work.id, "stage": stage_name(
+            mutation, f"{work.id}:structure") if decision == sir.CONFIRMATION_CREATE else None}
+        _set_followup(mutation, run.review_run_id, entry)
+    stage = entry.get("stage")
+    if isinstance(stage, str):
+        if not mutation.has_stage(stage):
+            specs, relations = sir.confirmation_registration(ProjectView.load(store), phase_id, work.id)
+            ledger = f"{review_paths.WORKLINE_DIR}/relations/roadmap.yaml"
+            if ledger in gitops.record_preexisting_dirty(mutation, store.root):
+                raise StopError(f"the confirmation structure of {work.id} writes {ledger}, which held a change from "
+                                "before this operation; nothing of it was recorded", code="dirty_overlap")
+            register_works(mutation, stage, specs, relations)
+        paths = _owned_paths(mutation.stage_effects(stage))
+        session._commit(f"{work.id}:structure-commit", f"chore(workline): add the Phase confirmation of {work.display}",
+                        paths, include_canonical=False)
+    return _integration_successor(session, view, work, run.review_run_id, ())
+
+
+# --------------------------------------------------------------------------- R27: evidence at an ordinary completion
+
+def _covering_reference(store: ProjectStore, mutation: Mutation, review: ReviewStore, view: ProjectView,
+                        projected: ProjectView, phase_id: str) -> Any:
+    """The covering integration of the projected basis and the references of its consumed Integration Run - found by
+    the Consumption of the integration's own ``work_completed`` - or ``None`` when none can be cited (a Run with no
+    gate chain included, RB5K-2).
+
+    The records are read through the working Project's Review store, and the
+    evidence built from them is immutable and committed by this operation: so
+    every record a reference is read from (the Consumption, the consumed Run
+    summary, the Receipt, the adjudication, every gate generation, the Candidate
+    snapshot) must hold no change from before this operation - one that does is
+    refused ``dirty_overlap`` and never bound (RB5K-1), so the evidence binds
+    only bytes HEAD holds.
+    """
+    from . import achievement as ach
+    from .review import integration as ri
+
+    basis = ach.phase_basis(projected, phase_id)
+    for integration_id in sorted(basis.covering_integration_ids):
+        completed = [event.id for event in view.events_for(integration_id) if event.type == "work_completed"]
+        consumption = next((found for found in review.consumptions()
+                            if isinstance(found, records.IntegrationConsumption)
+                            and found.target_identity == integration_id and found.terminal_event_id in completed), None)
+        if consumption is None:
+            continue
+        run_id = consumption.review_run_id
+        chain = review.gate_chain(run_id)
+        if chain is None:
+            continue
+        sources = [review_paths.consumption_rel(consumption.consumption_id), review_paths.history_run_rel(run_id),
+                   review_paths.receipt_rel(consumption.receipt_id), review_paths.adjudication_rel(run_id),
+                   review_paths.candidate_snapshot_rel(chain.generations[0].candidate_hash)]
+        sources += [review_paths.gate_rel(run_id, generation.generation) for generation in chain.generations]
+        dirty = sorted(set(gitops.record_preexisting_dirty(mutation, store.root)) & set(sources))
+        if dirty:
+            raise StopError(f"the Review records the Phase completion evidence of {phase_id} would cite held a change "
+                            "from before this operation (" + ", ".join(dirty) + "); the evidence binds only what HEAD "
+                            "holds, so nothing was recorded", code="dirty_overlap")
+        receipt = review.read_receipt(consumption.receipt_id)
+        adjudication = review.read_adjudication(run_id)
+        outcome = ri.PhaseOutcome.from_record(adjudication.phase_outcome)
+        ref = ach.IntegrationRunRef(
+            integration_id, run_id, receipt.authorized_candidate_hash, chain.latest_digest, receipt.receipt_id,
+            review.receipt_digest(receipt.receipt_id), consumption.consumption_id,
+            review.consumption_digest(consumption.consumption_id), review.history_digest(review_paths.HISTORY_RUNS, run_id),
+        )
+        candidate = review.read_candidate_snapshot(chain.generations[0].candidate_hash).material or {}
+        evaluators = [(str(task["task_slot"]), str(task["reviewer_identity"]), str(task["reviewer_version"]))
+                      for task in chain.latest.accepted_tasks]
+        refs = [(item["work_id"], item["review_run_id"], item["run_summary_digest"])
+                for item in candidate.get("work_review_refs") or []]
+        return integration_id, ref, outcome, evaluators, refs
+    return None
+
+
+def completion_evidence_effects(store: ProjectStore, mutation: Mutation, work: Entity, stage: str,
+                                events: list[Effect]) -> list[Effect]:
+    """§32.36 - §32.37 for an ordinary START completion (a downstream confirmation, or any Work whose completion
+    closes the current reviewed basis): the phase_completion evidence, reserved and built before the completion is
+    recorded, for its SAME lifecycle stage - or nothing. A legacy Phase pays nothing: its completion mode is read
+    before any basis is computed."""
+    from . import achievement as ach
+    from . import phase_integration as pi
+
+    view = ProjectView.load(store)
+    phase_id = str(work.phase_id)
+    if work.phase_id is None or phase_id not in view.phases or pi.completion_mode(view, phase_id) != pi.MODE_REVIEWED:
+        return []
+    added = [Event.from_record(effect.payload["record"]) for effect in events]
+    projected = replace(view, events=list(view.events) + added)
+    review = ReviewStore(store)
+    existing = review.phase_completion_evidence()
+    if not ach.phase_evidence_obligation(projected, phase_id, existing).required:
+        return []
+    found = _covering_reference(store, mutation, review, view, projected, phase_id)
+    if found is None:
+        raise StopError(f"completing {work.id} makes reviewed Phase {phase_id} generated-complete, and no covering "
+                        "integration's consumed Review can be cited: no evidence is fabricated, nothing was recorded",
+                        code=CODE_PHASE_EVIDENCE_UNAVAILABLE)
+    integration_id, ref, outcome, evaluators, refs = found
+    sources = [message for _, message in history.integration_run_ref_problems(review, ref, outcome)]
+    evidence_id = mutation.reserve_id(f"{stage}:achievement", "review_achievement")
+    evidence = ach.phase_completion_evidence_for(
+        projected, phase_id, existing, achievement_evidence_id=evidence_id, covering_integration_id=integration_id,
+        integration_review=ref, phase_outcome=outcome, source_ref_problems=sources, evaluators=evaluators,
+        rationale=outcome.rationale, causing_mutation_id=mutation.id, causing_operation=OWNER,
+        causing_event_ids=[added[-1].id], work_review_refs=refs,
+    )
+    if evidence is None:
+        return []
+    path = review_paths.history_achievement_rel(evidence_id)
+    fsafe.require_immutable_create()
+    gate.require_committable(store, [path])
+    gitops.require_no_planning_transform(store.root, [path])
+    checkout.require_checkout_capability(store, [path])
+    if path not in mutation.scope.files:
+        mutation.extend_scope(files=[path])
+    return [Effect.create_file(path, serialize.canonical_text(history.achievement_record(evidence).to_record()))]
+
+
+def replan_evidence_effects(store: ProjectStore, mutation: Mutation, work_id: str, stage: str,
+                            causing_event_ids: list[str], *, causing_operation: str = OWNER) -> list[Effect]:
+    """§32.36 - §32.37 for START's cancel (its replan applied): the phase_completion evidence over the Project as the
+    cancel's applied effects leave it, reserved and built before the final commit - or nothing. A legacy Phase pays
+    nothing. A basis whose evidence cannot be valid (no covering integration's consumed Review can be cited, or the
+    body does not hold - e.g. its required Human confirmation was cancelled) is not written over: no evidence is
+    fabricated, the obligation stays open and progression stays blocked, and the cancel itself is never refused."""
+    from . import achievement as ach
+    from . import phase_integration as pi
+
+    view = ProjectView.load(store)
+    work = view.works.get(work_id)
+    phase_id = None if work is None else work.phase_id
+    if phase_id is None or phase_id not in view.phases or pi.completion_mode(view, phase_id) != pi.MODE_REVIEWED:
+        return []
+    review = ReviewStore(store)
+    existing = review.phase_completion_evidence()
+    if not ach.phase_evidence_obligation(view, phase_id, existing).required:
+        return []
+    try:
+        found = _covering_reference(store, mutation, review, view, view, phase_id)
+    except StopError as refused:
+        if refused.code != "dirty_overlap":
+            raise
+        return []  # RB5K-1 for a cancel / exclusion: nothing is bound from changed records, and the owner is not refused
+    if found is None:
+        return []
+    integration_id, ref, outcome, evaluators, refs = found
+    sources = [message for _, message in history.integration_run_ref_problems(review, ref, outcome)]
+    try:
+        evidence = ach.phase_completion_evidence_for(
+            view, phase_id, existing, achievement_evidence_id=mutation.reserve_id(stage, "review_achievement"),
+            covering_integration_id=integration_id, integration_review=ref, phase_outcome=outcome,
+            source_ref_problems=sources, evaluators=evaluators, rationale=outcome.rationale,
+            causing_mutation_id=mutation.id, causing_operation=causing_operation, causing_event_ids=causing_event_ids,
+            work_review_refs=refs,
+        )
+    except ValidationError:
+        return []
+    if evidence is None:
+        return []
+    path = review_paths.history_achievement_rel(evidence.achievement_evidence_id)
+    fsafe.require_immutable_create()
+    gate.require_committable(store, [path])
+    gitops.require_no_planning_transform(store.root, [path])
+    checkout.require_checkout_capability(store, [path])
+    if path not in mutation.scope.files:
+        mutation.extend_scope(files=[path])
+    return [Effect.create_file(path, serialize.canonical_text(history.achievement_record(evidence).to_record()))]
+
+
+def stage_evidence_postcommit(store: ProjectStore, mutation: Mutation, stage: str) -> None:
+    """§32.39 for an owner that records phase_completion evidence in a stage of its own (a Roadmap work-plan
+    exclusion): when ``stage`` is recorded, HEAD holds its record byte for byte and the evidence is HEAD's committed
+    Phase basis; a mismatch is reconcile required, never replaced. An owner that recorded none pays nothing."""
+    from . import achievement as ach
+
+    if not mutation.has_stage(stage):
+        return
+    expected = {effect["payload"]["path"]: effect["payload"]["content"].encode("utf-8")
+                for effect in mutation.stage_effects(stage) if effect.get("kind") == "create_file"}
+    git = hermetic_module.enter(store)
+    _, head = _head(git)
+    held = {entry.path: entry for entry in gitcmd.tree_entries(store.root, head, sorted(expected)) or []}
+    for path, data in sorted(expected.items()):
+        entry = held.get(path)
+        if entry is None or entry.type != "blob" or entry.mode != "100644" \
+                or gitcmd.read_blob(store.root, entry.oid) != data:
+            raise _reconcile(f"{path} is not committed at HEAD as a 100644 blob of the canonical bytes stage {stage} "
+                             "recorded", "review_not_persisted")
+    evidence_id = mutation.reserved(stage)
+    if evidence_id is None or review_paths.history_achievement_rel(evidence_id) not in expected:
+        return
+    evidence = ReviewStore(store).read_achievement(evidence_id).evidence
+    problems = ach.postcommit_basis_problems(
+        evidence, ach.phase_basis(committed_view_at(store, git, head), evidence.phase_id))
+    if problems:
+        raise _reconcile("the Phase completion evidence stage " + stage + " recorded is not HEAD's committed Phase "
+                         "basis (§32.39): " + "; ".join(problems) + "; no replacement evidence is made",
+                         REASON_ACHIEVEMENT_BASIS_MISMATCH)
+
+
+def roadmap_achievement_postcommit(store: ProjectStore, mutation: Mutation, roadmap_id: str, head: str,
+                                   stage: str) -> None:
+    """§32.46 step 11 for the Roadmap owner's achieved path: the roadmap_achieved event, its roadmap_achievement
+    evidence and the Roadmap basis read back from commit ``head`` itself as one decision. Nothing is repaired or
+    replaced: a mismatch is reconcile required, with the achievement reason stage_evidence_postcommit uses."""
+    from . import achievement as ach
+    from .committed_view import committed_view
+
+    evidence_id = mutation.reserved(f"{stage}:achievement")
+    event_id = mutation.reserved(f"{stage}:event:0")
+    committed = committed_view(store, head)
+    evidence = ReviewStore(store).read_achievement(str(evidence_id)).evidence
+    (event,) = [found for found in committed.events if found.id == event_id]
+    basis = ach.roadmap_basis(committed, roadmap_id, ReviewStore(store).phase_completion_evidence(),
+                              review_refs=evidence.review_refs, human_decision_ref=evidence.human_decision_ref)
+    problems = ach.readback_problems(evidence, basis, event)
+    if problems:
+        raise _reconcile(f"the committed roadmap_achieved of {roadmap_id} and its evidence do not read back as one "
+                         "decision: " + "; ".join(problems), REASON_ACHIEVEMENT_BASIS_MISMATCH)
+
+
+def completion_postcommit(store: ProjectStore, mutation: Mutation, work_id: str) -> None:
+    """After a completion's finalization (§32.31, §32.39): the Review records its lifecycle stage wrote - an
+    integration terminal stage's, or an ordinary completion's evidence - are committed at HEAD byte for byte, and
+    phase_completion evidence is HEAD's committed Phase basis. Nothing is repaired or replaced: a mismatch is
+    reconcile required. A completion that wrote no Review record (every legacy one) is not this check's."""
+    from . import achievement as ach
+
+    stages = [name for name in _recorded_stages(mutation) if name.startswith(f"{work_id}:lifecycle:") and any(
+        (effect["payload"].get("record") or {}).get("type") in ("work_completed", "work_cancelled")
+        for effect in mutation.stage_effects(name) if effect["kind"] == "append_event")]
+    if not stages:
+        return
+    stage = stages[-1]
+    expected = {effect["payload"]["path"]: effect["payload"]["content"].encode("utf-8")
+                for effect in mutation.stage_effects(stage) if effect.get("kind") == "create_file"}
+    cancelled = [name for name in _recorded_stages(mutation) if name.startswith(f"{work_id}:cancel:")
+                 and name.endswith(":achievement")]
+    for name in cancelled[-1:]:
+        expected.update({effect["payload"]["path"]: effect["payload"]["content"].encode("utf-8")
+                         for effect in mutation.stage_effects(name) if effect.get("kind") == "create_file"})
+    if not expected:
+        return
+    git = hermetic_module.enter(store)
+    _, head = _head(git)
+    entries = gitcmd.tree_entries(store.root, head, sorted(expected))
+    held = {entry.path: entry for entry in entries or []}
+    for path, data in sorted(expected.items()):
+        entry = held.get(path)
+        if entry is None or entry.type != "blob" or entry.mode != "100644" \
+                or gitcmd.read_blob(store.root, entry.oid) != data:
+            raise _reconcile(f"{path} is not committed at HEAD as a 100644 blob of the canonical bytes the completion "
+                             f"stage of {work_id} recorded", "review_not_persisted")
+    for evidence_id in [mutation.reserved(f"{stage}:achievement")] + [mutation.reserved(name) for name in cancelled[-1:]]:
+        if evidence_id is None or review_paths.history_achievement_rel(evidence_id) not in expected:
+            continue
+        evidence = ReviewStore(store).read_achievement(evidence_id).evidence
+        basis = ach.phase_basis(committed_view_at(store, git, head), evidence.phase_id)
+        problems = ach.postcommit_basis_problems(evidence, basis)
+        if problems:
+            raise _reconcile("the Phase completion evidence the completion of " + work_id + " recorded is not HEAD's "
+                             "committed Phase basis (§32.39): " + "; ".join(problems) + "; no replacement evidence is "
+                             "made", REASON_ACHIEVEMENT_BASIS_MISMATCH)
+
+
+# --------------------------------------------------------------------------- the owner loop
+
+def review_phase_integration(session: "_Session", view: ProjectView, work: Entity) -> Any:
+    """START's Phase Integration Review of one marked integration (§32.16): its lifecycle opens, no executor runs.
+
+    The Run's chain decides the next step, so a resume continues at the
+    earliest unfinished generation and decides nothing again:
+
+    ```text
+    (none)  G1 accept           1  launch -> G2         2  declined: final not_authorized (STOP)
+                                                           otherwise G3 accept
+    3  adjudicate -> G4         4  HUMAN_WAIT: pending (R8), a Human decision exits it into a successor Run
+                                   DOMAIN_REPAIR_REQUIRED: final not_authorized; START's repair plan, fix
+                                     Works, the move (R26) - a new Run when the integration is entered again
+                                   CONFIRMATION_STRUCTURE_REQUIRED: final not_authorized; the confirmation
+                                     through CREATE, committed, then a successor Run (§32.23)
+                                   a step-4 refusal: final not_authorized (STOP)
+                                   AUTHORIZATION_READY: G5 seal
+    5  sealed: the terminal gate, the terminal stage, START's ordinary finalization
+    ```
+    """
+    from . import start as st
+    from .review import integration as ri
+
+    store, mutation = session.store, session.mutation
+    held = _integration_runs(mutation, work.id)
+    moved = _repair_move(mutation, held[-1]) if held else None
+    if moved is not None and _recorded_stages(mutation)[-1] == moved[1]:
+        # resumed right after the repair move: that cycle ended there, exactly as uninterrupted
+        return st.StartResult("moved", work.id, mutation.id, tuple(session.completed), work.phase_id,
+                              head=gitcmd.head_commit(store.root))
+    run = _integration_run(session, view, work)
+    while True:
+        _integration_resolve_pending(session, run)
+        review = ReviewStore(store)
+        chain = _integration_chain(store, run)
+        latest = 0 if chain is None else chain.latest.generation
+        if chain is not None:
+            problems = p4.chain_problems(chain)
+            first = chain.generations[0]
+            if first.review_kind != ri.REVIEW_KIND or first.target_identity != work.id \
+                    or first.operation_identity != integration_operation_identity(work.id):
+                problems.append("generation 1 is not the Phase Integration Review of this integration")
+            if problems or p4.shape_of(chain) == p4.SHAPE_REPAIR or latest > p4.SEAL_GENERATION:
+                raise _integration_reconcile(f"Integration Review Run {run.review_run_id}: "
+                                             + "; ".join(problems or ["not discovery -> adjudication -> seal"]))
+        if latest == 0:
+            _integration_accept(session, run)
+        elif latest == 1:
+            _integration_launch(session, run, chain)
+        elif latest == p4.DISCOVERY_SETTLE_GENERATION:
+            if any(task["status"] != records.TASK_SETTLED_OK for task in chain.latest.settled_tasks):
+                raise StopError(f"a discovery task of Integration Review Run {run.review_run_id} declined: the Run is "
+                                "final not_authorized and no Receipt issues", code=ri.CODE_NOT_AUTHORIZABLE)
+            _integration_accept_adjudication(session, run, chain)
+        elif latest == 3:
+            _integration_adjudicate(session, run, chain)
+        elif latest == p4.ADJUDICATION_SETTLE_GENERATION:
+            history.require_history_ready(review, run.review_run_id, history.BOUNDARY_FINDINGS,
+                                          history_contract=history.HISTORY_CONTRACT)
+            disposition = review.read_adjudication(run.review_run_id).integration_disposition
+            if disposition == records.HUMAN_WAIT:
+                # R8: the same canonical Run, pending, until an explicit Human decision exits it into a successor
+                run = _integration_successor(session, view, work, run.review_run_id,
+                                             _integration_exit_wait(session, run.review_run_id, chain, work.id))
+                continue
+            if disposition == ri.BRANCH_CONFIRMATION_STRUCTURE_REQUIRED:
+                run = _integration_confirmation_structure(session, view, work, run)
+                continue
+            if disposition == ri.BRANCH_DOMAIN_REPAIR_REQUIRED:
+                return _integration_domain_repair(session, view, work, run)
+            if disposition in records.INTEGRATION_G4_TERMINAL_DISPOSITIONS:
+                raise StopError(f"Integration Review Run {run.review_run_id} ended at generation 4 with "
+                                f"{disposition}: it is final not_authorized, no Receipt issues, and it is never "
+                                "recovered as authorizable; a repaired structure is a new Candidate and a new Run",
+                                code=str(disposition))
+            _integration_seal(session, run, chain)
+        elif chain.latest.sealed:
+            run.receipt_id = str(chain.latest.receipt_id)
+            return _integration_terminal(session, work, run, chain)
+        else:
+            raise _integration_reconcile(f"Integration Review Run {run.review_run_id} is at generation {latest}, "
+                                         "which this owner never writes")
 
 
 def is_p4_mutation(mutation: Mutation) -> bool:

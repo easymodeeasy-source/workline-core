@@ -306,6 +306,14 @@ class ProjectView:
             for relation, label in self.unsatisfied_dependencies(work.id):
                 if label in EXCLUDED_STATES:
                     reasons.append(f"{relation.id}: predecessor {relation.from_id} is {label} (replan required)")
+        if not reasons:
+            # §32.9: a Phase whose effective plan holds a marked integration also needs a completed integration
+            # covering its current plan. Entity / event / relation truth only; nothing for an unmarked Phase.
+            # Asked only once every legacy check holds, so an incomplete Phase costs what it always did.
+            # Imported here: phase_integration imports this module.
+            from .phase_integration import completion_reasons as integration_completion_reasons
+
+            reasons.extend(integration_completion_reasons(self, phase_id))
         return PhaseCompletion(not reasons, tuple(reasons))
 
     def phase_state(self, phase_id: str) -> str:

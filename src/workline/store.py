@@ -164,6 +164,18 @@ class Entity:
         value = self.meta.get("work_kind")
         return str(value) if value else None
 
+    @property
+    def phase_review_contract(self) -> Any:
+        """The stored ``phase_review_contract`` frontmatter value, raw, or ``None`` when the key is absent (§32.2).
+
+        Read-only and never normalized: a present-but-empty or non-text marker
+        comes back as stored, so it can never read as an absent (legacy) one.
+        Whether it is valid is structural validation's and CREATE's question.
+        The key is the one ``phase_integration.PHASE_REVIEW_CONTRACT_KEY`` names;
+        it is spelled here because this module cannot import that one.
+        """
+        return self.meta.get("phase_review_contract")
+
 
 @dataclass(frozen=True)
 class Relation:

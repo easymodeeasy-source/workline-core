@@ -17,6 +17,7 @@ from typing import Any, Callable, Iterable
 
 from . import gitops, input_validation, yamlish
 from .create import (
+    INTEGRATION_COVERAGE_ORDER,
     RelationSpec,
     WorkSpec,
     _allocated_displays,
@@ -40,6 +41,7 @@ from .mutation import (
     require_same_request,
     utc_now,
 )
+from .phase_integration import PHASE_REVIEW_CONTRACT_KEY, completed_integration_edge_problems
 from .state import ProjectView
 from .store import WORK_DESIRED_HEADING, WORKLINE_DIR, Entity, Event, ProjectStore, Relation, render_body
 from .validate import Problem, validate_structure
@@ -107,6 +109,10 @@ def projected_view(
             meta["origin"] = {"type": "standalone"}
         if spec.work_kind is not None:
             meta["work_kind"] = spec.work_kind
+        if spec.phase_review_contract is not None:
+            # As CREATE writes it (right after work_kind): a projected replan reads a marked new integration as one
+            # (RB5 R28, ruling R-1), so what is judged on the projection is the reviewed Phase it makes.
+            meta[PHASE_REVIEW_CONTRACT_KEY] = spec.phase_review_contract
         body = render_body(spec.name, [(WORK_DESIRED_HEADING, spec.desired_state)])
         projected.works[work_id] = Entity(work_id, "work", meta, body, ProjectStore.entity_rel_path("work", work_id))
     return projected
@@ -136,8 +142,21 @@ def plan_replan(
     its record already holds is carried on from that record and never comes
     back here (:func:`_resume_plan_exclusion`), and its registration
     (:func:`apply_replan`) does not judge the text again.
+
+    The same holds for a relation the replan adds onto a completed reviewed
+    integration (RB5 R06, Control Plane ruling CPQ-01, deny-only): unless its
+    predecessor completed before the integration in canonical event order it
+    would launder late Work into an old cover, so it is refused here - before
+    any ID is reserved - with the code CREATE and structural validation use
+    for the same predicate. A new Work of the replan (named by its key) has no
+    completion yet and is always refused there; a legacy integration never is.
     """
     removals = _resolve_removals(view, replan)
+    laundering = completed_integration_edge_problems(
+        view, [(spec.type, spec.from_ref, spec.to_ref) for spec in replan.add_relations]
+    )
+    if laundering:
+        raise ValidationError("replan: " + "; ".join(laundering), code=INTEGRATION_COVERAGE_ORDER)
     input_validation.require_works_text(replan.new_works, "replan work")
     work_ids = {key: mutation.reserve_id(f"{prefix}:works:work:{key}", "work") for key in replan.new_works}
     additions: list[Relation] = []
@@ -244,11 +263,18 @@ def problems_text(problems: list[Problem]) -> str:
 # START's invocation, which a plan exclusion never shares.
 
 _PLAN_EXCLUSION_REQUEST_VERSION = 1
+#: Control Plane ruling R-1 (RB5 R28): a request whose replan registers a new Work with a ``phase_review_contract``
+#: binds it positively, under this version; a request with none keeps version 1 and its exact shape, so a pending
+#: version 1 request is compared, and continued, exactly as it always was - never reinterpreted.
+_MARKED_PLAN_EXCLUSION_REQUEST_VERSION = 2
 
 # The stages a plan exclusion records, as its owners name them.
 _EVENT_STAGE = "event"
 _REPLAN = "replan"
 _FINALIZE_STAGE = "finalize"
+#: RB5 (§32.36 - §32.37): the phase_completion evidence a work-plan exclusion closes, recorded after its replan and
+#: before its finalization, under the one ``review_achievement`` ID reserved under this same key.
+ACHIEVEMENT_STAGE = "achievement"
 
 
 def _plan_exclusion_request(target: str, replan: Replan) -> dict[str, Any]:
@@ -273,24 +299,35 @@ def _plan_exclusion_request(target: str, replan: Replan) -> dict[str, Any]:
 
     It says what was decided, not where: the branch a decision is finalized on is
     recorded by the Mutation Controller with the decided effects themselves.
+
+    A replan that registers a Work with a ``phase_review_contract`` records it
+    on every new Work entry, under :data:`_MARKED_PLAN_EXCLUSION_REQUEST_VERSION`
+    (ruling R-1): the marker is part of what was decided, so a retry deciding it
+    otherwise is another request. Without one the request is the version 1
+    request it always was.
     """
+    marked = any(spec.phase_review_contract is not None for spec in replan.new_works.values())
+
+    def new_work(key: str, spec: WorkSpec) -> dict[str, Any]:
+        entry = {
+            "key": key,
+            "name": spec.name,
+            "desired_state": _stripped(spec.desired_state),
+            "phase_id": spec.phase_id,
+            "roadmap_id": spec.roadmap_id,
+            "work_kind": spec.work_kind,
+            "confirmation_target": spec.confirmation_target,
+            "related": [{"type": r.type, "to": r.to, "condition": r.condition} for r in spec.related],
+            "derivation_detail": None if spec.derivation_detail is None else _stripped(spec.derivation_detail),
+        }
+        if marked:
+            entry[PHASE_REVIEW_CONTRACT_KEY] = spec.phase_review_contract
+        return entry
+
     return {
-        "version": _PLAN_EXCLUSION_REQUEST_VERSION,
+        "version": _MARKED_PLAN_EXCLUSION_REQUEST_VERSION if marked else _PLAN_EXCLUSION_REQUEST_VERSION,
         "target": target,
-        "new_works": [
-            {
-                "key": key,
-                "name": spec.name,
-                "desired_state": _stripped(spec.desired_state),
-                "phase_id": spec.phase_id,
-                "roadmap_id": spec.roadmap_id,
-                "work_kind": spec.work_kind,
-                "confirmation_target": spec.confirmation_target,
-                "related": [{"type": r.type, "to": r.to, "condition": r.condition} for r in spec.related],
-                "derivation_detail": None if spec.derivation_detail is None else _stripped(spec.derivation_detail),
-            }
-            for key, spec in replan.new_works.items()
-        ],
+        "new_works": [new_work(key, spec) for key, spec in replan.new_works.items()],
         "add_relations": [{"type": r.type, "from": r.from_ref, "to": r.to_ref} for r in replan.add_relations],
         "remove_relation_ids": list(replan.remove_relation_ids),
     }
@@ -428,7 +465,7 @@ def _plan_exclusion_reservations(replan: Replan) -> tuple[dict[str, str], dict[s
 def _proven_reservations(record: dict[str, Any], replan: Replan, refuse) -> dict[str, str]:
     """The record's reservations, when each is a key this request reserves, holding a distinct ID of its kind."""
     before_event, registration = _plan_exclusion_reservations(replan)
-    expected = {**before_event, **registration}
+    expected = {**before_event, **registration, ACHIEVEMENT_STAGE: "review_achievement"}
     reserved = record.get("reserved_ids") or {}
     if not isinstance(reserved, dict):
         raise refuse("reservations that are not a mapping")
@@ -678,8 +715,19 @@ def _prove_plan_exclusion(
         raise refuse("effects that cannot be read")
     stages = _recorded_stages(effects, refuse)
     order = _plan_exclusion_stages(replan)
+    if ACHIEVEMENT_STAGE in stages:
+        order.insert(len(order) - 1, ACHIEVEMENT_STAGE)
     if stages != order[: len(stages)]:
         raise refuse(f"the stages {stages}, where this request records {order} in that order")
+    if ACHIEVEMENT_STAGE in stages:
+        # RB5: exactly one immutable phase_completion record under the ID reserved for it, and nothing else
+        from .review import paths as review_paths
+
+        evidence = [effect for effect in effects if effect.get("stage") == ACHIEVEMENT_STAGE]
+        evidence_id = reserved.get(ACHIEVEMENT_STAGE)
+        if not isinstance(evidence_id, str) or [effect.get("kind") for effect in evidence] != ["create_file"] \
+                or (evidence[0].get("payload") or {}).get("path") != review_paths.history_achievement_rel(evidence_id):
+            raise refuse(f"an {ACHIEVEMENT_STAGE} stage other than the phase_completion evidence the exclusion closes")
     if any(key not in reserved for key in before_event):
         raise refuse("a recorded stage without the reservations this request makes before recording one")
     works_stage, relations_stage, remove_stage = f"{_REPLAN}:works", f"{_REPLAN}:relations", f"{_REPLAN}:remove"

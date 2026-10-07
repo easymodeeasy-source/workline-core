@@ -35,6 +35,12 @@ from .mutation import (
     unapplied_effects,
 )
 from .oplock import project_operation
+from .phase_integration import (
+    CODE_COVERAGE_ORDER,
+    PHASE_REVIEW_CONTRACT_KEY,
+    SUPPORTED_PHASE_REVIEW_CONTRACTS,
+    completed_integration_edge_problems,
+)
 from .state import COMPLETE, EXCLUDED_STATES, ProjectView
 from .store import (
     CONDITIONAL_RELATED_TYPES,
@@ -51,6 +57,9 @@ from .store import (
 from .validate import Problem, validate_condition, validate_structure
 
 DIRECT_OWNER = "create-direct"
+#: The refusal code of an edge onto a completed reviewed integration: ``phase_integration.CODE_COVERAGE_ORDER``, the
+#: one definition structural validation reports for the same predicate (ruling CPQ-01; finding RB5I-2).
+INTEGRATION_COVERAGE_ORDER = CODE_COVERAGE_ORDER
 
 
 @dataclass(frozen=True)
@@ -71,7 +80,15 @@ class RelationSpec:
 
 @dataclass(frozen=True)
 class WorkSpec:
-    """Decided Work meaning handed to the registration core."""
+    """Decided Work meaning handed to the registration core.
+
+    ``phase_review_contract`` is the caller-decided Phase Review contract of an
+    integration Work (``WORKLINE_COMPLETION_SPRINT`` §14.2 / §32.2): Roadmap or
+    START decides that a newly created ``phase_integration_check`` uses
+    ``phase-integration-review-v1``; CREATE only validates and persists that
+    decision and never decides whether Review is required. ``None`` - the
+    default - registers exactly the Work it always registered.
+    """
 
     name: str
     desired_state: str
@@ -81,6 +98,7 @@ class WorkSpec:
     confirmation_target: str | list[str] | None = None
     related: tuple[RelatedSpec, ...] = ()
     derivation_detail: str | None = None
+    phase_review_contract: str | None = None
 
     @property
     def standalone(self) -> bool:
@@ -191,6 +209,13 @@ def _validate_spec(spec: WorkSpec, key: str, view: ProjectView) -> None:
         raise ValidationError(f"work {key}: unknown work_kind {spec.work_kind}")
     if spec.confirmation_target is not None and spec.work_kind != "human_confirmation":
         raise ValidationError(f"work {key}: confirmation_target is only for human_confirmation Works")
+    if spec.phase_review_contract is not None:
+        # §32.2: exact supported value only, and only on an integration Work; CREATE persists the caller's decision.
+        if spec.work_kind != "phase_integration_check":
+            raise ValidationError(f"work {key}: phase_review_contract is only for phase_integration_check Works")
+        if not isinstance(spec.phase_review_contract, str) \
+                or spec.phase_review_contract not in SUPPORTED_PHASE_REVIEW_CONTRACTS:
+            raise ValidationError(f"work {key}: unsupported phase_review_contract {spec.phase_review_contract!r}")
     if spec.phase_id is None:
         if spec.roadmap_id is not None:
             raise ValidationError(f"work {key}: standalone Work must not carry roadmap_id")
@@ -342,6 +367,8 @@ def _registration_effects(
             meta["origin"] = {"type": "standalone"}
         if spec.work_kind is not None:
             meta["work_kind"] = spec.work_kind
+        if spec.phase_review_contract is not None:
+            meta[PHASE_REVIEW_CONTRACT_KEY] = spec.phase_review_contract
         if spec.confirmation_target is not None:
             target = spec.confirmation_target
             if isinstance(target, list):
@@ -483,6 +510,11 @@ def _check_projection(
 
     if _has_cycle(graph):
         raise ValidationError("requires_completion would form a cycle")
+    # Ruling CPQ-01 (deny-only): no caller-decided edge may launder Work into a completed reviewed integration.
+    # A legacy integration is never refused here, so every unmarked registration keeps exactly its old result.
+    laundering = completed_integration_edge_problems(view, [(r.type, r.from_id, r.to) for r in relations])
+    if laundering:
+        raise ValidationError("; ".join(laundering), code=INTEGRATION_COVERAGE_ORDER)
 
 
 # --------------------------------------------------------------------------- direct invocation
@@ -738,7 +770,7 @@ def create_standalone_work(
     """
     if not spec.standalone or spec.roadmap_id is not None:
         raise SpecViolation("direct CREATE only creates standalone Works (origin.type = standalone)")
-    if spec.work_kind is not None:
+    if spec.work_kind is not None or spec.phase_review_contract is not None:
         raise SpecViolation("direct CREATE does not create special Phase Works")
     # Before the execution lock, whose holder description names the Work (RB10 N3(b)): a caller value the
     # request cannot be read with, or UTF-8 cannot write, is refused here rather than escaping as a raw error.
