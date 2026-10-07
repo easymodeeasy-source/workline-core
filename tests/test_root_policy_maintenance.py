@@ -185,7 +185,7 @@ class LayoutTests(WorklineTestCase):
                          "the evaluation sub-operation never writes the Global policy (§31.42)")
         self.assertEqual(("review_run", "review_task", "review_receipt", "review_consumption",
                           "review_promotion_packet", "review_global_policy_change",
-                          "review_global_policy_evaluation"), rm.RESERVATION_KINDS)
+                          "review_global_policy_evaluation", "review_finding"), rm.RESERVATION_KINDS)
         for kind in rm.RESERVATION_KINDS + ("root_policy_mutation",):
             with self.subTest(kind=kind):
                 self.assertTrue(ids.is_valid_id(ids.new_id(kind), kind))
@@ -670,6 +670,8 @@ class MutationRecordTests(MutationCase):
         with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
             first = self.open(lock)
             run = first.reserve_id("run", "review_run")
+        cyclic: dict = {"remote": "origin"}
+        cyclic["branch"] = cyclic
         with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
             # RB7BL-2: a resume re-freezes nothing, and a differing frozen value is never silently replaced
             for overrides, named in (({"branch": "refs/heads/other"}, "branch"), ({"base": "0" * 40}, "base"),
@@ -677,7 +679,11 @@ class MutationRecordTests(MutationCase):
                                      ({"global_policy_version": True}, "global_policy"),
                                      ({"global_policy_digest": "b" * 64}, "global_policy"),
                                      ({"publication": {"remote": "origin", "branch": "refs/heads/main"}},
-                                      "publication")):
+                                      "publication"),
+                                     # RB7BD-1: unorderable keys and a reference cycle cannot even be compared
+                                     ({"publication": {1: "x", "remote": "y"}}, "publication"),
+                                     ({"publication": cyclic}, "publication"),
+                                     ({"base": {1: "a", "b": 2}}, "base")):
                 with self.subTest(resume=overrides):
                     error = self.assertReconcile("review_p7_root_mutation_conflict", self.open, lock, **overrides)
                     self.assertIn(named, str(error))
@@ -723,9 +729,13 @@ class MutationRecordTests(MutationCase):
     def test_a_rebind_pre_seeds_reconstructed_ids_and_allocates_nothing_for_them(self) -> None:
         run, receipt = ids.new_id("review_run"), ids.new_id("review_receipt")
         with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
-            for bad in ({"run": "rr_bad"}, {"run": ids.new_id("work")}, {"": run}, {"run": 5}):
+            # RB7BA-2: a scope naming no Packet / change / evaluation ID, so the value check alone refuses
+            for bad in ({"run": "rr_bad"}, {"run": ids.new_id("work")}, {"": run}, {"run": 5},
+                        {"run": run + "\n"}, {"run": ids.new_id("review_policy_change")}):
                 with self.subTest(rebind=bad):
-                    self.assertStop("review_p7_root_effect_refused", self.open, lock, rebind=bad)
+                    self.assertStop("review_p7_root_effect_refused", self.open, lock, rebind=bad,
+                                    write_scope=[ROOT_POLICY_LAYOUT.review_dir + "/"])
+            self.assertFalse(os.path.lexists(self.root / rm.MUTATIONS_DIR), "a refused rebind records nothing")
             # Amendment 4: a recovery open's ID-naming scope paths name rebound IDs (here the Packet / change ones
             # are not rebound, so the scope is refused; the rebind itself is otherwise taken exactly as before)
             self.assertStop("review_p7_root_effect_refused", self.open, lock, rebind={"run": run, "receipt": receipt})
@@ -822,7 +832,7 @@ class MutationRecordTests(MutationCase):
         good = self.stored(mutation.mutation_id)
         commit = {"stage": "kg1", "parent": self.head(), "ref": "refs/heads/main", "message": "kg1",
                   "paths": [self.gate], "date": DATE}
-        facts = {"prepared_commit": self.head(), "prepared_tree": "1" * 40, "ref_moved": False}
+        facts = {"prepared_commit": "2" * 40, "prepared_tree": "1" * 40, "ref_moved": False}
 
         def effect(kind, payload, state="intended", effect_facts=None):
             return {"kind": kind, "payload": payload, "state": state, "facts": effect_facts}
@@ -852,6 +862,10 @@ class MutationRecordTests(MutationCase):
             "commit marked without facts": {"effects": [effect(rm.EFFECT_COMMIT, commit, "marked")]},
             "commit facts while intended": {"effects": [effect(rm.EFFECT_COMMIT, commit, "intended", facts)]},
             "commit applied": {"effects": [effect(rm.EFFECT_COMMIT, commit, "applied")]},
+            "commit prepared as its own parent": {"effects": [effect(rm.EFFECT_COMMIT, commit, "marked",
+                                                                     {**facts, "prepared_commit": self.head()})]},
+            "reserved ID with a trailing newline": {"reserved_ids": {"run": self.run_id + "\n"}},
+            "reserved ID of a kind never reserved": {"reserved_ids": {"x": ids.new_id("review_policy_change")}},
             "push of a remote-less root": {"effects": [effect(rm.EFFECT_PUSH, {
                 "stage": "kp", "remote": "origin", "ref": "refs/heads/main", "commit": self.head()})]},
             "effect kind is a list": {"effects": [effect(["root-commit"], commit)]},
@@ -870,6 +884,57 @@ class MutationRecordTests(MutationCase):
                     self.assertReconcile("review_p7_root_mutation_unreadable", self.open, lock)
         path.write_text(serialize.canonical_text(good), encoding="utf-8", newline="\n")
         self.assertEqual([good], rm.pending_mutations(self.root))
+        # the one valid shape of a marked commit reads back (the corruption rows above discriminate)
+        marked = {**good, "effects": [effect(rm.EFFECT_COMMIT, commit, "marked", facts)]}
+        path.write_text(serialize.canonical_text(marked), encoding="utf-8", newline="\n")
+        self.assertEqual([marked], rm.pending_mutations(self.root))
+        path.write_text(serialize.canonical_text(good), encoding="utf-8", newline="\n")
+
+    def test_a_validator_failure_is_unreadable_with_its_cause_chained(self) -> None:
+        """RB7BD-4: an exception inside the record validator is never presented as bare corruption."""
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            self.open(lock)
+        defect = KeyError("a validator defect")
+        with mock.patch.object(rm, "_scope_entry_problem", side_effect=defect):
+            error = self.assertReconcile("review_p7_root_mutation_unreadable", rm.pending_mutations, self.root)
+        self.assertIs(defect, error.__cause__, "the cause is chained, never discarded")
+        self.assertIn("KeyError", str(error))
+        self.assertIn("validation failed", str(error))
+        self.assertEqual(1, len(rm.pending_mutations(self.root)), "the record itself is readable")
+
+    def test_a_finding_id_is_reserved_and_no_other_kind_is_admitted(self) -> None:
+        """INTEGRATION REQUEST from RB7-D: P4 adjudication of a root Run reserves one Finding ID per Finding."""
+        finding = ids.new_id("review_finding")
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            mutation = self.open(lock)
+            reserved = mutation.reserve_id("finding:0", "review_finding")
+            self.assertTrue(ids.is_valid_id(reserved, "review_finding"))
+            self.assertEqual(reserved, mutation.reserve_id("finding:0", "review_finding"))
+            self.assertReconcile("review_p7_root_mutation_conflict", mutation.reserve_id, "finding:0", "review_run")
+            outside = sorted(set(ids.PREFIXES) - set(rm.RESERVATION_KINDS))
+            self.assertTrue(set(rm.RESERVATION_KINDS) <= set(ids.PREFIXES))
+            for kind in ("root_policy_mutation", "review_repair_batch", "review_policy_change", "work", "mutation"):
+                self.assertIn(kind, outside)
+            for kind in outside:
+                with self.subTest(refused=kind):
+                    self.assertStop("review_p7_root_effect_refused", mutation.reserve_id, f"other:{kind}", kind)
+            self.assertEqual({"finding:0": reserved}, self.stored(mutation.mutation_id)["reserved_ids"])
+            mutation.abandon()
+            # the same kind through first-open reservations and a recovery rebind; no other kind either way
+            scope = [ROOT_POLICY_LAYOUT.review_dir + "/"]
+            first = self.open(lock, {"first": 1}, write_scope=scope, reserved={"finding:0": finding})
+            self.assertEqual(finding, first.reserve_id("finding:0", "review_finding"))
+            first.abandon()
+            recovered = self.open(lock, {"recovered": 1}, write_scope=scope, rebind={"finding:0": finding})
+            self.assertEqual(finding, recovered.reserve_id("finding:0", "review_finding"))
+            recovered.abandon()
+            for kind in outside:
+                with self.subTest(open_refuses=kind):
+                    self.assertStop("review_p7_root_effect_refused", self.open, lock, {"x": kind},
+                                    write_scope=scope, reserved={"k": ids.new_id(kind)})
+                    self.assertStop("review_p7_root_effect_refused", self.open, lock, {"x": kind},
+                                    write_scope=scope, rebind={"k": ids.new_id(kind)})
+        self.assertEqual([], rm.pending_mutations(self.root), "a stored Finding reservation reads back")
 
 
 class FirstOpenReservationTests(MutationCase):
@@ -1181,10 +1246,18 @@ class EffectTests(MutationCase):
             self.assertStop("review_p7_root_effect_refused", mutation.apply_effect, kg1)
             commit, tree = self.commit_object(base)
             self.assertStop("review_p7_root_effect_refused", mutation.mark_effect, kg1, {"prepared_commit": commit})
+            # RB7BD-5: a commit made on its recorded parent is never that parent itself - not as the first facts
+            # (nothing would move, so ref_moved would be vacuously provable) and never later either
+            for moved in (False, True):
+                with self.subTest(parent_as_prepared=moved):
+                    self.assertStop("review_p7_root_effect_refused", mutation.mark_effect, kg1,
+                                    {"prepared_commit": base, "prepared_tree": tree, "ref_moved": moved})
+            self.assertIsNone(mutation.effects()[kg1]["facts"])
             mutation.mark_effect(kg1, {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": False})
             self.assertEqual("marked", mutation.effects()[kg1]["state"])
+            other, _ = self.commit_object(base, "another kg1")
             self.assertReconcile("review_p7_root_effect_conflict", mutation.mark_effect, kg1,
-                                 {"prepared_commit": base, "prepared_tree": tree, "ref_moved": False})
+                                 {"prepared_commit": other, "prepared_tree": tree, "ref_moved": False})
             # the ref has not moved: recording it as moved is refused
             self.assertReconcile("review_p7_root_effect_conflict", mutation.mark_effect, kg1,
                                  {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": True})

@@ -563,10 +563,24 @@ OPERATION_EFFECTS: Mapping[str, tuple[str, ...]] = MappingProxyType({
     OPERATION_CHANGE: tuple(kind for kind in ROOT_EFFECT_KINDS if kind != EFFECT_EVALUATION_CREATE),
     OPERATION_EVALUATION: (EFFECT_EVALUATION_CREATE, EFFECT_COMMIT, EFFECT_PUSH),
 })
+#: The IDs a root mutation reserves (§31.11): the common Review IDs, the three P7 kinds, and - because the root
+#: Review reuses P4 adjudication, whose blocking outcome is the terminal G4 ``not_authorized`` (§31.25 / §31.27) -
+#: one ``review_finding`` per normalized Finding (INTEGRATION REQUEST from RB7-D). No other kind is admitted.
 RESERVATION_KINDS = (
     "review_run", "review_task", "review_receipt", "review_consumption",
-    "review_promotion_packet", "review_global_policy_change", "review_global_policy_evaluation",
+    "review_promotion_packet", "review_global_policy_change", "review_global_policy_evaluation", "review_finding",
 )
+
+
+def _reservable_id(value: object) -> bool:
+    """``value`` is exactly one ID of a :data:`RESERVATION_KINDS` kind.
+
+    ``ids.kind_of`` matches with a ``$`` that also admits ONE trailing newline,
+    so a newline anywhere is refused outright (RB7BA-1, as ``namespace``'s own
+    exact-ID check does); the same rule holds for ``reserved``, ``rebind`` and
+    a stored record's ``reserved_ids``.
+    """
+    return isinstance(value, str) and "\n" not in value and ids.kind_of(value) in RESERVATION_KINDS
 STAGES = ("kg1", "kg2", "kg3", "kg4", "kg5", "kp", "km", "evaluation")
 #: Which stages each operation commits in, and which of them may ever be published: a Review generation commit
 #: publishes nothing by itself (§16.14, §31.27); only Kp / Km and the evaluation commit reach the remote.
@@ -947,6 +961,9 @@ class RootMutation:
             if set(found) != set(COMMIT_FACT_FIELDS) or not gitcmd.full_commit_id(found["prepared_commit"]) \
                     or not gitcmd.full_commit_id(found["prepared_tree"]) or type(found["ref_moved"]) is not bool:
                 raise _refused(f"root commit facts are exactly {', '.join(COMMIT_FACT_FIELDS)}")
+            if found["prepared_commit"] == effect["payload"]["parent"]:
+                raise _refused(f"the prepared {effect['payload']['stage']} commit is a new commit on its recorded "
+                               "parent, never the parent itself (RB7BD-5)")
             if previous is None:
                 if found["ref_moved"]:
                     raise _refused(f"the {effect['payload']['stage']} commit of root mutation {self.mutation_id} "
@@ -1091,11 +1108,29 @@ def _strict(value: object) -> str:
     return json.dumps(value, sort_keys=True, default=repr)
 
 
+def _same_frozen(given: object, stored: object) -> bool:
+    """Whether a resume's argument is exactly the record's frozen value (RB7BD-1).
+
+    The stored value is a validated record value; an argument that cannot even
+    be rendered for the comparison - unorderable mapping keys, a reference
+    cycle - is a value no record holds, so it differs (and the resume is the
+    catalogued ``review_p7_root_mutation_conflict``), never a raw error.
+    """
+    try:
+        return _strict(given) == _strict(stored)
+    except (TypeError, ValueError, RecursionError):
+        return False
+
+
 def _mutation_rel(mutation_id: str) -> str:
     return f"{MUTATIONS_DIR}/{mutation_id}.yaml"
 
 
 _MUTATION_NAME = re.compile(r"(rpm_[0-9A-HJKMNP-TV-Z]{26})\.yaml\Z")
+
+
+#: What the record validator can raise on a value of a shape no check anticipated (RB7BL-4 / RB7BD-4).
+_UNEXPECTED_SHAPE = (TypeError, AttributeError, KeyError, IndexError, ValueError, RecursionError)
 
 
 def _mutation_problem(record: object, mutation_id: str) -> str | None:
@@ -1105,16 +1140,13 @@ def _mutation_problem(record: object, mutation_id: str) -> str | None:
     dereferences - the write scope, each effect payload (re-checked with the very
     rule :meth:`RootMutation.add_effect` applied when it was recorded), each
     effect's state and facts - is proven here, so a corrupted record is
-    ``review_p7_root_mutation_unreadable`` and never a crash further on. A value
-    of a shape no check anticipated is caught here too and read the same way.
+    ``review_p7_root_mutation_unreadable`` and never a crash further on. This
+    function catches nothing: an exception of a shape no check anticipated is
+    turned into that reconcile at the read boundary (:func:`_scan_mutations`)
+    with the exception CHAINED as its cause (RB7BD-4), so a defect of the
+    validator itself is never presented as record corruption without its
+    traceback.
     """
-    try:
-        return _mutation_record_problem(record, mutation_id)
-    except (TypeError, AttributeError, KeyError, IndexError, ValueError, RecursionError) as exc:
-        return f"it holds a value of an unexpected shape ({type(exc).__name__})"
-
-
-def _mutation_record_problem(record: object, mutation_id: str) -> str | None:
     if not isinstance(record, dict) or set(record) != set(MUTATION_FIELDS):
         return "it is not exactly the root mutation record fields"
     if record["schema"] != MUTATION_SCHEMA or record["version"] != MUTATION_VERSION:
@@ -1134,8 +1166,7 @@ def _mutation_record_problem(record: object, mutation_id: str) -> str | None:
             or not isinstance(global_policy["digest"], str) or _DIGEST.fullmatch(global_policy["digest"]) is None:
         return "its Global policy version / digest is malformed"
     reserved = record["reserved_ids"]
-    if not isinstance(reserved, dict) or any(not isinstance(key, str) or not key or not isinstance(value, str)
-                                             or ids.kind_of(value) not in RESERVATION_KINDS
+    if not isinstance(reserved, dict) or any(not isinstance(key, str) or not key or not _reservable_id(value)
                                              for key, value in reserved.items()):
         return "its reserved IDs are malformed"
     scope = record["write_scope"]
@@ -1178,6 +1209,8 @@ def _mutation_record_problem(record: object, mutation_id: str) -> str | None:
         problem = _payload_problem(kind, effect["payload"], record, effects[:index])
         if problem is not None:
             return f"effect {index} ({kind}) is not one this mutation could have recorded: {problem}"
+        if kind == EFFECT_COMMIT and facts is not None and facts["prepared_commit"] == effect["payload"]["parent"]:
+            return f"effect {index} ({kind}) records its own parent as its prepared commit"
         key = _identity_key(effect)
         if key in seen:
             return f"two effects are recorded for {key[1]}"
@@ -1214,7 +1247,12 @@ def _scan_mutations(root: Path) -> list[dict[str, Any]]:
                 record, _ = serialize.parse_canonical(raw, described)
             except ValidationError as exc:
                 raise reconcile(f"{described} is unreadable ({exc})", REASON_MUTATION_UNREADABLE) from exc
-            problem = _mutation_problem(record, matched.group(1))
+            try:
+                problem = _mutation_problem(record, matched.group(1))
+            except _UNEXPECTED_SHAPE as exc:
+                raise reconcile(f"{described} is unreadable: it holds a value of an unexpected shape, or its "
+                                f"validation failed ({type(exc).__name__}; the cause is chained)",
+                                REASON_MUTATION_UNREADABLE) from exc
             if problem is not None:
                 raise reconcile(f"{described} is unreadable: {problem}", REASON_MUTATION_UNREADABLE)
             found.append(record)
@@ -1308,7 +1346,7 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
             "global_policy": {"version": global_policy_version, "digest": global_policy_digest},
             "publication": dict(publication) if isinstance(publication, Mapping) else publication,
         }
-        differing = sorted(name for name, value in given.items() if _strict(value) != _strict(existing[name]))
+        differing = sorted(name for name, value in given.items() if not _same_frozen(value, existing[name]))
         if differing:
             raise reconcile(f"the pending root mutation {existing['mutation_id']} froze another "
                             + ", ".join(differing) + " than this resume passes; a resume re-freezes nothing and is "
@@ -1343,16 +1381,14 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
         if not isinstance(rebind, Mapping):
             raise _refused("a rebind is a mapping of reservation keys to canonical IDs")
         for key, value in rebind.items():
-            if not isinstance(key, str) or not key or not isinstance(value, str) \
-                    or ids.kind_of(value) not in RESERVATION_KINDS:
+            if not isinstance(key, str) or not key or not _reservable_id(value):
                 raise _refused(f"{value!r} is not a canonical ID a root mutation reserves")
             seeded[key] = value
     if reserved is not None:
         if not isinstance(reserved, Mapping):
             raise _refused("first-open reservations are a mapping of reservation keys to IDs")
         for key, value in reserved.items():
-            if not isinstance(key, str) or not key or not isinstance(value, str) or "\n" in value \
-                    or ids.kind_of(value) not in RESERVATION_KINDS:
+            if not isinstance(key, str) or not key or not _reservable_id(value):
                 raise _refused(f"{value!r} is not an ID of a kind a root mutation reserves")
             seeded[key] = value
     if reserved is not None or rebind is not None:
