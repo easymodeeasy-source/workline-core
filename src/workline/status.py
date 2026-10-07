@@ -1629,7 +1629,20 @@ def _policy_lines(section: Mapping[str, Any]) -> list[str]:
         out.append(f"  shadow authority (advisory): {failed_shadow.strip()}")
     elif isinstance(shadow, Mapping):
         out.extend("  " + line for line in _shadow_lines(shadow))
+    # P7 (§31.46, RB7PSW-4): the configured Workline root's maintenance diagnostics, one line, after every other part
+    part("root_maintenance", _root_maintenance_line)
     return out
+
+
+def _root_maintenance_line(found: Mapping[str, Any]) -> str:
+    """The human line of ``policy.root_maintenance``: the Global policy, its publication authorization, a pending
+    root mutation. Presentation of the model only."""
+    baseline = found["global_policy"]
+    pending = found["pending_mutation"]
+    held = "none" if pending is None else " ".join(
+        str(pending[key]) for key in ("status", "operation", "mutation_id", "stage") if pending.get(key) is not None)
+    return (f"global {baseline['source_mode']} v{baseline['version']} {baseline['digest']}, "
+            f"authorization {found['authorization']['status']}, pending root mutation {held}")
 
 
 def _shadow_lines(found: Mapping[str, Any]) -> list[str]:

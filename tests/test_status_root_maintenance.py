@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from status_helpers import StatusCase
-from workline import root_maintenance
+from workline import root_maintenance, status
 from workline.errors import StopError, ValidationError
 
 
@@ -58,3 +58,43 @@ class RootMaintenanceStatusTests(StatusCase):
                                side_effect=ValidationError("x", code="review_record_noncanonical")):
             data = self.data()
         self.assertEqual({"status": "none", "problems": []}, data["policy"]["maintenance"])
+
+    def test_the_human_rendering_shows_one_root_maintenance_line(self) -> None:
+        """RB7PSW-4: one human line after every other policy part - the report, or why it is unavailable."""
+        report = {
+            "status": "available",
+            "global_policy": {"source_mode": "materialized", "version": 2, "digest": "d" * 64},
+            "current_change_id": None, "evaluation_ids": [],
+            "authorization": {"status": "valid", "remote": "origin", "branch": "refs/heads/main"},
+            "pending_mutation": {"mutation_id": "rpm_01ARZ3NDEKTSV4RRFFQ69G5FAV", "operation": "global-policy-change",
+                                 "status": "pending", "stage": "commit"},
+            "next_boundary_adapter_identity": "x",
+        }
+        cases = (
+            (report, "  root maintenance: global materialized v2 " + "d" * 64 + ", authorization valid, pending root "
+                     "mutation pending global-policy-change rpm_01ARZ3NDEKTSV4RRFFQ69G5FAV commit"),
+            ({**report, "pending_mutation": None}, "  root maintenance: global materialized v2 " + "d" * 64
+             + ", authorization valid, pending root mutation none"),
+            ({**report, "pending_mutation": {"mutation_id": None, "operation": None, "status": "reconcile_required",
+                                             "stage": None}},
+             "  root maintenance: global materialized v2 " + "d" * 64
+             + ", authorization valid, pending root mutation reconcile_required"),
+            (StopError("the Global policy does not load", code="review_policy_unavailable"),
+             "  root maintenance: unavailable - review_policy_unavailable: the Global policy does not load"),
+            ({"status": "available"}, "  root maintenance: available"),
+        )
+        others = None
+        for found, line in cases:
+            with self.subTest(line=line):
+                effect = {"side_effect": found} if isinstance(found, BaseException) else {"return_value": found}
+                with mock.patch.object(root_maintenance, "status_report", **effect):
+                    lines = status.render_human(self.model()).splitlines()
+                self.assertEqual(1, sum(1 for item in lines if item.startswith("  root maintenance:")))
+                self.assertIn(line, lines)
+                policy = lines[lines.index("Policy"):]
+                block = policy[:next((i for i, item in enumerate(policy[1:], 1) if not item.startswith(" ")),
+                                     len(policy))]
+                self.assertEqual(line, block[-1], "after every other policy part")
+                rest = [item for item in lines if item != line]
+                others = rest if others is None else others
+                self.assertEqual(others, rest, "no other human line changes")
