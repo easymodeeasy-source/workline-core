@@ -1030,10 +1030,12 @@ def activation_problems(store: ProjectStore, review: ReviewStore) -> list[Review
         ]
     try:
         # Only the version 1 review-v1 Work Consumption is bound to a marked completion here. A version 5
-        # Integration Consumption (records.IntegrationConsumption, RB5 §32.31) is left out on purpose and
-        # explicitly: the reviewed Phase integration's own ``work_completed`` is ordinary and unmarked, so neither
+        # Integration Consumption (records.IntegrationConsumption, RB5 §32.31) is left out on purpose: the
+        # reviewed Phase integration's own ``work_completed`` is ordinary and unmarked, so neither
         # COMPLETION_UNCONSUMED nor CONSUMPTION_UNBOUND is ever about it. Its event binding is the terminal START
-        # stage's (RB5 I-5 / I-6), never this pass's.
+        # stage's (RB5 I-5 / I-6), never this pass's. v5 is a distinct class, not a Consumption subclass, so
+        # isinstance(Consumption) already excludes it; the second clause is a belt-and-braces guard should a
+        # shared base ever be introduced.
         consumptions = {
             event_id: found
             for event_id, found in review.consumption_by_terminal_event().items()

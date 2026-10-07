@@ -24,6 +24,9 @@ LIFECYCLE_REASONS = {
     "multiple_started_phases", "no_unique_phase", "no_work_in_flight", "multiple_targets",
     "ambiguous_startable_candidates", "no_startable_phase", "all_active_phases_complete", "no_startable_work",
     "pending_mutation_unresolved", "structure_invalid", "project_changed_during_status",
+    # RB5 (§32.41 / §32.42, I-9): a next Phase held back by a reviewed predecessor's open evidence obligation - pin
+    # widened additively (disclosed)
+    "phase_evidence_not_ready",
 }
 TOP_LEVEL = {"schema", "version", "snapshot_consistency", "snapshot_reason", "project", "authority", "git", "lifecycle",
              "pending", "validation", "review", "completion", "policy"}
@@ -53,7 +56,20 @@ class RenderTests(StatusCase):
         data = self.data()
         self.assertEqual((data["schema"], data["version"]), ("workline-status", 1))
         self.assertEqual(set(data), TOP_LEVEL)
-        self.assertEqual(data["completion"], {"status": "not_available_by_contract"})
+        # RB5 (§32.51 / §14.28, I-9): an established Project's completion slot is available - pin updated deliberately
+        # (was {"status": "not_available_by_contract"}, which a non-established folder still reports)
+        self.assertEqual({"status", "phases", "roadmaps"}, set(data["completion"]))
+        self.assertEqual("available", data["completion"]["status"])
+        (phase,) = data["completion"]["phases"]
+        self.assertEqual(("legacy", {"status": "not_applicable", "achievement_evidence_id": None}, None),
+                         (phase["completion_mode"], phase["evidence"], phase["latest_integration_review"]))
+        self.assertEqual({"phase_id", "roadmap_id", "completion_mode", "generated_complete", "basis_digest",
+                          "covering_integration_id", "coverage", "latest_integration_review", "evidence",
+                          "progression_ready", "downstream_confirmations"}, set(phase))
+        (roadmap,) = data["completion"]["roadmaps"]
+        self.assertEqual({"roadmap_id", "all_active_phases_generated_complete", "every_reviewed_phase_progression_ready",
+                          "unready_phases", "achieved"}, set(roadmap))
+        self.assertEqual({"event_id": None, "evidence_id": None, "binding": "ok"}, roadmap["achieved"])
         # RB6 (§30.30, RB6A-IR-2): the RB1 policy placeholder is filled additively - pin updated deliberately
         self.assertEqual("available", data["policy"]["status"])
         # RB7 (§31.46, RB7C-4, IR-RB7-5): the root maintenance diagnostics join additively, isolated - pin updated

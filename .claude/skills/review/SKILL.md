@@ -745,6 +745,7 @@ P5 capability is an explicit per-Run stored Review policy/history-contract prope
   repairs/<repair_batch_id>.yaml     Repair summary（成功した修理ごとに一つ）
   relations/<relation_id>.yaml       後の / cross-runのrelation（ID kind `rhr`）
   human-decisions/<decision_id>.yaml Human Decision Evidence（影響Runごとに一つ、ID kind `rhd`）
+  achievements/<achievement_id>.yaml Phase / Roadmapの達成evidence（ID kind `rha`、owner: START / Roadmap、RB5）
 ```
 
 すべてimmutable create-only・strict schema・canonical bytes・filename == record identityで、可変の「現在のhistory」fileもindexも持たない。予約keyは `review-relation:<run>:<決定的な序数>` と `review-decision:<影響Run>`（`review-run:` では始まらない）。
@@ -780,6 +781,8 @@ Finding summaryはcanonical P4 adjudicationのFindingから正確に写し（cat
 A P5-capable adjudication receives a deterministic validated prior-history reference set for the same target/review kind and may return structured cross-run relation claims. Accepted relations are immutable new G4 facts; they never rewrite prior Findings or Runs.
 
 relation recordは端点のrecordを書き換えない。Finding summaryの `relation_ids` は同じG4で受理したrelationだけを束ね、後のrelationで追記しない。LOW Problem・Improvementはどのseverityでも自動でWorkを作らない。将来Workとのprovenance link（`future_work_link`）は明示のCREATE入力からだけ作る（`skills/create` のfuture Work provenance）。Future Work provenance is optional explicit CREATE input. P5 never schedules or creates Work automatically. When source_finding_id is supplied and valid, CREATE persists one future_work_link relation in the same canonical owner commit as the Work without changing Work progression or originating completion dependencies.
+
+Phase Integration Reviewのcontractの下でだけ、`repair_induced` relationはfix Workをtargetにできる（version 2で、そのfix Workの `future_work_link` と同じ `integration_provenance` を持つ）: relationのsourceがPhase Integration RunのFindingであり、targetが正本のWorkで、そのWorkをfix Workとして登録した検証済みのversion 2 `future_work_link` がちょうど1つあり（2つあれば `review_record_conflict` で、どちらも選ばない）、そのlinkがWorkを、relationのprovenanceが名指すのと同じIntegration Runとstrategyの、別のRunの前のIntegration Findingへ正に結び、Finding・Work・linkのidentityが正規に検証でき、semantic surfaceがその前のFindingのものと一致し、H-3と整合性が保たれる時だけである。それ以外の `repair_induced` の検証（Repair Batchのtarget、任意のWork targetの拒否）は変わらず、以前有効だったrecordはそのまま有効である。
 
 ### Human Decision Evidence
 
@@ -896,6 +899,30 @@ strategy_rule: two consecutive supported B/C failures on one semantic surface re
 version: 1
 work_creation_rule: LOW and Improvement never create Work automatically
 ```
+
+## Phase Integration Review（phase-integration-v1、RB5）
+
+markerを持つintegration（`phase_review_contract: phase-integration-review-v1`）のPhase統合を、STARTのoperationの中の従属gateとしてauthorizeするReview kind。Reviewはverificationとauthorizationだけを持ち、integration Workのlifecycle・再integration・確認構造・domainのfix Workは持たない（START / CREATEがowner）。
+
+```text
+review_kind                 phase-integration-v1
+target_identity             integration Work ID
+operation identity          start-phase-integration:<digest of {review_kind, target_identity}>
+review_contract             review-v1-phase-integration-p4-v1（P6-capable family policy。P7のroot policy familyではない）
+authorized_operation_stage  phase-integration:terminal
+Consumption                 version 5 Integration Consumption（integration自身の通常のwork_completedに束ねる）
+```
+
+- **namespace**: Integration Runとそのhistory・achievement evidenceはProjectのReview namespace（`.workline/review/`）にだけある。Workline rootのpolicy Review namespaceはP5 historyもachievement evidenceも持たない。
+- **selectors（CP Q-C1、fail closed）**: `review=` と `phase_review=` の両方を持つ `outer` のSTARTが、review-v1のWork mutationのままmarkerを持つintegrationへ続くことになるなら、Phase Integrationの永続effectの前に `phase_review_outer_with_work_review` で止まる（一つのoperationでmutation contractを跨がない。F3の公開の意味も変えず、push-onlyのterminal stageも作らない）。operatorは `phase_review=` を付けたsingle-workのSTARTでintegrationを走らせる。single-workのSTARTがmarkerを持つintegrationを名指して両方を持つ時は、`phase_review` がPhase Integration Reviewに適用され、`review` はselectorとして検証されるだけでWork Review（marker・recoveryを含む）を起動せず、integrationの通常のterminalの意味はそのままである。
+- **Candidate**: HEADのcommitted canonical objectsから作る厳密なPhase Integration Candidate（Phaseのdesired-state digest、markerを含むintegration metadata、base commit / branch、effective Work、依存、coverage分類、downstream confirmation、Related参照、検証済みP5 Work Review参照、achievement evidence参照、構造validation digest、Effective Policy hash、candidate_generation、owning START mutationとterminal stage）。STARTの未commitのopening lifecycleはbasisではなくlifecycle projectionとして別に束ねる。
+- **topology**: P4のdiscovery → adjudication → seal。G1 discovery受理、G2 settle、G3 adjudication受理、G4 settle、`AUTHORIZATION_READY` だけがG5でsealしReceiptを出す。P4のCandidate repair（G5 / G6のRepair Batch）は使わない。domainの修理はSTARTの通常のfix Workである。
+- **Phase outcome**: adjudicationはP4のadjudicationに加えてPhase outcomeを1つだけ持つ: `objectively_satisfied` / `human_confirmation_required` / `not_satisfied` / `desired_state_change_required`。Phase objectiveはdesired-state digestで名指し、reviewerの文章で書き換えない。`not_satisfied` はblockingなProblem HIGH/MIDか明示のunmet objective obligationに支えられ、`desired_state_change_required` はHUMANへ行く。
+- **G4のdisposition**（この順で1つ）: HUMAN / `desired_state_change_required` → `HUMAN_WAIT`（同じRunのまま待つ）; blocking Problem / `not_satisfied` → `DOMAIN_REPAIR_REQUIRED`; `human_confirmation_required` で有効なdownstream confirmationが無い → `CONFIRMATION_STRUCTURE_REQUIRED`; それ以外で coverage / evidence が成立 → `AUTHORIZATION_READY`。step 4の拒否は `phase_integration_uncovered`（`invalid_uncovered` Work）/ `phase_integration_not_authorizable`（coverage / evidenceが現在でない）。`HUMAN_WAIT` 以外のG4-terminal dispositionは、RunをそのG4でfinal `not_authorized`（P5 Run summaryを同じG4に書く）で終え、Receiptを出さず、authorizableとして回復せず、後のRunのset asideとして名指さない。
+- **STRATEGY_CHANGE（Integration Run間、CP Q-C3）**: `DOMAIN_REPAIR_REQUIRED` のSTRATEGY_CHANGE要否は、同じsemantic surfaceのsupportedなB/C relation chainで決まる: 現在のIntegration Findingが同じsurfaceのsupportedな `cross_run_recurrence`（B）または `repair_induced`（C、fix Workのversion 2 `future_work_link` がsource Findingへ解決する）の前任Findingを持ち、その前任Finding自身も同じsurfaceのsupportedなB/Cの前任を持つ時だけ要る。Runの順番・時刻・newest・IDの辞書順・最新のhistory recordからは決めず、時間的な隣接だけ・不明な因果はA_NEWのままである。要る時、同じsurfaceで既にlinkされたstrategy identityを再利用する修理planは拒否される。
+- **verification-only**: discovery / verifierはfrozen Candidateに対して動き、Projectの永続状態を変えない。`result_paths=()` は証明にならない。Ownerが起動の前後でProject状態を測り、変化があれば何もsettleしない。
+- **achievement evidence**（P5 history `history/achievements/<rha_…>.yaml`、ID kind `review_achievement`）: `phase_completion`（reviewed Phaseの現在のbasis、covering integrationのCandidate / Run（terminal gate）/ Receipt / Consumptionのdigestとconsumed Run summary参照、Phase outcome）と `roadmap_achievement`（Roadmap basis、構造化decision、予約した `roadmap_achieved` event ID）。immutableなevidenceでありlifecycleではない。作るのはSTART / Roadmapのownerだけで、Reviewは作らない。
+- **future_work_link provenance**: integrationのfix Workへの `future_work_link` は、STARTの修理planが登録したWorkについてだけ、source Integration Runとstrategy identityをversion 2で持てる。Workを完了集合に入れず、ReviewをWorkのownerにしない。
 
 ## P6 Project-local Adaptive Policy（§15 / §30）
 

@@ -1021,6 +1021,16 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
                 blockers.append({"code": "multiple_started_phases", "ids": started})
         # Roadmap's Phase selection (``roadmap.select_phase``): the startable Phases, narrowed by planned_next.
         candidates = view.startable_phases(roadmap_id)
+        # RB5 (§32.41, RB8-FC-08): narrowed by progression-readiness exactly as ``roadmap.progression_ready_phases``
+        # narrows them - only when a Phase of the Roadmap is reviewed (a legacy-only Roadmap reads nothing new)
+        reviewed_roadmap = _reviewed_roadmap(view, roadmap_id)
+        held_back: list[tuple[str, str, str]] = []
+        if candidates and reviewed_roadmap:
+            candidates, held_back = _progression_ready(context, view, candidates)
+            blockers.extend(
+                {"code": PHASE_EVIDENCE_NOT_READY, "ids": [predecessor], "candidate": candidate, "reason": reason}
+                for candidate, predecessor, reason in held_back
+            )
         preferred = view.planned_next_preference(candidates) if candidates else []
         if len(preferred) == 1:
             next_phase = _next(preferred[0].id, None, [p.id for p in candidates], [p.id for p in preferred], "planned")
@@ -1029,6 +1039,11 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
             blockers.append({"code": AMBIGUOUS_CANDIDATES, "kind": "phase", "ids": sorted(p.id for p in preferred)})
         else:
             reason = "all_active_phases_complete" if view.all_active_phases_complete(roadmap_id) else "no_startable_phase"
+            if held_back or (reason == "all_active_phases_complete" and reviewed_roadmap
+                             and _unready_reviewed_phases(context, view, roadmap_id)):
+                # §32.41 / §32.42: a candidate held back by its predecessor's open evidence obligation, or a complete
+                # reviewed Phase without progression-ready evidence - never point at the achievement check yet
+                reason = PHASE_EVIDENCE_NOT_READY
             next_phase = _next(None, reason, [], [], None)
             if reason == "no_startable_phase":
                 blockers.extend(
@@ -1108,6 +1123,41 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
         _withhold(section, STRUCTURE_INVALID)
         section["blockers"].append({"code": STRUCTURE_INVALID, "ids": []})
     return section
+
+
+#: RB5 (§32.41 / §32.42): the next-Phase reason and blocker when a reviewed Phase's evidence obligation is open.
+PHASE_EVIDENCE_NOT_READY = "phase_evidence_not_ready"
+
+
+def _reviewed_roadmap(view: ProjectView, roadmap_id: str) -> bool:
+    """Whether any Phase of the Roadmap is reviewed - ``roadmap.progression_ready_phases``' own gate."""
+    from . import phase_integration as pi
+
+    return any(pi.completion_mode(view, phase.id) == pi.MODE_REVIEWED for phase in view.roadmap_phases(roadmap_id))
+
+
+def _progression_ready(context: _Context, view: ProjectView, candidates: list[Any]
+                       ) -> tuple[list[Any], list[tuple[str, str, str]]]:
+    """The candidates narrowed by progression-readiness (``achievement_reader.progression_narrowing``), the Project's
+    own Review history only."""
+    from .review import achievement_reader
+    from .review.store import ReviewStore
+
+    narrowing = achievement_reader.progression_narrowing(view, ReviewStore(context.store), candidates)
+    return list(narrowing.ready), list(narrowing.blocked)
+
+
+def _unready_reviewed_phases(context: _Context, view: ProjectView, roadmap_id: str) -> list[str]:
+    """The complete reviewed active Phases that are not progression-ready (``roadmap.unready_reviewed_phases``)."""
+    from . import achievement
+    from . import phase_integration as pi
+    from .review.store import ReviewStore
+
+    evidence = ReviewStore(context.store).phase_completion_evidence()
+    validation = achievement.structural_validation(view)
+    return [phase.id for phase in view.active_phases(roadmap_id)
+            if pi.completion_mode(view, phase.id) == pi.MODE_REVIEWED and pi.phase_generated_complete(view, phase.id)
+            and not achievement.phase_progression_decision(view, phase.id, evidence, validation=validation).ready]
 
 
 def _withhold(lifecycle: dict[str, Any], reason: str) -> None:
@@ -1235,6 +1285,170 @@ def _policy(context: _Context) -> dict[str, Any]:
     return section
 
 
+def _completion(context: _Context) -> dict[str, Any]:
+    """RB5 (§32.51 / §14.28): Phase completion and Roadmap achievement, read-only, from the Project alone.
+
+    Every Phase of every active or achieved Roadmap: its completion mode, generated completeness, current basis,
+    reviewed-integration coverage, the latest Phase Integration Review of its marked integration(s), its current
+    phase_completion evidence, progression-readiness and downstream confirmations; and every such Roadmap's
+    completeness, readiness and ``roadmap_achieved`` evidence binding. Achievement records are read through the
+    PROJECT ``ReviewStore`` only (``history/achievements`` is PROJECT-only); nothing reads the Workline root. A
+    legacy Phase reports ``legacy`` with evidence ``not_applicable`` - nothing is invented for it. One structural
+    validation serves every Phase (each Roadmap basis adds its own).
+    """
+    if not context.established:
+        return {"status": NOT_AVAILABLE_BY_CONTRACT}
+    from . import achievement
+    from .review.store import ReviewStore
+    from .state import ACHIEVED
+
+    view = ProjectView.load(context.store)
+    review = ReviewStore(context.store)
+    evidence = review.phase_completion_evidence()
+    records = review.achievement_records()
+    validation = achievement.structural_validation(view)
+    roadmap_ids = sorted(r.id for r in view.roadmaps.values() if view.roadmap_lifecycle(r.id) in (ACTIVE, ACHIEVED))
+    phases = [
+        _phase_completion(context, view, review, evidence, validation, phase.id, roadmap_id)
+        for roadmap_id in roadmap_ids
+        for phase in view.roadmap_phases(roadmap_id)
+    ]
+    return {
+        "status": "available",
+        "phases": sorted(phases, key=lambda item: item["phase_id"]),
+        "roadmaps": [_roadmap_completion(view, evidence, records, roadmap_id) for roadmap_id in roadmap_ids],
+    }
+
+
+def _phase_completion(context: _Context, view: ProjectView, review: Any, evidence: list[Any],
+                      validation: tuple[bool, str], phase_id: str, roadmap_id: str) -> dict[str, Any]:
+    from . import achievement
+    from . import phase_integration as pi
+
+    basis = achievement.phase_basis(view, phase_id, validation=validation)
+    coverage = pi.coverage_status(view, phase_id)
+    match = achievement.match_current_phase_evidence(basis, evidence) if basis.reviewed else None
+    decision = achievement.phase_progression_decision(view, phase_id, evidence, validation=validation)
+    covering = sorted(basis.covering_integration_ids)
+    first = covering[0] if covering else None
+    return {
+        "phase_id": phase_id,
+        "roadmap_id": roadmap_id,
+        "completion_mode": basis.completion_mode,
+        "generated_complete": basis.generated_complete,
+        "basis_digest": basis.digest,
+        "covering_integration_id": first,
+        "coverage": {"status": coverage.status, "reasons": list(coverage.reasons)},
+        "latest_integration_review": _latest_integration_review(context, view, review, phase_id) if basis.reviewed
+        else None,
+        "evidence": {"status": match.status if match is not None else "not_applicable",
+                     "achievement_evidence_id": match.evidence_id if match is not None else None},
+        "progression_ready": decision.ready,
+        "downstream_confirmations": [
+            {"work_id": work.id, "state": view.work_state(work.id).state}
+            for work in (pi.downstream_confirmations(view, phase_id, first) if first is not None else [])
+        ],
+    }
+
+
+def _latest_integration_review(context: _Context, view: ProjectView, review: Any, phase_id: str) -> dict[str, Any] | None:
+    """The Phase Integration Review Run of the Phase's marked integration(s) whose generation 1 was committed last.
+
+    "Last" is the commit order of each Run's gate 000001: the Run whose adding
+    commit has every other Run's gate 000001 in its history (one read of the
+    add-history per Run, never mtime, ID or timestamp); a Run whose generation 1
+    is not committed yet is later than every committed one. ``None`` when the
+    Phase has no such Run, or when the order does not single one out. The
+    disposition is the Run's final durable one, else its G4 integration
+    disposition when G4 settled, else ``open``.
+    """
+    from . import phase_integration as pi
+    from .review import committed, p4, paths, records
+
+    integrations = {work.id for work in pi.reviewed_integrations(view, phase_id)}
+    runs: dict[str, Any] = {}
+    for review_run_id in review.run_ids():
+        chain = review.gate_chain(review_run_id)
+        if chain is None:
+            continue
+        first = chain.generations[0]
+        if first.review_kind == records.INTEGRATION_REVIEW_KIND and first.target_identity in integrations:
+            runs[review_run_id] = chain
+    if not runs:
+        return None
+    head = gitcmd.head_commit(context.store.root)
+    gates = {review_run_id: paths.gate_rel(review_run_id, records.FIRST_GENERATION) for review_run_id in runs}
+    adding: dict[str, str] = {}
+    if head is not None:
+        for commit, names in committed.added_in_history(context.store.root, head, sorted(gates.values())):
+            for name in names:
+                for review_run_id, gate_path in gates.items():
+                    if name == gate_path and review_run_id not in adding:
+                        adding[review_run_id] = commit
+    pending = sorted(review_run_id for review_run_id in runs if review_run_id not in adding)
+    if len(pending) > 1:
+        return None
+    if pending:
+        latest = pending[0]
+    else:
+        latest_ones = []
+        for review_run_id, commit in sorted(adding.items()):
+            others = sorted(gates[other] for other in adding if other != review_run_id)
+            seen = {name for _, names in committed.added_in_history(context.store.root, commit, others)
+                    for name in names} if others else set()
+            if set(others) <= seen:
+                latest_ones.append(review_run_id)
+        if len(latest_ones) != 1:
+            return None
+        latest = latest_ones[0]
+    chain = runs[latest]
+    disposition = p4.final_disposition(review, chain)
+    if disposition is None:
+        adjudication = p4.bound_adjudication(review, chain)
+        disposition = adjudication.integration_disposition if adjudication is not None \
+            and adjudication.integration_disposition else "open"
+    return {"review_run_id": latest, "disposition": disposition}
+
+
+def _roadmap_completion(view: ProjectView, evidence: list[Any], records: Any, roadmap_id: str) -> dict[str, Any]:
+    from . import achievement
+
+    basis = achievement.roadmap_basis(view, roadmap_id, evidence)
+    return {
+        "roadmap_id": roadmap_id,
+        "all_active_phases_generated_complete": basis.all_active_phases_complete,
+        "every_reviewed_phase_progression_ready": not basis.unready_phases,
+        "unready_phases": [{"phase_id": phase_id, "evidence_status": status} for phase_id, status in basis.unready_phases],
+        "achieved": _achieved_binding(view, records, roadmap_id, basis),
+    }
+
+
+def _achieved_binding(view: ProjectView, records: Any, roadmap_id: str, basis: Any) -> dict[str, Any]:
+    """The ``roadmap_achieved`` event against the roadmap_achievement record (``achievement.event_evidence_problems``).
+
+    ``ok``: both agree, or neither exists (nothing achieved, nothing contradicts), or a legacy-only Roadmap was
+    achieved without one (no evidence is required or invented for it); ``missing_evidence``: a Roadmap holding a
+    reviewed Phase was achieved and no record binds the event; ``invalid``: the record and the event disagree, a
+    record exists without its event, or more than one of either exists.
+    """
+    from . import achievement
+
+    events = [event for event in view.events_for(roadmap_id) if event.type == achievement.ROADMAP_ACHIEVED_EVENT]
+    found = sorted((item.evidence for item in records if item.kind == achievement.KIND_ROADMAP_ACHIEVEMENT
+                    and item.evidence.roadmap_id == roadmap_id), key=lambda item: item.achievement_evidence_id)
+    event = events[0] if len(events) == 1 else None
+    record = found[0] if len(found) == 1 else None
+    shown = {"event_id": events[0].id if events else None,
+             "evidence_id": found[0].achievement_evidence_id if found else None}
+    if len(events) > 1 or len(found) > 1 or (found and not events):
+        return {**shown, "binding": "invalid"}
+    if event is None:
+        return {**shown, "binding": "ok"}
+    if record is None:
+        return {**shown, "binding": "missing_evidence" if basis.requires_structured_decision else "ok"}
+    return {**shown, "binding": "invalid" if achievement.event_evidence_problems(record, event) else "ok"}
+
+
 def _isolated_problems(reader: Callable[[], list[tuple[str, str]]]) -> list[tuple[str, str]]:
     try:
         return list(reader())
@@ -1255,6 +1469,8 @@ def _collect(root: Path) -> dict[str, Any]:
     body["validation"] = _isolated(lambda: _validation(context))
     body["review"] = _isolated(lambda: _review(context))
     body["policy"] = _isolated(lambda: _policy(context))
+    # RB5 (§32.51 / §14.28): the completion slot, from the Project alone
+    body["completion"] = _isolated(lambda: _completion(context))
     body["_blocking_mutations"] = list(context.blocking_mutations)
     return body
 
@@ -1309,7 +1525,6 @@ def _assemble(body: dict[str, Any], consistency: str) -> StatusModel:
         "snapshot_consistency": consistency,
         "snapshot_reason": PROJECT_CHANGED if consistency == CHANGING else None,
         **body,
-        "completion": {"status": NOT_AVAILABLE_BY_CONTRACT},
     }
     return StatusModel(_scrub(data))
 
@@ -1587,9 +1802,34 @@ def render_human(model: StatusModel) -> str:
 
     heading("Achievement")
     out.append(f"  {data['completion']['status']}")
+    out.extend(_completion_lines(data["completion"], index))
     heading("Policy")
     out.extend(_policy_lines(data["policy"]))
     return "\n".join(out) + "\n"
+
+
+def _completion_lines(section: Mapping[str, Any], index: dict[str, str]) -> list[str]:
+    """RB5: one line per Phase and per Roadmap of the completion slot - presentation of the model only."""
+    out: list[str] = []
+    if _section_status(section) is not None:
+        out.append(f"  {_section_status(section).strip()}")
+        return out
+    for phase in section.get("phases") or []:
+        try:
+            out.append(f"  {_label(index, phase['phase_id'])} {phase['completion_mode']} "
+                       f"complete={phase['generated_complete']} evidence={phase['evidence']['status']} "
+                       f"ready={phase['progression_ready']}")
+        except (KeyError, TypeError):
+            continue
+    for roadmap in section.get("roadmaps") or []:
+        try:
+            achieved = roadmap["achieved"]["binding"] if isinstance(roadmap.get("achieved"), Mapping) else None
+            out.append(f"  {_label(index, roadmap['roadmap_id'])} "
+                       f"all_complete={roadmap['all_active_phases_generated_complete']} "
+                       f"progression_ready={roadmap['every_reviewed_phase_progression_ready']} achieved={achieved}")
+        except (KeyError, TypeError):
+            continue
+    return out
 
 
 def _policy_lines(section: Mapping[str, Any]) -> list[str]:
