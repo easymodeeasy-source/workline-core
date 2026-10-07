@@ -231,7 +231,7 @@ class HumanObjectiveTests(IntegrationRunCase):
                          [item for item in found["human_required"] if item["kind"] != "review_human_wait"],
                          "the same Run's stored Phase outcome asks for a desired-state change")
         self.assertEqual([], found["objective_unmet"])
-        # the replicated reader agrees with the §32.44 reader itself (which returns prose)
+        # the same Run is the §32.44 reader's unresolved HUMAN decision (one owner, its prose unchanged)
         _, unresolved = rr.achievement_open_items(store, ProjectView.load(store), roadmap_id, None)
         self.assertEqual(1, len(unresolved))
         self.assertIn(run_id, unresolved[0])

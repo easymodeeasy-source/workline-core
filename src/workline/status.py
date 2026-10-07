@@ -1506,31 +1506,12 @@ def _human_objective(view: ProjectView, review: Any, roadmap_id: str, phases: li
 
 
 def _unresolved_human_waits(view: ProjectView, review: Any, roadmap_id: str) -> list[dict[str, Any]]:
-    """The HUMAN half of ``roadmap_review.achievement_open_items(store, view, roadmap_id, None)`` (§32.44), replicated
-    over the same reads because that reader returns prose: the P4-family Runs whose target is the Roadmap, one of its
-    Phases or one of their Works, at canonical G4 HUMAN_WAIT, that no Run's request set aside - each with its Run ID
-    and target."""
-    from .review import history, p4
+    """The Roadmap's unresolved G4 HUMAN_WAIT Runs, from their one owner ``roadmap_review.unresolved_human_waits``
+    (§32.44's own reader, the HUMAN half of ``achievement_open_items``) - each with its Run ID and target."""
+    from . import roadmap_review
 
-    targets = {roadmap_id}
-    for phase in view.roadmap_phases(roadmap_id):
-        targets.add(phase.id)
-        targets.update(work.id for work in view.phase_works(phase.id))
-    chains = {}
-    for run_id in review.run_ids():
-        chain = review.gate_chain(run_id)
-        if chain is None or chain.generations[0].target_identity not in targets \
-                or not p4.run_contracts(review, chain) - {None}:
-            continue
-        chains[run_id] = chain
-    named = set()
-    for chain in chains.values():
-        task_id = str(chain.generations[0].accepted_tasks[0]["task_id"])
-        named.update(str(item["review_run_id"]) for item in
-                     review.read_task_input(task_id).request_envelope.get("set_aside_runs") or [])
-    return [{"kind": "review_human_wait", "id": run_id, "target_id": chain.generations[0].target_identity}
-            for run_id, chain in sorted(chains.items())
-            if run_id not in named and p4.final_disposition(review, chain) == history.DISPOSITION_HUMAN_WAIT]
+    return [{"kind": "review_human_wait", "id": run_id, "target_id": target}
+            for run_id, target in roadmap_review.unresolved_human_waits(review, view, roadmap_id)]
 
 
 def _achieved_binding(view: ProjectView, records: Any, roadmap_id: str, basis: Any) -> dict[str, Any]:
