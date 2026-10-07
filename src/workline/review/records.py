@@ -1088,14 +1088,172 @@ class PolicyConsumption:
         )
 
 
+# --------------------------------------------------------------------------- global policy consumption (version 4)
+#
+# The Global Policy Consumption (P7, ``WORKLINE_COMPLETION_SPRINT`` §31.25 / §31.37, allocation A-1): the P1
+# Consumption schema at version 4, for the ``global-policy-change-v1`` root meta-review kind only, stored in the root
+# policy Review namespace. Its ``persisted_global_policy`` binds the exact root policy commit Kp and the persisted
+# Global policy it consumed the Receipt for. It names the single-purpose root policy mutation (``rpm``), never a
+# Project mutation, and no Work terminal event. Versions 1 - 3 keep every record they ever read with exactly their
+# meaning; the root kind is valid only in version 4, and version 4 only for the root kind. One Receipt still has at
+# most one Consumption (keyed by the Receipt alone).
+
+GLOBAL_POLICY_CONSUMPTION_VERSION = 4
+
+#: The root meta-review kind (§31.25), the only kind a version 4 Consumption may name, and its target.
+GLOBAL_POLICY_REVIEW_KIND = "global-policy-change-v1"
+GLOBAL_POLICY_TARGET_IDENTITY = "global-policy"
+PERSISTED_GLOBAL_POLICY_CONTRACT = "review-v1-p7-persisted-global-policy-v1"
+#: The total Profile compatibility adapters a Global change persists under - ``policy.COMPATIBILITY_TOTAL_ADAPTER_V1``,
+#: restated because this module imports no policy code, and pinned equal.
+GLOBAL_POLICY_COMPATIBILITY_ADAPTERS = ("review-v1-p7-total-adapter-v1",)
+
+GLOBAL_POLICY_CONSUMPTION_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "consumption_id",
+    "receipt_id",
+    "review_run_id",
+    "review_generation",
+    "review_kind",
+    "authorized_candidate_hash",
+    "operation_identity",
+    "root_policy_mutation_id",
+    "target_identity",
+    "persisted_global_policy",
+)
+
+PERSISTED_GLOBAL_POLICY_FIELDS = (
+    "contract",
+    "global_policy_change_id",
+    "promotion_packet_id",
+    "promotion_packet_digest",
+    "before_global_policy_version",
+    "before_global_policy_digest",
+    "after_global_policy_version",
+    "after_global_policy_digest",
+    "normalized_projection_hash",
+    "policy_commit",
+    "policy_parent",
+    "branch",
+    "policy_delta_digest",
+    "compatibility_adapter_identity",
+    "compatibility_adapter_digest",
+    "loader_identity",
+)
+
+
+def _validate_persisted_global_policy(value: object, described: str) -> dict[str, Any]:
+    where = f"{described} persisted_global_policy"
+    result = _require_mapping(value, where)
+    _require_exact_fields(result, PERSISTED_GLOBAL_POLICY_FIELDS, where)
+    _require_choice(result, "contract", (PERSISTED_GLOBAL_POLICY_CONTRACT,), where)
+    _require_id(result, "global_policy_change_id", "review_global_policy_change", where)
+    _require_id(result, "promotion_packet_id", "review_promotion_packet", where)
+    _require_digest(result, "promotion_packet_digest", where)
+    before = _require_int(result, "before_global_policy_version", where, minimum=1)
+    _require_digest(result, "before_global_policy_digest", where)
+    after = _require_int(result, "after_global_policy_version", where, minimum=2)
+    if after != before + 1:
+        raise ValidationError(f"{where} does not persist exactly the next Global policy version", code="review_record_invalid")
+    _require_digest(result, "after_global_policy_digest", where)
+    _require_digest(result, "normalized_projection_hash", where)
+    _require_full_commit(result, "policy_commit", where)
+    _require_full_commit(result, "policy_parent", where)
+    branch = result.get("branch")
+    if not isinstance(branch, str) or _FULL_BRANCH.fullmatch(branch) is None:
+        raise ValidationError(f"{where} branch is not a full branch ref: {branch!r}", code="review_record_invalid")
+    _require_digest(result, "policy_delta_digest", where)
+    _require_choice(result, "compatibility_adapter_identity", GLOBAL_POLICY_COMPATIBILITY_ADAPTERS, where)
+    _require_digest(result, "compatibility_adapter_digest", where)
+    _require_digest(result, "loader_identity", where)
+    return result
+
+
+@dataclass(frozen=True)
+class GlobalPolicyConsumption:
+    """The one use of one Global Policy Change Receipt, bound to the exact root policy commit it authorized (v4).
+
+    Reading proves form and bindings only; the root owner's committed proof
+    recomputes what it claims from committed objects. It binds no Work terminal
+    event and never invents one, and it is neither Project lifecycle truth nor
+    a Project record.
+    """
+
+    consumption_id: str
+    receipt_id: str
+    review_run_id: str
+    review_generation: int
+    review_kind: str
+    authorized_candidate_hash: str
+    operation_identity: str
+    root_policy_mutation_id: str
+    target_identity: str
+    persisted_global_policy: dict[str, Any]
+
+    #: A Global Policy Consumption binds no Work terminal event.
+    terminal_event_id = None
+    terminal_event_type = None
+    authorized_result_commit_sha = None
+
+    @property
+    def work_kind(self) -> bool:
+        return False
+
+    @property
+    def work_id(self) -> str | None:
+        return None
+
+    @property
+    def policy_commit(self) -> str:
+        return str(self.persisted_global_policy["policy_commit"])
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            serialize.SCHEMA_KEY: SCHEMA_CONSUMPTION,
+            serialize.VERSION_KEY: GLOBAL_POLICY_CONSUMPTION_VERSION,
+            "consumption_id": self.consumption_id,
+            "receipt_id": self.receipt_id,
+            "review_run_id": self.review_run_id,
+            "review_generation": self.review_generation,
+            "review_kind": self.review_kind,
+            "authorized_candidate_hash": self.authorized_candidate_hash,
+            "operation_identity": self.operation_identity,
+            "root_policy_mutation_id": self.root_policy_mutation_id,
+            "target_identity": self.target_identity,
+            "persisted_global_policy": dict(self.persisted_global_policy),
+        }
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "GlobalPolicyConsumption":
+        serialize.require_schema(record, SCHEMA_CONSUMPTION, GLOBAL_POLICY_CONSUMPTION_VERSION, described)
+        _require_exact_fields(record, GLOBAL_POLICY_CONSUMPTION_FIELDS, described)
+        review_kind = _require_choice(record, "review_kind", (GLOBAL_POLICY_REVIEW_KIND,), described)
+        target = _require_choice(record, "target_identity", (GLOBAL_POLICY_TARGET_IDENTITY,), described)
+        persisted = _validate_persisted_global_policy(record.get("persisted_global_policy"), described)
+        return GlobalPolicyConsumption(
+            consumption_id=_require_id(record, "consumption_id", "review_consumption", described),
+            receipt_id=_require_id(record, "receipt_id", "review_receipt", described),
+            review_run_id=_require_id(record, "review_run_id", "review_run", described),
+            review_generation=_require_int(record, "review_generation", described, minimum=FIRST_GENERATION),
+            review_kind=review_kind,
+            authorized_candidate_hash=_require_digest(record, "authorized_candidate_hash", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            root_policy_mutation_id=_require_id(record, "root_policy_mutation_id", "root_policy_mutation", described),
+            target_identity=target,
+            persisted_global_policy=dict(persisted),
+        )
+
+
 def consumption_from_record(
     record: dict[str, Any], described: str
-) -> "Consumption | PlanningConsumption | PolicyConsumption":
+) -> "Consumption | PlanningConsumption | PolicyConsumption | GlobalPolicyConsumption":
     """A stored Consumption of any version, read by its own reader.
 
     Version 1 is the P1 reader, unchanged, and a planning kind is refused
     there; version 2 is the Planning Consumption; version 3 is the Policy
-    Consumption (P6). Any other version is not read. Version 1 reads exactly
+    Consumption (P6); version 4 is the Global Policy Consumption (P7,
+    allocation A-1). Any other version is not read. Version 1 reads exactly
     what it always read: that a Policy Receipt is consumed only by a version 3
     Consumption is the P6 validation's, made where a Policy Receipt exists.
     """
@@ -1104,6 +1262,8 @@ def consumption_from_record(
         return PlanningConsumption.from_record(record, described)
     if version == POLICY_CONSUMPTION_VERSION:
         return PolicyConsumption.from_record(record, described)
+    if version == GLOBAL_POLICY_CONSUMPTION_VERSION:
+        return GlobalPolicyConsumption.from_record(record, described)
     found = Consumption.from_record(record, described)
     if found.review_kind in PLANNING_REVIEW_KINDS:
         raise ValidationError(
@@ -1415,7 +1575,11 @@ P4_WORK_CONTRACT = "review-v1-work-p4-v1"
 #: contract family - P4 discovery reports and the P4 adjudication, G1-G5 - with no Repair Batch branch, so a
 #: Repair Batch or Repair Result never names it (:data:`P4_REPAIR_CONTRACTS`).
 P6_POLICY_CHANGE_CONTRACT = "review-v1-policy-change-p6-v1"
-P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT, P6_POLICY_CHANGE_CONTRACT)
+#: P7 (§31.25, addendum RB7C-1 (d)): the root meta-review contract of the ``global-policy-change-v1`` kind - P4
+#: discovery reports and the P4 adjudication, G1-G5 in the root policy Review namespace, no Repair Batch branch (so
+#: never in :data:`P4_REPAIR_CONTRACTS`), bound under the root non-history family policy only (``p4.CONTRACT_POLICIES``).
+P7_GLOBAL_POLICY_CHANGE_CONTRACT = "review-v1-global-policy-change-p4-v1"
+P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT, P6_POLICY_CHANGE_CONTRACT, P7_GLOBAL_POLICY_CHANGE_CONTRACT)
 #: The contracts whose Runs may repair: exactly the two P4 owner contracts, unchanged.
 P4_REPAIR_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT)
 
