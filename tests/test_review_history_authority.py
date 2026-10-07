@@ -109,7 +109,11 @@ class ScopeTests(unittest.TestCase):
       and - RB5 §32.26 / §32.50 - by START's Phase-integration repair (``start_review._record_fix_links``), which
       writes the version 2 ``future_work_link`` of each fix Work it registers; nothing in Review writes one, and P5
       still never creates or schedules a Work;
-    * RB5 owns achievement: nothing calls ``rb5_reference`` or ``confirmed_relations`` yet (§28.21 / §28.22).
+    * RB5 owns achievement: nothing calls ``rb5_reference`` yet (§28.21). ``confirmed_relations`` (§28.22) is
+      wired by RB5 (§32.28, CP ruling Q-C3) into the Phase Integration STRATEGY_CHANGE relation chain only, and
+      only inside the history core: ``history.bc_relation_surfaces`` filters a Finding's VALIDATED relations
+      through it for ``p4.integration_strategy_change_required``. No module outside history calls it, so it stays
+      UNWIRED here - an owner never counts an unvalidated "supported" relation by calling it directly.
     """
 
     UNWIRED = ("history_problems", "rb5_reference", "confirmed_relations",

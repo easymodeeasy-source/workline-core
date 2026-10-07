@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import re
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
@@ -1907,6 +1907,7 @@ def adjudication(
     policy_id: str = POLICY_ID,
     phase_outcome: Any = None,
     integration_disposition: str | None = None,
+    strategy_change_required: bool | None = None,
 ) -> records.P4Adjudication:
     """The canonical adjudication record, with the reserved Finding IDs in canonical Finding order.
 
@@ -1919,6 +1920,13 @@ def adjudication(
     (``review.integration.integration_branch``, or the step-4 refusal code -
     ruling OQ-C); the record carries both at version 2. Under every other
     contract both must be absent and nothing changes.
+
+    CP RB5 Q-C3: under the Phase Integration contract the owner also gives
+    ``strategy_change_required`` - :func:`integration_strategy_change_required`
+    over this G4's relation drafts (an integration Run has no current-cycle
+    prior, so :func:`normalize_adjudication` never derives it) - and the
+    recorded obligation is that or the normalized one. Under every other
+    contract it must be ``None`` and the record is byte for byte what it was.
     """
     if len(finding_ids) != len(normalized.drafts):
         raise ValidationError("one reserved Finding ID per normalized Finding", code="review_record_invalid")
@@ -1926,6 +1934,9 @@ def adjudication(
     if not integration and (phase_outcome is not None or integration_disposition is not None):
         raise ValidationError("only a Phase Integration adjudication carries a Phase outcome and a G4 disposition",
                               code="review_record_invalid")
+    if strategy_change_required is not None and (not integration or type(strategy_change_required) is not bool):
+        raise ValidationError("only a Phase Integration adjudication is given a relation-chain strategy change "
+                              "requirement, as a boolean", code="review_record_invalid")
     by_source: dict[tuple[str, str, int], str] = {}
     findings: list[dict[str, Any]] = []
     for draft, finding_id in zip(normalized.drafts, finding_ids):
@@ -1968,6 +1979,8 @@ def adjudication(
             normalized.strategy_change_class if derive_outcome(normalized) == REPAIR_REQUIRED else None
         ),
     }
+    if strategy_change_required:
+        record["obligations"] = {**record["obligations"], "strategy_change_required": True}
     if integration:
         record[serialize.VERSION_KEY] = records.P4_INTEGRATION_ADJUDICATION_VERSION
         outcome_record = phase_outcome.to_record() if hasattr(phase_outcome, "to_record") else phase_outcome
@@ -3677,8 +3690,22 @@ def _relation_invalid(message: str) -> StopError:
     return stop(CODE_ADJUDICATION_INVALID, f"the adjudication's relation claims are invalid: {message}; nothing is settled")
 
 
+#: CP RB5 Q-C2: the ``target_family`` of a relation claim naming an integration domain fix Work. Admitted only for a
+#: ``repair_induced`` claim, and only when the owner passes the fix Works its validated version 2
+#: ``future_work_link`` records resolve (``fix_works``); every other caller sees exactly the old refusal.
+FIX_WORK_FAMILY = "works"
+
+
+def _require_integration_fix_works(found: records.P4Adjudication, fix_works: object) -> None:
+    """Q-C2 condition 1 at the producer: only a Phase Integration adjudication is given fix Works (RB5RT-2)."""
+    if fix_works is not None and found.review_contract != records.P4_PHASE_INTEGRATION_CONTRACT:
+        raise _relation_invalid(f"only a Phase Integration adjudication names integration fix Works; this one is "
+                                f"under {found.review_contract}")
+
+
 def relation_drafts(returned: P4AdjudicationReturn, found: records.P4Adjudication,
-                    references: Sequence[Mapping[str, Any]], *, policy_id: str) -> tuple[RelationDraft, ...]:
+                    references: Sequence[Mapping[str, Any]], *, policy_id: str,
+                    fix_works: Mapping[str, history.Relation] | None = None) -> tuple[RelationDraft, ...]:
     """Validate a return's relation claims against the adjudication and the bound references (GAP-C).
 
     A P4-only adjudication returns none (anything else is refused, its
@@ -3688,10 +3715,17 @@ def relation_drafts(returned: P4AdjudicationReturn, found: records.P4Adjudicatio
     Finding's canonical position, then the type and target - never the return
     order. Type / endpoint / status / evidence / rationale are validated by the
     history core when the record is built.
+
+    CP RB5 Q-C2: a Phase Integration owner also passes ``fix_works`` - each fix
+    Work an earlier Integration Finding's repair registered, mapped to its
+    validated version 2 ``future_work_link`` (:func:`history.integration_fix_link`).
+    A ``repair_induced`` claim may then name such a Work (``target_family``
+    :data:`FIX_WORK_FAMILY`); no other claim, and no other caller, may.
     """
     claims = returned.relation_claims
     if not isinstance(claims, tuple):
         raise _relation_invalid("relation_claims is not a tuple")
+    _require_integration_fix_works(found, fix_works)
     if not is_history_policy(policy_id):
         if claims:
             raise _relation_invalid("a P4-only adjudication returns no cross-run relation claim")
@@ -3710,7 +3744,9 @@ def relation_drafts(returned: P4AdjudicationReturn, found: records.P4Adjudicatio
         if target is None:
             raise _relation_invalid(f"claim {claim.source_claim_index} of {claim.source_task_id!r} is no Finding of this "
                                     "adjudication; a relation starts at the later Finding that made it knowable")
-        if (claim.target_family, claim.target_id) not in bound:
+        fix_target = claim.target_family == FIX_WORK_FAMILY and fix_works is not None \
+            and claim.relation_type == history.RELATION_REPAIR_INDUCED and claim.target_id in fix_works
+        if (claim.target_family, claim.target_id) not in bound and not fix_target:
             raise _relation_invalid(f"{claim.target_family} {claim.target_id!r} is not in the bound validated "
                                     "prior-history reference set")
         position, finding_id = target
@@ -3723,23 +3759,70 @@ def relation_drafts(returned: P4AdjudicationReturn, found: records.P4Adjudicatio
 
 
 def relation_record(draft: RelationDraft, relation_id: str, source: history.FindingSummary,
-                    references: Sequence[Mapping[str, Any]]) -> history.Relation:
-    """One accepted relation record (an immutable new G4 fact), validated through the history core."""
+                    references: Sequence[Mapping[str, Any]], *,
+                    fix_works: Mapping[str, history.Relation] | None = None) -> history.Relation:
+    """One accepted relation record (an immutable new G4 fact), validated through the history core.
+
+    CP RB5 Q-C2: a claim naming a fix Work (:data:`FIX_WORK_FAMILY`) becomes the
+    narrow version 2 ``repair_induced`` to that Work, carrying exactly the
+    provenance of the Work's own ``future_work_link``.
+    """
     claim = draft.claim
-    digest = next(str(item["digest"]) for item in references
-                  if (item["family"], item["id"]) == (claim.target_family, claim.target_id))
     try:
+        source_endpoint = history.endpoint(history.ENDPOINT_FINDING, source.finding_id, basis=history.BASIS_HISTORY,
+                                           digest=serialize.digest(source.to_record()))
+        if claim.target_family == FIX_WORK_FAMILY and fix_works is not None and claim.target_id in fix_works:
+            return history.relation(
+                relation_id, claim.relation_type, source_endpoint,
+                history.endpoint(history.ENDPOINT_WORK, claim.target_id, basis=history.BASIS_PROJECT),
+                status=claim.status, rationale=claim.rationale, semantic_surface=claim.semantic_surface,
+                supporting_evidence_digests=claim.supporting_evidence_digests,
+                integration_provenance=fix_works[claim.target_id].integration_provenance,
+            )
+        digest = next(str(item["digest"]) for item in references
+                      if (item["family"], item["id"]) == (claim.target_family, claim.target_id))
         return history.relation(
-            relation_id, claim.relation_type,
-            history.endpoint(history.ENDPOINT_FINDING, source.finding_id, basis=history.BASIS_HISTORY,
-                             digest=serialize.digest(source.to_record())),
+            relation_id, claim.relation_type, source_endpoint,
             history.endpoint(REFERENCE_KINDS[claim.target_family], claim.target_id, basis=history.BASIS_HISTORY,
                              digest=digest),
             status=claim.status, rationale=claim.rationale, semantic_surface=claim.semantic_surface,
             supporting_evidence_digests=claim.supporting_evidence_digests,
         )
-    except (ValidationError, KeyError, TypeError) as exc:
+    except (ValidationError, KeyError, TypeError, StopIteration) as exc:
         raise _relation_invalid(str(exc)) from exc
+
+
+def integration_strategy_change_required(reader: Any, drafts: Sequence[RelationDraft], *,
+                                         fix_works: Mapping[str, history.Relation] | None = None,
+                                         work_ids: Collection[str] | None = None) -> bool:
+    """CP RB5 Q-C3 (OPTION_I_RELATION_CHAIN): two consecutive supported B/C on one semantic surface S.
+
+    Step 1: a current Integration Finding has a supported B/C claim on S
+    (:data:`history.SURFACE_RELATIONS`) whose predecessor resolves canonically
+    to an earlier Integration Finding F1 - for B the bound Finding itself, for C
+    the fix Work's validated version 2 ``future_work_link`` source (Q-C2), on
+    the same S. Step 2: F1 itself has a validated supported B/C predecessor on S
+    (:func:`history.bc_relation_surfaces`). Both hold -> STRATEGY_CHANGE is
+    required. Pure over the reader; no timestamp, newest Run, lexical ID or
+    latest record decides adjacency - the relations themselves are the chain.
+    """
+    for draft in drafts:
+        claim = draft.claim
+        surface = claim.semantic_surface
+        if claim.status != history.CAUSAL_SUPPORTED or claim.relation_type not in history.SURFACE_RELATIONS \
+                or surface is None:
+            continue
+        if claim.target_family == paths.HISTORY_FINDINGS and claim.relation_type == history.RELATION_CROSS_RUN_RECURRENCE:
+            earlier = history.integration_finding(reader, claim.target_id)
+        elif claim.target_family == FIX_WORK_FAMILY and fix_works is not None and claim.target_id in fix_works:
+            earlier = history.integration_finding(reader, fix_works[claim.target_id].source.id)
+            if earlier is not None and earlier.semantic_surface != surface:
+                earlier = None  # Q-C2 condition 6: the fix repaired another surface
+        else:
+            earlier = None
+        if earlier is not None and surface in history.bc_relation_surfaces(reader, earlier.finding_id, work_ids=work_ids):
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -3759,7 +3842,8 @@ class G4History:
 
 
 def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration, drafts: Sequence[RelationDraft],
-               relation_ids: Sequence[str], references: Sequence[Mapping[str, Any]]) -> G4History:
+               relation_ids: Sequence[str], references: Sequence[Mapping[str, Any]], *,
+               fix_works: Mapping[str, history.Relation] | None = None) -> G4History:
     """§28.8 / §28.12 / §28.5: the Finding summaries, the accepted relations and (HUMAN_WAIT) the Run summary of one G4.
 
     For a G4-terminal contract (:func:`repairs` false - the P6 Policy Review), a
@@ -3773,6 +3857,7 @@ def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration,
     """
     if len(relation_ids) != len(drafts):
         raise ValidationError("one reserved relation ID per accepted relation claim", code="review_record_invalid")
+    _require_integration_fix_works(found, fix_works)
     owned: dict[str, list[str]] = {}
     for draft, relation_id in zip(drafts, relation_ids):
         owned.setdefault(draft.finding_id, []).append(relation_id)
@@ -3781,7 +3866,7 @@ def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration,
         for item in found.findings
     )
     by_id = {item.finding_id: item for item in summaries}
-    relations = tuple(relation_record(draft, relation_id, by_id[draft.finding_id], references)
+    relations = tuple(relation_record(draft, relation_id, by_id[draft.finding_id], references, fix_works=fix_works)
                       for draft, relation_id in zip(drafts, relation_ids))
     summary = None
     if found.outcome == HUMAN_WAIT:

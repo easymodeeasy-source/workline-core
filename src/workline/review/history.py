@@ -971,6 +971,17 @@ INTEGRATION_PROVENANCE_FIELDS = ("source_review_run_id", "strategy_id")
 STRATEGY_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,127}")
 
 
+#: CP RB5 Q-C2 (NARROW_PHASE_INTEGRATION_REPAIR_INDUCED_WORK_TARGET): under the Phase Integration Review contract a
+#: ``repair_induced`` relation may name the domain fix Work an earlier Integration Finding's repair registered - and
+#: only that Work - as its target, at relation version 2 with the same ``integration_provenance`` the fix Work's own
+#: version 2 ``future_work_link`` carries (the earlier Integration Run and the repair strategy). Structurally a
+#: ``repair_induced`` with a Work target is valid only WITH that provenance, and with provenance only with a Work
+#: target; the positive binding to the fix Work's link, the source Finding being an Integration Finding, and the
+#: surface agreement are proven against the canonical records (:func:`relation_problems`). Every other
+#: ``repair_induced`` - the P4 Repair Batch target, version 1 - validates exactly as before.
+INTEGRATION_FIX_TARGET_KINDS: Mapping[str, tuple[str, ...]] = {RELATION_REPAIR_INDUCED: (ENDPOINT_WORK,)}
+
+
 def _require_integration_provenance(record: dict[str, Any], described: str) -> dict[str, str]:
     where = f"{described} {INTEGRATION_PROVENANCE_KEY}"
     found = records._require_mapping(record.get(INTEGRATION_PROVENANCE_KEY), where)
@@ -1043,12 +1054,16 @@ class Relation:
         else:
             _require_header(record, SCHEMA_RELATION, RELATION_FIELDS, described)
         relation_type = records._require_choice(record, "relation_type", RELATION_TYPES, described)
-        if provenance is not None and relation_type != RELATION_FUTURE_WORK_LINK:
-            raise ValidationError(f"{described} is a {relation_type}; only a {RELATION_FUTURE_WORK_LINK} carries "
-                                  "integration fix provenance", code=PROBLEM_INVALID)
+        if provenance is not None and relation_type not in (RELATION_FUTURE_WORK_LINK,) + tuple(INTEGRATION_FIX_TARGET_KINDS):
+            raise ValidationError(f"{described} is a {relation_type}; only a {RELATION_FUTURE_WORK_LINK} or a "
+                                  f"{RELATION_REPAIR_INDUCED} to an integration fix Work carries integration fix "
+                                  "provenance", code=PROBLEM_INVALID)
         source = Endpoint.from_record(record.get("source"), f"{described} source")
         target = Endpoint.from_record(record.get("target"), f"{described} target")
         source_kinds, target_kinds = RELATION_ENDPOINT_KINDS[relation_type]
+        if relation_type in INTEGRATION_FIX_TARGET_KINDS and provenance is not None:
+            # CP RB5 Q-C2: the narrow Phase Integration shape - a fix Work target, and nothing else, with provenance
+            target_kinds = INTEGRATION_FIX_TARGET_KINDS[relation_type]
         if source.kind not in source_kinds or target.kind not in target_kinds:
             raise ValidationError(
                 f"{described} is a {relation_type} from a {source.kind} to a {target.kind}; it joins a "
@@ -2055,6 +2070,8 @@ def relation_problems(reader: Any, found: Relation, *, work_ids: Collection[str]
 
 def _provenance_problems(reader: Any, found: Relation, where: str) -> list[Problem]:
     """RB5 (§32.50): the integration fix provenance names the Phase Integration Run its source Finding belongs to."""
+    if found.relation_type in INTEGRATION_FIX_TARGET_KINDS:
+        return _fix_target_problems(reader, found, where)
     run = str(found.integration_provenance["source_review_run_id"])  # type: ignore[index]
     try:
         if not reader.history_exists(paths.HISTORY_FINDINGS, found.source.id):
@@ -2071,6 +2088,80 @@ def _provenance_problems(reader: Any, found: Relation, where: str) -> list[Probl
         problems.append((PROBLEM_MISSING, f"{where} names source Run {run}, which has no gate chain"))
     elif chain.generations[0].review_kind != records.INTEGRATION_REVIEW_KIND:
         problems.append((PROBLEM_CONFLICT, f"{where} names source Run {run}, which is not a Phase Integration Review"))
+    return problems
+
+
+def integration_fix_link(reader: Any, work_id: str) -> Relation | None:
+    """The one version 2 ``future_work_link`` that registered ``work_id`` as an integration domain fix Work, or
+    ``None`` when no stored link names it (§32.26 / §32.50; CP RB5 Q-C2 / Q-C3).
+
+    Read from the canonical relation records - never inferred from a Work's
+    name, order or creation time. More than one such link for one Work is a
+    conflict (``review_record_conflict``), never resolved by choosing one.
+    """
+    found = []
+    for identifier in reader.history_ids(paths.HISTORY_RELATIONS):
+        relation_record = reader.read_history(paths.HISTORY_RELATIONS, identifier)
+        if relation_record.relation_type == RELATION_FUTURE_WORK_LINK \
+                and relation_record.integration_provenance is not None and relation_record.target.id == work_id:
+            found.append(relation_record)
+    if len(found) > 1:
+        raise ValidationError(f"Work {work_id} is the fix Work of {len(found)} integration future_work_links: "
+                              + ", ".join(sorted(item.relation_id for item in found)), code=PROBLEM_CONFLICT)
+    return found[0] if found else None
+
+
+def integration_finding(reader: Any, finding_id: str) -> "FindingSummary | None":
+    """The stored Finding summary ``finding_id`` when it is a Finding of a Phase Integration Review Run, else ``None``."""
+    if not reader.history_exists(paths.HISTORY_FINDINGS, finding_id):
+        return None
+    summary = reader.read_history(paths.HISTORY_FINDINGS, finding_id)
+    chain = reader.gate_chain(summary.review_run_id)
+    if chain is None or chain.generations[0].review_kind != records.INTEGRATION_REVIEW_KIND:
+        return None
+    return summary
+
+
+def _fix_target_problems(reader: Any, found: Relation, where: str) -> list[Problem]:
+    """CP RB5 Q-C2: a ``repair_induced`` relation to a fix Work holds only in the exact narrow Phase Integration case.
+
+    (1) its source is a Finding of a Phase Integration Review Run; (2) its
+    target is a Work (structural, and a canonical Work where the caller knows
+    the Project's Works); (3) that Work carries exactly one validated version 2
+    ``future_work_link``; (4) that link binds the Work to an earlier Integration
+    Finding of the very Integration Run and strategy this relation's provenance
+    names; (5) the identities validate (the structural reader and the link's own
+    provenance proof); (6) the relation's semantic surface is that earlier
+    Finding's; (7) H-3 / integrity are the structural reader's.
+    """
+    provenance = dict(found.integration_provenance or {})
+    try:
+        source = integration_finding(reader, found.source.id)
+        if source is None:
+            return [(PROBLEM_CONFLICT, f"{where} is a {found.relation_type} to a fix Work, and its source Finding "
+                                       f"{found.source.id} is not a Finding of a Phase Integration Review Run")]
+        link = integration_fix_link(reader, found.target.id)
+        if link is None:
+            return [(PROBLEM_MISSING, f"{where} names Work {found.target.id}, which no version 2 integration "
+                                      "future_work_link registered as a fix Work")]
+        problems = [(code, f"{where}: the fix Work's future_work_link {link.relation_id}: {message}")
+                    for code, message in _provenance_problems(reader, link, f"relation {link.relation_id}")]
+        earlier = integration_finding(reader, link.source.id)
+    except ValidationError as exc:
+        return [(_code(exc), f"{where}: the fix Work's provenance does not read: {exc}")]
+    if dict(link.integration_provenance or {}) != provenance:
+        problems.append((PROBLEM_CONFLICT, f"{where} names provenance {provenance}, and the fix Work "
+                                           f"{found.target.id} was registered with {link.integration_provenance}"))
+    if earlier is None:
+        problems.append((PROBLEM_CONFLICT, f"{where}: the fix Work's source Finding {link.source.id} is not a Finding "
+                                           "of a Phase Integration Review Run"))
+    else:
+        if earlier.review_run_id == source.review_run_id or earlier.finding_id == source.finding_id:
+            problems.append((PROBLEM_CONFLICT, f"{where} relates Finding {source.finding_id} to a fix of its own Run "
+                                               f"{source.review_run_id}; a repair-induced defect follows an earlier Run"))
+        if earlier.semantic_surface != found.semantic_surface:
+            problems.append((PROBLEM_CONFLICT, f"{where} is on surface {found.semantic_surface}, and the fix Work "
+                                               f"repairs Finding {earlier.finding_id} on {earlier.semantic_surface}"))
     return problems
 
 
@@ -2368,6 +2459,44 @@ def history_problems(reader: Any, *, work_ids: Collection[str] | None) -> list[P
 def confirmed_relations(found: Iterable[Relation]) -> tuple[Relation, ...]:
     """The relations that may feed confirmed recurrence / causality metrics: ``supported`` only (§28.22)."""
     return tuple(item for item in found if item.confirmed)
+
+
+def bc_predecessor(reader: Any, found: Relation, *, work_ids: Collection[str] | None = None) -> "FindingSummary | None":
+    """The earlier Integration Finding a validated supported B/C relation resolves to canonically, or ``None``.
+
+    CP RB5 Q-C3 (OPTION_I_RELATION_CHAIN): B (``cross_run_recurrence``) names
+    the earlier Finding itself; C (``repair_induced``) names the fix Work, whose
+    validated version 2 ``future_work_link`` resolves the earlier Finding (Q-C2).
+    The relation must be ``supported`` (:func:`confirmed_relations`), validate
+    against the canonical records (:func:`relation_problems`), and resolve to a
+    Finding of a Phase Integration Review Run. A Repair Batch target (the P4
+    current-cycle repair) is not a cross-Run Integration predecessor. Never a
+    timestamp, a newest Run, a lexical ID or a latest record.
+    """
+    if not found.confirmed or found.relation_type not in SURFACE_RELATIONS:
+        return None
+    if relation_problems(reader, found, work_ids=work_ids):
+        return None
+    if found.target.kind == ENDPOINT_FINDING:
+        return integration_finding(reader, found.target.id)
+    if found.target.kind == ENDPOINT_WORK:
+        link = integration_fix_link(reader, found.target.id)
+        return None if link is None else integration_finding(reader, link.source.id)
+    return None
+
+
+def bc_relation_surfaces(reader: Any, finding_id: str, *, work_ids: Collection[str] | None = None) -> frozenset[str]:
+    """The semantic surfaces on which the stored Integration Finding ``finding_id`` has a validated supported B/C
+    predecessor (CP RB5 Q-C3, step 2).
+
+    Read from the Finding summary's own ``relation_ids`` - the relations its G4
+    made knowable starting at it - filtered by :func:`confirmed_relations` and
+    resolved by :func:`bc_predecessor`. Empty for a Finding with none.
+    """
+    summary = reader.read_history(paths.HISTORY_FINDINGS, finding_id)
+    relations = [reader.read_history(paths.HISTORY_RELATIONS, relation_id) for relation_id in summary.relation_ids]
+    return frozenset(str(item.semantic_surface) for item in confirmed_relations(relations)
+                     if bc_predecessor(reader, item, work_ids=work_ids) is not None)
 
 
 # --------------------------------------------------------------------------- readiness (§28.18, §28.20)
