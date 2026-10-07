@@ -62,7 +62,9 @@ class PathsTests(unittest.TestCase):
             "POLICY_PROFILE_REL": ".workline/review/policy/project-profile.yaml",
             "WORK_TERMINAL_ACTIVATION_REL": ".workline/review/activation/work-terminal-v1.yaml",
             "GENERATION_WIDTH": 6, "SERIALIZATION_TOKEN": ".generation-serialization",
-            "HISTORY_FAMILIES": ("runs", "findings", "repairs", "relations", "human-decisions"),
+            # RB5 (§32.32, CP RB5 post-RB7 re-thread §4.3): the PROJECT descriptor gains the sixth family,
+            # achievements - pin widened additively (was the five P5 families)
+            "HISTORY_FAMILIES": ("runs", "findings", "repairs", "relations", "human-decisions", "achievements"),
             "POLICY_FAMILIES": ("changes", "evaluations"),
             "REVIEW_SUBDIRS": ("gates", "receipts", "consumptions", "supersessions", "candidate-snapshots",
                                "task-inputs", "activation", "reports", "adjudications", "repair-batches",

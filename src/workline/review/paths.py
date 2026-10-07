@@ -51,17 +51,22 @@ REPORTS_DIR = _PROJECT.reports_dir
 ADJUDICATIONS_DIR = _PROJECT.adjudications_dir
 REPAIR_BATCHES_DIR = _PROJECT.repair_batches_dir
 REPAIR_RESULTS_DIR = _PROJECT.repair_results_dir
-#: The P5 durable history namespace (§13.3 / §28.3): five immutable create-only record families, each
-#: one level below it, and nothing else - no index, no cache, no mutable "current history" file.
+#: The P5 durable history namespace (§13.3 / §28.3): immutable create-only record families, each one level
+#: below it, and nothing else - no index, no cache, no mutable "current history" file. P5 defines five; RB5 adds
+#: the sixth, ``achievements`` (§14.18 / §32.32): Phase completion and Roadmap achievement evidence, which is
+#: audit evidence and never lifecycle truth. The families are declared once, by the PROJECT descriptor
+#: (:mod:`workline.review.namespace`); these names are its re-exports.
 HISTORY_DIR = _PROJECT.history_dir
 HISTORY_RUNS = _namespace.HISTORY_RUNS
 HISTORY_FINDINGS = _namespace.HISTORY_FINDINGS
 HISTORY_REPAIRS = _namespace.HISTORY_REPAIRS
 HISTORY_RELATIONS = _namespace.HISTORY_RELATIONS
 HISTORY_HUMAN_DECISIONS = _namespace.HISTORY_HUMAN_DECISIONS
+HISTORY_ACHIEVEMENTS = _namespace.HISTORY_ACHIEVEMENTS
 HISTORY_FAMILIES = _namespace.HISTORY_FAMILIES
 #: The identity kind a history record of each family is named by (§28.4): Run / Finding / Repair history
-#: reuses its immutable source record's stable ID; only relations and Human Decision Evidence allocate one.
+#: reuses its immutable source record's stable ID; relations, Human Decision Evidence and achievement evidence
+#: (§32.32, reserved through ``Mutation.reserve_id``) allocate one.
 HISTORY_FAMILY_KINDS = _namespace.HISTORY_FAMILY_KINDS
 
 #: The P6 Project-local Review policy namespace (§15.23 / §30.17): the one mutable canonical Profile, written only
@@ -221,6 +226,11 @@ def history_relation_rel(relation_id: str) -> str:
 def history_decision_rel(decision_id: str) -> str:
     """One Human Decision Evidence record."""
     return history_rel(HISTORY_HUMAN_DECISIONS, decision_id)
+
+
+def history_achievement_rel(achievement_evidence_id: str) -> str:
+    """One Phase completion / Roadmap achievement evidence record (§14.18 / §32.32)."""
+    return history_rel(HISTORY_ACHIEVEMENTS, achievement_evidence_id)
 
 
 def policy_family_dir(family: str) -> str:

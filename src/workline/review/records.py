@@ -1245,17 +1245,130 @@ class GlobalPolicyConsumption:
         )
 
 
+# --------------------------------------------------------------------------- integration consumption (version 5)
+#
+# Allocation A-1 numbers the Consumption versions after P6's 3: version 4 is the Global Policy Consumption (P7,
+# §31.37) and version 5 is the Phase Integration Consumption (RB5, §32.21 / §32.31): the P1 Consumption schema at
+# version 5, for the Phase Integration Review kind only. It binds the integration Work's own ordinary
+# ``work_completed`` (Work-kind, unique by Receipt and by terminal event) and never a result commit: a reviewed
+# integration is verification-only (§14.4, §32.29). It never replaces ``work_completed`` (§32.31). Versions 1 - 4
+# keep every record they ever read with exactly their meaning; that a Phase Integration Receipt is consumed only by
+# a version 5 Consumption is the validation's, keyed on the Receipt (``validate._integration_records``).
+
+INTEGRATION_CONSUMPTION_VERSION = 5
+
+#: RB5 (§14.4 / §32.19): the Phase Integration Review kind, the only kind a version 5 Consumption names. Declared
+#: here because this module cannot import ``review.integration`` (which imports it); ``review.integration.REVIEW_KIND``
+#: is pinned equal to it.
+INTEGRATION_REVIEW_KIND = "phase-integration-v1"
+
+INTEGRATION_CONSUMPTION_FIELDS = (
+    serialize.SCHEMA_KEY,
+    serialize.VERSION_KEY,
+    "consumption_id",
+    "receipt_id",
+    "review_run_id",
+    "review_generation",
+    "review_kind",
+    "authorized_candidate_hash",
+    "operation_identity",
+    "operation_mutation_id",
+    "terminal_event_id",
+    "terminal_event_type",
+    "target_identity",
+)
+
+
+@dataclass(frozen=True)
+class IntegrationConsumption:
+    """The one use of one Phase Integration Receipt, bound to the integration Work's ``work_completed`` (version 5).
+
+    Work-kind: ``terminal_event_id`` is the integration's own ordinary
+    ``work_completed`` event and ``target_identity`` the integration Work, so
+    the terminal-event uniqueness index holds it with every other Work-kind
+    Consumption. It binds no result commit and no artifact kind - the reviewed
+    integration authorizes verification, never domain output - and it is not
+    Project lifecycle truth.
+    """
+
+    consumption_id: str
+    receipt_id: str
+    review_run_id: str
+    review_generation: int
+    review_kind: str
+    authorized_candidate_hash: str
+    operation_identity: str
+    operation_mutation_id: str
+    terminal_event_id: str
+    terminal_event_type: str
+    target_identity: str
+
+    #: An Integration Consumption binds no result commit and no artifact (verification-only).
+    #: ``authorized_result_commit_sha`` / ``artifact_kind`` / ``work_kind`` / ``work_id`` are the duck-typed
+    #: Consumption reader surface only (indexes, Receipt binding); the F1 Gate-2 artifact rule - "a Work-kind
+    #: Consumption is one of result_commit or empty" - is the version 1 record's (:class:`Consumption`), never this
+    #: record's, and validate's completion/activation pass binds no event of this kind (§32.31: the reviewed
+    #: integration's ``work_completed`` is ordinary and unmarked).
+    authorized_result_commit_sha = None
+    artifact_kind = None
+
+    @property
+    def work_kind(self) -> bool:
+        return True
+
+    @property
+    def work_id(self) -> str:
+        return self.target_identity
+
+    def to_record(self) -> dict[str, Any]:
+        return {
+            serialize.SCHEMA_KEY: SCHEMA_CONSUMPTION,
+            serialize.VERSION_KEY: INTEGRATION_CONSUMPTION_VERSION,
+            "consumption_id": self.consumption_id,
+            "receipt_id": self.receipt_id,
+            "review_run_id": self.review_run_id,
+            "review_generation": self.review_generation,
+            "review_kind": self.review_kind,
+            "authorized_candidate_hash": self.authorized_candidate_hash,
+            "operation_identity": self.operation_identity,
+            "operation_mutation_id": self.operation_mutation_id,
+            "terminal_event_id": self.terminal_event_id,
+            "terminal_event_type": self.terminal_event_type,
+            "target_identity": self.target_identity,
+        }
+
+    @staticmethod
+    def from_record(record: dict[str, Any], described: str) -> "IntegrationConsumption":
+        serialize.require_schema(record, SCHEMA_CONSUMPTION, INTEGRATION_CONSUMPTION_VERSION, described)
+        _require_exact_fields(record, INTEGRATION_CONSUMPTION_FIELDS, described)
+        return IntegrationConsumption(
+            consumption_id=_require_id(record, "consumption_id", "review_consumption", described),
+            receipt_id=_require_id(record, "receipt_id", "review_receipt", described),
+            review_run_id=_require_id(record, "review_run_id", "review_run", described),
+            review_generation=_require_int(record, "review_generation", described, minimum=FIRST_GENERATION),
+            review_kind=_require_choice(record, "review_kind", (INTEGRATION_REVIEW_KIND,), described),
+            authorized_candidate_hash=_require_digest(record, "authorized_candidate_hash", described),
+            operation_identity=_require_text(record, "operation_identity", described),
+            operation_mutation_id=_require_id(record, "operation_mutation_id", "mutation", described),
+            terminal_event_id=_require_id(record, "terminal_event_id", "event", described),
+            terminal_event_type=_require_choice(record, "terminal_event_type", (WORK_TERMINAL_EVENT,), described),
+            target_identity=_require_id(record, "target_identity", "work", described),
+        )
+
+
 def consumption_from_record(
     record: dict[str, Any], described: str
-) -> "Consumption | PlanningConsumption | PolicyConsumption | GlobalPolicyConsumption":
+) -> "Consumption | PlanningConsumption | PolicyConsumption | GlobalPolicyConsumption | IntegrationConsumption":
     """A stored Consumption of any version, read by its own reader.
 
     Version 1 is the P1 reader, unchanged, and a planning kind is refused
     there; version 2 is the Planning Consumption; version 3 is the Policy
     Consumption (P6); version 4 is the Global Policy Consumption (P7,
+    allocation A-1); version 5 is the Phase Integration Consumption (RB5,
     allocation A-1). Any other version is not read. Version 1 reads exactly
     what it always read: that a Policy Receipt is consumed only by a version 3
-    Consumption is the P6 validation's, made where a Policy Receipt exists.
+    Consumption is the P6 validation's, made where a Policy Receipt exists, and
+    the same holds for a Phase Integration Receipt and version 5.
     """
     version = record.get(serialize.VERSION_KEY)
     if version == PLANNING_CONSUMPTION_VERSION:
@@ -1264,6 +1377,8 @@ def consumption_from_record(
         return PolicyConsumption.from_record(record, described)
     if version == GLOBAL_POLICY_CONSUMPTION_VERSION:
         return GlobalPolicyConsumption.from_record(record, described)
+    if version == INTEGRATION_CONSUMPTION_VERSION:
+        return IntegrationConsumption.from_record(record, described)
     found = Consumption.from_record(record, described)
     if found.review_kind in PLANNING_REVIEW_KINDS:
         raise ValidationError(
@@ -1579,7 +1694,14 @@ P6_POLICY_CHANGE_CONTRACT = "review-v1-policy-change-p6-v1"
 #: discovery reports and the P4 adjudication, G1-G5 in the root policy Review namespace, no Repair Batch branch (so
 #: never in :data:`P4_REPAIR_CONTRACTS`), bound under the root non-history family policy only (``p4.CONTRACT_POLICIES``).
 P7_GLOBAL_POLICY_CHANGE_CONTRACT = "review-v1-global-policy-change-p4-v1"
-P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT, P6_POLICY_CHANGE_CONTRACT, P7_GLOBAL_POLICY_CHANGE_CONTRACT)
+#: RB5 (§32.19 / §32.20, ruling OQ-B): the Phase Integration Review contract of the Phase Integration kind. A
+#: member of the P4-capable contract family - P4 discovery reports and the P4 adjudication, G1-G4, a G5 seal only on
+#: AUTHORIZATION_READY - with no Repair Batch branch (domain repair is START's normal fix Work, §14.14), so it is never
+#: in :data:`P4_REPAIR_CONTRACTS`. Bound under the P6-capable family policy only (``p4.CONTRACT_POLICIES``, R6-1); it
+#: is deliberately NOT declared in ``p4.P6_POLICY_RECORD["review_contracts"]``, whose digest is frozen (H1).
+P4_PHASE_INTEGRATION_CONTRACT = "review-v1-phase-integration-p4-v1"
+P4_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT, P6_POLICY_CHANGE_CONTRACT, P7_GLOBAL_POLICY_CHANGE_CONTRACT,
+                P4_PHASE_INTEGRATION_CONTRACT)
 #: The contracts whose Runs may repair: exactly the two P4 owner contracts, unchanged.
 P4_REPAIR_CONTRACTS = (P4_PLANNING_CONTRACT, P4_WORK_CONTRACT)
 
@@ -1948,6 +2070,89 @@ P4_OBLIGATION_FIELDS = (
     "strategy_change_required",
 )
 
+# --------------------------------------------------------------------------- RB5 Phase Integration adjudication (§32.21 / §32.22)
+#
+# The stored Integration adjudication carries exactly one Phase outcome (§32.21) and the one G4 disposition its
+# owner derived in the frozen order (§32.22, ruling CPQ-04) - at adjudication version 2, for the Phase Integration
+# contract only (MC-8). Every other contract's adjudication stays version 1, byte for byte. The vocabularies are
+# ``review.integration``'s, restated here because this module cannot import it; they are pinned equal.
+
+P4_INTEGRATION_ADJUDICATION_VERSION = 2
+P4_INTEGRATION_ADJUDICATION_FIELDS = P4_ADJUDICATION_FIELDS + ("phase_outcome", "integration_disposition")
+INTEGRATION_PHASE_OUTCOME_FIELDS = ("outcome", "phase_desired_state_digest", "rationale", "unmet_objective_obligations")
+INTEGRATION_OBJECTIVELY_SATISFIED = "objectively_satisfied"
+INTEGRATION_HUMAN_CONFIRMATION_REQUIRED = "human_confirmation_required"
+INTEGRATION_NOT_SATISFIED = "not_satisfied"
+INTEGRATION_DESIRED_STATE_CHANGE_REQUIRED = "desired_state_change_required"
+INTEGRATION_PHASE_OUTCOMES = (
+    INTEGRATION_OBJECTIVELY_SATISFIED, INTEGRATION_HUMAN_CONFIRMATION_REQUIRED, INTEGRATION_NOT_SATISFIED,
+    INTEGRATION_DESIRED_STATE_CHANGE_REQUIRED,
+)
+#: The G4 disposition of a Phase Integration Run: the four branches of §32.22, and - ruling OQ-C - the two step-4
+#: refusals (``invalid_uncovered`` / coverage or evidence not current) that prevent AUTHORIZATION_READY.
+INTEGRATION_DOMAIN_REPAIR_REQUIRED = "DOMAIN_REPAIR_REQUIRED"
+INTEGRATION_CONFIRMATION_STRUCTURE_REQUIRED = "CONFIRMATION_STRUCTURE_REQUIRED"
+INTEGRATION_UNCOVERED = "phase_integration_uncovered"
+INTEGRATION_NOT_AUTHORIZABLE = "phase_integration_not_authorizable"
+INTEGRATION_DISPOSITIONS = (
+    HUMAN_WAIT, INTEGRATION_DOMAIN_REPAIR_REQUIRED, INTEGRATION_CONFIRMATION_STRUCTURE_REQUIRED, INTEGRATION_UNCOVERED,
+    INTEGRATION_NOT_AUTHORIZABLE, AUTHORIZATION_READY,
+)
+#: OQ-C: the dispositions that end the Integration Run at G4 - Run disposition ``not_authorized``, no Receipt, the
+#: P5 Run summary written in that G4, never recoverable as authorizable, never set aside. HUMAN_WAIT stays the
+#: canonical waiting Run (R8); only AUTHORIZATION_READY may seal G5.
+INTEGRATION_G4_TERMINAL_DISPOSITIONS = (
+    INTEGRATION_DOMAIN_REPAIR_REQUIRED, INTEGRATION_CONFIRMATION_STRUCTURE_REQUIRED, INTEGRATION_UNCOVERED,
+    INTEGRATION_NOT_AUTHORIZABLE,
+)
+
+
+def _integration_adjudication_problems(record: dict[str, Any], outcome: str, findings: list[dict[str, Any]],
+                                       described: str) -> tuple[dict[str, Any], str]:
+    """The Phase outcome and G4 disposition of a version 2 Integration adjudication, read strictly.
+
+    What the record alone can prove about §32.21 / §32.22 is checked here: the
+    outcome vocabulary and shape, and that the disposition is the one the P4
+    outcome and the Phase outcome allow in the frozen order. What needs the
+    Candidate - the downstream confirmations, ``invalid_uncovered``, the
+    desired-state digest - is the owner's derivation, made before this record
+    is built (``review.integration.integration_branch``).
+    """
+    where = f"{described} phase_outcome"
+    found = _require_mapping(record.get("phase_outcome"), where)
+    _require_exact_fields(found, INTEGRATION_PHASE_OUTCOME_FIELDS, where)
+    phase = _require_choice(found, "outcome", INTEGRATION_PHASE_OUTCOMES, where)
+    _require_digest(found, "phase_desired_state_digest", where)
+    _require_public_text(found, "rationale", where)
+    obligations = _require_public_list(found, "unmet_objective_obligations", where, labels=True)
+    _require_sorted_unique(obligations, "unmet_objective_obligations", where)
+    disposition = _require_choice(record, "integration_disposition", INTEGRATION_DISPOSITIONS, described)
+
+    def refuse(message: str) -> ValidationError:
+        return ValidationError(f"{described} is {outcome} / {phase} with disposition {disposition}: {message}",
+                               code="review_record_invalid")
+
+    blocking = any(item["blocking"] for item in findings)
+    if phase == INTEGRATION_NOT_SATISFIED and not obligations and not blocking:
+        raise refuse("not_satisfied rests on a blocking Problem or an explicit unmet objective obligation (§32.21)")
+    if phase != INTEGRATION_NOT_SATISFIED and obligations:
+        raise refuse("only not_satisfied carries an unmet objective obligation")
+    if phase in (INTEGRATION_OBJECTIVELY_SATISFIED, INTEGRATION_HUMAN_CONFIRMATION_REQUIRED) and blocking:
+        raise refuse("an authorizing Phase outcome with a blocking Problem is self-contradictory")
+    if (disposition == HUMAN_WAIT) != (outcome == HUMAN_WAIT):
+        raise refuse("HUMAN_WAIT is exactly the P4 HUMAN_WAIT (§32.22 step 1)")
+    if phase == INTEGRATION_DESIRED_STATE_CHANGE_REQUIRED and disposition != HUMAN_WAIT:
+        raise refuse("a desired-state change routes HUMAN")
+    if outcome == REPAIR_REQUIRED and not blocking:
+        raise refuse("the integration never uses the in-Review repair: REPAIR_REQUIRED rests on a blocking Problem")
+    if outcome != HUMAN_WAIT:
+        domain = outcome == REPAIR_REQUIRED or phase == INTEGRATION_NOT_SATISFIED
+        if domain != (disposition == INTEGRATION_DOMAIN_REPAIR_REQUIRED):
+            raise refuse("DOMAIN_REPAIR_REQUIRED is exactly a blocking Problem or not_satisfied (§32.22 step 2)")
+    if disposition == INTEGRATION_CONFIRMATION_STRUCTURE_REQUIRED and phase != INTEGRATION_HUMAN_CONFIRMATION_REQUIRED:
+        raise refuse("CONFIRMATION_STRUCTURE_REQUIRED follows human_confirmation_required only (§32.22 step 3)")
+    return dict(found), disposition
+
 
 @dataclass(frozen=True)
 class P4Adjudication:
@@ -1958,6 +2163,12 @@ class P4Adjudication:
     ``finding_id``. The record is structurally total here; the §12.4 decision
     order, merging and causal-linkage rules are checked by
     :func:`workline.review.p4.adjudication_problems`.
+
+    RB5: under :data:`P4_PHASE_INTEGRATION_CONTRACT` the record is version
+    :data:`P4_INTEGRATION_ADJUDICATION_VERSION` and also carries the one Phase
+    outcome and the G4 disposition (``phase_outcome`` / ``integration_disposition``);
+    under every other contract both are ``None`` and the record is version 1,
+    exactly as before.
     """
 
     review_run_id: str
@@ -1986,6 +2197,10 @@ class P4Adjudication:
     #: when the outcome is REPAIR_REQUIRED, so the Repair Batch is rebuilt from this record alone.
     repair_purpose: str | None = None
     strategy_change_class: str | None = None
+    #: RB5 (§32.21 / §32.22): the one Phase outcome record and the owner-derived G4 disposition of a Phase
+    #: Integration adjudication; ``None`` under every other contract.
+    phase_outcome: dict[str, Any] | None = None
+    integration_disposition: str | None = None
 
     def finding(self, finding_id: str) -> dict[str, Any] | None:
         for found in self.findings:
@@ -2025,12 +2240,21 @@ class P4Adjudication:
                 "strategy_change_class": self.strategy_change_class,
             }
         )
+        if self.review_contract == P4_PHASE_INTEGRATION_CONTRACT:
+            record[serialize.VERSION_KEY] = P4_INTEGRATION_ADJUDICATION_VERSION
+            record["phase_outcome"] = None if self.phase_outcome is None else dict(self.phase_outcome)
+            record["integration_disposition"] = self.integration_disposition
         return record
 
     @staticmethod
     def from_record(record: dict[str, Any], described: str) -> "P4Adjudication":
-        serialize.require_schema(record, SCHEMA_P4_ADJUDICATION, VERSION, described)
-        _require_exact_fields(record, P4_ADJUDICATION_FIELDS, described)
+        # RB5: the Phase Integration contract's adjudication is version 2 with its two extra fields; every other
+        # contract's is version 1 with exactly the P4 fields, as before.
+        integration = isinstance(record, dict) and record.get("review_contract") == P4_PHASE_INTEGRATION_CONTRACT
+        serialize.require_schema(record, SCHEMA_P4_ADJUDICATION,
+                                 P4_INTEGRATION_ADJUDICATION_VERSION if integration else VERSION, described)
+        _require_exact_fields(record, P4_INTEGRATION_ADJUDICATION_FIELDS if integration else P4_ADJUDICATION_FIELDS,
+                              described)
         reports: list[dict[str, Any]] = []
         for item in _require_list(record, "reports", described):
             entry = _require_mapping(item, f"{described} report")
@@ -2131,6 +2355,10 @@ class P4Adjudication:
             raise ValidationError(
                 f"{described} is candidate generation {generation} and names no predecessor", code="review_record_invalid"
             )
+        phase_outcome, disposition = None, None
+        if integration:
+            _require_choice(record, "review_kind", (INTEGRATION_REVIEW_KIND,), described)
+            phase_outcome, disposition = _integration_adjudication_problems(record, outcome, findings, described)
         return P4Adjudication(
             review_run_id=_require_id(record, "review_run_id", "review_run", described),
             review_kind=_require_text(record, "review_kind", described),
@@ -2156,6 +2384,8 @@ class P4Adjudication:
             obligations=dict(obligations),
             repair_purpose=None if purpose is None else str(purpose),
             strategy_change_class=None if change_class is None else str(change_class),
+            phase_outcome=phase_outcome,
+            integration_disposition=disposition,
         )
 
 

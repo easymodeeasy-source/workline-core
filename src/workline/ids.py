@@ -56,11 +56,16 @@ PREFIXES = {
     "review_promotion_packet": "rpp",
     "review_global_policy_change": "rgc",
     "review_global_policy_evaluation": "rge",
+    # RB5 (§32.32, allocation A-1): one Phase completion / Roadmap achievement evidence record is an explicit P5
+    # history kind reserved through ``Mutation.reserve_id``, with a prefix that cannot be read as ``rhr_`` / ``rhd_``,
+    # ``rr_`` or the Roadmap prefix ``r`` followed by text.
+    "review_achievement": "rha",
 }
 
 # Longest first, so that ``rr_``/``rcp_``/``rcs_``/``rtk_``/``rfd_``/``rrb_``/``rhr_``/``rhd_``/``rpc_``/``rpe_``/
-# ``rpm_``/``rpp_``/``rgc_``/``rge_`` are read as themselves rather than as the Roadmap prefix ``r`` followed by text.
-_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rpc|rpe|rpm|rpp|rgc|rge|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
+# ``rpm_``/``rpp_``/``rgc_``/``rge_``/``rha_`` are read as themselves rather than as the Roadmap prefix ``r`` followed
+# by text.
+_ID_RE = re.compile(r"^(mut|rel|rcp|rcs|rtk|rfd|rrb|rhr|rhd|rpc|rpe|rpm|rpp|rgc|rge|rha|rr|evt|der|r|p|w)_([0-9A-HJKMNP-TV-Z]{26})$")
 
 
 def new_ulid(now_ms: int | None = None) -> str:

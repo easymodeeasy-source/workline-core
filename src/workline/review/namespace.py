@@ -49,20 +49,28 @@ GENERATION_WIDTH = 6
 #: never committed, and it is never Review truth.
 SERIALIZATION_TOKEN = ".generation-serialization"
 
-#: The P5 durable history families (§13.3 / §28.3), Project only.
+#: The P5 durable history families (§13.3 / §28.3), Project only. P5 defines five; RB5 adds the sixth,
+#: ``achievements`` (§14.18 / §32.32): Phase completion and Roadmap achievement evidence, which is audit evidence and
+#: never lifecycle truth. Like every history family it lives under ``history/`` (no new top-level subdirectory) and
+#: exists only where the descriptor admits history - never under the root policy Review namespace.
 HISTORY_RUNS = "runs"
 HISTORY_FINDINGS = "findings"
 HISTORY_REPAIRS = "repairs"
 HISTORY_RELATIONS = "relations"
 HISTORY_HUMAN_DECISIONS = "human-decisions"
-HISTORY_FAMILIES = (HISTORY_RUNS, HISTORY_FINDINGS, HISTORY_REPAIRS, HISTORY_RELATIONS, HISTORY_HUMAN_DECISIONS)
-#: The identity kind a history record of each family is named by (§28.4).
+HISTORY_ACHIEVEMENTS = "achievements"
+HISTORY_FAMILIES = (HISTORY_RUNS, HISTORY_FINDINGS, HISTORY_REPAIRS, HISTORY_RELATIONS, HISTORY_HUMAN_DECISIONS,
+                    HISTORY_ACHIEVEMENTS)
+#: The identity kind a history record of each family is named by (§28.4): Run / Finding / Repair history reuses its
+#: immutable source record's stable ID; relations, Human Decision Evidence and achievement evidence (§32.32, reserved
+#: through ``Mutation.reserve_id``) allocate one.
 HISTORY_FAMILY_KINDS = {
     HISTORY_RUNS: "review_run",
     HISTORY_FINDINGS: "review_finding",
     HISTORY_REPAIRS: "review_repair_batch",
     HISTORY_RELATIONS: "review_relation",
     HISTORY_HUMAN_DECISIONS: "review_decision",
+    HISTORY_ACHIEVEMENTS: "review_achievement",
 }
 
 #: The P6 Project-local policy namespace (§15.23 / §30.17), Project only: one mutable Profile and two immutable

@@ -1,6 +1,7 @@
 """P5 §28.25 (with §28.3 / §28.4 / §28.15 / §28.16): history records, paths, IDs, readers and structural checks.
 
-* the five history path families, the two-level record-path rule, and the 12-entry closed namespace;
+* the six history path families (P5's five, RB5's achievements), the two-level record-path rule, and the 12-entry
+  closed namespace;
 * the two new Review ID kinds and their reservation-key helpers;
 * strict schemas: canonical round-trip, unknown / missing field, schema, version, contract, vocabulary;
 * the GAP-F seam: ``authorized`` / ``historical_escape`` are refused by the one named predicate;
@@ -166,6 +167,28 @@ def human_decision_fixture(found: records.P4Adjudication | None = None, *, chang
     )
 
 
+#: RB5 (§32.32): one phase_completion record's ``review_achievement`` identity.
+ACHIEVEMENT = "rha_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+
+
+def achievement_fixture() -> history.AchievementRecord:
+    """One strict phase_completion record (RB5 §32.38), its body built field by field - no Project read."""
+    from workline import achievement as ach, phase_integration as pi
+
+    integration = "w_01ARZ3NDEKTSV4RRFFQ69G5FB0"
+    return history.achievement_record(ach.PhaseCompletionEvidence(
+        achievement_evidence_id=ACHIEVEMENT, phase_id="p_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        roadmap_id="r_01ARZ3NDEKTSV4RRFFQ69G5FAV", phase_desired_state_digest="6" * 64, basis_digest="7" * 64,
+        completion_mode=pi.MODE_REVIEWED, effective_work_ids=(TARGET, integration), covering_integration_id=integration,
+        integration_review=ach.IntegrationRunRef(integration, RUN, "1" * 64, "2" * 64, RECEIPT, "3" * 64, CONSUMPTION,
+                                                 "4" * 64, "5" * 64),
+        phase_outcome="objectively_satisfied", phase_outcome_digest="8" * 64, downstream_confirmations=(),
+        structural_validation_digest=ach.PASS_VALIDATION_DIGEST, work_review_refs=(), no_blocking_obligation_digests=(),
+        evaluators=(("adjudicator", "claude-opus", "5.5"),), rationale="Every effective Work is integrated.",
+        causing_mutation_id=MUTATION, causing_operation="start", causing_event_ids=(),
+    ))
+
+
 def every_record() -> dict[str, object]:
     """One structurally valid record of every history family (sources not laid down)."""
     repair = adjudication_fixture()
@@ -179,6 +202,8 @@ def every_record() -> dict[str, object]:
         paths.HISTORY_REPAIRS: history.repair_summary(repair, batch, result, source_candidate_material_digest="9" * 64),
         paths.HISTORY_RELATIONS: history.Relation.from_record(relation_fixture(), "relation"),
         paths.HISTORY_HUMAN_DECISIONS: human_decision_fixture(),
+        # RB5 (§32.32): the sixth family (extends the P5 fixture set; I-3, R09 / R10)
+        paths.HISTORY_ACHIEVEMENTS: achievement_fixture(),
     }
 
 
@@ -250,7 +275,8 @@ class IdentityTests(unittest.TestCase):
     def test_the_schemas_are_new_and_distinct(self) -> None:
         existing = {value for name, value in vars(records).items() if name.startswith("SCHEMA_")}
         existing |= {value for name, value in vars(p4).items() if name.startswith("SCHEMA_")}
-        self.assertEqual(5, len(set(history.SCHEMAS)))
+        # RB5 (§32.32, I-3 R09 / MC-11): the achievement schema is the sixth (was 5)
+        self.assertEqual(6, len(set(history.SCHEMAS)))
         self.assertEqual(set(), set(history.SCHEMAS) & existing)
 
     def test_the_closed_vocabularies_are_the_frozen_ones(self) -> None:
@@ -290,10 +316,11 @@ class IdKindTests(unittest.TestCase):
                    "review_task": "rtk", "review_finding": "rfd", "review_repair_batch": "rrb"}
         self.assertEqual(earlier, {kind: prefix for kind, prefix in ids.PREFIXES.items() if kind in earlier})
         # P6 (§30.16) adds the two policy kinds after P5's two; P7 (§31.11, allocation A-1) adds the four root policy
-        # maintenance kinds; nothing else is added.
+        # maintenance kinds; RB5 (§32.32, allocation A-1) adds the achievement evidence kind; nothing else is added.
         self.assertEqual(set(earlier) | {"review_relation", "review_decision", "review_policy_change",
                                          "review_policy_evaluation", "root_policy_mutation", "review_promotion_packet",
-                                         "review_global_policy_change", "review_global_policy_evaluation"},
+                                         "review_global_policy_change", "review_global_policy_evaluation",
+                                         "review_achievement"},
                          set(ids.PREFIXES))
 
     def test_the_p7_root_kinds_have_their_allocated_prefixes_and_are_read_as_themselves(self) -> None:
@@ -314,6 +341,21 @@ class IdKindTests(unittest.TestCase):
                 self.assertIsNone(ids.kind_of(f"{prefix}x_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
         self.assertEqual("review_policy_change", ids.kind_of("rpc_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
         self.assertEqual("review_policy_evaluation", ids.kind_of("rpe_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+
+    def test_the_achievement_kind_has_its_allocated_prefix_and_is_read_as_itself(self) -> None:
+        self.assertEqual("rha", ids.PREFIXES["review_achievement"])
+        identifier = ids.new_id("review_achievement")
+        self.assertTrue(identifier.startswith("rha_"), identifier)
+        self.assertEqual("review_achievement", ids.kind_of(identifier))
+        self.assertTrue(ids.is_valid_id(identifier, "review_achievement"))
+        fixed = "rha_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        self.assertEqual("review_achievement", ids.kind_of(fixed), "never the Roadmap prefix r followed by text")
+        for other in ("roadmap", "review_relation", "review_decision", "review_run"):
+            with self.subTest(other=other):
+                self.assertFalse(ids.is_valid_id(fixed, other))
+        self.assertIsNone(ids.kind_of("rhax_01ARZ3NDEKTSV4RRFFQ69G5FAV"))
+        self.assertEqual("review_relation", ids.kind_of(RELATION))
+        self.assertEqual("review_decision", ids.kind_of(DECISION))
 
     def test_reservation_keys_are_replay_stable_and_never_a_run_key(self) -> None:
         self.assertEqual(f"review-relation:{RUN}:1", history.review_relation_key(RUN, 1))
@@ -337,21 +379,30 @@ class IdKindTests(unittest.TestCase):
 
 
 class PathTests(unittest.TestCase):
-    def test_the_five_families_have_the_frozen_shapes(self) -> None:
+    def test_the_six_families_have_the_frozen_shapes(self) -> None:
+        # RB5 (§14.18 / §32.32) adds the sixth family, achievements, after P5's five (renamed from "five").
         finding = "rfd_01ARZ3NDEKTSV4RRFFQ69G5F10"
         batch = "rrb_01ARZ3NDEKTSV4RRFFQ69G5FAB"
+        achievement = "rha_01ARZ3NDEKTSV4RRFFQ69G5FAV"
         self.assertEqual(f".workline/review/history/runs/{RUN}.yaml", paths.history_run_rel(RUN))
         self.assertEqual(f".workline/review/history/findings/{finding}.yaml", paths.history_finding_rel(finding))
         self.assertEqual(f".workline/review/history/repairs/{batch}.yaml", paths.history_repair_rel(batch))
         self.assertEqual(f".workline/review/history/relations/{RELATION}.yaml", paths.history_relation_rel(RELATION))
         self.assertEqual(f".workline/review/history/human-decisions/{DECISION}.yaml",
                          paths.history_decision_rel(DECISION))
-        self.assertEqual(("runs", "findings", "repairs", "relations", "human-decisions"), paths.HISTORY_FAMILIES)
+        self.assertEqual(f".workline/review/history/achievements/{achievement}.yaml",
+                         paths.history_achievement_rel(achievement))
+        self.assertEqual(("runs", "findings", "repairs", "relations", "human-decisions", "achievements"),
+                         paths.HISTORY_FAMILIES)
+        self.assertEqual("review_achievement", paths.HISTORY_FAMILY_KINDS[paths.HISTORY_ACHIEVEMENTS])
+        self.assertEqual(set(paths.HISTORY_FAMILIES), set(paths.HISTORY_FAMILY_KINDS))
 
     def test_each_family_takes_only_its_own_identity_kind(self) -> None:
         for call, value in ((paths.history_run_rel, RELATION), (paths.history_finding_rel, RUN),
                             (paths.history_repair_rel, RUN), (paths.history_relation_rel, "rel_01ARZ3NDEKTSV4RRFFQ69G5FAV"),
-                            (paths.history_decision_rel, RELATION), (paths.history_run_rel, "../x")):
+                            (paths.history_decision_rel, RELATION), (paths.history_run_rel, "../x"),
+                            (paths.history_achievement_rel, RELATION), (paths.history_achievement_rel, RUN),
+                            (paths.history_achievement_rel, "test-achievement-1")):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 call(value)
         with self.assertRaises(ValidationError):
@@ -602,6 +653,11 @@ class SanitationTests(unittest.TestCase):
             "human": history.HUMAN_DECISION_FIELDS, "entry": history.AFFECTED_ENTRY_FIELDS,
             "gap": history.AFFECTED_GAP_FIELDS,
         }
+        # RB5 (§32.38 / §32.47): the achievement record is the P5 header over one of the two RB5 bodies
+        from workline import achievement as ach
+
+        tuples.update({"achievement header": history.ACHIEVEMENT_HEADER_FIELDS,
+                       "phase_completion": ach.PHASE_EVIDENCE_FIELDS, "roadmap_achievement": ach.ROADMAP_EVIDENCE_FIELDS})
         for name, fields in tuples.items():
             for field in fields:
                 with self.subTest(record=name, field=field):
@@ -609,6 +665,10 @@ class SanitationTests(unittest.TestCase):
 
     def test_every_mapping_valued_field_has_a_closed_field_set(self) -> None:
         closed = {"causal_material", "source", "target", "affected_entries", "affected_coverage_gaps"}
+        # RB5 (§32.38 / §32.47): the achievement bodies' nested mappings, each read by the RB5 core against its own
+        # exact field tuple (proven per field in test_rb5_review_shared_surfaces.py)
+        closed |= {"integration_review", "downstream_confirmations", "work_review_refs", "evaluators",
+                   "causing_operation", "phase_evidence_refs", "legacy_phase_facts"}
         for family, found in every_record().items():
             for key, value in found.to_record().items():  # type: ignore[attr-defined]
                 is_mapping = isinstance(value, dict) or (isinstance(value, list) and value and isinstance(value[0], dict))
@@ -646,6 +706,7 @@ class StoreTests(HistoryCase):
             paths.HISTORY_REPAIRS: (self.review.repair_history, self.review.repair_history_ids),
             paths.HISTORY_RELATIONS: (self.review.relation_history, self.review.relation_history_ids),
             paths.HISTORY_HUMAN_DECISIONS: (self.review.human_decision_history, self.review.human_decision_history_ids),
+            paths.HISTORY_ACHIEVEMENTS: (self.review.read_achievement, self.review.achievement_ids),
         }
         for family, (read, list_ids) in named.items():
             with self.subTest(named=family):
@@ -732,7 +793,13 @@ class StoreTests(HistoryCase):
         written = [self.put_history(family, found) for family, found in every_record().items()]
         checkout.require_namespace_readable(self.store)
         work_checkout._read_every_record(self.review, written)
-        self.assertEqual([], self.codes())
+        # RB5 (§32.49, fresh review RB5PSW-2, orchestrator-accepted): validation reports an achievement record's
+        # source Run / Receipt / Consumption refs; this fixture lays no source down, so exactly that one problem,
+        # naming the achievement record, is reported. Every P5 family stays source-free here (was: no problem).
+        problems = validate.review_problems(self.review)
+        self.assertEqual(["review_record_missing"], [problem.code for problem in problems])
+        self.assertIn(ACHIEVEMENT, problems[0].message)
+        self.assertIn(f"Integration Run {RUN}", problems[0].message)
 
     def test_the_resulting_tree_reader_refuses_a_history_path_no_family_reads(self) -> None:
         # Never skipped (P-12 of P4): an unknown family or an extra level is refused by the reader itself; a

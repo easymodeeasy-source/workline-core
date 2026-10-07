@@ -137,9 +137,12 @@ ROOT_POLICY_ID = "review-v1-p7-root-policy-v1"
 #: under the P6-capable policy - its Run is reviewed under the pre-change Effective Policy, which only a P6 Run
 #: freezes. A later contract restricted the same way adds its entry; a contract not named here keeps exactly the
 #: policies its owner binds today. P7: the root meta-review contract exists only under the root family policy.
+#: RB5 (ruling OQ-B, R6-1): the Phase Integration contract is new, so every Run of it is a NEW first P4-capable Run
+#: and binds the P6-capable family policy - and nothing else.
 CONTRACT_POLICIES: Mapping[str, tuple[str, ...]] = {
     records.P6_POLICY_CHANGE_CONTRACT: (P6_POLICY_ID,),
     records.P7_GLOBAL_POLICY_CHANGE_CONTRACT: (ROOT_POLICY_ID,),
+    records.P4_PHASE_INTEGRATION_CONTRACT: (P6_POLICY_ID,),
 }
 #: Why each restricted contract binds only its policies (the refusal's explanation, one per contract).
 _CONTRACT_POLICY_REASONS: Mapping[str, str] = {
@@ -147,6 +150,8 @@ _CONTRACT_POLICY_REASONS: Mapping[str, str] = {
                                        "P6-capable Run freezes",
     records.P7_GLOBAL_POLICY_CHANGE_CONTRACT: "the root meta-review is reviewed under the pre-change Global policy and "
                                               "the fixed root meta-rules of the root non-history family policy",
+    records.P4_PHASE_INTEGRATION_CONTRACT: "a Phase Integration Review Run is always a new P6-capable Run (R6-1); no "
+                                           "P4-only or P5 Run of it exists",
 }
 
 
@@ -1900,14 +1905,27 @@ def adjudication(
     reports: Sequence[tuple[str, str, Mapping[str, Any]]],
     prior: PriorCycle | None,
     policy_id: str = POLICY_ID,
+    phase_outcome: Any = None,
+    integration_disposition: str | None = None,
 ) -> records.P4Adjudication:
     """The canonical adjudication record, with the reserved Finding IDs in canonical Finding order.
 
     Its ``instruction`` is the Run's family policy's adjudication instruction:
     a P4-only adjudication is byte for byte what it always was.
+
+    RB5 (§32.21 / §32.22): under the Phase Integration contract the owner also
+    gives the adjudicator's one Phase outcome (a ``review.integration.PhaseOutcome``
+    or its record) and the G4 disposition it derived from it
+    (``review.integration.integration_branch``, or the step-4 refusal code -
+    ruling OQ-C); the record carries both at version 2. Under every other
+    contract both must be absent and nothing changes.
     """
     if len(finding_ids) != len(normalized.drafts):
         raise ValidationError("one reserved Finding ID per normalized Finding", code="review_record_invalid")
+    integration = review_contract == records.P4_PHASE_INTEGRATION_CONTRACT
+    if not integration and (phase_outcome is not None or integration_disposition is not None):
+        raise ValidationError("only a Phase Integration adjudication carries a Phase outcome and a G4 disposition",
+                              code="review_record_invalid")
     by_source: dict[tuple[str, str, int], str] = {}
     findings: list[dict[str, Any]] = []
     for draft, finding_id in zip(normalized.drafts, finding_ids):
@@ -1950,6 +1968,11 @@ def adjudication(
             normalized.strategy_change_class if derive_outcome(normalized) == REPAIR_REQUIRED else None
         ),
     }
+    if integration:
+        record[serialize.VERSION_KEY] = records.P4_INTEGRATION_ADJUDICATION_VERSION
+        outcome_record = phase_outcome.to_record() if hasattr(phase_outcome, "to_record") else phase_outcome
+        record["phase_outcome"] = dict(outcome_record) if isinstance(outcome_record, Mapping) else outcome_record
+        record["integration_disposition"] = integration_disposition
     found = records.P4Adjudication.from_record(serialize.canonical_data(record), "the P4 adjudication")
     problems = adjudication_problems(found)
     if problems:
@@ -3100,9 +3123,15 @@ def own_summary_disposition(reader: Any, chain: Any) -> str | None:
     ```text
     G2 settling a task failed     not_authorized   (GAP-E: that G2 settlement)
     G4 HUMAN_WAIT                 human_wait       (that G4)
+    G4 terminal Phase Integration not_authorized   (that G4; RB5 ruling OQ-C)
     G6 repair settled             repaired         (that G6)
     G6 invalidation of the seal   invalidated      (that G6)
     ```
+
+    The Phase Integration row is kind-specific: its G4-terminal Run is final
+    and never authorizable, so no successor ever sets it aside and its G4
+    summary is one of the history paths its own chain wrote. The P6 Policy
+    Review's G4-terminal Run keeps exactly its RB6 reading here.
 
     Read from the canonical chain and adjudication only. A Consumption makes a
     sealed Run ``consumed`` in its owner's Consumption transition
@@ -3117,6 +3146,10 @@ def own_summary_disposition(reader: Any, chain: Any) -> str | None:
     if latest.generation == ADJUDICATION_SETTLE_GENERATION and reader.adjudication_exists(chain.review_run_id) \
             and reader.read_adjudication(chain.review_run_id).outcome == HUMAN_WAIT:
         return history.DISPOSITION_HUMAN_WAIT
+    if latest.generation == ADJUDICATION_SETTLE_GENERATION and latest.review_kind == records.INTEGRATION_REVIEW_KIND \
+            and reader.adjudication_exists(chain.review_run_id) \
+            and history.g4_terminal_adjudication(reader.read_adjudication(chain.review_run_id)):
+        return history.DISPOSITION_NOT_AUTHORIZED
     if latest.generation == LAST_GENERATION:
         return history.DISPOSITION_REPAIRED if shape_of(chain) == SHAPE_REPAIR else history.DISPOSITION_INVALIDATED
     return None
@@ -3731,7 +3764,12 @@ def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration,
 
     For a G4-terminal contract (:func:`repairs` false - the P6 Policy Review), a
     REPAIR_REQUIRED adjudication makes non-authorization final in this same G4,
-    so its ``not_authorized`` Run summary is written here too (§28.5).
+    so its ``not_authorized`` Run summary is written here too (§28.5). RB5
+    (ruling OQ-C): a Phase Integration adjudication whose recorded G4
+    disposition is terminal (:func:`history.g4_terminal_adjudication`) ends its
+    Run here the same way - whatever its P4 outcome, since a
+    CONFIRMATION_STRUCTURE_REQUIRED or step-4 refusal is a P4
+    AUTHORIZATION_READY.
     """
     if len(relation_ids) != len(drafts):
         raise ValidationError("one reserved relation ID per accepted relation claim", code="review_record_invalid")
@@ -3750,6 +3788,9 @@ def g4_history(found: records.P4Adjudication, gate_four: records.GateGeneration,
         summary = history.run_summary(gate_four, durable_disposition=history.DISPOSITION_HUMAN_WAIT,
                                       candidate_generation=found.candidate_generation, adjudication=found)
     elif found.outcome == REPAIR_REQUIRED and not repairs(found.review_contract):
+        summary = history.run_summary(gate_four, durable_disposition=history.DISPOSITION_NOT_AUTHORIZED,
+                                      candidate_generation=found.candidate_generation, adjudication=found)
+    elif found.review_kind == records.INTEGRATION_REVIEW_KIND and history.g4_terminal_adjudication(found):
         summary = history.run_summary(gate_four, durable_disposition=history.DISPOSITION_NOT_AUTHORIZED,
                                       candidate_generation=found.candidate_generation, adjudication=found)
     return G4History(summaries, relations, summary)

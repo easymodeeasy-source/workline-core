@@ -40,7 +40,9 @@ from ..ids import is_valid_id
 from ..store import EVENT_LIFECYCLE_FIELDS, ProjectStore
 from . import activation as work_activation
 from . import paths, serialize
-from .records import OPERATION_CONTRACT_REVIEW_V1, Consumption, GateGeneration, PlanningConsumption, Receipt
+from .records import (
+    OPERATION_CONTRACT_REVIEW_V1, Consumption, GateGeneration, IntegrationConsumption, PlanningConsumption, Receipt,
+)
 from .store import GateChain, ReviewStore
 
 
@@ -141,10 +143,14 @@ def review_problems(review: ReviewStore) -> list[ReviewProblem]:
     namespace = review.namespace
     if namespace.history:
         problems.extend(_history_records(review))
+        # RB5 (§32.49): the achievement family is P5 history - read only where the namespace has history
+        problems.extend(_achievement_records(review))
     if namespace.activation:
         problems.extend(_activation(review))
     if namespace.policy:
         problems.extend(_policy_records(review, chains))
+    # RB5 (§32.19 - §32.22): the Phase Integration Receipts, Consumptions and Run chains, wherever they are stored
+    problems.extend(_integration_records(review, chains))
     return problems
 
 
@@ -156,7 +162,7 @@ def _namespace_shape(review: ReviewStore) -> list[ReviewProblem]:
     """Only the known directories (P1's seven, P4's four, P5's history), each a plain directory - read without following.
 
     ``history/`` is the one area two levels deep (§28.3): it holds exactly the
-    five history family directories, each plain, and nothing else. The known
+    history family directories (``paths.HISTORY_FAMILIES``), each plain, and nothing else. The known
     directories are the reader's namespace's own (P7: the root policy Review
     has no history, policy, activation or repair area, so one there is unknown).
     """
@@ -210,7 +216,7 @@ def _policy_shape(review: ReviewStore) -> list[ReviewProblem]:
 
 
 def _history_shape(review: ReviewStore) -> list[ReviewProblem]:
-    """``history/`` holds only the five family directories, each a plain directory - read without following."""
+    """``history/`` holds only the history family directories, each a plain directory - read without following."""
     try:
         found = review.entries(review.namespace.history_dir) or []
     except ValidationError as exc:
@@ -812,6 +818,87 @@ def _policy_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[R
     return problems
 
 
+def _integration_records(review: ReviewStore, chains: dict[str, GateChain]) -> list[ReviewProblem]:
+    """RB5 (§32.19 - §32.22, rulings OQ-B / OQ-C): the Phase Integration Review records, read strictly.
+
+    Absence is valid. Keyed on the Receipt, as RB6B-L5 keys the Policy
+    Consumption, so the version 1 reader stays byte-identical:
+
+    ```text
+    Consumption   a Phase Integration Receipt is consumed only by a version 5 Integration
+                  Consumption; a version 5 one consumes only a Phase Integration Receipt that
+                  authorizes the integration terminal stage
+    Run           the Phase Integration kind binds exactly the Phase Integration contract,
+                  and the contract only that kind, on a Work target, under the P6-capable family
+                  policy (OQ-B / R6-1)
+    G4            a Run whose recorded G4 disposition is terminal has no generation 5 - no seal,
+                  no Receipt, never authorizable (OQ-C); only AUTHORIZATION_READY goes past G4
+    ```
+    """
+    from . import history, p4, records
+    from .integration import AUTHORIZED_OPERATION_STAGE
+
+    problems: list[ReviewProblem] = []
+    try:
+        consumptions = review.consumptions()
+    except ValidationError:
+        consumptions = ()  # the Consumption pass reports it
+    for found in consumptions:
+        try:
+            receipt = review.read_receipt(found.receipt_id)
+        except ValidationError:
+            continue  # the Consumption pass reports a missing Receipt
+        integration_receipt = receipt.review_kind == records.INTEGRATION_REVIEW_KIND
+        if isinstance(found, records.IntegrationConsumption):
+            if not integration_receipt or receipt.authorized_operation_stage != AUTHORIZED_OPERATION_STAGE:
+                problems.append(ReviewProblem("review_record_conflict",
+                                              f"Integration Consumption {found.consumption_id} consumes a Receipt that "
+                                              "is not a Phase Integration terminal authorization"))
+        elif integration_receipt:
+            problems.append(ReviewProblem("review_record_conflict",
+                                          f"consumption {found.consumption_id} consumes the Phase Integration Receipt "
+                                          f"{found.receipt_id} and is not a version "
+                                          f"{records.INTEGRATION_CONSUMPTION_VERSION} Integration Consumption"))
+    for run_id, chain in sorted(chains.items()):
+        first = chain.generations[0]
+        try:
+            envelopes = [review.read_task_input(str(task["task_id"])).request_envelope for task in first.accepted_tasks]
+            contracts = {p4.contract_of_envelope(envelope) for envelope in envelopes}
+            policies = {p4.policy_of_envelope(envelope) for envelope in envelopes}
+        except ValidationError:
+            continue  # the provenance pass reports it
+        named = {envelope.get("review_contract") for envelope in envelopes if isinstance(envelope, dict)}
+        if first.review_kind != records.INTEGRATION_REVIEW_KIND \
+                and records.P4_PHASE_INTEGRATION_CONTRACT not in contracts | named:
+            continue
+        where = f"Phase Integration Review Run {run_id}"
+        if first.review_kind != records.INTEGRATION_REVIEW_KIND \
+                or contracts != {records.P4_PHASE_INTEGRATION_CONTRACT} or policies != {p4.P6_POLICY_ID} \
+                or not is_valid_id(first.target_identity, "work"):
+            problems.append(ReviewProblem("review_record_conflict",
+                                          f"{where} does not bind exactly the Phase Integration kind and contract, on "
+                                          "a Work target, under the P6-capable family policy"))
+            continue
+        if len(chain.generations) <= p4.ADJUDICATION_SETTLE_GENERATION:
+            continue
+        try:
+            found = review.read_adjudication(run_id) if review.adjudication_exists(run_id) else None
+        except ValidationError:
+            continue  # the P4 record pass reports it
+        if found is None:
+            continue  # the P4 chain pass reports it
+        if history.g4_terminal_adjudication(found):
+            problems.append(ReviewProblem("review_gate_chain",
+                                          f"{where} ended at G4 ({found.integration_disposition}: not_authorized, no "
+                                          f"Receipt) and holds generation {chain.latest.generation}; a G4-terminal "
+                                          "Phase Integration Run is never sealed or resumed"))
+        elif found.integration_disposition != records.AUTHORIZATION_READY:
+            problems.append(ReviewProblem("review_gate_chain",
+                                          f"{where} goes past G4 with disposition {found.integration_disposition}; only "
+                                          "AUTHORIZATION_READY seals G5"))
+    return problems
+
+
 def _policy_compatibility(store: ProjectStore, review: ReviewStore) -> list[ReviewProblem]:
     """§30.7 / §30.30: an incompatible canonical Profile is a validation Problem; an absent one never is."""
     from . import policy
@@ -850,6 +937,45 @@ def _history_records(review: ReviewStore) -> list[ReviewProblem]:
     from . import history
 
     return [ReviewProblem(code, message) for code, message in history.load_history(review).problems]
+
+
+def _achievement_records(review: ReviewStore) -> list[ReviewProblem]:
+    """RB5 §32.49: the achievement records against the canonical records they cite, and against each other.
+
+    Each record's strict schema, path and identity are the structural pass's
+    (:func:`_history_records`); a record that does not read is reported there
+    and skipped here. This pass adds the record-level cross-checks §32.49
+    lists: no two phase_completion records for one Phase basis and no two
+    roadmap_achievement records for one reserved event (§32.34), every cited
+    phase_completion record stored with the cited body digest, and every
+    phase_completion record's source Run / Receipt / Consumption refs - the
+    Integration Run's terminal G5 gate, its stored adjudication and Phase
+    outcome, its Receipt, its version 5 Consumption and its consumed P5 Run
+    summary, each by identity and by the digest of its own canonical bytes
+    (:func:`history.achievement_source_problems`; Review records only). The
+    terminal START stage records the Consumption and the consumed summary
+    before the achievement record (§32.31 / §32.37), so a stored record's
+    sources exist. Only the current-basis recomputation and the event binding
+    read the Project, so they alone are the owners' read-back and the
+    progression reader's, never this reader-level pass. A Project with no
+    achievement record has nothing here.
+    """
+    from . import history
+
+    try:
+        identifiers = review.achievement_ids()
+    except ValidationError:
+        return []  # the structural pass reports an unreadable family
+    found = []
+    for identifier in identifiers:
+        try:
+            found.append(review.read_achievement(identifier))
+        except ValidationError:
+            continue  # the structural pass reports it
+    problems = [problem for item in found
+                for problem in history.achievement_problems(review, item) + history.achievement_source_problems(review, item)]
+    problems += history.duplicate_achievement_problems(found)
+    return [ReviewProblem(code, message) for code, message in problems]
 
 
 def activation_problems(store: ProjectStore, review: ReviewStore) -> list[ReviewProblem]:
@@ -903,10 +1029,15 @@ def activation_problems(store: ProjectStore, review: ReviewStore) -> list[Review
             )
         ]
     try:
+        # Only the version 1 review-v1 Work Consumption is bound to a marked completion here. A version 5
+        # Integration Consumption (records.IntegrationConsumption, RB5 §32.31) is left out on purpose and
+        # explicitly: the reviewed Phase integration's own ``work_completed`` is ordinary and unmarked, so neither
+        # COMPLETION_UNCONSUMED nor CONSUMPTION_UNBOUND is ever about it. Its event binding is the terminal START
+        # stage's (RB5 I-5 / I-6), never this pass's.
         consumptions = {
             event_id: found
             for event_id, found in review.consumption_by_terminal_event().items()
-            if isinstance(found, Consumption) and found.work_kind
+            if isinstance(found, Consumption) and not isinstance(found, IntegrationConsumption) and found.work_kind
         }
     except ValidationError:
         return []  # a conflict between Consumptions is the structural pass's to report

@@ -463,6 +463,17 @@ class ReviewStore:
     def receipt_exists(self, receipt_id: str) -> bool:
         return self.read_bytes(self.namespace.receipt_rel(receipt_id)) is not None
 
+    def receipt_digest(self, receipt_id: str) -> str:
+        """The canonical digest of one stored Receipt, over the exact bytes the reader accepted (RB5 CPQ-05A)."""
+        relative = self.namespace.receipt_rel(receipt_id)
+        found, text = self._read_record(relative, f"Review receipt {relative}", Receipt.from_record)
+        if found.receipt_id != receipt_id:
+            raise ValidationError(
+                f"Review receipt {relative} declares receipt {found.receipt_id}, not the one its filename names",
+                code="review_record_invalid",
+            )
+        return serialize.digest_of_text(text)
+
     def receipt_ids(self) -> tuple[str, ...]:
         return self._ids_in(self.namespace.receipts_dir, "review_receipt")
 
@@ -482,6 +493,19 @@ class ReviewStore:
 
     def consumption_ids(self) -> tuple[str, ...]:
         return self._ids_in(self.namespace.consumptions_dir, "review_consumption")
+
+    def consumption_digest(self, consumption_id: str) -> str:
+        """The canonical digest of one stored Consumption of any version, over the exact bytes the reader accepted
+        (RB5 CPQ-05A)."""
+        relative = self.namespace.consumption_rel(consumption_id)
+        found, text = self._read_record(relative, f"Review consumption {relative}", records.consumption_from_record)
+        if found.consumption_id != consumption_id:
+            raise ValidationError(
+                f"Review consumption {relative} declares consumption {found.consumption_id}, not the one its "
+                "filename names",
+                code="review_record_invalid",
+            )
+        return serialize.digest_of_text(text)
 
     def consumptions(self) -> "tuple[Consumption | PlanningConsumption, ...]":
         return tuple(self.read_consumption(found) for found in self.consumption_ids())
@@ -830,7 +854,7 @@ class ReviewStore:
 
     # P5 durable history (§28.16) ----------------------------------------------
     #
-    # Narrow readers over the five history families. The parsers live in
+    # Narrow readers over the history families. The parsers live in
     # :mod:`workline.review.history`; every read takes the same canonical path
     # safety, canonical-bytes boundary and schema round-trip as every other
     # Review record, and the filename must be the identity inside the record.
@@ -896,6 +920,54 @@ class ReviewStore:
 
     def human_decision_history_ids(self) -> tuple[str, ...]:
         return self.history_ids(paths.HISTORY_HUMAN_DECISIONS)
+
+    # RB5 achievement evidence (§14.18 / §32.32 / §32.49) ------------------------
+    #
+    # The sixth history family, read through the same strict history reader:
+    # the P5 header over one RB5 body (``history.AchievementRecord``), the
+    # filename the ``review_achievement`` identity inside it. Evidence only:
+    # nothing here derives a Phase or Roadmap state, and nothing writes. A
+    # history family like the other five, so under a namespace without history
+    # (the root policy Review, P7) every reader here refuses with
+    # ``review_namespace_invalid`` through ``history_ids`` / ``read_history``.
+
+    def achievement_ids(self) -> tuple[str, ...]:
+        return self.history_ids(paths.HISTORY_ACHIEVEMENTS)
+
+    def read_achievement(self, achievement_evidence_id: str) -> Any:
+        """One achievement record (``history.AchievementRecord``) by its ``review_achievement`` identity."""
+        return self.read_history(paths.HISTORY_ACHIEVEMENTS, achievement_evidence_id)
+
+    def achievement_exists(self, achievement_evidence_id: str) -> bool:
+        return self.history_exists(paths.HISTORY_ACHIEVEMENTS, achievement_evidence_id)
+
+    def achievement_digest(self, achievement_evidence_id: str) -> str:
+        """The canonical digest of the stored record (header included) - not the body digest a basis binds."""
+        return self.history_digest(paths.HISTORY_ACHIEVEMENTS, achievement_evidence_id)
+
+    def achievement_records(self) -> tuple[Any, ...]:
+        """Every stored achievement record, strictly read, in identity order. A record that does not read raises:
+        evidence that cannot be read is never silently left out of a progression decision (fail closed)."""
+        return tuple(self.read_achievement(identifier) for identifier in sorted(self.achievement_ids()))
+
+    def phase_completion_evidence(self) -> tuple[Any, ...]:
+        """The validated phase_completion bodies (``achievement.PhaseCompletionEvidence``) this reader holds - the
+        ``evidence`` every current-basis match and progression decision takes (§32.34 / §32.40).
+
+        Validated means read strictly AND agreeing with the Phase Integration
+        Review records each cites (``history.integration_ref_problems``,
+        §32.49): a record that does not is never valid evidence, and a reader
+        holding one fails closed (``review_record_invalid``) rather than leave
+        it out of a decision as if it did not exist.
+        """
+        from .. import achievement
+
+        found = [item.evidence for item in self.achievement_records() if item.kind == achievement.KIND_PHASE_COMPLETION]
+        problems = [message for evidence in found for _, message in history.integration_ref_problems(self, evidence)]
+        if problems:
+            raise ValidationError("phase_completion evidence does not agree with the Phase Integration Review records "
+                                  "it cites (reconcile required): " + "; ".join(problems), code="review_record_invalid")
+        return tuple(found)
 
     # P6 Project-local Review policy (§30.17) ------------------------------------
     #
