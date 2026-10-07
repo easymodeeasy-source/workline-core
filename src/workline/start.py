@@ -3432,8 +3432,12 @@ def _recorded_registration(
 
 #: RB5J-1 (§32.14 with F3 §4.3): an ``outer`` START holding both selectors that names a marked integration. Its
 #: ordinary Works would run review-v1 Work Review, whose mutation commits only review-v1 Work commits and publishes
-#: only by push-only stages, while the integration must finish by START's ordinary commit and push (§32.31); the
-#: frozen text does not say how one operation does both, so it is refused before anything is written.
+#: only by push-only stages, while the integration must finish by START's ordinary commit and push (§32.31).
+#: Control Plane ruling RB5 Q-C1 = OPTION_A_FAIL_CLOSED: both selectors never authorize one outer invocation to cross
+#: mutation contracts, so this STOP comes before any Phase Integration durable effect - no F3 publication change, no
+#: push-only terminal stage. The operator runs a single-work START with ``phase_review=`` for the integration; there
+#: ``phase_review`` applies to its Phase Integration Review and ``review`` is validated as a selector only (no Work
+#: Review activation, marker or recovery), the integration keeping its ordinary terminal semantics.
 CODE_SELECTORS_OUTER = "phase_review_outer_with_work_review"
 
 
