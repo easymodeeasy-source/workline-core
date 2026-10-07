@@ -155,6 +155,8 @@ callerが通常Workを追加するとき:
 
 CREATEは「通常Workを追加したからintegrationが必要だろう」と推測しない。
 
+`phase_review_contract` は、caller（Roadmapのreview-v1 Phase entry、またはreviewed semanticsのSTART）が決めて渡すintegrationのReview contract markerである。`work_kind: phase_integration_check` のWorkにだけ、正確な値 `phase-integration-review-v1` でだけ付けられ、CREATEは検証して書き、正本の読み戻しで同じ値を保つ。CREATEはmarkerを決めない・推測しない・既存Workへ後から付けない。それ以外のWork・それ以外の値は登録前に拒否し、direct standalone invocationはmarkerを受けない。markerの無い登録は従来と同じbytesになる。
+
 ## Relations
 
 `.workline/relations/roadmap.yaml`:

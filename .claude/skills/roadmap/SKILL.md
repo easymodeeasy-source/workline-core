@@ -404,6 +404,19 @@ desired state自体の変更が必要 → human confirmation
 
 Roadmap start event / Phase completion eventは作らない。stateは生成する。
 
+## Phase達成evidence（RB5）
+
+review-v1のPhase entry（`review=` を渡すPhase entry）は、integrationに `phase_review_contract: phase-integration-review-v1` を付けて登録する（version 2のdesign identityがmarkerを束ね、Review対象のCandidateもそれを持つ）。`review=None` のPhase entryは従来どおりmarkerを付けない。既存Workへ後からmarkerを付けない。
+
+markerを持つintegrationのPhase（reviewed Phase）は、STARTのPhase Integration Reviewでintegrationが完了する。Phase completeは引き続き生成するstateで、eventにはしない。
+
+- **生成完了とprogression-readyは別**: reviewed Phaseは、生成完了に加えて、現在のbasisに対する有効なphase_completion evidenceがちょうど1件ある時だけprogression-ready。legacy Phaseはlegacyの規則のままcompleteならready。evidenceはPhase lifecycleではない。
+- **startable Phaseの制限**: `ProjectView.startable_phases` は変えず、Roadmapの候補選択（startable_phases / select_phase）は、完了したreviewed predecessor Phaseがprogression-readyでない候補を外す。明示選択された候補でも同じで、理由（そのpredecessorのevidence obligation）を示して拒否する。lifecycleの依存未充足とは言わない。reviewed Phaseが無いRoadmapは何も変わらない。
+- **候補0件の診断**: 全active Phaseが生成完了でも、reviewed Phaseのevidence obligationが閉じていなければ「achievement checkへ進む」とは言わず、どのPhase / basisに有効なevidenceが無いかを示す。
+- **work-plan-exclude**: 未開始Workのplan exclusionでreviewed Phaseのbasisが再び閉じるなら、同じoperationがcovering integrationのconsumed Reviewを引くphase_completion evidenceを、replanの後・commitの前の `achievement` stageに記録する（原因はその `plan_excluded` event）。Phase plan exclusionはevidenceを作らない。
+- **Roadmap achievement（H-2）**: reviewed Phaseを含むRoadmapの `achieved` は、構造化した `RoadmapAchievementDecision`（judgement・evaluator identity / version・public-safe rationale・evidence refs・任意のHuman Decision Evidence ref）でだけ記録し、文字列のjudgementは拒否する（legacyだけのRoadmapの文字列judgementは従来どおり）。callerはH-2の下でAIとして `achieved` を自分で決めてよく、AIだからという理由だけでHuman確認を足さない。`achieved` 以外のjudgementは読み取りだけで、何も書かない。
+- **achievedの記録**: 決定時のRoadmap basisを凍結し、`roadmap-achievement` operationのlock内で同じbasisを再計算して一致を確かめ、全active Phaseの生成完了・全reviewed Phaseのprogression-ready・構造validation PASS・decisionが現在のPhase evidenceを全て引くこと・decisionが引くReview Run / Human Decision Evidenceが正本recordとして検証できること・未解決のHUMAN決定とblockingなReview obligationが無いことを確かめる（どれかが欠ければ何も書かない）。`roadmap_achieved` eventのIDとroadmap_achievement evidenceのIDを予約し、eventとそれを参照するevidenceを1つの `achievement` stageとして記録し、commit・pushしてから、commitしたevent / evidence / basisの一致を読み戻して証明する（違えば `review_achievement_basis_mismatch` のreconcile、置き換えない）。中断した記録は同じdecisionの再実行がそのstageから終える。
+
 ## Review-v1 planning（明示opt-in）
 
 Roadmap作成とPhase entryは、呼び出しごとの明示opt-inでだけReview gate（`skills/review`）を通る。`create_roadmap(..., review=PlanningReview(...))` / `enter_phase(..., review=PlanningReview(...))` がreview-v1 planningであり、`review=None`（既定）はlegacy pathで従来と1 byteも変わらない。opt-inはdurable invocationのmarker（`review_contract: review-v1-planning-v1`、`publication_contract: review-v1-planning-publication-v1`、recoveryでは `recovery_of_review_run_id`）として記録し、markerの無いrecordとある呼び出し、またはその逆は `reconcile required`（`review_marker_mismatch`）で停止してrecordを変えない。opt-inしたinvocationがlegacyへfallbackすることはない。
