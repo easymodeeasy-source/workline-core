@@ -693,7 +693,9 @@ SNAPSHOT_FIELDS = (
     serialize.SCHEMA_KEY, serialize.VERSION_KEY, "source_id", "head", "provenance", "records", "opportunities",
     "escapes", "local_outcomes", "semantic_surfaces", "unresolved_human", "profile",
 )
-OPPORTUNITY_FIELDS = ("review_run_id", "global_policy_version", "global_changes")
+#: One Relevant Opportunity: its Run, the Global policy version and the EFFECTIVE setting of the surface the Run froze
+#: (``None`` both when the Run froze no Effective Policy), and the Global-origin experiments it froze.
+OPPORTUNITY_FIELDS = ("review_run_id", "global_policy_version", "setting", "global_changes")
 #: An escape / recurrence fact among a source's records: a supported relation, or a serious supported Problem.
 ESCAPE_SERIOUS_PROBLEM = "serious_problem"
 ESCAPE_FIELDS = ("family", "id", "digest", "kind")
@@ -715,14 +717,21 @@ def _stored_digest(reader: Any, ref: Mapping[str, Any]) -> str:
     return str(reader.history_digest(family, identifier))
 
 
-def _opportunity_entry(reader: Any, review_run_id: str) -> dict[str, Any]:
-    """One Relevant Opportunity, with the Global policy its Run froze - positive proof of what it ran under."""
+def _opportunity_entry(reader: Any, review_run_id: str, surface_id: str) -> dict[str, Any]:
+    """One Relevant Opportunity of ``surface_id``, with what its Run froze - positive proof of what it ran under.
+
+    The Global policy version, the surface's EFFECTIVE setting (the Profile
+    overlay on the Global: the behaviour that Run actually exercised) and the
+    Global-origin experiments. A Run that froze no Effective Policy (a P4 / P5
+    Run) has neither version nor setting: unknown, never assumed.
+    """
     frozen = policy.frozen_effective_policy(reader, review_run_id)
     if frozen is None:
-        return {"review_run_id": review_run_id, "global_policy_version": None, "global_changes": []}
+        return {"review_run_id": review_run_id, "global_policy_version": None, "setting": None, "global_changes": []}
     return {
         "review_run_id": review_run_id,
         "global_policy_version": int(frozen["global_baseline"]["baseline_version"]),
+        "setting": int(frozen["settings"][surface_id]),
         "global_changes": sorted({str(item["policy_change_id"]) for item in frozen["active_experiments"]
                                   if item["origin"] == policy.ORIGIN_GLOBAL}),
     }
@@ -811,7 +820,7 @@ def source_snapshot(source_id: str, reader: Any, head: str, evidence: Sequence[M
         "source_id": source_id, "head": head,
         "provenance": {key: value for key, value in _provenance_of(normal).items() if key != "kind"},
         "records": found_records,
-        "opportunities": {surface_id: [_opportunity_entry(reader, run_id) for run_id in sorted(run_ids)]
+        "opportunities": {surface_id: [_opportunity_entry(reader, run_id, surface_id) for run_id in sorted(run_ids)]
                           for surface_id, run_ids in sorted(opportunities.items())},
         "escapes": escapes,
         "local_outcomes": outcomes,
@@ -859,11 +868,14 @@ def parse_source_snapshot(record: object, described: str) -> dict[str, Any]:
     for surface_id, entries in opportunities.items():
         if not isinstance(entries, list):
             raise _invalid(f"{described} opportunities of {surface_id} is not a list")
+        surface = policy.SURFACE_BY_ID[surface_id]
         for entry in entries:
             if not isinstance(entry, Mapping) or set(entry) != set(OPPORTUNITY_FIELDS) \
                     or not _is_id(entry["review_run_id"], "review_run") \
+                    or (entry["global_policy_version"] is None) != (entry["setting"] is None) \
                     or (entry["global_policy_version"] is not None
-                        and (type(entry["global_policy_version"]) is not int or entry["global_policy_version"] < 1)) \
+                        and (type(entry["global_policy_version"]) is not int or entry["global_policy_version"] < 1
+                             or not surface.in_range(entry["setting"]))) \
                     or not isinstance(entry["global_changes"], list) \
                     or any(not _is_id(item, "review_global_policy_change") for item in entry["global_changes"]) \
                     or not _sorted_unique(entry["global_changes"]):
@@ -880,6 +892,9 @@ def parse_source_snapshot(record: object, described: str) -> dict[str, Any]:
                     raise _invalid(f"{described} names a malformed escape fact")
             elif set(item) != set(OUTCOME_FIELDS[item["family"]] if item["family"] in OUTCOME_FIELDS else ()):
                 raise _invalid(f"{described} names a malformed Project-local outcome")
+        keys = [(item["family"], item["id"]) for item in found[name]]
+        if keys != sorted(set(keys)):
+            raise _invalid(f"{described} {name} are not sorted and duplicate-free")
     for name in ("semantic_surfaces", "unresolved_human"):
         values = records._require_list(found, name, described)
         if not _sorted_unique(values) or any(_label_problem(value) is not None for value in values):
@@ -1125,13 +1140,34 @@ def eligibility(request: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
     before setting (§31.26: never the direction word alone). An exact rollback
     (§31.20) rests on its exception and needs no fresh cross-Project trend;
     its exactness is :func:`exact_rollback_problem`'s.
+
+    Without the pre-change setting this answer is PROVISIONAL under the
+    lighten floor (``pre_change_setting`` is ``None``): it counts only the
+    opportunities whose Run positively froze a setting, and
+    :func:`promotion_packet` - the governing decision - then counts only those
+    that exercised at least the pre-change (stronger) setting.
     """
     record = _require_request(request)
-    return _eligibility(record, snapshots, clusters, _word_floor(record["direction"]))
+    return _eligibility(record, snapshots, clusters, _word_floor(record["direction"]), None)
+
+
+def _exercised(entries: Sequence[Mapping[str, Any]], pre_change_setting: int | None) -> list[str]:
+    """The opportunities that exercised the stronger pre-change behaviour (§31.19 L12023, §16.10 L4499).
+
+    Only a Run that positively froze its effective setting of the surface
+    counts, and only when that setting is at least the pre-change one: an
+    opportunity under a lighter setting, or whose setting is unknown, says
+    nothing about the behaviour a lightening removes. With no pre-change
+    setting given (the provisional word-floor answer), every known setting
+    counts.
+    """
+    return [str(entry["review_run_id"]) for entry in entries if entry["setting"] is not None
+            and (pre_change_setting is None or entry["setting"] >= pre_change_setting)]
 
 
 def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any]], clusters: Mapping[str, Any],
-                 floor: str) -> dict[str, Any]:
+                 floor: str, pre_change_setting: int | None) -> dict[str, Any]:
+    """Eligibility under ``floor``; ``pre_change_setting`` is the surface's before setting where it is known."""
     parsed = _require_snapshots(snapshots)
     surface_id = record["policy_surface_id"]
     mechanism = record["generalized_mechanism_id"]
@@ -1175,8 +1211,10 @@ def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
             problems.append("too_few_lineages")
         if len(independent) < FLOOR_CLUSTERS[floor]:
             problems.append("too_few_independent_clusters")
+        exercised = {source_id: _exercised(by_id[source_id]["opportunities"][surface_id], pre_change_setting)
+                     for source_id in supporting}
         if floor == FLOOR_LIGHTEN and any(
-                sum(len(opportunities.get(member, ())) for member in cluster) < policy.SINGLE_EVENT_FLOOR
+                sum(len(exercised.get(member, ())) for member in cluster) < policy.SINGLE_EVENT_FLOOR
                 for cluster in independent):
             problems.append("unrepresentative_opportunities")
     return serialize.canonical_data({
@@ -1184,6 +1222,7 @@ def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
         "floor": floor,
         "problems": problems,
         "basis": basis,
+        "pre_change_setting": pre_change_setting,
         "request_digest": request_digest(record),
         "policy_surface_id": surface_id,
         "generalized_mechanism_id": mechanism,
@@ -1575,13 +1614,13 @@ def promotion_packet(request: Mapping[str, Any], *, promotion_packet_id: str, gl
     if not isinstance(clusters, Mapping) or serialize.canonical_data(dict(clusters)) != computed_clusters:
         raise reconcile("the clusters are not the clustering of these source snapshots", REASON_CANDIDATE_MISMATCH)
     if serialize.canonical_data(dict(eligibility)) != _eligibility(record, parsed, computed_clusters,
-                                                                    _word_floor(record["direction"])):
+                                                                    _word_floor(record["direction"]), None):
         raise reconcile("the eligibility is not this request's over these snapshots", REASON_CANDIDATE_MISMATCH)
     if serialize.canonical_data(dict(proof)) != compatibility_proof(before, after):
         raise stop(CODE_COMPATIBILITY_UNPROVEN, "the compatibility proof is not the total adapter-v1 proof of this "
                                                 "before / after Global policy")
     floor = movement_floor(before, after)
-    governing = _eligibility(record, parsed, computed_clusters, floor)
+    governing = _eligibility(record, parsed, computed_clusters, floor, _settings(before)[record["policy_surface_id"]])
     if not governing["eligible"]:
         raise stop(CODE_NOT_ELIGIBLE, f"the promotion is not eligible under the {floor} floor: "
                                       f"{', '.join(governing['problems'])}; eligibility is only a floor, never a reason "
@@ -1701,7 +1740,7 @@ def parse_promotion_packet(record: object, described: str) -> dict[str, Any]:
     if request_problems(stated):
         raise _invalid(f"{described} does not state a valid request: {request_problems(stated)[0][1]}")
     floor = FLOOR_LIGHTEN if _lightens(found["before_setting"], found["after_setting"]) else FLOOR_STRENGTHEN
-    governing = _eligibility(stated, parsed, computed, floor)
+    governing = _eligibility(stated, parsed, computed, floor, found["before_setting"])
     if found["eligibility"] != governing or not governing["eligible"]:
         raise _invalid(f"{described} eligibility is not the eligible {floor}-floor result of its own evidence")
     evidence = _packet_evidence(parsed, governing["supporting_sources"], surface_id)
@@ -1907,6 +1946,7 @@ def parse_review_context(record: object, described: str) -> dict[str, Any]:
     serialize.require_schema(found, SCHEMA_CONTEXT, RECORD_VERSION, described)
     records._require_exact_fields(found, CONTEXT_FIELDS, described)
     fixed = {"review_kind": REVIEW_KIND, "contract": CONTRACT, "root_policy_id": POLICY_ID,
+             "root_policy_hash": _root_policy_hash(), "meta_rules_digest": policy.meta_rules_digest(),
              "persisted_adapter_identity": PERSISTED_ADAPTER_IDENTITY,
              "projection_semantics_version": PROJECTION_SEMANTICS_VERSION,
              "loader_semantics_identity": policy.LOADER_SEMANTICS_IDENTITY, "meta_rules_id": policy.META_RULES_ID,
@@ -1914,7 +1954,7 @@ def parse_review_context(record: object, described: str) -> dict[str, Any]:
     for key, value in fixed.items():
         if found[key] != value:
             raise _invalid(f"{described} {key} is not the root Review's")
-    for key in ("root_policy_hash", "loader_identity", "meta_rules_digest", "before_global_policy_digest"):
+    for key in ("loader_identity", "before_global_policy_digest"):
         records._require_digest(found, key, described)
     records._require_int(found, "before_global_policy_version", described, minimum=1)
     return serialize.canonical_data(found)
@@ -2021,16 +2061,53 @@ def adjudication_request(*, review_run_id: str, candidate_hash: str, review_cont
 
 # --------------------------------------------------------------------------- the mechanical root meta-verifier (§31.28)
 
-FACT_FIELDS = ("current_before_global_digest", "sources_current", "source_problems", "publication_ready")
+#: The facts the owner gathers (Amendment 7: six keys). ``rollback_change`` / ``rollback_evaluation`` are the stored
+#: change and evaluation records the exact-rollback exception names (canonical mappings read from committed objects),
+#: both ``None`` when the exception is not used.
+FACT_FIELDS = ("current_before_global_digest", "sources_current", "source_problems", "publication_ready",
+               "rollback_change", "rollback_evaluation")
+
+
+def _rollback_exception_problems(found: Mapping[str, Any], facts: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """§31.28 "rollback exception exactness when used", re-proven - never a label check alone (Amendment 7).
+
+    Unused: both rollback facts are ``None``. Used: the Candidate is a rollback
+    whose eligibility rests on the exception, the two facts are exactly the
+    change and the evaluation the exception names, and
+    :func:`exact_rollback_problem` holds over them, the request the Packet
+    states and the before Global policy.
+    """
+    packet = found["promotion_packet"]
+    exception = packet["rollback_exception"]
+    change, evaluation = facts["rollback_change"], facts["rollback_evaluation"]
+    if exception is None:
+        if change is not None or evaluation is not None:
+            return [(CODE_META_VERIFIER_FAILED, "rollback records are given for a Candidate that does not use the "
+                                                "exact-rollback exception")]
+        return []
+    if found["direction"] != DIRECTION_ROLLBACK or packet["eligibility"]["basis"] != BASIS_EXACT_ROLLBACK:
+        return [(CODE_ROLLBACK_INEXACT, "the exact-rollback exception is used by a Candidate that is not an exact "
+                                        "rollback")]
+    if not isinstance(change, Mapping) or not isinstance(evaluation, Mapping) \
+            or change.get("global_policy_change_id") != exception["global_policy_change_id"] \
+            or evaluation.get("evaluation_id") != exception["evaluation_id"]:
+        return [(CODE_ROLLBACK_INEXACT, "the stored change and evaluation the exact-rollback exception names are not "
+                                        "both given")]
+    problem = exact_rollback_problem(_request_of_packet(packet), found["before_global_policy"], change, evaluation)
+    if problem is not None:
+        return [(CODE_ROLLBACK_INEXACT, f"the exact-rollback exception does not hold: {problem}")]
+    return []
 
 
 def meta_verifier_problems(material: Mapping[str, Any], facts: Mapping[str, Any]) -> list[tuple[str, str]]:
     """Every failed item of the fixed mechanical root meta-verifier (§31.28), coded; external approval never overrides.
 
-    ``facts`` (gathered by the owner): the current before-Global digest,
-    whether the bound source evidence is still current (and the problems when
-    not), and the root publication readiness (``None`` for a remote-less
-    root). Every other item is re-derived from the Candidate material itself,
+    ``facts`` (gathered by the owner, :data:`FACT_FIELDS`): the current
+    before-Global digest, whether the bound source evidence is still current
+    (and the problems when not), the root publication readiness (``None`` for
+    a remote-less root), and the stored change / evaluation records an
+    exact-rollback exception names (``None`` when unused; re-proven by
+    :func:`exact_rollback_problem`). Every other item is re-derived from the Candidate material itself,
     against the fixed registry, the fixed meta-rules and this build's root
     meta-policy - never against the proposed after-state.
     """
@@ -2083,19 +2160,16 @@ def meta_verifier_problems(material: Mapping[str, Any], facts: Mapping[str, Any]
     exception = packet["rollback_exception"]
     if floor is not None:
         snapshots = [item["snapshot"] for item in packet["source_snapshots"]]
-        recomputed = _eligibility(_request_of_packet(packet), snapshots, clustering(snapshots), floor)
+        recomputed = _eligibility(_request_of_packet(packet), snapshots, clustering(snapshots), floor,
+                                  found["before_setting"])
         if recomputed != packet["eligibility"] or not recomputed["eligible"]:
             problems.append((CODE_NOT_ELIGIBLE, f"the {floor}-floor eligibility does not hold: "
                                                 f"{', '.join(recomputed['problems']) or 'it is not the Packet result'}"))
         slots = required_discovery_slots(before, after, exact_rollback=exception is not None)
         if found["required_discovery_slots"] != slots:
             problems.append((CODE_META_VERIFIER_FAILED, "the required discovery slots are not the pre-change floor"))
-    # rollback exception exactness when used (its record-level exactness is proven over the immutable change and
-    # evaluation records at the freeze, and the unchanged before Global keeps it)
-    if exception is not None and (found["direction"] != DIRECTION_ROLLBACK
-                                  or packet["eligibility"]["basis"] != BASIS_EXACT_ROLLBACK):
-        problems.append((CODE_ROLLBACK_INEXACT, "the exact-rollback exception is used by a Candidate that is not an "
-                                                "exact rollback"))
+    # rollback exception exactness when used (Amendment 7): re-proven over the stored change and evaluation records
+    problems.extend(_rollback_exception_problems(found, facts))
     # total Profile compatibility
     try:
         proof = compatibility_proof(before, after)
@@ -2162,6 +2236,8 @@ def discovery_declined(chain: Any) -> bool:
 def g4_outcome(chain: Any, adjudication_outcome: str | None) -> str:
     """The root Run's G4 outcome, read from its validated Gate chain alone (§31.27, RB7C-1 (e)).
 
+    A declined discovery task is terminal ``not_authorized`` whatever the
+    adjudication says (the verdict :func:`recovery_adapter` gives the same Run).
     ``REPAIR_REQUIRED`` under the non-repairing root contract is terminal
     ``not_authorized`` (no Receipt, no Repair Batch); ``HUMAN_WAIT`` is the
     canonical HUMAN_WAIT of the SAME Run, never set aside (R8); an
@@ -2170,13 +2246,16 @@ def g4_outcome(chain: Any, adjudication_outcome: str | None) -> str:
     """
     _require_root_chain(chain)
     state = p4.run_state(chain, adjudication_outcome)
+    if state not in (p4.STATE_G4_REPAIR, p4.STATE_G4_HUMAN, p4.STATE_G4_READY, p4.STATE_G5_SEALED):
+        raise reconcile(f"Review Run {chain.review_run_id} is at {state}, which has no G4 outcome",
+                        REASON_CHAIN_INVALID)
+    if discovery_declined(chain):
+        return OUTCOME_NOT_AUTHORIZED  # the same verdict recovery gives the Run (recovery_adapter)
     if state == p4.STATE_G4_REPAIR:
         return OUTCOME_NOT_AUTHORIZED
     if state == p4.STATE_G4_HUMAN:
         return OUTCOME_HUMAN_WAIT
-    if state in (p4.STATE_G4_READY, p4.STATE_G5_SEALED):
-        return OUTCOME_AUTHORIZATION_READY
-    raise reconcile(f"Review Run {chain.review_run_id} is at {state}, which has no G4 outcome", REASON_CHAIN_INVALID)
+    return OUTCOME_AUTHORIZATION_READY
 
 
 # --------------------------------------------------------------------------- root recovery classification (§31.29, RB7C-2)

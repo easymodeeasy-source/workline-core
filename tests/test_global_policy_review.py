@@ -8,10 +8,12 @@ Unit level over the inert core :mod:`workline.review.global_policy`:
 * the root requests are the common P4 requests under the root policy - no history contract, no prior history, no
   set-aside summary, no decision evidence, no Effective Policy (WAIT_PSW_IR_RB7_2 until PSW lands the root branch);
   the root policy is refused under every other contract and in a Work P4 Context; static effective policy hash;
-* G4 from the validated Gate chain alone: REPAIR_REQUIRED is terminal ``not_authorized`` (no Repair Batch),
+* G4 from the validated Gate chain alone: a declined discovery and REPAIR_REQUIRED are terminal ``not_authorized``
+  (no Repair Batch; the same verdict recovery gives),
   HUMAN_WAIT stays the same Run (R8), authorization-ready seals - and no P5 history surface is ever reached;
-* the fixed mechanical meta-verifier has precedence over any reviewer approval; the pre-change Global policy and the
-  fixed root meta-rules are what the Context, the requirement and the floors bind;
+* the fixed mechanical meta-verifier has precedence over any reviewer approval and re-proves an exact-rollback
+  exemption over the stored change / evaluation records (Amendment 7); the pre-change Global policy and the fixed
+  root meta-rules are what the Context (pinned to this build), the requirement and the floors bind;
 * the root recovery classification over the shared discovery core (no automatic set-aside, R8);
 * the persistence records: the change record, the deterministic Patch Note, the Consumption v4 projection;
 * the module is inert and its P7 codes are its own catalogue.
@@ -20,7 +22,6 @@ Unit level over the inert core :mod:`workline.review.global_policy`:
 from __future__ import annotations
 
 import ast
-from dataclasses import replace
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -33,9 +34,9 @@ from workline.review import history, p4, policy, records, recovery, serialize
 from workline.review.store import GateChain
 
 from test_global_policy_promotion import (
-    CHANGE_ID, PACKET_ID, PSW_P4, RECEIPT_ID, RUN_ID, SECRET_ROOT, V1, V2_SLOTS3, WAIT_PSW_IR_RB7_2,
-    candidate_for, change_request, digest_of, ident, root_policy_hash_stub, successor, three_independent,
-    two_independent,
+    CHANGE_ID, EVALUATION_ID, PACKET_ID, PSW_P4, RECEIPT_ID, RUN_ID, SECRET_ROOT, V1, V2_SLOTS3, WAIT_PSW_IR_RB7_2,
+    applied_change, candidate_for, change_request, digest_of, evaluate, ident, observed, root_policy_hash_stub,
+    successor, three_independent, two_independent,
 )
 
 PSW_RECORDS = hasattr(records, "GLOBAL_POLICY_REVIEW_KIND")
@@ -43,7 +44,9 @@ WAIT_PSW_IR_RB7_1 = "WAIT_PSW_IR_RB7_1: records root contract / P7 kind constant
 SOURCE = Path(gp.__file__).read_text(encoding="utf-8")
 LOADER = digest_of("loader identity")
 GOOD_FACTS = {"current_before_global_digest": policy.global_policy_digest(V1), "sources_current": True,
-              "source_problems": [], "publication_ready": True}
+              "source_problems": [], "publication_ready": True, "rollback_change": None, "rollback_evaluation": None}
+#: The facts an exact-rollback Candidate's meta-verification is given (Amendment 7: six keys).
+ROLLBACK_CHANGE_ID = "rgc_" + "2" * 26
 
 
 def actor(*_: Any) -> None:
@@ -218,6 +221,12 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual("review-policy/review", context["namespace_root"])
         self.assertNotIn(self.material["after_global_policy_digest"], serialize.canonical_text(context))
         self.assertEqual(context, gp.parse_review_context(context, "the Context"))
+        for name, value in (("root_policy_hash", digest_of("another root family policy")),
+                            ("meta_rules_digest", digest_of("other meta-rules")),
+                            ("before_global_policy_digest", "not a digest")):
+            with self.subTest(foreign=name):
+                with self.assertRaises(ValidationError):
+                    gp.parse_review_context({**context, name: value}, "the Context")
         authority = gp.requirement(self.material)["authority"]
         self.assertEqual(policy.global_policy_digest(V1), authority["before_global_policy_digest"])
         self.assertEqual(policy.meta_rules_digest(), authority["meta_rules_digest"])
@@ -296,12 +305,22 @@ class G4OutcomeTests(unittest.TestCase):
         self.assertEqual(gp.OUTCOME_AUTHORIZATION_READY, gp.g4_outcome(root_chain(4), records.AUTHORIZATION_READY))
         self.assertEqual(gp.OUTCOME_AUTHORIZATION_READY, gp.g4_outcome(root_chain(5), records.AUTHORIZATION_READY))
 
+    def test_a_declined_discovery_never_authorizes_whatever_the_adjudication_says(self) -> None:
+        chain = root_chain(4, declined=True)
+        self.assertEqual([], p4.chain_problems(chain), "a declined settlement is shape-valid")
+        for outcome in (records.AUTHORIZATION_READY, records.HUMAN_WAIT, records.REPAIR_REQUIRED):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(gp.OUTCOME_NOT_AUTHORIZED, gp.g4_outcome(chain, outcome))
+        self.assertEqual(gp.OUTCOME_NOT_AUTHORIZED, gp.g4_outcome(root_chain(5, declined=True),
+                                                                  records.AUTHORIZATION_READY))
+
     def test_no_g4_outcome_before_g4_off_shape_or_for_another_kind(self) -> None:
         for name, chain, outcome in (("G3", root_chain(3), None), ("repair branch", root_chain(5, shape=p4.SHAPE_REPAIR),
                                                                     records.REPAIR_REQUIRED),
                                      ("invalidated", root_chain(6), records.AUTHORIZATION_READY),
                                      ("P6 kind", root_chain(4, kind=policy.REVIEW_KIND), records.HUMAN_WAIT),
-                                     ("unknown outcome", root_chain(4), "MAYBE")):
+                                     ("unknown outcome", root_chain(4), "MAYBE"),
+                                     ("declined at G2", root_chain(2, declined=True), None)):
             with self.subTest(case=name):
                 with self.assertRaises(ReconcileRequired) as raised:
                     gp.g4_outcome(chain, outcome)
@@ -350,6 +369,12 @@ class MetaVerifierTests(unittest.TestCase):
         tampered = {**self.material, "promotion_packet": {**self.material["promotion_packet"], "summary": "other"}}
         self.assertTrue(gp.meta_verifier_problems(tampered, GOOD_FACTS))
 
+    def test_rollback_facts_are_none_when_the_exception_is_unused(self) -> None:
+        change = applied_change(self)
+        facts = {**GOOD_FACTS, "rollback_change": change}
+        self.assertEqual([gp.CODE_META_VERIFIER_FAILED], [code for code, _ in gp.meta_verifier_problems(
+            self.material, facts)])
+
     def test_the_lighten_floor_is_rechecked_by_the_movement(self) -> None:
         snapshots = three_independent()
         material = candidate_for(V2_SLOTS3, change_request(snapshots, direction="adjust", after=2), snapshots)
@@ -357,6 +382,51 @@ class MetaVerifierTests(unittest.TestCase):
         self.assertEqual([], gp.meta_verifier_problems(material, facts))
         self.assertEqual(3, material["required_discovery_slots"])
         self.assertEqual(gp.FLOOR_LIGHTEN, material["promotion_packet"]["eligibility"]["floor"])
+
+
+class ExactRollbackMetaVerifierTests(unittest.TestCase):
+    """Amendment 7 / §31.28: "rollback exception exactness when used" is re-proven over the stored records."""
+
+    def setUp(self) -> None:
+        root_policy_hash_stub(self)
+        self.change = applied_change(self)
+        self.before = successor(V1, slots=2)
+        self.evaluation = evaluate(self.change, gp.RESULT_ROLLBACK, observed(CHANGE_ID))
+        request = change_request([], direction="rollback", after=1, rollback_of=CHANGE_ID,
+                                 rollback_evaluation_id=EVALUATION_ID)
+        self.material = candidate_for(self.before, request, [], change_id=ROLLBACK_CHANGE_ID)
+        self.facts = {**GOOD_FACTS, "current_before_global_digest": policy.global_policy_digest(self.before),
+                      "rollback_change": self.change, "rollback_evaluation": self.evaluation}
+
+    def test_an_exact_rollback_with_its_stored_records_passes(self) -> None:
+        self.assertEqual(gp.BASIS_EXACT_ROLLBACK, self.material["promotion_packet"]["eligibility"]["basis"])
+        self.assertEqual([], gp.meta_verifier_problems(self.material, self.facts))
+        gp.require_meta_verifier(self.material, self.facts)
+
+    def test_an_unproven_exemption_never_seals(self) -> None:
+        retained = evaluate(self.change, gp.RESULT_RETAIN, observed(CHANGE_ID))
+        other_change = dict(self.change, global_policy_change_id="rgc_" + "3" * 26)
+        cases = {
+            "records missing": {"rollback_change": None, "rollback_evaluation": None},
+            "evaluation missing": {"rollback_evaluation": None},
+            "another change": {"rollback_change": other_change},
+            "the threshold did not fire": {"rollback_evaluation": retained},
+            "not a mapping": {"rollback_change": "rgc"},
+        }
+        for name, changes in cases.items():
+            with self.subTest(case=name):
+                problems = gp.meta_verifier_problems(self.material, {**self.facts, **changes})
+                self.assertEqual([gp.CODE_ROLLBACK_INEXACT], [code for code, _ in problems])
+                with self.assertRaises(StopError) as raised:
+                    gp.require_meta_verifier(self.material, {**self.facts, **changes})
+                self.assertEqual(gp.CODE_META_VERIFIER_FAILED, raised.exception.code)
+                self.assertIn(gp.CODE_ROLLBACK_INEXACT, str(raised.exception))
+
+    def test_the_change_must_still_be_the_one_in_force(self) -> None:
+        moved = successor(self.before, steps=1)
+        facts = {**self.facts, "current_before_global_digest": policy.global_policy_digest(moved)}
+        self.assertIn(gp.CODE_META_VERIFIER_FAILED, [code for code, _ in gp.meta_verifier_problems(self.material,
+                                                                                                    facts)])
 
 
 # =========================================================================== root recovery classification (§31.29, RB7C-2, R8)
@@ -394,6 +464,10 @@ class RecoveryAdapterTests(unittest.TestCase):
         self.assertEqual(gp.SETTLED_NOT_AUTHORIZED, self.classify(root_chain(2, candidate=self.hash, declined=True)))
         self.outcome = records.REPAIR_REQUIRED
         self.assertEqual(gp.SETTLED_NOT_AUTHORIZED, self.classify(root_chain(4, candidate=self.hash)))
+        self.outcome = records.AUTHORIZATION_READY
+        declined = root_chain(4, candidate=self.hash, declined=True)
+        self.assertEqual(gp.SETTLED_NOT_AUTHORIZED, self.classify(declined))
+        self.assertEqual(gp.OUTCOME_NOT_AUTHORIZED, gp.g4_outcome(declined, self.outcome), "one Run, one verdict")
 
     def test_a_human_wait_run_is_recovered_as_the_same_waiting_run(self) -> None:
         self.outcome = records.HUMAN_WAIT
@@ -429,10 +503,14 @@ class RecoveryAdapterTests(unittest.TestCase):
                                                             material=other), "a settled Run is settled whoever's")
 
     def test_the_bound_identity_is_named_together(self) -> None:
-        with self.assertRaises(ValidationError):
-            gp.recovery_adapter(promotion_packet_id=PACKET_ID, candidate_hash=None, consumed=lambda _: False)
-        with self.assertRaises(ValidationError):
-            gp.recovery_adapter(promotion_packet_id="rpp_bad", candidate_hash=self.hash, consumed=lambda _: False)
+        # Amendment 6: both None (nothing bound yet) or both given; exactly one is review_record_invalid
+        for packet_id, candidate in ((PACKET_ID, None), (None, self.hash), ("rpp_bad", self.hash), (PACKET_ID, "x")):
+            with self.subTest(packet_id=packet_id, candidate=candidate):
+                with self.assertRaises(ValidationError) as raised:
+                    gp.recovery_adapter(promotion_packet_id=packet_id, candidate_hash=candidate,
+                                        consumed=lambda _: False)
+                self.assertEqual("review_record_invalid", raised.exception.code)
+        gp.recovery_adapter(promotion_packet_id=None, candidate_hash=None, consumed=lambda _: False)
 
 
 # =========================================================================== persistence records (§31.33-§31.37)
@@ -512,11 +590,18 @@ class InertCoreTests(unittest.TestCase):
     def test_the_core_imports_nothing_that_locks_reads_files_mutates_or_reaches_history(self) -> None:
         tree = ast.parse(SOURCE)
         allowed = {"errors", "ids", "namespace", "p4", "policy", "records", "serialize", "recovery"}
+        standard = {"__future__", "dataclasses", "itertools", "pathlib", "re", "typing"}
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level:
                 names = {node.module} if node.module else {alias.name for alias in node.names}
                 with self.subTest(line=node.lineno):
                     self.assertLessEqual(names - {None}, allowed)
+            elif isinstance(node, ast.ImportFrom):
+                with self.subTest(line=node.lineno):
+                    self.assertIn(node.module, standard, "an absolute import reaches only the standard library")
+            elif isinstance(node, ast.Import):
+                with self.subTest(line=node.lineno):
+                    self.assertLessEqual({alias.name for alias in node.names}, standard)
         self.assertIsNone(re.search(r"\bimport history\b|from \.history import|from \. import .*\bhistory\b", SOURCE))
         calls = {node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
                  for node in ast.walk(tree) if isinstance(node, ast.Call)}
@@ -536,12 +621,13 @@ class InertCoreTests(unittest.TestCase):
                             for node in ast.walk(adapter)))
 
     def test_every_p7_code_literal_is_declared_once_in_this_catalogue(self) -> None:
-        found = {node.value for node in ast.walk(ast.parse(SOURCE))
-                 if isinstance(node, ast.Constant) and isinstance(node.value, str)
-                 and re.fullmatch(r"review_p7_[a-z_]+", node.value)}
+        occurrences = [node.value for node in ast.walk(ast.parse(SOURCE))
+                       if isinstance(node, ast.Constant) and isinstance(node.value, str)
+                       and re.fullmatch(r"review_p7_[a-z_]+", node.value)]
         declared = set(gp.STOP_CODES) | set(gp.RECONCILE_REASONS)
-        self.assertEqual(found, declared)
+        self.assertEqual(declared, set(occurrences))
         self.assertEqual(len(gp.STOP_CODES) + len(gp.RECONCILE_REASONS), len(declared))
+        self.assertEqual(len(declared), len(occurrences), "each P7 code is spelled exactly once, in the catalogue")
         self.assertFalse(re.search(r"review_p6_[a-z_]+", SOURCE), "no P6 code is raised by the P7 core")
         others = set(p4.STOP_CODES) | set(p4.RECONCILE_REASONS) | set(policy.STOP_CODES) | set(policy.RECONCILE_REASONS) \
             | set(history.STOP_CODES) | set(history.RECONCILE_REASONS)

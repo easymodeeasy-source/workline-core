@@ -10,8 +10,9 @@ Unit level over the inert core :mod:`workline.review.global_policy`:
   duplicate observation correlate; absence of known correlation is never independence; unresolved independence
   does not count and needs no HUMAN;
 * eligibility: one Project (many Runs) never qualifies; >1 lineage and >=2 mutually proven-independent clusters for
-  strengthen; >=3 / >=3 and representative exercised opportunities for lighten, decided by the movement; an
-  unexercised source is excluded; a Project-specific mechanism is refused;
+  strengthen; >=3 / >=3 and representative opportunities that exercised the stronger pre-change setting for lighten
+  (an unknown setting never counts), decided by the movement; an unexercised source is excluded; a Project-specific
+  mechanism is refused;
 * the Promotion Packet re-derives every part and is evidence, never authorization;
 * :class:`EvaluationRecordTests`: the pure Global evaluation record and post-change independence (§31.41-§31.43);
   :class:`ExactRollbackTests` (§31.20); :class:`ActiveGlobalExperimentTests` (§16.10).
@@ -110,14 +111,21 @@ def record_ref(family: str, identifier: str, digest: str) -> dict[str, Any]:
 
 
 def snapshot(source_id: str, n: int, *, runs: int = 2, surface: str = SLOTS, global_changes: tuple[str, ...] = (),
-             global_version: int | None = None, human: tuple[str, ...] = (), semantic: tuple[str, ...] = (),
+             ran_under: Any = None, human: tuple[str, ...] = (), semantic: tuple[str, ...] = (),
              records: list[dict[str, Any]] | None = None, **provenance_overrides: Any) -> dict[str, Any]:
-    """A canonical source snapshot built directly (what :func:`gp.source_snapshot` would extract)."""
+    """A canonical source snapshot built directly (what :func:`gp.source_snapshot` would extract).
+
+    ``ran_under``: the ``(Global policy version, effective setting)`` every Run froze, a list of one per Run, or
+    ``None`` - the Runs froze no Effective Policy (unknown).
+    """
     if records is None:
         records = [{"family": RUNS, "id": ident("rr", n * 100 + index), "digest": digest_of(source_id, index)}
                    for index in range(1, runs + 1)]
-    entries = [{"review_run_id": item["id"], "global_policy_version": global_version,
-                "global_changes": sorted(global_changes)} for item in records if item["family"] == RUNS]
+    runs_of = [item for item in records if item["family"] == RUNS]
+    under = list(ran_under) if isinstance(ran_under, list) else [ran_under] * len(runs_of)
+    entries = [{"review_run_id": item["id"], "global_policy_version": None if frozen is None else frozen[0],
+                "setting": None if frozen is None else frozen[1], "global_changes": sorted(global_changes)}
+               for item, frozen in zip(runs_of, under)]
     prov = provenance(n, **provenance_overrides)
     prov.pop("kind")
     found = {
@@ -163,19 +171,21 @@ def two_independent() -> list[dict[str, Any]]:
     return [snapshot("alpha", 1), snapshot("beta", 2)]
 
 
-def three_independent(runs: int = 2) -> list[dict[str, Any]]:
-    return [snapshot("alpha", 1, runs=runs), snapshot("beta", 2, runs=runs), snapshot("gamma", 3, runs=runs)]
+def three_independent(runs: int = 2, ran_under: Any = (2, 3)) -> list[dict[str, Any]]:
+    """Three mutually independent sources whose Runs exercised ``ran_under`` (default: required slots 3, Global v2)."""
+    return [snapshot("alpha", 1, runs=runs, ran_under=ran_under), snapshot("beta", 2, runs=runs, ran_under=ran_under),
+            snapshot("gamma", 3, runs=runs, ran_under=ran_under)]
 
 
-def candidate_for(before: dict[str, Any], request: gp.GlobalPolicyChangeRequest,
-                  snapshots: list[dict[str, Any]]) -> dict[str, Any]:
+def candidate_for(before: dict[str, Any], request: gp.GlobalPolicyChangeRequest, snapshots: list[dict[str, Any]],
+                  *, change_id: str = CHANGE_ID) -> dict[str, Any]:
     """The full pure pipeline: request -> clusters -> eligibility -> after -> proof -> Packet -> Candidate."""
     record = gp.request_record(request)
     clusters = gp.clustering(snapshots)
     found = gp.eligibility(record, snapshots, clusters)
     after = gp.after_global_policy(before, record)
     proof = gp.compatibility_proof(before, after)
-    packet = gp.promotion_packet(record, promotion_packet_id=PACKET_ID, global_policy_change_id=CHANGE_ID,
+    packet = gp.promotion_packet(record, promotion_packet_id=PACKET_ID, global_policy_change_id=change_id,
                                  before_global=before, after_global=after, snapshots=snapshots, clusters=clusters,
                                  eligibility=found, proof=proof)
     return gp.candidate_material(packet, before, after, proof)
@@ -420,6 +430,51 @@ class SourceSnapshotTests(unittest.TestCase):
                           for item in found["local_outcomes"]])
         self.assertEqual({SLOTS: [], STEPS: []}, found["opportunities"])
 
+    def test_an_opportunity_records_the_effective_setting_its_run_froze(self) -> None:
+        baseline = policy.parse_baseline(policy.materialized_baseline_record(V1, (), ()), "the baseline")
+        overridden = policy.ProjectProfile(
+            profile_version=1, parent_profile_digest=None, global_baseline_digest=digest_of("baseline"),
+            global_baseline_version=1, loader_semantics_identity=policy.LOADER_SEMANTICS_IDENTITY,
+            overrides=({"policy_surface_id": SLOTS, "strength_class": "default", "setting": 3,
+                        "direction": "strengthen", "supporting_policy_change_id": ident("rpc", 1)},),
+            active_experiment_refs=())
+        reader = SourceReader("delta")
+        ref = reader.run(9)
+        envelope = {serialize.SCHEMA_KEY: p4.SCHEMA_DISCOVERY_REQUEST, "policy_id": p4.P6_POLICY_ID,
+                    policy.EFFECTIVE_POLICY_KEY: policy.effective_policy_record(baseline, overridden, ()),
+                    policy.DISCOVERY_ROLE_KEY: policy.ROLE_REQUIRED}
+        reader.gate_chain = lambda run_id: SimpleNamespace(  # type: ignore[method-assign]
+            review_run_id=run_id, generations=[SimpleNamespace(accepted_tasks=[{"task_id": run_id}])])
+        reader.read_task_input = lambda task_id: SimpleNamespace(request_envelope=envelope)  # type: ignore[attr-defined]
+        found = gp.source_snapshot("delta", reader, HEAD, (provenance(4), ref))
+        self.assertEqual({"review_run_id": ident("rr", 9), "global_policy_version": 1, "setting": 3,
+                          "global_changes": []}, found["opportunities"][SLOTS][0],
+                         "the Project overlay the Run exercised, not the Global default")
+        unknown = gp.source_snapshot("alpha", self.reader, HEAD, self.evidence)
+        self.assertEqual({None}, {entry["setting"] for entry in unknown["opportunities"][SLOTS]})
+
+    def test_a_malformed_opportunity_does_not_read(self) -> None:
+        found = snapshot("alpha", 1, ran_under=(2, 3))
+        entry = found["opportunities"][SLOTS][0]
+        for name, bad in (("version without setting", {**entry, "setting": None}),
+                          ("setting without version", {**entry, "global_policy_version": None}),
+                          ("setting out of range", {**entry, "setting": 9}),
+                          ("no setting field", {key: value for key, value in entry.items() if key != "setting"})):
+            with self.subTest(case=name):
+                opportunities = {**found["opportunities"], SLOTS: [bad] + found["opportunities"][SLOTS][1:]}
+                with self.assertRaises(ValidationError):
+                    gp.parse_source_snapshot({**found, "opportunities": opportunities}, "the snapshot")
+
+    def test_escapes_and_local_outcomes_have_one_canonical_form(self) -> None:
+        refs = (provenance(1), self.reader.relation(4, 1), self.reader.relation(5, 2))
+        found = gp.source_snapshot("alpha", self.reader, HEAD, refs)
+        self.assertEqual([ident("rhr", 4), ident("rhr", 5)], [item["id"] for item in found["escapes"]])
+        for name, escapes in (("reordered", list(reversed(found["escapes"]))),
+                              ("duplicated", found["escapes"] + found["escapes"][:1])):
+            with self.subTest(case=name):
+                with self.assertRaises(ValidationError):
+                    gp.parse_source_snapshot({**found, "escapes": escapes}, "the snapshot")
+
     def test_b0_b1_witness_ignores_unrelated_head_movement_and_catches_changed_evidence(self) -> None:
         bound = gp.source_witness(gp.source_snapshot("alpha", self.reader, HEAD, self.evidence))
         moved = gp.source_witness(gp.source_snapshot("alpha", self.reader, "b" * 40, self.evidence))
@@ -446,7 +501,8 @@ class SourceSnapshotTests(unittest.TestCase):
         reader.read_task_input = lambda task_id: SimpleNamespace(request_envelope=envelope)  # type: ignore[attr-defined]
         found = gp.source_snapshot("delta", reader, HEAD, (provenance(4), ref))
         self.assertEqual([CHANGE_ID], found["opportunities"][SLOTS][0]["global_changes"])
-        self.assertEqual(2, found["opportunities"][SLOTS][0]["global_policy_version"])
+        self.assertEqual((2, 2), (found["opportunities"][SLOTS][0]["global_policy_version"],
+                                  found["opportunities"][SLOTS][0]["setting"]))
 
 
 # =========================================================================== independence (§31.17) and clusters (§31.18)
@@ -568,11 +624,19 @@ class EligibilityTests(unittest.TestCase):
         found = elig(two_independent(), direction="lighten", after=1)
         self.assertFalse(found["eligible"])
         self.assertEqual(gp.FLOOR_LIGHTEN, found["floor"])
-        self.assertEqual({"too_few_lineages", "too_few_independent_clusters"}, set(found["problems"]))
-        self.assertTrue(elig(three_independent(), direction="lighten", after=1)["eligible"])
+        self.assertEqual({"too_few_lineages", "too_few_independent_clusters", "unrepresentative_opportunities"},
+                         set(found["problems"]))
+        provisional = elig(three_independent(), direction="lighten", after=1)
+        self.assertTrue(provisional["eligible"], provisional["problems"])
+        self.assertIsNone(provisional["pre_change_setting"], "without the before setting the answer is provisional")
         thin = elig(three_independent(runs=1), direction="lighten", after=1)
         self.assertEqual(["unrepresentative_opportunities"], thin["problems"])
         self.assertTrue(thin["holdout_required"])
+
+    def test_opportunities_whose_setting_is_unknown_never_satisfy_the_lighten_floor(self) -> None:
+        unknown = elig(three_independent(ran_under=None), direction="lighten", after=1)
+        self.assertEqual(["unrepresentative_opportunities"], unknown["problems"])
+        self.assertTrue(elig(three_independent(ran_under=None))["eligible"], "the strengthen floor needs no setting")
 
     def test_a_source_never_counted_merely_because_a_check_was_never_exercised(self) -> None:
         unexercised = snapshot("gamma", 3, runs=0, records=[{"family": FINDINGS, "id": ident("rfd", 9),
@@ -663,6 +727,30 @@ class PacketTests(unittest.TestCase):
                 with self.assertRaises(ValidationError):
                     gp.parse_promotion_packet({**packet, name: value}, "the Packet")
 
+    def test_lightening_counts_only_opportunities_that_exercised_the_stronger_behaviour(self) -> None:
+        # §31.19 L12023 / §16.10 L4499: Global required slots 3 -> 2; what was exercised at 1 or 2 says nothing about 3
+        cases = {
+            "ran under Global v1 (slots 1)": ((1, 1), False),
+            "ran under a lighter Project setting 2": ((2, 2), False),
+            "setting unknown (no frozen Effective Policy)": (None, False),
+            "ran under the pre-change setting 3": ((2, 3), True),
+            "ran under a stricter Project setting 4": ((2, 4), True),
+            "one exercised and one lighter Run per source": ([(2, 3), (1, 1)], False),
+        }
+        for name, (ran_under, eligible) in cases.items():
+            with self.subTest(case=name):
+                snapshots = three_independent(ran_under=ran_under)
+                if eligible:
+                    packet = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)
+                    self.assertEqual((gp.FLOOR_LIGHTEN, 3, True), (packet["eligibility"]["floor"],
+                                                                   packet["eligibility"]["pre_change_setting"],
+                                                                   packet["eligibility"]["eligible"]))
+                    continue
+                with self.assertRaises(StopError) as raised:
+                    self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)
+                self.assertEqual(gp.CODE_NOT_ELIGIBLE, raised.exception.code)
+                self.assertIn("unrepresentative_opportunities", str(raised.exception))
+
     def test_a_change_that_lowers_the_setting_is_held_to_the_lighten_floor_whatever_its_word(self) -> None:
         with self.assertRaises(StopError) as raised:
             self.build(V2_SLOTS3, direction="adjust", after=2)
@@ -713,8 +801,8 @@ def evaluation_request(change_id: str, result: str, snapshots: list[dict[str, An
 
 
 def observed(change_id: str, runs: int = 2) -> list[dict[str, Any]]:
-    return [snapshot("alpha", 11, runs=runs, global_changes=(change_id,), global_version=2),
-            snapshot("beta", 12, runs=runs, global_changes=(change_id,), global_version=2)]
+    return [snapshot("alpha", 11, runs=runs, global_changes=(change_id,), ran_under=(2, 2)),
+            snapshot("beta", 12, runs=runs, global_changes=(change_id,), ran_under=(2, 2))]
 
 
 def evaluate(change: dict[str, Any], result: str, snapshots: list[dict[str, Any]], *,
@@ -777,14 +865,14 @@ class EvaluationRecordTests(unittest.TestCase):
 
     def test_correlated_projects_never_become_many_confirmations(self) -> None:
         lineage = digest_of("lineage", 11)
-        correlated = [snapshot("alpha", 11, runs=3, global_changes=(CHANGE_ID,), global_version=2),
-                      snapshot("beta", 12, runs=3, global_changes=(CHANGE_ID,), global_version=2, lineage=lineage)]
+        correlated = [snapshot("alpha", 11, runs=3, global_changes=(CHANGE_ID,), ran_under=(2, 2)),
+                      snapshot("beta", 12, runs=3, global_changes=(CHANGE_ID,), ran_under=(2, 2), lineage=lineage)]
         with self.assertRaises(StopError) as raised:
             evaluate(self.change, gp.RESULT_RETAIN, correlated)
         self.assertEqual(gp.CODE_EVALUATION_INVALID, raised.exception.code)
 
     def test_chronology_alone_is_never_causal_evidence(self) -> None:
-        unobserved = [snapshot("alpha", 11, global_version=2), snapshot("beta", 12, global_version=2)]
+        unobserved = [snapshot("alpha", 11, ran_under=(2, 2)), snapshot("beta", 12, ran_under=(2, 2))]
         for result in (gp.RESULT_RETAIN, gp.RESULT_ADJUST, gp.RESULT_ROLLBACK):
             with self.subTest(result=result):
                 with self.assertRaises(StopError) as raised:
