@@ -1172,6 +1172,12 @@ def _policy(context: _Context) -> dict[str, Any]:
     hash and both adaptive surfaces' values), the experiments with their
     status, the policy maintenance / reconcile need, and the advisory BL-055
     shadow-authority diagnostic. Nothing is written, locked or repaired.
+
+    P7 (§31.46, RB7C-4, IR-RB7-5): ``root_maintenance`` is the configured
+    Workline root's read-only maintenance diagnostics, isolated like every other
+    part - an unreadable canonical root record, which ``status_report`` raises
+    on by design, renders that key unavailable with its code and hides nothing
+    else. ``maintenance`` stays the Project's own.
     """
     from .review import policy as review_policy
     from .review.store import ReviewStore
@@ -1223,6 +1229,9 @@ def _policy(context: _Context) -> dict[str, Any]:
     from .shadow_authority import detect_shadow_authority
 
     section["shadow_authority"] = _isolated(lambda: detect_shadow_authority(context.store.root).to_json())
+    from . import root_maintenance
+
+    section["root_maintenance"] = _isolated(lambda: root_maintenance.status_report(context.store.workline_root()))
     return section
 
 

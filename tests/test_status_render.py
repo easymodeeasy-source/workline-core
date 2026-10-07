@@ -56,8 +56,11 @@ class RenderTests(StatusCase):
         self.assertEqual(data["completion"], {"status": "not_available_by_contract"})
         # RB6 (§30.30, RB6A-IR-2): the RB1 policy placeholder is filled additively - pin updated deliberately
         self.assertEqual("available", data["policy"]["status"])
+        # RB7 (§31.46, RB7C-4, IR-RB7-5): the root maintenance diagnostics join additively, isolated - pin updated
+        # deliberately (was the seven keys without root_maintenance)
         self.assertEqual({"status", "global_baseline", "profile", "effective_policy", "experiments", "maintenance",
-                          "shadow_authority"}, set(data["policy"]))
+                          "shadow_authority", "root_maintenance"}, set(data["policy"]))
+        self.assertIn(data["policy"]["root_maintenance"]["status"], ("available", "unavailable"))
         self.assertEqual({"status": "absent"}, data["policy"]["profile"])
         self.assertEqual({"status": "none", "problems": []}, data["policy"]["maintenance"])
 
