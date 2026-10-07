@@ -42,7 +42,7 @@ from ..errors import ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
 from . import fsafe, history, paths, records, serialize
-from .namespace import PROJECT_REVIEW_NAMESPACE, ReviewNamespace
+from .namespace import NAMESPACES, PROJECT_REVIEW_NAMESPACE, ReviewNamespace
 from .records import (
     CandidateSnapshot,
     Consumption,
@@ -232,18 +232,26 @@ class ReviewStore:
         self._bind(store.root, PROJECT_REVIEW_NAMESPACE, store)
 
     def _bind(self, root: Path, namespace: ReviewNamespace, store: ProjectStore | None) -> None:
-        if not isinstance(namespace, ReviewNamespace):
+        # one of the two described descriptors (namespace.NAMESPACES), never a constructed one (RB7PSW-2): only
+        # PROJECT has the Project-only areas, and its root is the one the Project-only path sites name
+        if not isinstance(namespace, ReviewNamespace) or namespace not in NAMESPACES:
             raise ValidationError(f"a Review reader reads one described Review namespace, not {namespace!r}",
                                   code="review_namespace_invalid")
         self.store = store
         self.root = root
         self.namespace = namespace
 
-    @staticmethod
-    def for_namespace(root: Path, namespace: ReviewNamespace) -> "ReviewStore":
+    @classmethod
+    def for_namespace(cls, root: Path, namespace: ReviewNamespace) -> "ReviewStore":
         """The reader of ``namespace`` under the repository ``root``: the PROJECT one (a ``ProjectStore`` is bound,
         exactly as ``ReviewStore(ProjectStore(root))``), or the root policy one (no ``ProjectStore``: the Workline
-        root is not a Project, and nothing here creates ``<root>/.workline``)."""
+        root is not a Project, and nothing here creates ``<root>/.workline``).
+
+        The working-tree reader only: a subclass (the committed reader, whose namespace is its constructor's
+        ``namespace=``) is refused, so a committed reader never silently becomes a working-tree one.
+        """
+        if cls is not ReviewStore:
+            raise TypeError(f"{cls.__name__} is bound to a namespace by its own constructor, never by for_namespace")
         found = ReviewStore.__new__(ReviewStore)
         project = namespace == PROJECT_REVIEW_NAMESPACE
         found._bind(Path(root), namespace, ProjectStore(Path(root)) if project else None)

@@ -22,6 +22,7 @@ from workline.errors import ValidationError
 from workline.review import paths, records, serialize, validate
 from workline.review.committed import CommittedReviewStore
 from workline.review.namespace import PROJECT_REVIEW_NAMESPACE as PROJECT, ROOT_POLICY_REVIEW_NAMESPACE as ROOT
+from workline.review.namespace import ReviewNamespace
 from workline.review.store import ReviewStore
 from workline.store import ProjectStore
 
@@ -81,6 +82,41 @@ class PathsTests(unittest.TestCase):
             self.assertEqual(code, raised.exception.code)
         paths.require_review_readable_path(paths.POLICY_PROFILE_REL)
 
+    def test_every_project_path_builders_refusal_is_its_pre_refactor_code_and_message(self) -> None:
+        """RB7PSW-3: literals taken from the base blob ``src/workline/review/paths.py`` at 9822de2 (before the
+        delegation to the PROJECT descriptor), so a change to a descriptor builder's refusal fails here even though
+        ``paths`` and the descriptor now run the same code."""
+        rows = (
+            ("receipt_rel", ("x",), "review_record_invalid", "not a review_receipt id: 'x'"),
+            ("receipt_rel", (RUN,), "review_record_invalid", f"not a review_receipt id: '{RUN}'"),
+            ("consumption_rel", ("x",), "review_record_invalid", "not a review_consumption id: 'x'"),
+            ("supersession_rel", ("x",), "review_record_invalid", "not a review_receipt id: 'x'"),
+            ("candidate_snapshot_rel", ("A" * 64,), "review_record_invalid",
+             f"candidate_hash is not a lowercase hex SHA-256: '{'A' * 64}'"),
+            ("candidate_snapshot_rel", ("abc",), "review_record_invalid",
+             "candidate_hash is not a lowercase hex SHA-256: 'abc'"),
+            ("task_input_rel", (RUN,), "review_record_invalid", f"not a review_task id: '{RUN}'"),
+            ("report_rel", ("g" * 64,), "review_record_invalid",
+             f"result_digest is not a lowercase hex SHA-256: '{'g' * 64}'"),
+            ("adjudication_rel", ("x",), "review_record_invalid", "not a review_run id: 'x'"),
+            ("repair_batch_rel", ("x",), "review_record_invalid", "not a review_repair_batch id: 'x'"),
+            ("repair_result_rel", (RUN,), "review_record_invalid", f"not a review_repair_batch id: '{RUN}'"),
+            ("history_rel", ("index", RUN), "review_record_invalid", "not a Review history family: 'index'"),
+            ("history_rel", ("runs", "rfd_01ARZ3NDEKTSV4RRFFQ69G5F10"), "review_record_invalid",
+             "not a review_run id: 'rfd_01ARZ3NDEKTSV4RRFFQ69G5F10'"),
+            ("policy_record_rel", ("profiles", "x"), "review_record_invalid",
+             "not a Review policy evidence family: 'profiles'"),
+            ("policy_record_rel", ("changes", RUN), "review_record_invalid", f"not a review_policy_change id: '{RUN}'"),
+            ("require_policy_profile_path", (".workline/review/policy/other.yaml",), "review_containment",
+             "'.workline/review/policy/other.yaml' is not the canonical Project Profile "
+             ".workline/review/policy/project-profile.yaml"),
+        )
+        for name, args, code, message in rows:
+            for owner, label in ((paths, "paths"), (PROJECT, "PROJECT")):
+                with self.subTest(builder=name, args=args, owner=label), self.assertRaises(ValidationError) as raised:
+                    getattr(owner, name)(*args)
+                self.assertEqual((code, message), (raised.exception.code, str(raised.exception)))
+
 
 class Root(unittest.TestCase):
     def setUp(self) -> None:
@@ -126,6 +162,28 @@ class StoreTests(Root):
         with self.assertRaises(ValidationError) as raised:
             reader.gate_chain(RUN)
         self.assertEqual("review_gate_chain", raised.exception.code, "the one chain rule")
+
+    def test_only_a_described_namespace_is_ever_bound(self) -> None:
+        """RB7PSW-2: ``_bind`` checks membership in ``namespace.NAMESPACES``, not only the type - a constructed
+        descriptor (even one with PROJECT's flags) is never bound, so no Project-only path site reads under it."""
+        constructed = (
+            ReviewNamespace("project", "elsewhere/review", PROJECT.subdirs, history=True, policy=True, activation=True,
+                            repairs=True),
+            ReviewNamespace(ROOT.name, "elsewhere/review", ROOT.subdirs, history=False, policy=False, activation=False,
+                            repairs=False),
+        )
+        for namespace in (*constructed, "review-policy/review", None):
+            with self.subTest(namespace=namespace), self.assertRaises(ValidationError) as raised:
+                ReviewStore.for_namespace(self.root, namespace)
+            self.assertEqual("review_namespace_invalid", raised.exception.code)
+        self.assertFalse((self.root / ".workline").exists())
+        self.assertIs(ROOT, ReviewStore.for_namespace(self.root, ROOT).namespace)
+
+    def test_for_namespace_makes_only_the_working_tree_reader(self) -> None:
+        """Note 2 of the RB7 batch review: a committed reader is bound by its own constructor's ``namespace=``."""
+        self.assertIs(ReviewStore, type(ReviewStore.for_namespace(self.root, ROOT)))
+        with self.assertRaises(TypeError):
+            CommittedReviewStore.for_namespace(self.root, ROOT)
 
     def test_every_project_only_reader_refuses_under_the_root_namespace(self) -> None:
         reader = ReviewStore.for_namespace(self.root, ROOT)
@@ -199,6 +257,11 @@ class CommittedTests(WorklineTestCase):
         self.assertEqual(1, project.gate_chain(RUN).latest.generation)
         self.assertFalse(any(path.startswith("review-policy") for path in project._tree))
         self.assertFalse(any(path.startswith(".workline") for path in committed._tree))
+        constructed = ReviewNamespace(ROOT.name, ".workline/review", ROOT.subdirs, history=False, policy=False,
+                                      activation=False, repairs=False)
+        with self.assertRaises(ValidationError) as raised:  # RB7PSW-2: refused before any tree is listed
+            CommittedReviewStore(repo, head, namespace=constructed)
+        self.assertEqual("review_namespace_invalid", raised.exception.code)
 
 
 if __name__ == "__main__":

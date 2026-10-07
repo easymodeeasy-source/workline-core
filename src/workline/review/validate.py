@@ -192,14 +192,14 @@ def _policy_shape(review: ReviewStore) -> list[ReviewProblem]:
     a file, is a namespace problem. Absence of any of them is valid.
     """
     try:
-        found = review.entries(paths.POLICY_DIR) or []
+        found = review.entries(review.namespace.policy_dir) or []
     except ValidationError as exc:
         return [_problem(exc)]
     problems: list[ReviewProblem] = []
     for entry in found:
-        where = f"{paths.POLICY_DIR}/{entry.name}"
+        where = f"{review.namespace.policy_dir}/{entry.name}"
         if entry.name != paths.POLICY_PROFILE_NAME and entry.name not in paths.POLICY_FAMILIES:
-            problems.append(ReviewProblem("review_namespace_invalid", f"{paths.POLICY_DIR} holds unknown entry {entry.name}"))
+            problems.append(ReviewProblem("review_namespace_invalid", f"{review.namespace.policy_dir} holds unknown entry {entry.name}"))
         elif entry.is_indirection:
             problems.append(ReviewProblem("review_containment", f"{where} is a symlink, junction or other reparse point"))
         elif entry.name == paths.POLICY_PROFILE_NAME and not entry.is_file:
@@ -212,20 +212,20 @@ def _policy_shape(review: ReviewStore) -> list[ReviewProblem]:
 def _history_shape(review: ReviewStore) -> list[ReviewProblem]:
     """``history/`` holds only the five family directories, each a plain directory - read without following."""
     try:
-        found = review.entries(paths.HISTORY_DIR) or []
+        found = review.entries(review.namespace.history_dir) or []
     except ValidationError as exc:
         return [_problem(exc)]
     problems: list[ReviewProblem] = []
     for entry in found:
         if entry.name not in paths.HISTORY_FAMILIES:
-            problems.append(ReviewProblem("review_namespace_invalid", f"{paths.HISTORY_DIR} holds unknown entry {entry.name}"))
+            problems.append(ReviewProblem("review_namespace_invalid", f"{review.namespace.history_dir} holds unknown entry {entry.name}"))
         elif entry.is_indirection:
             problems.append(
-                ReviewProblem("review_containment", f"{paths.HISTORY_DIR}/{entry.name} is a symlink, junction or other reparse point")
+                ReviewProblem("review_containment", f"{review.namespace.history_dir}/{entry.name} is a symlink, junction or other reparse point")
             )
         elif not entry.is_dir:
             problems.append(
-                ReviewProblem("review_namespace_invalid", f"{paths.HISTORY_DIR}/{entry.name} is a file where a directory belongs")
+                ReviewProblem("review_namespace_invalid", f"{review.namespace.history_dir}/{entry.name} is a file where a directory belongs")
             )
     return problems
 
@@ -1152,7 +1152,7 @@ def _activation(review: ReviewStore) -> list[ReviewProblem]:
     """
     problems: list[ReviewProblem] = []
     try:
-        found = review.entries(paths.ACTIVATION_DIR)
+        found = review.entries(review.namespace.activation_dir)
     except ValidationError as exc:
         return [_problem(exc)]
     allowed = paths.WORK_TERMINAL_ACTIVATION_REL.rsplit("/", 1)[-1]
@@ -1161,18 +1161,18 @@ def _activation(review: ReviewStore) -> list[ReviewProblem]:
             continue
         if entry.is_indirection:
             problems.append(
-                ReviewProblem("review_containment", f"{paths.ACTIVATION_DIR}/{entry.name} is a symlink, junction or other reparse point")
+                ReviewProblem("review_containment", f"{review.namespace.activation_dir}/{entry.name} is a symlink, junction or other reparse point")
             )
         elif entry.name != allowed:
             problems.append(
                 ReviewProblem(
                     "review_namespace_invalid",
-                    f"{paths.ACTIVATION_DIR} holds {entry.name}; the only activation record P1 defines is {allowed}",
+                    f"{review.namespace.activation_dir} holds {entry.name}; the only activation record P1 defines is {allowed}",
                 )
             )
         else:  # the expected name, but a directory rather than a plain file
             problems.append(
-                ReviewProblem("review_namespace_invalid", f"{paths.ACTIVATION_DIR}/{entry.name} is not a plain file")
+                ReviewProblem("review_namespace_invalid", f"{review.namespace.activation_dir}/{entry.name} is not a plain file")
             )
     # The record parses (if it is present as a plain file). When the activation
     # file itself is the broken entry, the enumeration above already said so.
