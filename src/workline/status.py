@@ -1062,9 +1062,10 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
                     _dependency_blockers(view, [p for p in members if view.phase_state(p.id) in (UNSTARTED, IN_PROGRESS)])
                 )
         if history_failure is not None:
-            # as STRUCTURE_INVALID withholds every selection: only the next Phase depends on Review history
+            # as STRUCTURE_INVALID withholds every selection: only the next Phase depends on Review history. The
+            # reason is one status-owned token (RB5RR-1); the blocker carries the exact refusal code
             next_phase["id"] = None
-            next_phase["reason"] = history_failure
+            next_phase["reason"] = REVIEW_HISTORY_UNAVAILABLE
             next_phase["basis"] = None
             blockers.append({"code": history_failure, "ids": []})
         phase_id = current_phase["id"]
@@ -1145,6 +1146,9 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
 
 #: RB5 (§32.41 / §32.42): the next-Phase reason and blocker when a reviewed Phase's evidence obligation is open.
 PHASE_EVIDENCE_NOT_READY = "phase_evidence_not_ready"
+#: RB5PR1B-1 / RB5RR-1: the one next-Phase reason when the Review history it depends on cannot be read - the exact
+#: refusal code rides on the blocker, so the reason vocabulary stays closed.
+REVIEW_HISTORY_UNAVAILABLE = "review_history_unavailable"
 
 
 def _reviewed_roadmap(view: ProjectView, roadmap_id: str) -> bool:

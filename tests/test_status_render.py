@@ -27,6 +27,9 @@ LIFECYCLE_REASONS = {
     # RB5 (§32.41 / §32.42, I-9): a next Phase held back by a reviewed predecessor's open evidence obligation - pin
     # widened additively (disclosed)
     "phase_evidence_not_ready",
+    # RB5 (RB5PR1B-1 / RB5RR-1): a next Phase withheld because the Review history it depends on cannot be read (the
+    # exact refusal code is the blocker's) - pin widened additively (disclosed)
+    "review_history_unavailable",
 }
 TOP_LEVEL = {"schema", "version", "snapshot_consistency", "snapshot_reason", "project", "authority", "git", "lifecycle",
              "pending", "validation", "review", "completion", "policy"}

@@ -96,12 +96,15 @@ class CompletionSlotTests(IntegrationRunCase):
         self.assertEqual("phase_evidence_not_ready", lifecycle["next"]["phase"]["reason"])
         self.assertIsNone(rm.select_phase(store, roadmap_id), "Roadmap holds the same Phase back")
 
-    def test_an_unreadable_achievement_record_withholds_only_the_next_phase(self) -> None:
-        """RB5PR1B-1: a Review-history read failure never blanks the lifecycle section - the inventory and every
-        other blocker stay, one blocker names the failure, and only the next-Phase selection is withheld."""
-        store, phase_a, ids, roadmap_id = self.reviewed()
+    def broken_history(self, store, phase_a: str) -> tuple[dict, dict]:
+        """Hold another Roadmap (one more blocker that must survive), read status, then make the achievement record
+        unreadable and read again: ``(healthy, broken)``. Asserts what both RB5PR1B-1 arms share - lifecycle
+        available with its inventory, exactly one ``review_record_*`` blocker, every other blocker kept, the next
+        Phase withheld as ``(None, review_history_unavailable, None)`` (RB5RR-1) and the completion slot's own
+        failure."""
         other = self.simple_roadmap(store, {"z": ("Phase Z", "Z が成立する")})
         self.assertEqual("roadmap_held", rm.hold_roadmap(store, other.roadmap_id).status)
+        healthy = self.data(store.root)
         (record,) = (store.root / paths.HISTORY_DIR / paths.HISTORY_ACHIEVEMENTS).glob("*.yaml")
         record.write_bytes(b"schema: not-an-achievement\n")
         data = self.data(store.root)
@@ -109,16 +112,42 @@ class CompletionSlotTests(IntegrationRunCase):
         self.assertEqual("available", lifecycle["status"])
         self.assertIn(phase_a, [item["id"] for item in lifecycle["phases"]])
         self.assertTrue(lifecycle["works"] or lifecycle["roadmaps"])
-        codes = [item["code"] for item in lifecycle["blockers"]]
-        self.assertIn("roadmap_held", codes, "every other blocker stays")
+        self.assertIn("roadmap_held", [item["code"] for item in lifecycle["blockers"]])
         failures = [item for item in lifecycle["blockers"] if item["code"].startswith("review_record_")]
         self.assertEqual(1, len(failures))
         self.assertEqual([], failures[0]["ids"])
+        self.assertEqual(healthy["lifecycle"]["blockers"],
+                         [item for item in lifecycle["blockers"] if item is not failures[0]], "every other blocker stays")
         next_phase = lifecycle["next"]["phase"]
-        self.assertEqual((None, failures[0]["code"], None), (next_phase["id"], next_phase["reason"], next_phase["basis"]))
-        self.assertTrue(next_phase["candidates"], "the observed candidate set is kept")
+        self.assertEqual((None, status.REVIEW_HISTORY_UNAVAILABLE, None),
+                         (next_phase["id"], next_phase["reason"], next_phase["basis"]))
         self.assertEqual("unavailable", data["completion"]["status"], "the completion section's own failure is correct")
-        self.assertEqual("available", data["lifecycle"]["status"])
+        return healthy, data
+
+    def test_an_unreadable_achievement_record_withholds_only_the_next_phase(self) -> None:
+        """RB5PR1B-1: a Review-history read failure never blanks the lifecycle section - the inventory and every
+        other blocker stay, one blocker names the failure (its exact code), and only the next-Phase selection is
+        withheld, under the one reason ``review_history_unavailable`` (RB5RR-1). Both arms: the candidates'
+        progression narrowing (a startable successor) and, RB5RR-3, §32.42's all-active-Phases-complete check when
+        nothing is startable."""
+        store, phase_a, ids, roadmap_id = self.reviewed()
+        _, data = self.broken_history(store, phase_a)
+        self.assertTrue(data["lifecycle"]["next"]["phase"]["candidates"], "the observed candidate set is kept")
+        with self.subTest("second arm: nothing startable, every active Phase complete (RB5RR-3)"):
+            from workline.state import ProjectView
+
+            store, phase_a, ids = self.marked_project("second-arm")  # one reviewed Phase, no successor
+            self.assertEqual("completed", self.integrate(store, ids["integration"]).status)
+            roadmap_id = self.roadmap_of(store, phase_a)
+            view = ProjectView.load(store)
+            self.assertEqual([], view.startable_phases(roadmap_id))
+            self.assertTrue(view.all_active_phases_complete(roadmap_id))
+            healthy, data = self.broken_history(store, phase_a)
+            chosen = healthy["lifecycle"]["next"]["phase"]
+            self.assertEqual((None, "all_active_phases_complete", []),
+                             (chosen["id"], chosen["reason"], chosen["candidates"]),
+                             "the readable history reaches the §32.42 branch")
+            self.assertEqual([], data["lifecycle"]["next"]["phase"]["candidates"])
 
     def test_a_stale_reviewed_phase_never_points_at_the_achievement_check(self) -> None:
         """RB5PR1B-2: status filters complete reviewed Phases exactly as ``roadmap.unready_reviewed_phases`` does
