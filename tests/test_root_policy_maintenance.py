@@ -1255,6 +1255,11 @@ class EffectTests(MutationCase):
             self.assertIsNone(mutation.effects()[kg1]["facts"])
             mutation.mark_effect(kg1, {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": False})
             self.assertEqual("marked", mutation.effects()[kg1]["state"])
+            # RB7BF-2: "never later either" - with the prepared commit recorded, the parent is still refused by the
+            # write-side rule itself (without it this would be the prepared-commit conflict reconcile instead)
+            self.assertStop("review_p7_root_effect_refused", mutation.mark_effect, kg1,
+                            {"prepared_commit": base, "prepared_tree": tree, "ref_moved": False})
+            self.assertEqual(commit, mutation.effects()[kg1]["facts"]["prepared_commit"])
             other, _ = self.commit_object(base, "another kg1")
             self.assertReconcile("review_p7_root_effect_conflict", mutation.mark_effect, kg1,
                                  {"prepared_commit": other, "prepared_tree": tree, "ref_moved": False})
