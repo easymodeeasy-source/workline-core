@@ -58,11 +58,21 @@ def copy_workline_root(dest: Path, *, registry: str | None = None) -> Path:
     Nothing is installed and no bytecode, packaging metadata or tests come
     along, so the copy runs from source like a fresh checkout. ``registry``
     replaces its registry.md.
+
+    P7 (RB7C-7, RB8 I-RB7-3): the copy also carries the root ``.gitignore``
+    (it ignores ``.workline-root-runtime/``) and, when this root tracks it, the
+    materialized Global policy ``review-policy/global-policy.yaml`` the P6
+    loader reads - a root without them is not a root the loader accepts.
     """
     dest = Path(dest)
     dest.mkdir(parents=True)
     shutil.copy2(WORKLINE_ROOT / "registry.md", dest / "registry.md")
     shutil.copy2(WORKLINE_ROOT / LAUNCHER_NAME, dest / LAUNCHER_NAME)
+    shutil.copy2(WORKLINE_ROOT / ".gitignore", dest / ".gitignore")
+    global_policy = WORKLINE_ROOT / "review-policy" / "global-policy.yaml"
+    if global_policy.is_file():
+        (dest / "review-policy").mkdir()
+        shutil.copy2(global_policy, dest / "review-policy" / "global-policy.yaml")
     shutil.copytree(WORKLINE_ROOT / ".claude" / "skills", dest / ".claude" / "skills")
     # The whole package, subpackages included, minus anything a checkout would
     # not carry. Copying only the top-level ``*.py`` would leave a subpackage
