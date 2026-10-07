@@ -47,11 +47,13 @@ import os
 from pathlib import Path
 import secrets
 import shutil
+from typing import Any
 
 from .. import gitcmd
 from ..errors import StopError, ValidationError
 from ..store import ProjectStore
 from . import paths
+from .namespace import ReviewNamespace
 
 #: The one Review checkout configuration P2 v1 supports, byte for byte.
 CANONICAL_RULE = b".workline/review/** !text eol=lf -filter -ident -working-tree-encoding"
@@ -275,9 +277,30 @@ def require_namespace_readable(store: ProjectStore) -> None:
     (a half-written stage a lost runtime left) are not refused here.
     """
     from .store import ReviewStore
+
+    _require_readable(ReviewStore(store))
+
+
+def require_namespace_readable_in(repo: Path, namespace: ReviewNamespace) -> None:
+    """:func:`require_namespace_readable` over a Review namespace of ``repo`` - the Workline root's policy Review
+    (§31.29, addendum RB7C-2) - with the same refusal, ``review_namespace_unreadable``.
+
+    Only the areas the namespace has are read: each Project-only area (repair
+    batches and results, history, policy, activation) is gated on the
+    namespace's own flag, explicitly - never by catching the refusal its
+    reader raises under a namespace without it, which would pass a real
+    unreadable record as readable (RB7AL-3).
+    """
+    from .store import ReviewStore
+
+    _require_readable(ReviewStore.for_namespace(Path(repo), namespace))
+
+
+def _require_readable(review: Any) -> None:
+    """Every record of ``review``'s namespace reads strictly, or ``review_namespace_unreadable``."""
     from .validate import _namespace_shape
 
-    review = ReviewStore(store)
+    space = review.namespace
     try:
         if not review.exists():
             return
@@ -300,20 +323,24 @@ def require_namespace_readable(store: ProjectStore) -> None:
             review.read_report(result_digest)
         for review_run_id in review.adjudication_run_ids():
             review.read_adjudication(review_run_id)
-        for repair_batch_id in review.repair_batch_ids():
-            review.read_repair_batch(repair_batch_id)
-        for repair_batch_id in review.repair_result_ids():
-            review.read_repair_result(repair_batch_id)
-        for family in paths.HISTORY_FAMILIES:
-            for identifier in review.history_ids(family):
-                review.read_history(family, identifier)
-        # P6 (§30.17): the Project Profile and the immutable policy evidence records
-        review.read_profile()
-        for policy_change_id in review.policy_change_ids():
-            review.read_policy_change(policy_change_id)
-        for evaluation_id in review.policy_evaluation_ids():
-            review.read_policy_evaluation(evaluation_id)
-        review.read_activation()
+        if space.repairs:  # a namespace without repair areas (the root's, RB7C-1 (d)) holds none to read
+            for repair_batch_id in review.repair_batch_ids():
+                review.read_repair_batch(repair_batch_id)
+            for repair_batch_id in review.repair_result_ids():
+                review.read_repair_result(repair_batch_id)
+        if space.history:
+            for family in paths.HISTORY_FAMILIES:
+                for identifier in review.history_ids(family):
+                    review.read_history(family, identifier)
+        if space.policy:
+            # P6 (§30.17): the Project Profile and the immutable policy evidence records
+            review.read_profile()
+            for policy_change_id in review.policy_change_ids():
+                review.read_policy_change(policy_change_id)
+            for evaluation_id in review.policy_evaluation_ids():
+                review.read_policy_evaluation(evaluation_id)
+        if space.activation:
+            review.read_activation()
     except ValidationError as exc:
         raise StopError(
             f"the existing Review namespace does not read canonically ({exc.code}: {exc}); nothing is written",

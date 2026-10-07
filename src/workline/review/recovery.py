@@ -37,19 +37,27 @@ N4, :mod:`workline.recovery_disposition`) is one more source of the same
 set-aside relation the requests name: the Run is set aside with the stable
 reason ``disposed_by_human`` and never selected again; a disposition that does
 not hold its Run's exact witness stops the call (:func:`_human_dispositions`).
+
+P7 (§31.29, addendum RB7C-2): the same core discovers the Workline root's
+policy Review (:func:`discover_kind_in`). Under that namespace there is no
+Human disposition store, the root owner's ``pending`` hook replaces the Project
+MutationController's pending generation mutations, the persistence boundary
+runs against the root repository, and no history Run-summary path applies; the
+Project entries keep exactly their signatures and behaviour.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
 from .. import gitcmd
 from ..errors import ReconcileRequired, StopError, ValidationError
 from ..ids import is_valid_id
 from ..store import ProjectStore
 from . import checkout, committed, gate, p4, paths, planning, records, serialize, work_review
+from .namespace import PROJECT_REVIEW_NAMESPACE, ReviewNamespace
 from .records import GateGeneration
 from .store import GateChain, ReviewStore
 
@@ -137,6 +145,58 @@ def discover_kind(store: ProjectStore, review_kind: str, operation_identity: str
     return _discover(store, review_kind, operation_identity, lambda found: None, adapter)
 
 
+@dataclass(frozen=True)
+class _RootScope:
+    """Where a root discovery runs (RB7C-2): the root repository, its Review namespace and the owner's pending hook.
+
+    It stands where a Project discovery holds its ``ProjectStore``: ``root`` is
+    the one fact the persistence boundary reads of it (``gate.require_persisted``
+    is path-agnostic), and no ``ProjectStore`` is ever made for the Workline root.
+    """
+
+    root: Path
+    namespace: ReviewNamespace
+    pending: Callable[[str], Sequence[Mapping[str, Any]]]
+
+
+def discover_kind_in(
+    repo: Path,
+    namespace: ReviewNamespace,
+    review_kind: str,
+    operation_identity: str,
+    adapter: RecoveryAdapter,
+    *,
+    pending: Callable[[str], Sequence[Mapping[str, Any]]],
+) -> Discovery:
+    """:func:`discover_kind` over the Workline root's policy Review (§31.29, addendum RB7C-2) - the one core.
+
+    The same matching (``review_kind`` + ``operation_identity``, HEAD's history
+    and the working tree), the same whole-Run proof under the Run's own P4
+    contract, the adapter's classification and ``review_recovery_ambiguous`` for
+    more than one recoverable Run; no currency. Under this namespace there is no
+    Human disposition step (no Human store, R8), ``pending(review_run_id)`` - the
+    root owner's pending root mutations holding the Run - replaces the Project's
+    pending generation mutations, and ``adapter.classify`` receives the
+    repository ``Path`` where a Project discovery passes its ``ProjectStore``.
+    A Project's Review is discovered by :func:`discover_kind` only.
+    """
+    if namespace == PROJECT_REVIEW_NAMESPACE or namespace.history or namespace.policy or namespace.activation:
+        # a namespace with Project-only areas (Human dispositions, history) is a Project's: discover_kind only
+        raise ValueError("a Project's Review namespace is discovered by discover_kind(store, ...), never by "
+                         "discover_kind_in")
+    scope = _RootScope(Path(repo), namespace, pending)
+    checkout.require_namespace_readable_in(scope.root, namespace)
+    return _discover_in(scope, ReviewStore.for_namespace(scope.root, namespace), review_kind, operation_identity,
+                        lambda found: None, adapter)
+
+
+def _pending(scope: Any, review_run_id: str) -> Sequence[Mapping[str, Any]]:
+    """The pending mutations holding a Run's token: the Project's MutationController, or the root owner's hook."""
+    if isinstance(scope, _RootScope):
+        return scope.pending(review_run_id)
+    return gate.pending_generation_mutations(scope, review_run_id)
+
+
 def discover_work(
     store: ProjectStore,
     operation_identity: str,
@@ -185,10 +245,25 @@ def _discover(
     held: frozenset[str] = frozenset(),
 ) -> Discovery:
     checkout.require_namespace_readable(store)
-    review = ReviewStore(store)
+    return _discover_in(store, ReviewStore(store), review_kind, operation_identity, currency, adapter, held)
+
+
+def _discover_in(
+    scope: "ProjectStore | _RootScope",
+    review: ReviewStore,
+    review_kind: str,
+    operation_identity: str,
+    currency: Callable[[MatchingRun], Any],
+    adapter: RecoveryAdapter,
+    held: frozenset[str] = frozenset(),
+) -> Discovery:
+    """The discovery core over one scope: a Project (its ``ProjectStore``) or the root (:class:`_RootScope`)."""
+    store = scope  # the helpers below read only ``.root`` of a root scope, or branch on the scope
     head = gitcmd.head_commit(store.root)
     matching = _matching_runs(store, review, head, review_kind, operation_identity)
-    disposed = _human_dispositions(store, review, matching, held)
+    # RB7C-2 / R8: the root has no Human disposition store, and none is invented
+    disposed = frozenset() if isinstance(scope, _RootScope) else _human_dispositions(store, review, matching, held)
+    owner = scope.root if isinstance(scope, _RootScope) else scope
     runs: dict[str, MatchingRun] = {}
     for review_run_id in sorted(matching - held):
         runs[review_run_id] = _clean_run(store, review, head, review_run_id, adapter.shape)
@@ -202,7 +277,7 @@ def _discover(
     recoverable: list[MatchingRun] = []
     set_aside: list[dict[str, str]] = []
     for review_run_id, found in runs.items():
-        reason = adapter.classify(store, review, head, found, named_aside, currency)
+        reason = adapter.classify(owner, review, head, found, named_aside, currency)
         if reason == planning.SET_ASIDE_SET_ASIDE and review_run_id in disposed:
             reason = _DISPOSED_BY_HUMAN  # propagated by its stable code, never by the Human's free-form reason
         if reason is None:
@@ -359,11 +434,13 @@ def _matching_runs(
 ) -> set[str]:
     found: set[str] = set()
     first_name = paths.generation_name(records.FIRST_GENERATION)
+    gates = review.namespace.gates_dir
+    depth = len(gates.split("/"))  # <gates>/<run>/<generation>.yaml
     if head is not None:
-        for adding, names in committed.added_in_history(store.root, head, [paths.GATES_DIR]):
+        for adding, names in committed.added_in_history(store.root, head, [gates]):
             for name in names:
                 parts = name.split("/")
-                if len(parts) != 5 or parts[4] != first_name or not is_valid_id(parts[3], "review_run"):
+                if len(parts) != depth + 2 or parts[depth + 1] != first_name or not is_valid_id(parts[depth], "review_run"):
                     continue
                 raw = gitcmd.blob_at(store.root, adding, name)
                 if raw is None:
@@ -373,9 +450,9 @@ def _matching_runs(
                 except ValidationError as exc:
                     raise _incomplete(f"the generation 1 {name} added by {adding} does not read: {exc}") from exc
                 if gate_one.review_kind == review_kind and gate_one.operation_identity == operation_identity:
-                    found.add(parts[3])
+                    found.add(parts[depth])
     for review_run_id in review.run_ids():
-        if review.read_bytes(paths.gate_rel(review_run_id, records.FIRST_GENERATION)) is None:
+        if review.read_bytes(review.namespace.gate_rel(review_run_id, records.FIRST_GENERATION)) is None:
             continue
         gate_one = review.read_gate(review_run_id, records.FIRST_GENERATION)
         if gate_one.review_kind == review_kind and gate_one.operation_identity == operation_identity:
@@ -387,19 +464,20 @@ def _matching_runs(
 
 def _run_record_paths(review: ReviewStore, head: str | None, review_run_id: str, chain: GateChain | None) -> list[str]:
     """Every path of the Run's records: its gates, snapshot, task input, Receipt, Supersession, Consumptions of it."""
+    space = review.namespace
     found: list[str] = []
-    entries = review.entries(paths.run_dir(review_run_id)) or []
-    found += [f"{paths.run_dir(review_run_id)}/{entry.name}" for entry in entries]
+    entries = review.entries(space.run_dir(review_run_id)) or []
+    found += [f"{space.run_dir(review_run_id)}/{entry.name}" for entry in entries]
     if chain is None:
         return found
     first = chain.generations[0]
-    found.append(paths.candidate_snapshot_rel(first.candidate_hash))
+    found.append(space.candidate_snapshot_rel(first.candidate_hash))
     if first.accepted_tasks:
-        found.append(paths.task_input_rel(str(first.accepted_tasks[0]["task_id"])))
+        found.append(space.task_input_rel(str(first.accepted_tasks[0]["task_id"])))
     receipts = [generation.receipt_id for generation in chain.generations if generation.receipt_id]
     for receipt_id in receipts:
-        found.append(paths.receipt_rel(receipt_id))
-        found.append(paths.supersession_rel(receipt_id))
+        found.append(space.receipt_rel(receipt_id))
+        found.append(space.supersession_rel(receipt_id))
     return found
 
 
@@ -408,9 +486,9 @@ def _consumption_paths_of(store: ProjectStore, review: ReviewStore, head: str | 
     found: set[str] = set()
     for consumption_id in review.consumption_ids():
         if review.read_consumption(consumption_id).receipt_id in receipt_ids:
-            found.add(paths.consumption_rel(consumption_id))
+            found.add(review.namespace.consumption_rel(consumption_id))
     if head is not None:
-        for adding, names in committed.added_in_history(store.root, head, [paths.CONSUMPTIONS_DIR]):
+        for adding, names in committed.added_in_history(store.root, head, [review.namespace.consumptions_dir]):
             for name in names:
                 raw = gitcmd.blob_at(store.root, adding, name)
                 if raw is None:
@@ -441,6 +519,9 @@ def _clean_run(
     contract = run_contract(review, chain)
     if contract is not None:
         return _clean_p4_run(store, review, head, review_run_id, chain, contract)
+    if isinstance(store, _RootScope):
+        # a root policy Review Run is P4-family by construction (§31.25); a v1-shaped one is never classified
+        raise _incomplete(f"Review Run {review_run_id} binds no P4 contract in its generation-1 TaskInputs")
     shape = shape_of(chain)
     if shape:
         raise _incomplete(f"Review Run {review_run_id} {shape}")
@@ -467,7 +548,7 @@ def _clean_run(
         if not review.supersession_exists(str(receipt_id)):
             raise _incomplete(f"generation 4 of Review Run {review_run_id} has no Supersession")
     # no pending mutation holds the Run's token
-    if gate.pending_generation_mutations(store, review_run_id):
+    if _pending(store, review_run_id):
         raise _incomplete(f"a generation mutation of Review Run {review_run_id} is pending without its planning mutation")
     try:
         material = review.read_candidate_snapshot(first.candidate_hash).material or {}
@@ -482,8 +563,9 @@ def _require_clean_paths(
     """A Run's records are committed as HEAD's history added them, and the working tree holds them unchanged."""
     repo = store.root
     # everything HEAD's history ever added is still in HEAD's tree, with the same blob
-    run_prefix = paths.run_dir(review_run_id) + "/"
-    targets = sorted({paths.run_dir(review_run_id)} | {relative for relative in record_paths if not relative.startswith(run_prefix)})
+    run_prefix = review.namespace.run_dir(review_run_id) + "/"
+    targets = sorted({review.namespace.run_dir(review_run_id)}
+                     | {relative for relative in record_paths if not relative.startswith(run_prefix)})
     added = committed.added_in_history(repo, head, targets)
     at_head = {entry.path: entry for entry in (gitcmd.tree_entries(repo, head, record_paths) or [])}
     for adding, names in added:
@@ -784,25 +866,26 @@ def run_contract(review: ReviewStore, chain: GateChain) -> str | None:
 def p4_record_paths(review: ReviewStore, review_run_id: str, chain: GateChain) -> list[str]:
     """Every record path a P4 Run's chain names: gates, snapshots, every TaskInput, reports, adjudication,
     Repair Batch / Result (and Candidate N+1), Receipt and Supersession."""
-    found: list[str] = [f"{paths.run_dir(review_run_id)}/{entry.name}" for entry in (review.entries(paths.run_dir(review_run_id)) or [])]
+    space = review.namespace
+    found: list[str] = [f"{space.run_dir(review_run_id)}/{entry.name}" for entry in (review.entries(space.run_dir(review_run_id)) or [])]
     first = chain.generations[0]
-    found.append(paths.candidate_snapshot_rel(first.candidate_hash))
-    found += [paths.task_input_rel(str(task["task_id"])) for task in chain.latest.accepted_tasks]
+    found.append(space.candidate_snapshot_rel(first.candidate_hash))
+    found += [space.task_input_rel(str(task["task_id"])) for task in chain.latest.accepted_tasks]
     discovery = {str(task["task_id"]) for task in p4.discovery_tasks(chain)}
-    found += [paths.report_rel(str(task["result_digest"])) for task in chain.latest.settled_tasks
+    found += [space.report_rel(str(task["result_digest"])) for task in chain.latest.settled_tasks
               if str(task["task_id"]) in discovery]
     if len(chain.generations) >= p4.ADJUDICATION_SETTLE_GENERATION:
-        found.append(paths.adjudication_rel(review_run_id))
+        found.append(space.adjudication_rel(review_run_id))
     repair = p4.repair_task(chain)
     if repair is not None:
         batch_id = str(review.read_task_input(str(repair["task_id"])).request_envelope.get("repair_batch_id"))
-        found.append(paths.repair_batch_rel(batch_id))
+        found.append(space.repair_batch_rel(batch_id))
         if len(chain.generations) == p4.REPAIR_SETTLE_GENERATION:
-            found.append(paths.repair_result_rel(batch_id))
-            found.append(paths.candidate_snapshot_rel(review.read_repair_result(batch_id).result_candidate_hash))
+            found.append(space.repair_result_rel(batch_id))
+            found.append(space.candidate_snapshot_rel(review.read_repair_result(batch_id).result_candidate_hash))
     for generation in chain.generations:
         if generation.receipt_id:
-            found += [paths.receipt_rel(generation.receipt_id), paths.supersession_rel(generation.receipt_id)]
+            found += [space.receipt_rel(generation.receipt_id), space.supersession_rel(generation.receipt_id)]
     # P5 (P-5): the history the Run's own generations wrote, derived from its canonical records, never from file
     # presence - generation 1's set-aside summaries and Human Decision Evidence, its own G2 / G4 / G6 Run summary,
     # G4's Finding summaries and relations, G6's Repair summary. None for a P4-only Run.
@@ -817,26 +900,27 @@ def _clean_p4_run(
     problems = p4.chain_problems(chain)
     if problems:
         raise _incomplete(f"P4 Review Run {review_run_id} is not a P4 shape: " + "; ".join(problems))
+    space = review.namespace
     receipt_ids = {generation.receipt_id for generation in chain.generations if generation.receipt_id}
     try:
         consumptions = _consumption_paths_of(store, review, head, {str(item) for item in receipt_ids})
         record_paths = p4_record_paths(review, review_run_id, chain) + consumptions
-        if consumptions and p4.is_history_policy(p4.run_policy(review, chain)):
+        if consumptions and space.history and p4.is_history_policy(p4.run_policy(review, chain)):
             # §28.6: a consumed P5 (or P6, R6-1) Run's summary is made canonical by the same transition as its
-            # Consumption
-            record_paths.append(paths.history_run_rel(review_run_id))
+            # Consumption; a namespace without history (the root's, RB7C-2) never has this path
+            record_paths.append(space.history_rel(paths.HISTORY_RUNS, review_run_id))
     except (ValidationError, ReconcileRequired) as exc:
         raise _incomplete(f"the records of P4 Review Run {review_run_id} do not read: {exc}") from exc
     _require_clean_paths(store, review, head, review_run_id, record_paths)
-    wanted = [relative for relative in record_paths if not relative.startswith(paths.run_dir(review_run_id) + "/")
-              and not relative.startswith(paths.SUPERSESSIONS_DIR + "/") and not relative.startswith(paths.CONSUMPTIONS_DIR + "/")]
+    wanted = [relative for relative in record_paths if not relative.startswith(space.run_dir(review_run_id) + "/")
+              and not relative.startswith(space.supersessions_dir + "/") and not relative.startswith(space.consumptions_dir + "/")]
     missing = [relative for relative in wanted if review.read_bytes(relative) is None]
     if missing:
         raise _incomplete(f"P4 Review Run {review_run_id} is not whole: {', '.join(missing)} missing")
     if p4.shape_of(chain) == p4.SHAPE_SEAL and len(chain.generations) == p4.INVALIDATION_GENERATION:
         if not review.supersession_exists(str(chain.generation(p4.SEAL_GENERATION).receipt_id)):
             raise _incomplete(f"generation 6 of P4 Review Run {review_run_id} invalidates with no Supersession")
-    if gate.pending_generation_mutations(store, review_run_id):
+    if _pending(store, review_run_id):
         raise _incomplete(f"a generation mutation of P4 Review Run {review_run_id} is pending without its owner")
     first = chain.generations[0]
     try:
