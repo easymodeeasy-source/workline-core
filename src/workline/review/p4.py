@@ -126,19 +126,40 @@ HISTORY_POLICY_IDS = (P5_POLICY_ID, P6_POLICY_ID)
 #: with or without a Project Profile; it resolves and freezes its Effective Policy (GlobalPolicyBaseline + Profile
 #: or explicit absence). The P4-only and P5 identities stay exactly as they were, for the Runs that bind them.
 DEFAULT_POLICY_ID = P6_POLICY_ID
+#: P7 (§31.25, addendum RB7C-1, CP RB7-PREP item 1): the root non-history family policy of the root meta-review. Its
+#: record (:data:`ROOT_POLICY_RECORD`) is static, so every root Run binds ``family_policy_hash(ROOT_POLICY_ID)`` as its
+#: effective_policy_hash; it binds no P5 history contract and no frozen Effective Policy (the pre-change Global policy
+#: is carried by the root Candidate and Context). It is a member of :data:`FAMILY_POLICY_RECORDS` only - never of
+#: ``POLICY_RECORDS`` / ``POLICY_IDS`` / ``FAMILY_POLICY_IDS`` / ``HISTORY_POLICY_IDS`` - so no Work or Planning P4
+#: Context can name it, and it is bound under the root contract alone (both directions, :func:`contract_policy_problem`).
+ROOT_POLICY_ID = "review-v1-p7-root-policy-v1"
 #: RB6B-M4: the contracts bound to particular family policies, mechanically. The Policy Review contract exists only
 #: under the P6-capable policy - its Run is reviewed under the pre-change Effective Policy, which only a P6 Run
 #: freezes. A later contract restricted the same way adds its entry; a contract not named here keeps exactly the
-#: policies its owner binds today.
-CONTRACT_POLICIES: Mapping[str, tuple[str, ...]] = {records.P6_POLICY_CHANGE_CONTRACT: (P6_POLICY_ID,)}
+#: policies its owner binds today. P7: the root meta-review contract exists only under the root family policy.
+CONTRACT_POLICIES: Mapping[str, tuple[str, ...]] = {
+    records.P6_POLICY_CHANGE_CONTRACT: (P6_POLICY_ID,),
+    records.P7_GLOBAL_POLICY_CHANGE_CONTRACT: (ROOT_POLICY_ID,),
+}
+#: Why each restricted contract binds only its policies (the refusal's explanation, one per contract).
+_CONTRACT_POLICY_REASONS: Mapping[str, str] = {
+    records.P6_POLICY_CHANGE_CONTRACT: "a Policy Review is reviewed under the pre-change Effective Policy only a "
+                                       "P6-capable Run freezes",
+    records.P7_GLOBAL_POLICY_CHANGE_CONTRACT: "the root meta-review is reviewed under the pre-change Global policy and "
+                                              "the fixed root meta-rules of the root non-history family policy",
+}
 
 
 def contract_policy_problem(review_contract: object, policy_id: object) -> str | None:
-    """Why ``review_contract`` may not be bound under ``policy_id``, or ``None`` (RB6B-M4)."""
+    """Why ``review_contract`` may not be bound under ``policy_id``, or ``None`` (RB6B-M4; P7 both ways)."""
     allowed = CONTRACT_POLICIES.get(review_contract) if isinstance(review_contract, str) else None
     if allowed is not None and policy_id not in allowed:
-        return (f"{review_contract} Runs bind the {' / '.join(allowed)} family policy, never {policy_id!r}: a Policy "
-                "Review is reviewed under the pre-change Effective Policy only a P6-capable Run freezes")
+        return (f"{review_contract} Runs bind the {' / '.join(allowed)} family policy, never {policy_id!r}: "
+                f"{_CONTRACT_POLICY_REASONS[str(review_contract)]}")
+    if policy_id == ROOT_POLICY_ID and review_contract != records.P7_GLOBAL_POLICY_CHANGE_CONTRACT:
+        # RB7C-1 (d): the root family policy is never bound by a Planning, Work or Policy Review request
+        return (f"the root family policy {ROOT_POLICY_ID} binds only the {records.P7_GLOBAL_POLICY_CHANGE_CONTRACT} "
+                f"root meta-review, never {review_contract!r}")
     return None
 
 
@@ -743,8 +764,37 @@ P6_POLICY_RECORD: dict[str, Any] = {
                               "meta-rules, G1-G5, no Repair Batch branch; blocking or HUMAN issues no Receipt",
     },
 }
-#: Every family policy record, the P6-capable family identity included.
-FAMILY_POLICY_RECORDS: Mapping[str, dict[str, Any]] = {**POLICY_RECORDS, P6_POLICY_ID: P6_POLICY_RECORD}
+#: P7 (§31.25 / §31.26 / §31.27, addendum RB7C-1): the static root non-history family policy - P4's discovery and
+#: adjudication, P4's vocabularies, and the fixed root meta-rules; no repair, history or adaptive section. Pure data.
+SCHEMA_ROOT_POLICY = "review-p7-root-policy"
+ROOT_POLICY_RECORD: dict[str, Any] = {
+    **{key: value for key, value in POLICY_RECORD.items()
+       if key not in (serialize.SCHEMA_KEY, "policy_id", "review_contracts", "repair")},
+    serialize.SCHEMA_KEY: SCHEMA_ROOT_POLICY,
+    "policy_id": ROOT_POLICY_ID,
+    "review_contracts": [records.P7_GLOBAL_POLICY_CHANGE_CONTRACT],
+    "root": {
+        "review_kind": records.GLOBAL_POLICY_REVIEW_KIND,
+        "namespace_rule": "canonical P1-P4 records in the root policy Review namespace review-policy/review; no Project "
+                          "P5 history and no Human store",
+        "policy_rule": "reviewed under the pre-change Global policy plus these fixed root meta-rules; every root Run "
+                       "binds this static family policy as its Effective Policy",
+        "strength_rule": "required discovery slots are max(2, pre-change Global required slots), or max(3, ...) for a "
+                         "lightening change; distinct reviewer identity/version bindings; one separately bound "
+                         "adjudicator; the proposed policy never lowers the strength that authorizes it",
+        "repair_rule": "no Repair Batch: a blocking adjudication is terminal not_authorized at G4 with no Receipt; a "
+                       "changed proposal is a new Promotion Packet and Candidate",
+        "human_rule": "HUMAN is HUMAN_WAIT at G4 with no Receipt; the same Run stays the waiting Run",
+        "meta_verifier_rule": "the fixed mechanical root meta-policy verification re-checks every item before the G5 "
+                              "seal; no reviewer approval bypasses a failed item",
+        "publication_rule": "root generation commits are never pushed on their own; they become remote-visible only as "
+                            "ancestors of an authorized exact policy publication",
+    },
+}
+#: Every family policy record, the P6-capable family identity and the P7 root non-history policy included.
+FAMILY_POLICY_RECORDS: Mapping[str, dict[str, Any]] = {
+    **POLICY_RECORDS, P6_POLICY_ID: P6_POLICY_RECORD, ROOT_POLICY_ID: ROOT_POLICY_RECORD,
+}
 
 
 def _require_policy(policy_id: object) -> str:
@@ -813,6 +863,14 @@ def history_contract_of_policy(policy_id: str) -> str | None:
 
 def adjudication_instruction_of(policy_id: str) -> str:
     return str(FAMILY_POLICY_RECORDS[_require_family_policy(policy_id)]["adjudication"]["instruction"])
+
+
+def _require_root_request(history_bound: object, effective_policy: object, role: object) -> None:
+    """P7 (RB7C-1 (a)): a root request binds no history contract, no history writes or references, no frozen
+    Effective Policy and no discovery role - only P4's fields, under the root family policy."""
+    if history_bound or effective_policy is not None or role is not None:
+        raise ValidationError("a root meta-review request binds no P5 history, no Effective Policy record and no "
+                              "discovery role", code="review_record_invalid")
 
 
 def _p6_fields(policy_id: str, effective_policy: object, role: object, *, discovery: bool) -> dict[str, Any]:
@@ -947,6 +1005,9 @@ def discovery_request(
             raise ValidationError("a P4-only Run binds no history; it writes no summary or Human Decision Evidence",
                                   code="review_record_invalid")
         return serialize.canonical_data(record)
+    if policy_id == ROOT_POLICY_ID:
+        _require_root_request(summaries or decisions, effective_policy, discovery_role)
+        return serialize.canonical_data(record)
     record.update({
         history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT,
         "set_aside_summaries": summaries,
@@ -1005,6 +1066,9 @@ def adjudication_request(
         if references:
             raise ValidationError("a P4-only adjudication binds no prior history", code="review_record_invalid")
         return serialize.canonical_data(record)
+    if policy_id == ROOT_POLICY_ID:
+        _require_root_request(references, effective_policy, None)
+        return serialize.canonical_data(record)
     record.update({history.HISTORY_CONTRACT_KEY: history.HISTORY_CONTRACT, "prior_history": references,
                    **_p6_fields(policy_id, effective_policy, None, discovery=False)})
     return serialize.canonical_data(record)
@@ -1028,9 +1092,13 @@ def repair_request(
 ) -> dict[str, Any]:
     """The ReviewRepairRequest, built from canonical material only (§12.9 / §27.15).
 
-    A P4-only request is byte for byte what it always was; a P5 one also binds the history contract.
+    A P4-only request is byte for byte what it always was; a P5 one also binds the history contract. The P7 root
+    family policy has no Repair Batch branch, so it never asks for a repair (RB7C-1 (a)).
     """
     _require_contract_policy(review_contract, policy_id)
+    if policy_id == ROOT_POLICY_ID:
+        raise ValidationError("the root meta-review has no Repair Batch branch; nothing is repaired under the root "
+                              "family policy", code="review_contract_invalid")
     record: dict[str, Any] = {
         serialize.SCHEMA_KEY: SCHEMA_REPAIR_REQUEST,
         serialize.VERSION_KEY: RECORD_VERSION,
@@ -1077,6 +1145,10 @@ def policy_of_envelope(envelope: object) -> str | None:
         # is :func:`effective_policy_of_envelope`'s question, which fails closed - a P6 request whose record a later
         # build cannot read is never silently read as another family's or as a v1 request.
         return P6_POLICY_ID
+    if policy_value == ROOT_POLICY_ID and history.HISTORY_CONTRACT_KEY not in envelope \
+            and policy.EFFECTIVE_POLICY_KEY not in envelope:
+        # P7 (RB7C-1 (b)): explicit persisted identity, and a root request binds no history and no Effective Policy
+        return ROOT_POLICY_ID
     return None
 
 
@@ -1113,6 +1185,8 @@ def run_effective_policy_hash(policy_id: str, effective_policy: Mapping[str, Any
         return policy.effective_policy_hash(policy.parse_effective_policy(effective_policy, "the Run's Effective Policy"))
     if effective_policy is not None:
         raise ValidationError("only a P6-capable Run binds an Effective Policy record", code="review_record_invalid")
+    if policy_id == ROOT_POLICY_ID:
+        return family_policy_hash(ROOT_POLICY_ID)  # P7 (RB7C-1 (c)): the static root family policy
     return policy_hash(policy_id)
 
 
@@ -1127,6 +1201,8 @@ def envelope_policy_hash(envelope: object) -> str | None:
             return policy.effective_policy_hash(effective_policy_of_envelope(envelope) or {})
         except ValidationError:
             return None  # RB6B-M5: no hash is proven for an unreadable frozen record; every comparison fails closed
+    if found == ROOT_POLICY_ID:
+        return family_policy_hash(ROOT_POLICY_ID)  # P7 (RB7C-1 (c)): the static root family policy
     return policy_hash(found)
 
 
@@ -1236,6 +1312,8 @@ def task_input(
             raise ValidationError("a P6-capable task input binds the Effective Policy its request froze",
                                   code="review_record_invalid")
         effective_hash = policy.effective_policy_hash(effective)
+    elif policy_id == ROOT_POLICY_ID:
+        effective_hash = family_policy_hash(ROOT_POLICY_ID)  # P7 (RB7C-1 (c)): the static root family policy
     else:
         effective_hash = policy_hash(policy_id)
     return records.TaskInput(
