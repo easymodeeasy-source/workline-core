@@ -897,10 +897,56 @@ class WorkReviewClosingTests(IntegrationRunCase):
         self.assertEqual(("reconcile_required", st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE),
                          (raised.exception.code, raised.exception.reason))
         self.assertIn(pending["mutation_id"], str(raised.exception))
+        self.assertIn(f"Work {confirmation}, mode single-work", str(raised.exception))
         self.assertIn("review_marker_mismatch", str(raised.exception))
         self.assertEqual([], log, "the executor never ran again")
         self.assertEqual([pending["mutation_id"]], [found["mutation_id"] for found in MutationController(store).list_pending()])
+        # RB5RR2-2: the kept record is left exactly as it is
+        self.assertEqual(pending["effects"], MutationController(store).list_pending()[0]["effects"], "the record is not advanced")
         self.untouched(store, confirmation, phase_id)
+        # RB5RR2-1: the ordinary START of the same slot meets it as review_marker_mismatch
+        with self.assertRaises(ReconcileRequired) as ordinary:
+            st.start(store, confirmation, "single-work", completing_executor(store))
+        self.assertEqual("review_marker_mismatch", ordinary.exception.reason)
+
+    def test_an_outer_review_record_reaching_the_closing_work_names_its_own_slot(self) -> None:
+        """RB5RR2-1: a kept OUTER review-v1 record reaches the in-run refusal through the resumed outer START; the message
+        names that record's own slot (mode outer), the record is not advanced, and an ordinary single-work START of the
+        same Work meets it as a pending write-scope conflict (reconcile required, no marker reason) - as the message
+        says."""
+        from unittest import mock
+
+        from helpers import completing_executor
+        from planning_helpers import Crash
+        from test_review_p4_work import work_p4
+        from workline import start as st
+        from workline.errors import ReconcileRequired
+        from workline.mutation import MutationController
+
+        store, phase_id, confirmation = self.confirmed("outer-record")
+
+        def dying(ctx):
+            raise Crash("the process died while the executor ran")
+
+        with mock.patch.object(st, "_work_review_closes_reviewed_phase", return_value=False):
+            with self.assertRaises(Crash):
+                st.start(store, confirmation, "outer", dying, review=work_p4())
+        (pending,) = MutationController(store).list_pending()
+        self.assertEqual("outer", pending["invocation"]["mode"])
+        log: list[str] = []
+        with self.assertRaises(ReconcileRequired) as raised:
+            st.start(store, confirmation, "outer", completing_executor(store, log), review=work_p4())
+        self.assertEqual(("reconcile_required", st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE),
+                         (raised.exception.code, raised.exception.reason))
+        self.assertIn(f"Work {confirmation}, mode outer", str(raised.exception))
+        self.assertIn("pending write-scope conflict", str(raised.exception))
+        self.assertEqual([], log, "the executor never ran again")
+        self.assertEqual(pending["effects"], MutationController(store).list_pending()[0]["effects"], "the record is not advanced")
+        self.untouched(store, confirmation, phase_id)
+        with self.assertRaises(ReconcileRequired) as ordinary:
+            st.start(store, confirmation, "single-work", completing_executor(store))
+        self.assertIsNone(ordinary.exception.reason, "another mode meets the record as a write-scope conflict")
+        self.assertIn(pending["mutation_id"], str(ordinary.exception))
 
     def test_a_begun_work_review_run_of_the_closing_work_is_not_continued(self) -> None:
         """A review-v1 START whose Work Review Run began while its Work was not yet the closing one (simulated as
@@ -936,6 +982,8 @@ class WorkReviewClosingTests(IntegrationRunCase):
         self.assertEqual(("reconcile_required", st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE),
                          (raised.exception.code, raised.exception.reason))
         self.assertIn(pending["mutation_id"], str(raised.exception))
+        self.assertIn(f"Work {confirmation}, mode single-work", str(raised.exception))
+        self.assertEqual(pending["effects"], MutationController(store).list_pending()[0]["effects"], "the record is not advanced")
         self.assertEqual([], again.tasks, "the Run is not continued")
         self.assertEqual([pending["mutation_id"]], [found["mutation_id"] for found in MutationController(store).list_pending()])
         self.untouched(store, confirmation, phase_id)

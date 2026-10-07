@@ -3507,15 +3507,19 @@ def _require_work_review_not_closing(view: ProjectView, work: Entity, review: An
     if review is None or not _work_review_closes_reviewed_phase(view, work):
         return
     if pending is not None:
+        # RB5RR2-1: the slot is the kept record's own invocation (an outer record names the Work it was started for)
+        named, mode = pending.invocation.get("work_id"), pending.invocation.get("mode")
         raise ReconcileRequired(
-            f"START mutation {pending.id} keeps a review-v1 Work Review operation of {work.id} pending, and {work.id} "
-            f"is now the last incomplete Work of reviewed Phase {work.phase_id}: its completion would close the "
-            "Phase's current basis, whose phase_completion evidence the review-v1 Work Review terminal stage cannot "
-            f"record. The record is left exactly as it is and is not continued; an ordinary START of {work.id} meets "
-            f"this same record (review_marker_mismatch). Its exit is a Human reconciliation of mutation {pending.id}: "
-            "the Human recovery disposition (RB10 N4, dispose-recovery) sets a pending mutation aside only once RB1's "
-            "read-only classifier proves it pending_reconcile_required, which that classifier does not prove for a "
-            "START record: reconcile required",
+            f"START mutation {pending.id} (invocation: Work {named}, mode {mode}) keeps a review-v1 Work Review "
+            f"operation pending, and {work.id} is now the last incomplete Work of reviewed Phase {work.phase_id}: its "
+            "completion would close the Phase's current basis, whose phase_completion evidence the review-v1 Work "
+            "Review terminal stage cannot record. The record and its invocation are kept exactly as they are and are "
+            f"not continued; an ordinary START of {named} in mode {mode} meets this same record as "
+            "review_marker_mismatch, and a START in another mode or of another Work meets it as a pending write-scope "
+            f"conflict (reconcile required). Its exit is a Human reconciliation of mutation {pending.id}: the Human "
+            "recovery disposition (RB10 N4, dispose-recovery) sets a pending mutation aside only once RB1's read-only "
+            "classifier proves it pending_reconcile_required, which that classifier does not prove for a START "
+            "record: reconcile required",
             reason=CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE,
         )
     raise StopError(
