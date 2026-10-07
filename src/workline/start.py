@@ -537,6 +537,10 @@ class _Session:
             from . import start_review
 
             return start_review.review_phase_integration(self, view, work)
+        # RB5PR2-1: no Work is run under review-v1 Work Review whose completion could close its reviewed Phase's basis
+        # - the named one resumed, or one an outer continuation or a resumed outer START reaches - before its executor
+        # runs and before anything of this cycle is recorded.
+        _require_work_review_not_closing(view, work, self.review)
         # A derivation belongs to the cycle that decided it, and a cycle runs with the Work
         # carrying its target. One opened here is a new cycle, which decides its own.
         opening = not (state.state == IN_PROGRESS and state.has_target)
@@ -1001,6 +1005,13 @@ class _Session:
         """
         from . import start_review
 
+        # RB5PR2-1: a Run begun while its Work was not yet the last incomplete one of its reviewed Phase (another Work
+        # completed while this START waited) is not continued to a terminal stage that could not record the Phase's
+        # evidence: refused fail-closed, the record kept as it is.
+        reviewing = _review_run_work(self.mutation)
+        view = ProjectView.load(self.store)
+        if reviewing is not None and reviewing in view.works and view.work_state(reviewing).state != COMPLETED:
+            _require_work_review_not_closing(view, view.works[reviewing], self.review)
         return self._terminal_reviewed(start_review.continue_selected(self, selected))
 
     def _terminal_reviewed(self, sealed: Any) -> StartResult:
@@ -3440,6 +3451,64 @@ def _recorded_registration(
 #: Review activation, marker or recovery), the integration keeping its ordinary terminal semantics.
 CODE_SELECTORS_OUTER = "phase_review_outer_with_work_review"
 
+#: RB5PR2-1 (§32.36 / §32.37 against the F3-frozen review-v1 Work terminal stage): a Work whose completion could close
+#: its reviewed Phase's current basis owes that basis its phase_completion evidence in the SAME logical transition,
+#: and no later operation may fabricate it. The review-v1 Work Review terminal stage is frozen by F3 at its exact
+#: effects (two events, the Consumption, and the P5 summary) and carries no achievement effect, so such a completion
+#: under ``review=`` could never close the obligation. Resolved without changing the frozen shape, by fail-closed
+#: refusal: the Work is completed by an ordinary START (which records the evidence in its own lifecycle stage), never
+#: by review-v1 Work Review. Gated by both the Phase's canonical marker and the selector - no legacy or unmarked input
+#: and no other Work of a reviewed Phase is affected - and decided before anything of the Work is recorded.
+CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE = "phase_review_work_review_closes_reviewed_phase"
+
+
+def _work_review_closes_reviewed_phase(view: ProjectView, work: Entity) -> bool:
+    """Whether completing ``work`` could close its reviewed Phase's current basis (RB5PR2-1): the Phase runs the
+    reviewed completion mode and ``work`` is the last incomplete effective Work of it. Nothing broader - every other
+    Work of a reviewed Phase, and every Work of a legacy Phase, answers False."""
+    from .phase_integration import MODE_REVIEWED, completion_mode
+
+    if work.phase_id is None or work.phase_id not in view.phases or completion_mode(view, work.phase_id) != MODE_REVIEWED:
+        return False
+    incomplete = [found.id for found in view.effective_works(work.phase_id) if view.work_state(found.id).state != COMPLETED]
+    return incomplete == [work.id]
+
+
+def _require_work_review_not_closing(view: ProjectView, work: Entity, review: Any) -> None:
+    """STOP ``phase_review_work_review_closes_reviewed_phase`` when review-v1 Work Review would complete ``work`` and
+    that completion could close its reviewed Phase's basis (RB5PR2-1). A START without ``review=`` never asks."""
+    if review is None or not _work_review_closes_reviewed_phase(view, work):
+        return
+    raise StopError(
+        f"{work.id} is the last incomplete Work of reviewed Phase {work.phase_id}: its completion closes the Phase's "
+        "current basis, whose phase_completion evidence the review-v1 Work Review terminal stage cannot record; it "
+        "is completed by an ordinary START, which records that evidence with the completion. Nothing of it is run "
+        "under review-v1 Work Review",
+        code=CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE,
+    )
+
+
+def _resumes_start(controller: MutationController, invocation: dict[str, Any]) -> bool:
+    """Whether a pending START record of exactly this invocation exists (it is continued, not opened afresh)."""
+    import json
+
+    try:
+        pending = controller.list_pending()
+    except ReconcileRequired:
+        return True  # unreadable: reported at open, as always; the checks inside the run still apply
+    wanted = json.loads(json.dumps(invocation, sort_keys=True))  # as MutationController.open matches it
+    return any(record.get("owner") == OWNER and record.get("invocation") == wanted for record in pending)
+
+
+def _review_run_work(mutation: Mutation) -> str | None:
+    """The Work whose review-v1 Work Review Run this START reserved (its one reserved Run key), or None."""
+    from .review import work_review
+
+    prefix = f"review-run:{work_review.REVIEW_KIND}:"
+    found = sorted({str(key)[len(prefix):] for key in (mutation.record.get("reserved_ids") or {})
+                    if str(key).startswith(prefix)})
+    return found[0] if len(found) == 1 else None
+
 
 def _work_review_applies(work: Entity, review: Any, phase_review: Any) -> bool:
     """RB5 (§32.14): whether the Work Formal Review selector applies to the Work this START names.
@@ -3636,6 +3705,11 @@ def _start_locked(
     # The Phase integration entry gate for the named Work, on the structure just checked and before any intent
     # record exists, so a refusal writes nothing (§32.14 - §32.15).
     _phase_integration_gate(view.works.get(work_id, work), review, phase_review)
+    # RB5PR2-1: a fresh review-v1 START of a Work whose completion could close its reviewed Phase's basis is refused
+    # here, so nothing is written. A pending record (one this START already holds - a recorded cancel, hold or move
+    # is finished from it) is checked where its Work would be run or its Review continued (run_work, finish_review).
+    if review is not None and cancel is None and not _resumes_start(MutationController(store), invocation):
+        _require_work_review_not_closing(view, view.works.get(work_id, work), review)
     gitops.ensure_git_ready(store.root)
     # Before the mutation exists: an unpinned or drifted push destination STOPs
     # here, with no intent record, no domain write and no network contact.

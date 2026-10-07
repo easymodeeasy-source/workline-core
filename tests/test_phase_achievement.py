@@ -773,6 +773,178 @@ class DeferredAchievementTests(IntegrationRunCase):
 
 
 
+class WorkReviewClosingPredicateTests(unittest.TestCase):
+    """RB5PR2-1: the one predicate - a reviewed Phase's last incomplete effective Work - and nothing broader."""
+
+    def test_only_the_last_incomplete_work_of_a_reviewed_phase(self) -> None:
+        from workline import start as st
+
+        builder = ViewBuilder()
+        phase_id, normal, integration, confirmation = reviewed_phase(builder, works=2, complete=False,
+                                                                     confirmation=True)
+        view = builder.view()
+        self.assertEqual([False] * 4, [st._work_review_closes_reviewed_phase(view, view.works[work_id])
+                                       for work_id in (*normal, integration, confirmation)])
+        builder.complete(*normal)
+        view = builder.view()
+        self.assertFalse(st._work_review_closes_reviewed_phase(view, view.works[confirmation]),
+                         "the integration is still incomplete")
+        builder.complete(integration)
+        view = builder.view()
+        self.assertTrue(st._work_review_closes_reviewed_phase(view, view.works[confirmation]))
+        self.assertFalse(st._work_review_closes_reviewed_phase(view, view.works[normal[0]]), "completed already")
+
+    def test_a_legacy_phase_never_answers_true(self) -> None:
+        from workline import start as st
+
+        builder = ViewBuilder()
+        phase_id = builder.phase()
+        work_id = builder.work(phase_id, "W1")
+        integration = builder.integration(phase_id, marker=None)
+        builder.requires(work_id, integration)
+        confirmation = builder.confirmation(phase_id, integration)
+        builder.complete(work_id, integration)
+        view = builder.view()
+        self.assertEqual(pi.MODE_LEGACY, pi.completion_mode(view, phase_id))
+        self.assertFalse(st._work_review_closes_reviewed_phase(view, view.works[confirmation]))
+
+
+class WorkReviewClosingTests(IntegrationRunCase):
+    """RB5PR2-1 (§32.36 / §32.37 against the F3-frozen review-v1 terminal stage; decision (a), refuse): a Work whose
+    completion could close its reviewed Phase's basis is never completed under review-v1 Work Review - fresh,
+    resumed, or with its Work Review Run already begun - and is completed by an ordinary START, which records the
+    evidence. Gated by the marker and the selector: review= on any other Work of a reviewed Phase is unchanged."""
+
+    def confirmed(self, name: str):
+        """A reviewed Phase whose integration was authorized human_confirmation_required: its downstream confirmation
+        is the last incomplete Work. The Project is activated for review-v1 Work Review."""
+        from planning_helpers import CANONICAL_RULE
+        from rb5_run_helpers import Adjudicator, Discovery, phase_review
+
+        store, phase_id, ids = self.marked_project(name, remote=True, attributes=CANONICAL_RULE + "\n")
+        selector = phase_review(Discovery(), adjudicator=Adjudicator(ri.HUMAN_CONFIRMATION_REQUIRED))
+        self.assertEqual("completed", self.integrate(store, ids["integration"], selector).status)
+        view = ProjectView.load(store)
+        (confirmation,) = [w.id for w in view.effective_works(phase_id) if w.work_kind == pi.CONFIRMATION_KIND]
+        self.activate(store)
+        return store, phase_id, confirmation
+
+    def untouched(self, store: ProjectStore, confirmation: str, phase_id: str) -> None:
+        view = ProjectView.load(store)
+        self.assertNotEqual("completed", view.work_state(confirmation).state)
+        self.assertEqual((), ReviewStore(store).phase_completion_evidence())
+        self.assertFalse(view.phase_completion(phase_id).complete)
+
+    def test_the_closing_work_under_review_is_refused_before_anything_is_written(self) -> None:
+        from helpers import completing_executor
+        from test_review_p4_work import work_p4
+        from workline import start as st
+        from workline.errors import StopError
+        from workline.mutation import MutationController
+
+        store, phase_id, confirmation = self.confirmed("closing")
+        before = (git(store.root, "rev-parse", "HEAD").strip(),
+                  (store.root / ".workline" / "events" / "events.jsonl").read_bytes())
+        log: list[str] = []
+        with self.assertRaises(StopError) as raised:
+            st.start(store, confirmation, "single-work", completing_executor(store, log), review=work_p4())
+        self.assertEqual(st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE, raised.exception.code)
+        self.assertEqual([], log, "the executor never ran")
+        self.assertEqual(before, (git(store.root, "rev-parse", "HEAD").strip(),
+                                  (store.root / ".workline" / "events" / "events.jsonl").read_bytes()))
+        self.assertEqual([], MutationController(store).list_pending(), "no intent record was written")
+        self.untouched(store, confirmation, phase_id)
+        # the ordinary START completes it and records the Phase's evidence with that completion
+        self.assertEqual("completed", st.start(store, confirmation, "single-work", completing_executor(store)).status)
+        (evidence,) = ReviewStore(store).phase_completion_evidence()
+        self.assertEqual(phase_id, evidence.phase_id)
+        self.assertTrue(achievement_reader.phase_progression_ready(store, phase_id).ready)
+
+    def test_a_resumed_review_start_of_the_closing_work_is_refused_before_its_executor(self) -> None:
+        """A review-v1 START of the Work recorded before it became the closing one (simulated: the open-time
+        predicate answered False then) is refused when it is resumed - the run-time check, before its executor runs
+        again; the record stays as it is and nothing is completed."""
+        from unittest import mock
+
+        from helpers import completing_executor
+        from planning_helpers import Crash
+        from test_review_p4_work import work_p4
+        from workline import start as st
+        from workline.errors import StopError
+        from workline.mutation import MutationController
+
+        store, phase_id, confirmation = self.confirmed("resumed")
+
+        def dying(ctx):
+            raise Crash("the process died while the executor ran")
+
+        with mock.patch.object(st, "_work_review_closes_reviewed_phase", return_value=False):
+            with self.assertRaises(Crash):
+                st.start(store, confirmation, "single-work", dying, review=work_p4())
+        (pending,) = MutationController(store).list_pending()
+        log: list[str] = []
+        with self.assertRaises(StopError) as raised:
+            st.start(store, confirmation, "single-work", completing_executor(store, log), review=work_p4())
+        self.assertEqual(st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE, raised.exception.code)
+        self.assertEqual([], log, "the executor never ran again")
+        self.assertEqual([pending["mutation_id"]], [found["mutation_id"] for found in MutationController(store).list_pending()])
+        self.untouched(store, confirmation, phase_id)
+
+    def test_a_begun_work_review_run_of_the_closing_work_is_not_continued(self) -> None:
+        """A review-v1 START whose Work Review Run began while its Work was not yet the closing one (simulated as
+        above) is not continued to the review-v1 terminal stage when resumed: refused before the Run goes on, the
+        record kept, nothing completed and no reviewer asked again."""
+        from unittest import mock
+
+        from planning_helpers import Crash
+        from test_review_p4_planning import Discovery as WorkDiscovery
+        from test_review_p4_work import work_p4
+        from workline import start as st
+        from workline.errors import StopError
+        from workline.mutation import MutationController
+
+        store, phase_id, confirmation = self.confirmed("begun")
+
+        class Dying(WorkDiscovery):
+            def __call__(self, task):
+                raise Crash("the process died while the Work Review discovery ran")
+
+        def producing(ctx):
+            (store.root / "out-confirmation.txt").write_bytes(b"confirmed\n")
+            return st.Completed(("out-confirmation.txt",), message="feat: confirmation")
+
+        with mock.patch.object(st, "_work_review_closes_reviewed_phase", return_value=False):
+            with self.assertRaises(StopError):  # the reviewer failure: no settlement, the begun Run kept pending
+                st.start(store, confirmation, "single-work", producing, review=work_p4(Dying()))
+        (pending,) = MutationController(store).list_pending()
+        self.assertTrue(ReviewStore(store).run_ids(), "the Work Review Run began")
+        again = WorkDiscovery()
+        with self.assertRaises(StopError) as raised:
+            st.start(store, confirmation, "single-work", producing, review=work_p4(again))
+        self.assertEqual(st.CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE, raised.exception.code)
+        self.assertEqual([], again.tasks, "the Run is not continued")
+        self.assertEqual([pending["mutation_id"]], [found["mutation_id"] for found in MutationController(store).list_pending()])
+        self.untouched(store, confirmation, phase_id)
+
+    def test_review_on_a_non_closing_work_of_a_reviewed_phase_is_unchanged(self) -> None:
+        from planning_helpers import CANONICAL_RULE
+        from test_review_p4_work import work_p4
+        from workline import start as st
+
+        store, phase_id, ids = self.marked_project("open", complete_w1=False, remote=True,
+                                                   attributes=CANONICAL_RULE + "\n")
+        self.activate(store)
+        view = ProjectView.load(store)
+        self.assertFalse(st._work_review_closes_reviewed_phase(view, view.works[ids["w1"]]))
+
+        def producing(ctx):
+            (store.root / "out-w1.txt").write_bytes(b"result\n")
+            return st.Completed(("out-w1.txt",), message="feat: out-w1")
+
+        self.assertEqual("completed", st.start(store, ids["w1"], "single-work", producing, review=work_p4()).status)
+        self.assertEqual("completed", ProjectView.load(store).work_state(ids["w1"]).state)
+
+
 class CoveringReferenceTests(IntegrationRunCase):
     """RB5K-1 / RB5K-2 (§32.38 - §32.39): the covering integration's Review references an ordinary completion's
     phase_completion evidence binds are read only from records that hold no change from before the operation, and an
