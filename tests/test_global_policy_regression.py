@@ -213,6 +213,37 @@ class RootClassBEntryTests(WorklineTestCase):
         self.assertEqual("review_no_config_file_invalid", caught.exception.code)
 
 
+class RulesGitRootMaintenanceTests(unittest.TestCase):
+    """§31.47 / AO-1: rules/git states root policy maintenance; rules/human-confirmation is untouched; no new route."""
+
+    def registry(self) -> str:
+        from helpers import WORKLINE_ROOT
+
+        return WORKLINE_ROOT.joinpath("registry.md").read_text(encoding="utf-8").replace("\r\n", "\n")
+
+    def test_the_section_is_inside_rules_git_and_states_the_rules(self) -> None:
+        text = self.registry()
+        rules_git = text[text.index("<!-- workline-id: rules/git -->"):text.index("## AI Decision")]
+        self.assertLess(text.index("### Root policy maintenance"), text.index("<!-- workline-id: rules/ai-decision -->"))
+        section = rules_git[rules_git.index("### Root policy maintenance"):]
+        for phrase in ("`global-policy-change`", "`global-policy-evaluation`", "`review-policy/global-policy.yaml`",
+                       "`.workline-root-runtime/`", "`global-policy.lock`", "`root-policy-maintenance-status`",
+                       "`root-policy-maintenance-authorize`", "`base_exact`", "Kp", "Km", "`reconcile required`",
+                       "`.workline/`", "force", "rebase", "reset", "amend", "`<exact commit>:<full ref>`",
+                       "`rules/human-confirmation`"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+        self.assertNotRegex(section, r"BL-\d{3}")
+        self.assertEqual(1, text.count("### Root policy maintenance"))
+
+    def test_no_new_routing_id(self) -> None:
+        import re
+
+        ids = re.findall(r"<!-- workline-id: ([^ ]+) -->", self.registry())
+        self.assertNotIn("skills/global-policy", ids)
+        self.assertFalse([found for found in ids if "root" in found or "global-policy" in found])
+
+
 class RootRepositoryFactsTests(WorklineTestCase):
     """§31.13: the read-only Git facts root maintenance binds into its opaque local repository identity."""
 
