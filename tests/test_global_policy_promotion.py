@@ -624,8 +624,10 @@ class EligibilityTests(unittest.TestCase):
         found = elig(two_independent(), direction="lighten", after=1)
         self.assertFalse(found["eligible"])
         self.assertEqual(gp.FLOOR_LIGHTEN, found["floor"])
-        self.assertEqual({"too_few_lineages", "too_few_independent_clusters", "unrepresentative_opportunities"},
-                         set(found["problems"]))
+        self.assertEqual({"too_few_lineages", "too_few_independent_clusters"}, set(found["problems"]))
+        self.assertEqual([{"source_id": "alpha", "reasons": ["no_exercised_opportunity"]},
+                          {"source_id": "beta", "reasons": ["no_exercised_opportunity"]}], found["excluded_sources"],
+                         "a source whose setting is unknown exercised nothing under the lighten floor")
         provisional = elig(three_independent(), direction="lighten", after=1)
         self.assertTrue(provisional["eligible"], provisional["problems"])
         self.assertIsNone(provisional["pre_change_setting"], "without the before setting the answer is provisional")
@@ -635,8 +637,14 @@ class EligibilityTests(unittest.TestCase):
 
     def test_opportunities_whose_setting_is_unknown_never_satisfy_the_lighten_floor(self) -> None:
         unknown = elig(three_independent(ran_under=None), direction="lighten", after=1)
-        self.assertEqual(["unrepresentative_opportunities"], unknown["problems"])
-        self.assertTrue(elig(three_independent(ran_under=None))["eligible"], "the strengthen floor needs no setting")
+        self.assertEqual({"too_few_lineages", "too_few_independent_clusters"}, set(unknown["problems"]))
+        self.assertEqual({("no_exercised_opportunity",)}, {tuple(item["reasons"]) for item in unknown["excluded_sources"]})
+        self.assertEqual([], unknown["supporting_sources"])
+        self.assertNotIn("no_exercised_opportunity", gp.STOP_CODES + gp.RECONCILE_REASONS,
+                         "an exclusion reason of the eligibility record, never a catalogue code")
+        strengthen = elig(three_independent(ran_under=None))
+        self.assertTrue(strengthen["eligible"], "the strengthen floor needs no setting")
+        self.assertEqual([], strengthen["excluded_sources"])
 
     def test_a_source_never_counted_merely_because_a_check_was_never_exercised(self) -> None:
         unexercised = snapshot("gamma", 3, runs=0, records=[{"family": FINDINGS, "id": ident("rfd", 9),
@@ -729,22 +737,76 @@ class PacketTests(unittest.TestCase):
 
     def test_lightening_counts_only_opportunities_that_exercised_the_stronger_behaviour(self) -> None:
         # §31.19 L12023 / §16.10 L4499: Global required slots 3 -> 2; what was exercised at 1 or 2 says nothing about 3
+        excluded, thin = "too_few_independent_clusters", "unrepresentative_opportunities"
         cases = {
-            "ran under Global v1 (slots 1)": ((1, 1), False),
-            "ran under a lighter Project setting 2": ((2, 2), False),
-            "setting unknown (no frozen Effective Policy)": (None, False),
-            "ran under the pre-change setting 3": ((2, 3), True),
-            "ran under a stricter Project setting 4": ((2, 4), True),
-            "one exercised and one lighter Run per source": ([(2, 3), (1, 1)], False),
+            "ran under Global v1 (slots 1)": ((1, 1), excluded),
+            "ran under a lighter Project setting 2": ((2, 2), excluded),
+            "setting unknown (no frozen Effective Policy)": (None, excluded),
+            "ran under the pre-change setting 3": ((2, 3), None),
+            "ran under a stricter Project setting 4": ((2, 4), None),
+            "one exercised and one lighter Run per source": ([(2, 3), (1, 1)], thin),
         }
-        for name, (ran_under, eligible) in cases.items():
+        for name, (ran_under, problem) in cases.items():
             with self.subTest(case=name):
                 snapshots = three_independent(ran_under=ran_under)
-                if eligible:
+                if problem is None:
                     packet = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)
                     self.assertEqual((gp.FLOOR_LIGHTEN, 3, True), (packet["eligibility"]["floor"],
                                                                    packet["eligibility"]["pre_change_setting"],
                                                                    packet["eligibility"]["eligible"]))
+                    continue
+                with self.assertRaises(StopError) as raised:
+                    self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)
+                self.assertEqual(gp.CODE_NOT_ELIGIBLE, raised.exception.code)
+                self.assertIn(problem, str(raised.exception))
+
+    def test_a_source_that_exercised_only_the_lighter_behaviour_is_not_counted_and_blocks_nothing(self) -> None:
+        # RB7CD-1, §31.19 L12025: "no source counted" - an exclusion, never a refusal; the floors are "at least"
+        snapshots = three_independent() + [snapshot("delta", 4, ran_under=(1, 1))]
+        packet = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)
+        found = packet["eligibility"]
+        self.assertTrue(found["eligible"], found["problems"])
+        self.assertEqual(["alpha", "beta", "gamma"], found["supporting_sources"])
+        self.assertEqual([{"source_id": "delta", "reasons": ["no_exercised_opportunity"]}], found["excluded_sources"])
+        self.assertEqual(packet, gp.parse_promotion_packet(packet, "the Packet"))
+
+    def test_an_unexercised_cluster_never_displaces_a_qualifying_independent_triple(self) -> None:
+        # RB7CD-1 second face: "alpha" sorts first, ran only lighter, and is unresolved with beta (a shared dependency
+        # whose common cause it leaves unknown); it must not be chosen over the exercised triple beta / gamma / kappa
+        shared = digest_of("shared library")
+        snapshots = [snapshot("alpha", 1, ran_under=(1, 1),
+                              dependencies=[{"identity": shared, "common_cause": gp.CAUSE_UNKNOWN}]),
+                     snapshot("beta", 2, ran_under=(2, 3),
+                              dependencies=[{"identity": shared, "common_cause": gp.CAUSE_RULED_OUT}]),
+                     snapshot("gamma", 3, ran_under=(2, 3)), snapshot("kappa", 4, ran_under=(2, 3))]
+        self.assertEqual(gp.RELATION_UNRESOLVED, gp.relation(snapshots[0], snapshots[1])[0])
+        self.assertEqual(gp.RELATION_INDEPENDENT, gp.relation(snapshots[0], snapshots[2])[0])
+        found = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)["eligibility"]
+        self.assertTrue(found["eligible"], found["problems"])
+        self.assertEqual([{"sources": ["beta"]}, {"sources": ["gamma"]}, {"sources": ["kappa"]}],
+                         found["independent_clusters"])
+
+    def test_one_run_shared_by_a_project_and_its_fork_is_one_opportunity(self) -> None:
+        # RB7CD-2, §31.18: repeated Runs in one causal incident never multiply eligibility - distinct Runs per cluster
+        def pair(name: str, n: int, *, own_run: bool) -> list[dict[str, Any]]:
+            shared = {"family": RUNS, "id": ident("rr", n * 100), "digest": digest_of(name, "shared run")}
+            first = [shared] + ([{"family": RUNS, "id": ident("rr", n * 100 + 1), "digest": digest_of(name, "own")}]
+                                if own_run else [])
+            return [snapshot(name, n, records=first, ran_under=(2, 3)),
+                    snapshot(f"{name}-fork", n + 10, records=[shared], ran_under=(2, 3),
+                             lineage=digest_of("lineage", n))]
+
+        for own_run, eligible in ((False, False), (True, True)):
+            with self.subTest(distinct_runs_per_cluster=2 if own_run else 1):
+                snapshots = pair("alpha", 1, own_run=own_run) + pair("beta", 2, own_run=own_run) \
+                    + pair("gamma", 3, own_run=own_run)
+                clusters = gp.clustering(snapshots)["clusters"]
+                self.assertEqual([["alpha", "alpha-fork"], ["beta", "beta-fork"], ["gamma", "gamma-fork"]],
+                                 [cluster["sources"] for cluster in clusters])
+                if eligible:
+                    found = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)["eligibility"]
+                    self.assertEqual((True, 3, 3), (found["eligible"], found["lineages"],
+                                                    len(found["independent_clusters"])))
                     continue
                 with self.assertRaises(StopError) as raised:
                     self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)

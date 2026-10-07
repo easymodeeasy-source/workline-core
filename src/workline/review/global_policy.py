@@ -1189,6 +1189,10 @@ def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
             reasons.append("mechanism_differs")
         if not snapshot["opportunities"][surface_id]:
             reasons.append("no_relevant_opportunity")
+        elif floor == FLOOR_LIGHTEN and not _exercised(snapshot["opportunities"][surface_id], pre_change_setting):
+            # §31.19 L12025: a source whose opportunities never exercised the stronger behaviour is not counted -
+            # excluded like any other non-supporting source, never a refusal of the request
+            reasons.append("no_exercised_opportunity")
         if snapshot["unresolved_human"]:
             reasons.append("unresolved_human")
         if reasons:
@@ -1213,8 +1217,9 @@ def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
             problems.append("too_few_independent_clusters")
         exercised = {source_id: _exercised(by_id[source_id]["opportunities"][surface_id], pre_change_setting)
                      for source_id in supporting}
+        # §31.18: one Review Run named by several members of one cluster (a Project and its fork) is one opportunity
         if floor == FLOOR_LIGHTEN and any(
-                sum(len(exercised.get(member, ())) for member in cluster) < policy.SINGLE_EVENT_FLOOR
+                len({run for member in cluster for run in exercised.get(member, ())}) < policy.SINGLE_EVENT_FLOOR
                 for cluster in independent):
             problems.append("unrepresentative_opportunities")
     return serialize.canonical_data({
@@ -2687,6 +2692,13 @@ def active_global_experiments(changes: Sequence[Mapping[str, Any]], evaluations:
     later one. A lightening freezes its pre-change stronger setting as the
     independent holdout (§16.10). A Global version above 1 that no stored
     change produced, or two changes of one version, is refused.
+
+    Consumer precondition: a Global-origin experiment (and its holdout) is
+    valid only on a surface the consumer has proven the Project follows the
+    Global setting of; on a surface the Project's Profile overrides, the
+    experiment is dropped (RB7_FOUNDATION_INTERFACES Amendment 9; CP FLAG-C3
+    CONFIRMED) - otherwise the holdout need not be stronger than the effective
+    setting, which the P6 Effective Policy reader requires.
     """
     current = _require_global(current_global, "the current Global policy")
     parsed_changes = [parse_change_record(item, "a Global change record") for item in changes]
