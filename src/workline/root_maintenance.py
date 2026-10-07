@@ -656,6 +656,17 @@ def _scope_entry_problem(entry: object, operation: str) -> str | None:
     return None
 
 
+#: The root families whose exact path names a Promotion Packet / Global Policy Change / evaluation ID (Amendment 4).
+_ID_FAMILIES = ("promotion-packet", "change", "patch-note", "evaluation")
+
+
+def _scope_entry_id(entry: str) -> str | None:
+    """The ``rpp_`` / ``rgc_`` / ``rge_`` ID an exact write-scope path names, or None."""
+    if _family(entry) not in _ID_FAMILIES:
+        return None
+    return entry.rsplit("/", 1)[1].rsplit(".", 1)[0]
+
+
 def _in_scope(relative: str, write_scope: Sequence[str]) -> bool:
     if relative in write_scope:
         return True
@@ -1232,7 +1243,8 @@ def pending_for_run(workline_root: Path, review_run_id: str) -> list[dict[str, A
 
 def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str, base: str,
                   global_policy_version: int, global_policy_digest: str, write_scope: Sequence[str],
-                  publication: Mapping[str, Any] | None, rebind: Mapping[str, str] | None = None) -> RootMutation:
+                  publication: Mapping[str, Any] | None, rebind: Mapping[str, str] | None = None,
+                  reserved: Mapping[str, str] | None = None) -> RootMutation:
     """Open - or resume - the one root mutation of this root operation, under the held lock.
 
     One pending root mutation at a time (single-writer root maintenance). A
@@ -1250,10 +1262,26 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
     ``rebind`` (runtime-loss recovery only, §31.11) pre-seeds canonical IDs
     reconstructed from committed records and is refused while any pending
     record exists.
+
+    ``reserved`` (Amendment 4: first-open reservations for the exact write
+    scope) is accepted only when a NEW mutation is created - with a pending
+    record it is ``review_p7_root_mutation_conflict`` - and never together with
+    ``rebind`` (``review_p7_root_effect_refused``). Each item is a stable
+    reservation key and an ID of a :data:`RESERVATION_KINDS` kind the caller
+    allocated immediately before the open; the record's first durable write
+    stores them, so :meth:`RootMutation.reserve_id` returns them from then on
+    (§31.11: the first allocation stored durably, a retry returns the same ID).
+    With ``reserved`` - or, on a recovery open, ``rebind`` - every exact
+    write-scope path that names an ``rpp_`` / ``rgc_`` / ``rge_`` ID must name
+    one of those IDs (``review_p7_root_effect_refused``), so no frozen scope
+    path names an ID the mutation does not own. A call with neither behaves
+    exactly as before.
     """
     _require_held(lock)
     if lock.operation not in OPERATIONS:
         raise _refused(f"the {lock.operation} lock opens no root mutation")
+    if reserved is not None and rebind is not None:
+        raise _refused("first-open reservations and a runtime-loss rebind are never given together")
     found_invocation = _canonical(dict(invocation), "the invocation") if isinstance(invocation, Mapping) else None
     if not isinstance(found_invocation, dict) or not found_invocation:
         raise _refused("a root mutation names its invocation by a non-empty mapping")
@@ -1266,6 +1294,10 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
         if rebind is not None:
             raise reconcile(f"the pending root mutation {existing['mutation_id']} still exists, so nothing is rebound "
                             "beside it", REASON_MUTATION_CONFLICT)
+        if reserved is not None:
+            raise reconcile(f"the pending root mutation {existing['mutation_id']} already holds its reservations; a "
+                            "resume passes none (reserved=None) and reads them from the record",
+                            REASON_MUTATION_CONFLICT)
         if existing["operation"] != lock.operation or existing["invocation"] != found_invocation:
             raise reconcile(f"the pending root mutation {existing['mutation_id']} ({existing['operation']}) belongs to "
                             "another invocation; it is resumed with that invocation or reconciled first",
@@ -1306,7 +1338,7 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
         bound: dict[str, str] | None = {"remote": publication["remote"], "branch": publication["branch"]}
     else:
         bound = None
-    reserved: dict[str, str] = {}
+    seeded: dict[str, str] = {}
     if rebind is not None:
         if not isinstance(rebind, Mapping):
             raise _refused("a rebind is a mapping of reservation keys to canonical IDs")
@@ -1314,7 +1346,22 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
             if not isinstance(key, str) or not key or not isinstance(value, str) \
                     or ids.kind_of(value) not in RESERVATION_KINDS:
                 raise _refused(f"{value!r} is not a canonical ID a root mutation reserves")
-            reserved[key] = value
+            seeded[key] = value
+    if reserved is not None:
+        if not isinstance(reserved, Mapping):
+            raise _refused("first-open reservations are a mapping of reservation keys to IDs")
+        for key, value in reserved.items():
+            if not isinstance(key, str) or not key or not isinstance(value, str) or "\n" in value \
+                    or ids.kind_of(value) not in RESERVATION_KINDS:
+                raise _refused(f"{value!r} is not an ID of a kind a root mutation reserves")
+            seeded[key] = value
+    if reserved is not None or rebind is not None:
+        owned = set(seeded.values())
+        for entry in scope:
+            identifier = _scope_entry_id(entry)
+            if identifier is not None and identifier not in owned:
+                raise _refused(f"the write scope path {entry} names {identifier}, which this mutation does not "
+                               "reserve")
     mutation_id = ids.new_id("root_policy_mutation")
     record = {
         "schema": MUTATION_SCHEMA,
@@ -1326,7 +1373,7 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
         "branch": branch,
         "base": base,
         "global_policy": {"version": global_policy_version, "digest": global_policy_digest},
-        "reserved_ids": reserved,
+        "reserved_ids": seeded,
         "write_scope": scope,
         "effects": [],
         "notes": {},

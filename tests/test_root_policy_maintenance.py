@@ -205,9 +205,11 @@ class LayoutTests(WorklineTestCase):
         self.assertEqual([("lock", positional)], shape(rm.enter_git))
         self.assertEqual([("lock", positional), ("invocation", positional), ("branch", keyword), ("base", keyword),
                           ("global_policy_version", keyword), ("global_policy_digest", keyword),
-                          ("write_scope", keyword), ("publication", keyword), ("rebind", keyword)],
+                          ("write_scope", keyword), ("publication", keyword), ("rebind", keyword),
+                          ("reserved", keyword)],
                          shape(rm.open_mutation))
         self.assertIsNone(inspect.signature(rm.open_mutation).parameters["rebind"].default)
+        self.assertIsNone(inspect.signature(rm.open_mutation).parameters["reserved"].default)
         for function in (rm.pending_mutations, rm.repository_identity, rm.read_authorization, rm.publication_binding,
                          rm.status_report):
             with self.subTest(function=function.__name__):
@@ -724,7 +726,12 @@ class MutationRecordTests(MutationCase):
             for bad in ({"run": "rr_bad"}, {"run": ids.new_id("work")}, {"": run}, {"run": 5}):
                 with self.subTest(rebind=bad):
                     self.assertStop("review_p7_root_effect_refused", self.open, lock, rebind=bad)
-            mutation = self.open(lock, rebind={"run": run, "receipt": receipt})
+            # Amendment 4: a recovery open's ID-naming scope paths name rebound IDs (here the Packet / change ones
+            # are not rebound, so the scope is refused; the rebind itself is otherwise taken exactly as before)
+            self.assertStop("review_p7_root_effect_refused", self.open, lock, rebind={"run": run, "receipt": receipt})
+            mutation = self.open(lock, rebind={"run": run, "receipt": receipt, "packet": self.packet_id,
+                                               "change": self.change_id})
+            self.assertEqual(self.packet_id, mutation.reserve_id("packet", "review_promotion_packet"))
             self.assertEqual(run, mutation.reserve_id("run", "review_run"))
             self.assertEqual(receipt, mutation.reserve_id("receipt", "review_receipt"))
             self.assertReconcile("review_p7_root_mutation_conflict", mutation.reserve_id, "run", "review_receipt")
@@ -863,6 +870,152 @@ class MutationRecordTests(MutationCase):
                     self.assertReconcile("review_p7_root_mutation_unreadable", self.open, lock)
         path.write_text(serialize.canonical_text(good), encoding="utf-8", newline="\n")
         self.assertEqual([good], rm.pending_mutations(self.root))
+
+
+class FirstOpenReservationTests(MutationCase):
+    """Amendment 4: the IDs an exact write-scope path names are reserved by the record's first durable write."""
+
+    PACKET_KEY = "review-promotion-packet"
+    CHANGE_KEY = "review-global-policy-change"
+    EVALUATION_KEY = "review-global-policy-evaluation"
+
+    def reservations(self) -> dict[str, str]:
+        return {self.PACKET_KEY: self.packet_id, self.CHANGE_KEY: self.change_id}
+
+    def test_the_first_durable_write_stores_them_and_reserve_id_returns_them(self) -> None:
+        writes: list[tuple[str, str]] = []
+        real = rm._write_runtime
+
+        def recording(root, relative, text):
+            writes.append((relative, text))
+            return real(root, relative, text)
+
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            with mock.patch.object(rm, "_write_runtime", side_effect=recording):
+                mutation = self.open(lock, reserved=self.reservations())
+            records = [text for relative, text in writes if relative.startswith(rm.MUTATIONS_DIR + "/")]
+            self.assertEqual(1, len(records), "the open is one durable write")
+            first = serialize.parse_canonical(records[0].encode("utf-8"), "first write")[0]
+            self.assertEqual(self.reservations(), first["reserved_ids"])
+            self.assertEqual(sorted(self.scope), first["write_scope"])
+            stored = self.stored(mutation.mutation_id)
+            self.assertEqual(self.packet_id, mutation.reserve_id(self.PACKET_KEY, "review_promotion_packet"))
+            self.assertEqual(self.change_id, mutation.reserve_id(self.CHANGE_KEY, "review_global_policy_change"))
+            self.assertEqual(stored, self.stored(mutation.mutation_id), "returning a reservation writes nothing")
+            self.assertReconcile("review_p7_root_mutation_conflict", mutation.reserve_id, self.CHANGE_KEY,
+                                 "review_promotion_packet")
+            run = mutation.reserve_id("run", "review_run")
+            self.assertTrue(ids.is_valid_id(run, "review_run"), "any other key allocates as before")
+            self.assertEqual(self.reservations(),
+                             {key: value for key, value in self.stored(mutation.mutation_id)["reserved_ids"].items()
+                              if key != "run"})
+
+    def test_never_with_a_rebind_and_never_on_a_resume(self) -> None:
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            self.assertStop("review_p7_root_effect_refused", self.open, lock, reserved=self.reservations(),
+                            rebind=self.reservations())
+            self.assertFalse(os.path.lexists(self.root / rm.MUTATIONS_DIR), "refused before anything is written")
+            first = self.open(lock, reserved=self.reservations())
+            for reserved in (self.reservations(), {}, {self.PACKET_KEY: self.packet_id}):
+                with self.subTest(resume_with=reserved):
+                    self.assertReconcile("review_p7_root_mutation_conflict", self.open, lock, reserved=reserved)
+            self.assertStop("review_p7_root_effect_refused", self.open, lock, reserved=self.reservations(),
+                            rebind={})
+            again = self.open(lock)
+            self.assertEqual(first.mutation_id, again.mutation_id)
+            self.assertEqual(self.reservations(), again.record["reserved_ids"])
+        self.assertEqual(1, len(list((self.root / rm.MUTATIONS_DIR).iterdir())))
+
+    def test_each_reservation_is_an_id_of_a_reservation_kind(self) -> None:
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            for reserved in ({self.PACKET_KEY: "rpp_bad"}, {self.PACKET_KEY: ids.new_id("work")},
+                             {self.PACKET_KEY: ids.new_id("root_policy_mutation")},
+                             {self.PACKET_KEY: self.packet_id + "\n"}, {self.PACKET_KEY: 5}, {"": self.packet_id},
+                             {5: self.packet_id}, [(self.PACKET_KEY, self.packet_id)]):
+                with self.subTest(reserved=reserved):
+                    self.assertStop("review_p7_root_effect_refused", self.open, lock, reserved=reserved,
+                                    write_scope=[ROOT_POLICY_LAYOUT.review_dir + "/"])
+        self.assertFalse(os.path.lexists(self.root / rm.MUTATIONS_DIR), "a refused open records nothing")
+
+    def test_every_id_naming_scope_path_names_a_reserved_id(self) -> None:
+        foreign_packet = ROOT_POLICY_LAYOUT.promotion_packet_rel(ids.new_id("review_promotion_packet"))
+        foreign_change_id = ids.new_id("review_global_policy_change")
+        evaluation_id = ids.new_id("review_global_policy_evaluation")
+        evaluation = ROOT_POLICY_LAYOUT.global_evaluation_rel(evaluation_id)
+        foreign_evaluation = ROOT_POLICY_LAYOUT.global_evaluation_rel(ids.new_id("review_global_policy_evaluation"))
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            for name, scope, reserved in (
+                ("the change is not reserved", self.scope, {self.PACKET_KEY: self.packet_id}),
+                ("the packet is not reserved", self.scope, {self.CHANGE_KEY: self.change_id}),
+                ("a foreign packet", self.scope + [foreign_packet], self.reservations()),
+                ("a foreign change", [ROOT_POLICY_LAYOUT.global_change_rel(foreign_change_id)], self.reservations()),
+                ("a foreign Patch Note", [ROOT_POLICY_LAYOUT.patch_note_rel(foreign_change_id)], self.reservations()),
+                ("nothing reserved", [self.change], {}),
+            ):
+                with self.subTest(name):
+                    self.assertStop("review_p7_root_effect_refused", self.open, lock, write_scope=scope,
+                                    reserved=reserved)
+            # a runtime-loss recovery open is held to its rebound IDs the same way
+            self.assertStop("review_p7_root_effect_refused", self.open, lock, write_scope=self.scope,
+                            rebind={self.PACKET_KEY: self.packet_id})
+            self.assertFalse(os.path.lexists(self.root / rm.MUTATIONS_DIR), "a refused open records nothing")
+            # the Review prefix and the Global policy path name no reserved kind
+            only = self.open(lock, write_scope=[ROOT_POLICY_LAYOUT.review_dir + "/",
+                                                ROOT_POLICY_LAYOUT.global_policy_rel], reserved={})
+            self.assertEqual({}, only.record["reserved_ids"])
+            only.abandon()
+            recovered = self.open(lock, {"recovered": 1}, write_scope=self.scope, rebind=self.reservations())
+            self.assertEqual(self.reservations(), recovered.record["reserved_ids"])
+            recovered.abandon()
+            owned = self.open(lock, {"owned": 1}, reserved=self.reservations())
+            self.assertEqual(sorted(self.scope), owned.record["write_scope"])
+            owned.abandon()
+            # a call with neither behaves exactly as before: a scope naming any ID is taken as given
+            plain = self.open(lock, {"plain": 1}, write_scope=self.scope + [foreign_packet])
+            self.assertEqual({}, plain.record["reserved_ids"])
+            plain.abandon()
+        with rm.root_operation(self.root, rm.OPERATION_EVALUATION) as lock:
+            self.assertStop("review_p7_root_effect_refused", self.open, lock, write_scope=[foreign_evaluation],
+                            reserved={self.EVALUATION_KEY: evaluation_id})
+            mutation = self.open(lock, write_scope=[evaluation], reserved={self.EVALUATION_KEY: evaluation_id})
+            self.assertEqual(evaluation_id, mutation.reserve_id(self.EVALUATION_KEY,
+                                                                "review_global_policy_evaluation"))
+
+    def test_the_reservations_survive_a_crash_right_after_the_first_write(self) -> None:
+        arguments = dict(branch="refs/heads/main", base=self.head(), global_policy_version=1,
+                         global_policy_digest=policy.global_policy_digest(v1_global_policy()),
+                         write_scope=self.scope, publication=None)
+        child = subprocess.run(
+            [sys.executable, "-B", "-c", textwrap.dedent(f"""
+                import os, sys
+                sys.path.insert(0, {str(SRC)!r})
+                from pathlib import Path
+                from unittest import mock
+                from workline import implementation
+                from workline import root_maintenance as rm
+                root = Path({str(self.root)!r})
+                os.chdir(root)
+                with mock.patch.object(implementation, "running_workline_root", return_value=root):
+                    with rm.root_operation(root, rm.OPERATION_CHANGE) as lock:
+                        mutation = rm.open_mutation(lock, {{"request_digest": "d" * 64}}, reserved={self.reservations()!r},
+                                                    **{arguments!r})
+                        print(mutation.mutation_id, flush=True)
+                        os._exit(9)  # the process dies right after the first durable write, holding the lock
+            """)],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(9, child.returncode, child.stderr)
+        mutation_id = child.stdout.strip()
+        self.assertTrue(ids.is_valid_id(mutation_id, "root_policy_mutation"))
+        self.assertEqual(self.reservations(), self.stored(mutation_id)["reserved_ids"])
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            resumed = rm.open_mutation(lock, {"request_digest": "d" * 64}, reserved=None, **arguments)
+            self.assertEqual(mutation_id, resumed.mutation_id)
+            self.assertEqual(self.packet_id, resumed.reserve_id(self.PACKET_KEY, "review_promotion_packet"))
+            self.assertEqual(self.change_id, resumed.reserve_id(self.CHANGE_KEY, "review_global_policy_change"))
+            self.assertEqual(sorted(self.scope), resumed.record["write_scope"])
+        self.assertNoWorkline()
+        self.assertEqual("", self.git_clean())
 
 
 class EffectTests(MutationCase):
