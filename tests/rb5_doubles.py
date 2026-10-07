@@ -29,9 +29,6 @@ from workline.store import (  # noqa: E402
     render_body,
 )
 
-#: The exact skip reason of a test that needs a SHARED integration landing after RB6.
-DEFERRED = "DEFERRED_UNTIL_POST_RB6_INTEGRATION"
-
 INTEGRATION = "phase_integration_check"
 CONFIRMATION = "human_confirmation"
 V1 = "phase-integration-review-v1"

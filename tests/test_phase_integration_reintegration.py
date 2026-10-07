@@ -12,7 +12,7 @@ import unittest
 
 from helpers import WorklineTestCase, completing_executor, git, scripted_executor
 from planning_helpers import Crash, crash_at
-from rb5_doubles import DEFERRED, V1, ViewBuilder, reviewed_phase
+from rb5_doubles import V1, ViewBuilder, reviewed_phase
 from workline import phase_integration as pi
 from workline import start as st
 from workline import start_integration_review as sir

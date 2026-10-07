@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 from helpers import git, rmtree
-from rb5_doubles import DEFERRED, ViewBuilder, ident, reviewed_phase
+from rb5_doubles import ViewBuilder, ident, reviewed_phase
 from rb5_run_helpers import IntegrationRunCase
 from workline import achievement as ach
 from workline import ids

@@ -21,7 +21,7 @@ from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git
 from planning_helpers import Crash, PlanningTestCase, crash_at, design, plan, registered, run_ids
-from rb5_doubles import DEFERRED, V1, ViewBuilder
+from rb5_doubles import V1, ViewBuilder
 from workline import phase_integration as pi
 from workline import roadmap as rm
 from workline import roadmap_review as rr

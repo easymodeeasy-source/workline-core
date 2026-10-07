@@ -15,7 +15,7 @@ from unittest import mock
 from helpers import completing_executor, git
 from p5_helpers import decision_evidence
 from planning_helpers import Crash, crash_at, design, plan, registered
-from rb5_doubles import DEFERRED, V1, ViewBuilder, ident, reviewed_phase
+from rb5_doubles import V1, ViewBuilder, ident, reviewed_phase
 from rb5_run_helpers import (Adjudicator, Discovery, IntegrationRunCase, answering_executor, claim, phase_review,
                              repairing_executor)
 from workline import gitcmd

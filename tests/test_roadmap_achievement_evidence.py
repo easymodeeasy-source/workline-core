@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 import unittest
 
-from rb5_doubles import DEFERRED, ViewBuilder, ident, reviewed_phase
+from rb5_doubles import ViewBuilder, ident, reviewed_phase
 from rb5_run_helpers import IntegrationRunCase, phase_review
 from test_phase_achievement import evidence_for, legacy_phase
 from workline import achievement as ach

@@ -16,7 +16,7 @@ from helpers import WorklineTestCase, git
 from workline import roadmap as rm
 from workline import start as st
 from workline.ops import Replan
-from rb5_doubles import CONFIRMATION, DEFERRED, INTEGRATION, V1, ViewBuilder, ident, reviewed_phase
+from rb5_doubles import CONFIRMATION, INTEGRATION, V1, ViewBuilder, ident, reviewed_phase
 from workline import phase_integration as pi
 from workline.create import INTEGRATION_COVERAGE_ORDER, RelationSpec, WorkSpec, register_works
 from workline.errors import ValidationError

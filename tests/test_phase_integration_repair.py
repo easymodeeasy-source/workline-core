@@ -12,7 +12,7 @@ import dataclasses
 import unittest
 
 from helpers import completing_executor, git
-from rb5_doubles import DEFERRED, ident
+from rb5_doubles import ident
 from rb5_run_helpers import Adjudicator, Discovery, IntegrationRunCase, claim, phase_review, repairing_executor
 from workline import start as st
 from workline import start_integration_review as sir
