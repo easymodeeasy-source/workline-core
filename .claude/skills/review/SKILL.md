@@ -903,7 +903,7 @@ P6は、Global Review policyを下限として、Project固有の検証の強さ
 
 ### GlobalPolicyBaseline
 
-正本のloaderは読み取り専用の `workline.review.policy.load_global_baseline` である。RB7がGlobal policyを実体化するまでは `source_mode: derived-baseline` で、Workline rootの `registry.md` と review / roadmap / start Skillのdigest、固定meta-rules、2つのsurface定義、既存のplanning / Work / P4 / P5 / P6 policy identityから正確・再現可能に導く。canonical digestがbaseline identityで、Review ContextとProfileがそれを束ねる。Workline rootへは何も書かない。読めないauthorityは `review_p6_baseline_unavailable` で止まる。
+正本のloaderは読み取り専用の `workline.review.policy.load_global_baseline` で、同じinterfaceで2つのsource modeを読む。P7がGlobal policyを実体化する前は `source_mode: derived-baseline` で、Workline rootの `registry.md` と review / roadmap / start Skillのdigest、固定meta-rules、2つのsurface定義、既存のplanning / Work / P4 / P5 / P6 policy identityから正確・再現可能に導く。実体化した後は `source_mode: materialized-global-policy` で、Workline rootがtrackする `review-policy/global-policy.yaml`（adaptiveなpolicy dataだけを持ち、固定meta-rulesを定義し直せない）の厳格なrecordを読み、rootのauthority digestとsource policy identityをprovenanceとして束ねる。このfileは必須で、無い・indirection・読めないものは `review_p6_baseline_unavailable`、形の違うものは `review_record_invalid` で止まり、「無いからderived」と推測しない。Global policy version 1は移行時のderived baselineそのものの書き直しで、移行で変わるのは `source_mode` とprovenanceだけである（Profileの書き換え・backfillは無く、進行中のReviewの `effective_policy_hash` は変わらない）。それ以降のGlobal versionはP7の `global-policy-change` だけが作る（下のP7）。canonical digestがbaseline identityで、Review ContextとProfileがそれを束ねる。loaderはWorkline rootへ何も書かない。読めないauthorityは `review_p6_baseline_unavailable` で止まる。
 
 ### 固定の2 surface
 
@@ -1078,6 +1078,176 @@ review_contracts:
   - review-v1-work-p4-v1
   - review-v1-policy-change-p6-v1
 schema: review-p6-policy
+seal_generation: 5
+severities:
+  - HIGH
+  - MID
+  - LOW
+strategy_rule: two consecutive supported B/C failures on one semantic surface require STRATEGY_CHANGE
+version: 1
+work_creation_rule: LOW and Improvement never create Work automatically
+```
+
+## P7 Global Promotion / Global Policy Change（§16 / §31）
+
+P7は、十分に一般化され、十分に独立したProjectのevidenceだけを、Workline rootのadaptiveなReview policy（`review-policy/global-policy.yaml`）へ昇格する。Reviewは正規化したGlobal Policy Change Candidateを評価してAuthorizationを出すだけで、Workline rootの書き込み・Git・回復は専用のroot maintenance operation `global-policy-change`（owner `workline.global_policy`、runtimeは `workline.root_maintenance`）だけが所有する。Global policyが変えられるのはP6の固定2 surface（`review.discovery.required_slots`、`review.reverification.extra_scope_steps`）の設定だけで、正しさ・権限の意味（lifecycle / 完了、Problem / Improvementとseverity / blocking、H-1〜H-4、HUMANの境界、要件、正本のauthority / routing、Mutation / Git / securityの不変条件、strength classの意味、self-hostingの扱い）は変えない。それらを変えたい時は、adaptiveなGlobal Policy Changeではなく、通常のWorkline rootの実装・仕様の作業である（`review_p7_surface_refused`）。
+
+### self-hostingにしない
+
+Workline rootはWorkline Projectにならない。`<workline-root>/.workline/` も root のRoadmap / Phase / Work lifecycleも作らず、root operationはProjectSTART・Project mutation・self-hostingのどれでもない。root operationは、このprocessが実行しているWorkline root自身だけを対象にし（違えば `review_p7_root_binding_mismatch`）、`.workline` を持つroot（`review_p7_root_is_project`、未対応のself-hosting配置）、自分のGit top levelでないroot（`review_p7_root_not_repository`）、Workline Projectの中からの呼び出し（`review_p7_root_project_context`）を、何かを読む・書く前に止める。self-hostingの扱いはadaptive surfaceではない。
+
+### 独立性と相関（§31.17 / §31.18）
+
+昇格は呼び出し側が明示した有限のsource Project群だけを読み取り専用で読み（filesystemを探索せず、sourceのlockもmutationも開かない）、各sourceのvalidatedなP5 / P6 recordからH-3-safeなsource snapshotを作る。各snapshotはB0 / B1型の一貫性証明（source HEAD、束ねたevidenceのdigest、Profile / evaluationの状態）を持ち、抽出中にevidenceが動けば1回だけ再試行し、それでも動けばそのsourceはこの試行で使えない（`review_p7_source_unavailable`）。requestが名指したrecordがそのHEADに名指したdigestのまま保存されていない・読めないもの、public-safeなsnapshotにならないもの（snapshotはfactとdigestだけを持ち、path・transcript・locatorを持たない）は `review_p7_source_invalid` である。
+
+source同士の関係は、明示の構造化provenanceからだけ決める: `proven_independent`（異なるrepository / Project lineage、異なる引き金のincident / 因果instance、異なる実装機会、共有dependencyは共通原因でないと正に示されたもの）、`known_correlated`（同じlineage / copy元、同じ因果instance、同じ上流incident / 変更、同じ関係する因果dependency、重複観測という正の共有事実）、それ以外の欠けや不確かさはすべて `independence_unresolved`。「相関が見つからなかった」ことからの推論や、modelの推測でunresolvedをindependentに上げない。相関するevidenceは1つのclusterになり、unresolvedのevidenceは文脈を足すだけで独立したclusterを増やさない。数えるのは互いに `proven_independent` なclusterだけで、1つの因果incidentの中で繰り返されたRun・Finding・reviewerはeligibilityを増やさない。cluster identityと対ごとの関係evidenceはPromotion Packetに凍結する。
+
+### 昇格の下限（§31.19）
+
+eligibilityは機械的な判定で、root meta-reviewはそれでもevidenceを退けられる（届かなければ `review_p7_not_eligible`）。
+
+- strengthen と通常のadjust: 2つ以上のsource Project / repository lineage、互いにproven independentな2つ以上のcluster、同じ既存P6 `policy_surface_id`、同じ一般化されたmechanism（Project固有の名前や回避策は昇格しない）、Relevant Opportunityの裏付け、未解決のHUMAN / 要件境界が無いこと、観察とrollbackの能力。
+- lighten（固定v1のより強い下限）: 3つ以上のlineageと、互いにproven independentな3つ以上のcluster。下限を決めるのはdirectionの語ではなく実際の動きで、その1つのsettingを下げる変更はすべてlightenの下限に従う。強い（変更前の）挙動を実際に通ったopportunityだけを数える: そのRunが凍結したsurfaceのsettingが変更前のsetting以上だったものだけで、settingが不明なもの・それより軽かったものは数えず、強い挙動を一度も通っていないsourceはrequestの拒否ではなく、支持しないsourceとして除外する。数えるwitnessのclusterは代表的なclusterの中からだけ選ぶ: 代表的なclusterとは、異なる通過済みReview Runを2つ（単一イベントの下限）以上持つclusterで、1つのRunをcluster内の複数のmember（Projectとそのfork）が名指しても1つの機会である。それより薄いclusterは文脈を足すだけで独立したclusterにならず、条件を満たす集合から引くこともない。変更後も独立したholdout / 置き換えの検証が残る。
+
+### 正確なrollbackの例外（§31.20）
+
+1つの過去に認可されたGlobal Policy Changeを、その直前のbefore settingへ正確に戻すrollbackだけは、新しいcross-Projectの傾向なしに、その変更の既にreviewされたrollback契約を使える。条件はすべて: その変更の凍結したmeasurement contractでのcanonicalな `rollback` evaluationが、凍結したrollback thresholdが発火したことを証明する（その変更が作ったGlobal、または今のGlobalのevaluation）、対象surfaceは同じで、今のsettingはまだその変更のafter settingである、戻す先はその変更のbefore settingそのもの、固定meta-rulesがまだそのsettingを許す、Profile compatibilityがtotalのまま。ownerは例外を名乗るrequestを、Packetを作る前のentry freezeで、保存された変更記録とevaluation記録をcommit済みobjectから読んで証明し、meta-verifierがG4とG5のsealの直前にも同じ記録で証明し直す。どれかが欠ければ `review_p7_rollback_inexact` である。この例外でもGlobal Policy Change Reviewと正確な永続projectionの証明は省かない。正確でないrollbackは、実際の向きのstrengthen / lightenの下限に従う。
+
+### Profile compatibility（§31.21）
+
+Global Policy Changeは、すべての対応するProject Profile schemaに対するtotalなcompatibility adapterの証明を前提とする。v1は `review-v1-p7-total-adapter-v1` で、Profile v1と2つの固定整数surfaceについて、Global defaultが変わっても有効な絶対値のlocal overrideをそのまま保つ（古いProfile + 古いGlobal setting + 新しいGlobal setting → 同じ正規化されたlocal overrideの意味。欄を落とさず改名しない）。証明できない変更は `review_p7_compatibility_unproven` である。Projectは次のReview Runの境界でだけP6 loaderを通して新しいGlobal versionを採用し、既存のProfile fileは書き換えず、open Runは凍結した `effective_policy_hash` のまま続く。ProfileがoverrideしているsurfaceのGlobal由来の実験はそのProjectでは凍結しない。Project固有のevidence・Profileは昇格で消えず、Projectは固定の強さ・compatibilityの規則が許す限り後のGlobal defaultより厳しいままでいられる。
+
+### Global Policy Change Review（`global-policy-change-v1`）
+
+Promotion Packet（`review-policy/promotion-packets/<rpp_...>.yaml`）はimmutableなevidenceであって、authorizationではない。CandidateSnapshotは、正確なPacket、正確なbefore Global policy、正規化された提案のafter Global policy、compatibility proof、root meta-policy identity、期待するKpのprojectionを、runtimeの記憶なしに再構成できるclone-safeなmaterialを持つ。Candidateがrequestを再構成しなければ `review_p7_candidate_mismatch`（reconcile）、requestとして読めないものは `review_p7_request_invalid` である。
+
+reviewはkind `global-policy-change-v1`、target `global-policy`、stage `global-policy-change:persist-global-policy`、contract `review-v1-global-policy-change-p4-v1` で、root policy Review namespace `review-policy/review` の中の共通P1 / P4 schemaとadjudicationを使う（rootにProjectのP5 historyもHuman storeも無い）。family policyは静的なnon-history root policy `review-v1-p7-root-policy-v1` で（下のP7 Root Review Policy）、すべてのroot RunのEffective Policyはそのdigestである。Repair Batchの分岐は無い: blockingなadjudicationはG4でterminalな `not_authorized`（Receipt無し）、HUMANはG4の `human_wait`（Receipt無し、同じRunが待つRunのまま）、変えた提案は新しいPromotion PacketとCandidateである。G1-G5はそれぞれroot commit（Kg1-Kg5）になり、受理した外部taskはlaunchの前にcommitされる。root Reviewのgeneration commitはそれだけでは決してpushせず、後の認可された正確なpolicy / metadataの公開の祖先としてだけremoteに見える。rootのRunとして形・contract・kind・targetが合わないchainは `review_p7_chain_invalid`（reconcile）である。
+
+### 変更前のmeta-policy（§31.25 / §31.26 / §31.28）
+
+Global Policy Changeは、変更前のGlobal policyと固定のroot meta-rulesでreviewする。提案されたafter-stateは、自分を認可するReviewの強さを選べず、下げられない。必要なdiscovery slotは、strengthen / 通常のadjust / 正確なrollbackで `max(2, 変更前のGlobal required_slots)`、lightenで `max(3, 変更前のGlobal required_slots)`。数えるslotはすべて異なるreviewer identity / versionに束ね、adjudicatorは別に1つ束ねる（足りなければlaunch前に `review_p7_reviewer_floor_unmet`）。
+
+固定の機械的root meta-verifierは、G4とG5のsealの直前に、変更前の状態と固定meta-rulesに対して（提案されたafter-stateには対してではなく）次を検査し直し、外部reviewerの承認は失敗した項目を越えない（`review_p7_meta_verifier_failed`）: 対象surfaceがP6の固定registryにある、before Global policyがまだ一致する、提案したsettingが範囲内、固定meta-ruleも正しさ・権限のsurfaceも変わらない、必要なsource snapshotが今もcurrent、独立性 / clusterのeligibilityとlightenのより強い下限、使う時のrollback例外の正確さ、totalなProfile compatibility、観察 / rollbackの可能性、永続projection adapterがあること、必要な時のrootの公開の準備。
+
+### root durability（§16.14 / §31.29-§31.40）
+
+root Reviewの外部taskはP1の永続化に従う: 正確なCandidate / Promotion material、TaskInput、受理したdescriptorは外部launchの前にroot Review storageにcommitされる。runtimeの記憶は決してauthorityではない。
+
+rootの変更は専用のroot maintenance runtimeだけを通る: ignoreされた `.workline-root-runtime/`（ignoreされていなければ `review_p7_root_runtime_unignored`、不正なら `review_p7_root_runtime_invalid`）、単一のroot maintenance lock（他のprocessが持てば `review_p7_root_busy`、同じprocessの入れ子は `review_p7_root_nested`、lockを開けなければ `review_p7_root_lock_unavailable`、このprocessが持たないlockでの使用は `review_p7_root_lock_not_held`）、同時に1つだけのpending root mutation（別のものが待っていれば `review_p7_root_mutation_conflict`、読めなければ `review_p7_root_mutation_unreadable`、既に記録した別のeffectとぶつかれば `review_p7_root_effect_conflict`、既に適用されたかもしれないeffectを持つmutationは放棄しない `review_p7_root_abandon_refused`）、閉じたeffectの集合の外には何も書かない（`review_p7_root_effect_refused`）。
+
+remoteのあるrootでは、Human承認の正確なlocalなmaintenance authorization（`run-workline.py root-policy-maintenance-authorize`: remote名、正確なfull branch ref、正確なpush locatorを明示に確認し、今のGit設定と照合する。秘密を含むlocatorは拒否し、originから推測しない）が無ければ `global-policy-change` を始めない（`review_p7_authorization_required`）。authorizationはlocalでignoreされ、clone固有で、不透明なlocal repository identityに束ねるので、別のcloneへ写しても認可しない（identityが作れなければ `review_p7_repository_identity_unavailable`）。authorizeの入力が今のGit設定と合わなければ（rootに無いremote、locatorが無いか今のactive locatorでない、branchが今のbranchのfull refでない）何も書かず `review_p7_authorization_invalid`、読めるauthorizationが無ければ `review_p7_authorization_required`、保存したauthorizationが今の設定と合わなくなっていれば `review_p7_authorization_mismatch`（認可し直す）。remoteの無いrootに公開の認可は要らない。`run-workline.py root-policy-maintenance-status` とProjectの `status` の `policy.root_maintenance` は読み取り専用で、lockを取らず、runtimeへ書かず、remoteに触れず、pending mutationを直さない。
+
+entry freezeはfull branch ref、正確なbase HEAD、committedのGlobal policyのversion / digest、所有pathとその事前のdirt、公開のbindingを凍結する。HEADがGlobal policyをcommitしていなければrootは実体化されておらず変えられない（`review_p7_global_policy_unavailable`）。working treeのGlobal policyがcommitしたbefore bytesでない、など正確なbefore-stateが成り立たなければ `review_p7_before_state_conflict`。G5の後、Kpより前に凍結した基礎（Global policy、meta-policy identity、Packetのevidence、branchの基礎）が古くなれば、policyを書かず公開せず（`review_p7_stale_candidate`）、古いCandidateは変えずに新しいCandidate / Runから始める。
+
+永続化: Kp（`review-policy/global-policy.yaml`、`review-policy/changes/<rgc_...>.yaml`、`review-policy/patch-notes/<rgc_...>.md` の3 pathだけ）→ C-2(Kp)（commit済みobjectだけから、直前の親、branch、delta、reviewした正確なbytes、loaderの正規化projectionがCandidateのafter-stateに等しいこと、before / 親のpolicy identity、固定meta-rules identity、compatibility proof、Receiptがcurrentでsupersedeもconsumeもされていないこと、必要なsource evidenceのcurrentness）→ Kpの正確な公開 → Global Policy Consumption version 4 → Km（そのConsumptionのpathだけ）→ C-2(Km) → Kmの正確な公開 → complete。証明が合わなければpushせず、黙って採用も書き換えもしない（`review_p7_persisted_mismatch`）。すべてのroot commitは直前に期待した親に対してbase-exactで、予期しないHEADの移動はrebase / cherry-pick / amend / reset / forceせずreconcileにする。公開は記録した正確なcommitの `<sha>:<full ref>` だけで、各pushの直前にauthorizationを確かめ直し、locatorを解決し直し、destinationを読み、正確なfast-forwardとpush dry-runを証明する。branch tipを記録したcommitの代わりに公開しない。読めない・分岐したdestinationへはpushせずSTOP / reconcileする。mutationが凍結した公開のbindingが今と違う、pushするcommitが証明したcommitでない時も公開しない（`review_p7_publication_invalid`）。保存されたroot mutationや記録が今のrequest / entry freezeと矛盾すれば `review_p7_record_conflict`。
+
+runtimeを失った後は、共有のcanonical recovery discovery（rootのnamespace、`review_recovery_incomplete` / `review_recovery_ambiguous`）だけで、review kind・target・安定したoperation identity・Packet / Candidate identity・validatedなGate chainからRunを見つける。newest / timestampでは選ばない。1つだけ一致すれば、新しいroot runtime mutationがそのcanonicalな予約IDを束ねて続け（新しく発番しない）、曖昧ならSTOP / reconcileする。HUMAN_WAITのrootのRunはset asideせず、同じRunのまま `human_wait` を返す。自分のReceiptのcommit済みGlobal Policy Consumptionを持たない、HEADの履歴にcommitされた変更記録は、Kpのidentityが保存されていない変更であり、Git履歴から推測せず、公開もその上に積むこともせず、`review_p7_run_unrecovered`（手動reconcileの境界）で止まる。
+
+### evaluation（§31.41-§31.43）
+
+観察の評価はimmutableな `review-policy/evaluations/<rge_...>.yaml` 1件とその正確なcommit / 公開だけを書く専用のsub-operation `global-policy-evaluation` で、同じroot lock・runtime・authorization・exact-scopeのGit disciplineを使い、`global-policy.yaml` を直接書くことはない。評価は変更、評価したGlobal version / digest、凍結したmeasurement contract、source evidenceとclusterの状態、environment identity、結果、H-3-safeな理由、次の行動を束ね、変更が有効なGlobalについてだけ記録できる（それ以外は `review_p7_evaluation_invalid`）。
+
+- `retain`: policyを変えず、その変更の観察を終える。
+- `adjust`: 必要なら新しいPromotion Packet / Candidateを作る。評価だけではpolicyを変えない。
+- `rollback`: 新しいGlobal version・新しいreview・新しいcommitになり、上の正確なrollbackの例外は正確な時だけ使える。
+- `inconclusive`: 成功ではない。
+
+変更後のevidenceも同じ独立性 / 相関のモデルで数え、その変更の下で観察されたopportunityだけが数える。相関したProjectは多くの確認にならない。観察窓の中の重要なenvironmentの変化は、窓を分けるか正の無関係の証明を要し、さもなければ `inconclusive`。時系列だけでは因果のevidenceではない。
+
+stranded changeの入口条件（Amendment 12）: 自分のReceiptのcommit済みGlobal Policy Consumptionを持たない、HEADの履歴にcommitされた変更記録がある間は、`global-policy-change` も `global-policy-evaluation` も新しいroot mutationを開かず（IDの割り当ての前）、`review_p7_run_unrecovered` で止まる。そのoperation自身のpending mutationの再開は検査し直さない。pending root mutationが `reserved_ids` に持つ変更は、そのmutationのものなのでstrandedではなく、単一writerの拒否 `review_p7_root_mutation_conflict` がその状態を報告する（変更がまだ途中の間、evaluationは開かない）。
+
+### 停止規則（P7）
+
+root maintenanceのSTOP code: `review_p7_root_binding_mismatch`、`review_p7_root_is_project`、`review_p7_root_project_context`、`review_p7_root_not_repository`、`review_p7_root_runtime_invalid`、`review_p7_root_runtime_unignored`、`review_p7_root_busy`、`review_p7_root_nested`、`review_p7_root_lock_unavailable`、`review_p7_authorization_required`、`review_p7_authorization_mismatch`、`review_p7_authorization_invalid`、`review_p7_repository_identity_unavailable`、`review_p7_root_effect_refused`、`review_p7_root_lock_not_held`。root maintenanceのreconcile reason: `review_p7_root_mutation_conflict`、`review_p7_root_mutation_unreadable`、`review_p7_root_effect_conflict`、`review_p7_root_abandon_refused`。
+
+Global PromotionとGlobal Policy Change ReviewのSTOP code: `review_p7_request_invalid`、`review_p7_surface_refused`、`review_p7_source_unavailable`、`review_p7_source_invalid`、`review_p7_not_eligible`、`review_p7_rollback_inexact`、`review_p7_compatibility_unproven`、`review_p7_reviewer_floor_unmet`、`review_p7_meta_verifier_failed`、`review_p7_evaluation_invalid`。reconcile reason: `review_p7_candidate_mismatch`、`review_p7_chain_invalid`。
+
+`global-policy-change` ownerのSTOP code: `review_p7_before_state_conflict`、`review_p7_stale_candidate`、`review_p7_global_policy_unavailable`。reconcile reason: `review_p7_persisted_mismatch`、`review_p7_publication_invalid`、`review_p7_run_unrecovered`、`review_p7_record_conflict`。既存のcodeとreasonは同じ意味のまま使う（新しい綴りを作らない）。
+
+## P7 Root Review Policy
+
+root meta-review（`global-policy-change-v1`）のnon-historyなfamily policyのidentity recordは次の静的recordそのものである（Workline実装の定数 `workline.review.p4.ROOT_POLICY_RECORD` と一致しなければならない。RB7C-1）。root RunのEffective Policyはこのrecordのdigestそのもので、historyのcontract、Project Effective Policy、discovery roleを束ねない。P4 / P5 / P6のblockとは別のfamilyで、Project RunのP4 Contextには現れない。
+
+```yaml
+adjudication:
+  contract: review-v1-p4-adjudication-v1
+  instruction: review-v1-p4-adjudication-instruction-v1
+  merge_rule: "same substantive issue, same semantic responsibility, one repair closes all; uncertain stays separate"
+  order:
+    - unsupported
+    - HUMAN
+    - Problem
+    - Improvement
+    - dismissed_non_actionable
+  severity_rule: "the strongest severity the adjudication supports; the reviewer's severity is input only"
+  slot: p4-adjudicator
+  task_kind: p4-adjudication-v1
+blocking_rule: "Problem HIGH or MID, and every C_REPAIR_INDUCED Problem, is a blocking current-cycle obligation"
+categories:
+  - Problem
+  - Improvement
+convergence_rule: "unresolved blocking review obligations = 0 and required coverage and Evidence are current"
+discovery:
+  history: "fresh: no prior Finding or Repair history"
+  instruction: review-v1-p4-discovery-instruction-v1
+  report_rule: H-3 public-safe structured claims plus an explicit coverage declaration
+  slot_rule: "one required task per viewpoint the P4 selector binds; at least one"
+  task_kind: p4-discovery-v1
+dispositions:
+  - repair_required
+  - repaired_current_cycle
+  - retained_history_only
+  - future_work_candidate
+  - no_action_after_adjudication
+evidence_reuse_rule: "positive proof under the dependency vocabulary only; a report, adjudication or Receipt is never reused"
+human_rule: "a required requirement decision is HUMAN_WAIT at generation 4; no repair guesses it"
+impact_classes:
+  - LOCAL
+  - SHARED
+  - CONTRACT
+  - FOUNDATION
+improvement_rule: Improvement of any severity is non-blocking
+last_generation: 6
+low_rule: Problem LOW is non-blocking only while the current completion objective still holds
+outcomes:
+  - unsupported
+  - HUMAN
+  - Problem
+  - Improvement
+  - dismissed_non_actionable
+policy_id: review-v1-p7-root-policy-v1
+relations:
+  - A_NEW
+  - B_RECURRENCE
+  - C_REPAIR_INDUCED
+reverification_minimums:
+  CONTRACT:
+    - adjacent_eligibility
+    - contract_roundtrip
+    - failure_interruption_resume
+    - writers_readers
+  FOUNDATION:
+    - broad_integration
+    - full_suite
+  LOCAL:
+    - direct_consumers
+    - focused_tests
+  SHARED:
+    - focused_tests
+    - integration_checks
+    - representative_callers
+review_contracts:
+  - review-v1-global-policy-change-p4-v1
+root:
+  human_rule: "HUMAN is HUMAN_WAIT at G4 with no Receipt; the same Run stays the waiting Run"
+  meta_verifier_rule: "the fixed mechanical root meta-policy verification re-checks every item before the G5 seal; no reviewer approval bypasses a failed item"
+  namespace_rule: "canonical P1-P4 records in the root policy Review namespace review-policy/review; no Project P5 history and no Human store"
+  policy_rule: "reviewed under the pre-change Global policy plus these fixed root meta-rules; every root Run binds this static family policy as its Effective Policy"
+  publication_rule: "root generation commits are never pushed on their own; they become remote-visible only as ancestors of an authorized exact policy publication"
+  repair_rule: "no Repair Batch: a blocking adjudication is terminal not_authorized at G4 with no Receipt; a changed proposal is a new Promotion Packet and Candidate"
+  review_kind: global-policy-change-v1
+  strength_rule: "required discovery slots are max(2, pre-change Global required slots), or max(3, ...) for a lightening change; distinct reviewer identity/version bindings; one separately bound adjudicator; the proposed policy never lowers the strength that authorizes it"
+schema: review-p7-root-policy
 seal_generation: 5
 severities:
   - HIGH
