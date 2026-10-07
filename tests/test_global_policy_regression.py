@@ -256,16 +256,13 @@ class RootCliBindingTests(WorklineTestCase):
                    "pending_mutation", "next_boundary_adapter_identity"}
 
     def p7_root(self, name: str = "workline-root") -> Path:
-        """A git-initialized copy of this root carrying its tracked Global policy and root ignore rule."""
-        from helpers import WORKLINE_ROOT, copy_workline_root
+        """A git-initialized copy of this root; copy_workline_root carries its tracked Global policy and ignore rule."""
+        from helpers import copy_workline_root
         from workline.review import policy
 
         root = copy_workline_root(self.tmp / name)
         for relative in (".gitignore", policy.GLOBAL_POLICY_REL):
-            target = root.joinpath(*relative.split("/"))
-            if not target.exists():
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(WORKLINE_ROOT.joinpath(*relative.split("/")).read_bytes().replace(b"\r\n", b"\n"))
+            self.assertTrue(root.joinpath(*relative.split("/")).is_file(), relative)
         git(root, "init", "-q", "-b", "main")
         git(root, "add", "-A")
         git(root, "commit", "-q", "-m", "base")

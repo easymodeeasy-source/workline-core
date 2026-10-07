@@ -27,20 +27,6 @@ def baseline() -> policy.GlobalPolicyBaseline:
     return policy.load_global_baseline(WORKLINE_ROOT)
 
 
-def p7_root_copy(dest: Path) -> Path:
-    """A copied Workline root carrying its tracked Global policy (P7 §31.2, RB7C-7): the loader requires the file.
-
-    ``copy_workline_root`` gains the file itself with RB7's shared helper change; until then the copy is completed
-    here, and afterwards this adds nothing.
-    """
-    root = copy_workline_root(dest)
-    target = root.joinpath(*policy.GLOBAL_POLICY_REL.split("/"))
-    if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(WORKLINE_ROOT.joinpath(*policy.GLOBAL_POLICY_REL.split("/")).read_bytes())
-    return root
-
-
 def profile(version: int = 1, parent: str | None = None, *, setting: int = 2, surface: str = policy.SURFACE_REQUIRED_SLOTS,
             supporting: str = RPC, refs: tuple[str, ...] = (RPC,), digest: str | None = None) -> policy.ProjectProfile:
     found = policy.SURFACE_BY_ID[surface]
@@ -271,7 +257,7 @@ class CompatibilityTests(WorklineTestCase):
 
     def test_a_text_only_root_edit_keeps_the_profile_compatible(self) -> None:
         # R6-2 item 4: the canonical digest moves, the policy-semantic projection does not
-        other = p7_root_copy(self.tmp / "root2")
+        other = copy_workline_root(self.tmp / "root2")
         skill = other / ".claude" / "skills" / "review" / "SKILL.md"
         skill.write_bytes(skill.read_bytes() + b"\n")
         edited = policy.load_global_baseline(other)
@@ -468,7 +454,7 @@ class LoaderSeamTests(WorklineTestCase):
                          {key for key in first.record if first.record[key] != loaded.record[key]})
 
     def test_the_loader_never_mutates_the_workline_root(self) -> None:
-        root = p7_root_copy(self.tmp / "root")
+        root = copy_workline_root(self.tmp / "root")
 
         def snapshot() -> dict[str, tuple[bytes, int]]:
             return {str(path.relative_to(root)): (path.read_bytes(), path.stat().st_mtime_ns)
@@ -479,7 +465,7 @@ class LoaderSeamTests(WorklineTestCase):
         self.assertEqual(before, snapshot())
 
     def test_an_unreadable_root_authority_stops_the_loader(self) -> None:
-        root = p7_root_copy(self.tmp / "root")
+        root = copy_workline_root(self.tmp / "root")
         (root / ".claude" / "skills" / "start" / "SKILL.md").unlink()
         with self.assertRaises(StopError) as raised:
             policy.load_global_baseline(root)

@@ -21,7 +21,7 @@ from pathlib import Path
 import unittest
 from unittest import mock
 
-from helpers import WORKLINE_ROOT, WorklineTestCase, copy_workline_root
+from helpers import WORKLINE_ROOT, WorklineTestCase, copy_workline_root, rmtree
 from workline.errors import StopError, ValidationError
 from workline.review import policy, serialize
 
@@ -291,11 +291,18 @@ class LoaderReadsBothModesTests(unittest.TestCase):
                          "no Promotion Packet, change, evaluation or Patch Note is fabricated for it (§31.2)")
 
 
+def bare_root(dest: Path) -> Path:
+    """A copied Workline root WITHOUT its tracked Global policy (copy_workline_root carries it, RB7C-7)."""
+    root = copy_workline_root(dest)
+    rmtree(root / "review-policy")
+    return root
+
+
 class LoaderSwitchTests(WorklineTestCase):
     """§31.3 / §16.26: the same loader reads the tracked Global policy; the transition is source_mode only."""
 
     def root_with(self, data: bytes | None) -> Path:
-        root = copy_workline_root(self.tmp / "root")
+        root = bare_root(self.tmp / "root")
         if data is not None:
             (root / "review-policy").mkdir()
             (root / "review-policy" / "global-policy.yaml").write_bytes(data)
@@ -344,7 +351,7 @@ class LoaderSwitchTests(WorklineTestCase):
             ("not yaml", b"\x00\xff"),
         ):
             with self.subTest(name):
-                root = copy_workline_root(self.tmp / name.replace(" ", "-"))
+                root = bare_root(self.tmp / name.replace(" ", "-"))
                 (root / "review-policy").mkdir()
                 (root / "review-policy" / "global-policy.yaml").write_bytes(data)
                 with self.assertRaises(ValidationError) as raised:
@@ -356,7 +363,7 @@ class LoaderSwitchTests(WorklineTestCase):
         (outside / "global-policy.yaml").write_text(V1_TEXT, encoding="utf-8", newline="")
         for name in ("file symlink", "directory symlink", "directory junction"):
             with self.subTest(name):
-                root = copy_workline_root(self.tmp / f"root-{name.replace(' ', '-')}")
+                root = bare_root(self.tmp / f"root-{name.replace(' ', '-')}")
                 try:
                     if name == "file symlink":
                         (root / "review-policy").mkdir()
