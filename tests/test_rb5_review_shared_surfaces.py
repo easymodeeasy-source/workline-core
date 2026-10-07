@@ -602,7 +602,9 @@ class IntegrationConsumptionTests(Directory):
             records.consumption_from_record({**record, "version": 1}, "a v5 shape at version 1")
         with self.assertRaises(ValidationError) as raised:
             records.consumption_from_record({**record, "version": 4}, "version 4")
-        self.assertEqual("review_record_version", raised.exception.code, "4 stays unread until P7's reader")
+        # composition with landed RB7: version 4 is P7's Global Policy Consumption, whose strict reader refuses this shape
+        self.assertEqual("review_record_invalid", raised.exception.code,
+                         "version 4 is read by P7's GlobalPolicyConsumption reader, which refuses a version 5 shape")
 
     def test_one_terminal_event_has_one_consumption_whatever_its_version(self) -> None:
         self.put(paths.consumption_rel(ident("rcs", 1)), self.consumption())
