@@ -388,6 +388,190 @@ class LoaderSwitchTests(WorklineTestCase):
         self.assertFalse((root / ".workline-root-runtime").exists())
 
 
+MEASUREMENT = {"version": "m1", "metric": "supported escapes per relevant Run", "success_criteria": "no added escape",
+               "minimum_opportunities": 3, "minimum_clusters": 2, "continued_observation_permitted": False}
+STRENGTHEN_ID = "rgc_" + "1" * 26
+LIGHTEN_ID = "rgc_" + "2" * 26
+OVERRIDE_CHANGE = "rpc_" + "3" * 26
+
+
+def global_change(change_id: str, before: dict, after: dict, direction: str, surface: str = SLOTS) -> dict:
+    """A stored Global change record of ``before`` -> ``after`` on ``surface`` (RB7-C's strict schema)."""
+    from workline.review import global_policy as gp
+
+    before_setting = policy.global_policy_settings(before)[surface]
+    record = {
+        serialize.SCHEMA_KEY: gp.SCHEMA_CHANGE, serialize.VERSION_KEY: 1, "global_policy_change_id": change_id,
+        "promotion_packet_id": "rpp_" + change_id[4:], "promotion_packet_digest": "a" * 64, "candidate_hash": "b" * 64,
+        "review_run_id": "rr_" + "7" * 26, "receipt_id": "rcp_" + "7" * 26,
+        "before_global_policy_version": before["global_policy_version"],
+        "before_global_policy_digest": policy.global_policy_digest(before),
+        "after_global_policy_version": after["global_policy_version"],
+        "after_global_policy_digest": policy.global_policy_digest(after),
+        "policy_surface_id": surface, "before_setting": before_setting,
+        "after_setting": policy.global_policy_settings(after)[surface], "direction": direction,
+        "generalized_mechanism_id": "contract-drift", "compatibility_adapter_identity": policy.COMPATIBILITY_TOTAL_ADAPTER_V1,
+        "compatibility_proof_digest": "c" * 64, "expected_effect": "fewer escapes per relevant Run",
+        "measurement_contract": dict(MEASUREMENT),
+        "rollback_contract": {"threshold": "one added supported escape",
+                              "unit": {"policy_surface_id": surface, "restore_setting": before_setting,
+                                       "restore_global_policy_digest": policy.global_policy_digest(before)}},
+        "summary": "a generalized contract-drift check",
+    }
+    return gp.parse_change_record(record, "a Global change record")
+
+
+class NoProfileReader:
+    """A Project with no Profile and no policy record: the Global baseline alone governs it."""
+
+    def read_profile(self) -> None:
+        return None
+
+    def policy_change_ids(self) -> tuple[str, ...]:
+        return ()
+
+    def policy_evaluation_ids(self) -> tuple[str, ...]:
+        return ()
+
+
+class OverrideReader:
+    """The change-record readers the compatibility decision uses, over one Project change (R6-2 item 3)."""
+
+    def __init__(self, change: dict) -> None:
+        self.change = change
+
+    def policy_change_ids(self) -> tuple[str, ...]:
+        return (self.change["policy_change_id"],)
+
+    def read_policy_change(self, change_id: str) -> dict:
+        return self.change
+
+    def policy_change_exists(self, change_id: str) -> bool:
+        return change_id == self.change["policy_change_id"]
+
+
+class GlobalChangeAdoptionTests(WorklineTestCase):
+    """§31.45 / §16.12: a Project adopts a later Global version at its next Run boundary through the same loader.
+
+    Lineage here: v1 (slots 1) -> v2 strengthens slots to 2 -> v3 lightens slots back to 1.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.v2 = policy.global_policy_record(2, V1_DIGEST, {SLOTS: 2, STEPS: 0})
+        self.v3 = policy.global_policy_record(3, policy.global_policy_digest(self.v2), {SLOTS: 1, STEPS: 0})
+        self.changes = [global_change(STRENGTHEN_ID, v1(), self.v2, "strengthen"),
+                        global_change(LIGHTEN_ID, self.v2, self.v3, "lighten")]
+        self.root = self.root_at(self.v3, self.changes)
+
+    def root_at(self, current: dict, changes: list, name: str = "root") -> Path:
+        root = copy_workline_root(self.tmp / name)
+        (root / "review-policy" / "changes").mkdir(parents=True)
+        (root / "review-policy" / "global-policy.yaml").write_bytes(policy.global_policy_bytes(current))
+        for change in changes:
+            (root / "review-policy" / "changes" / f"{change['global_policy_change_id']}.yaml").write_bytes(
+                serialize.canonical_bytes(change))
+        return root
+
+    def overriding(self, surface: str, setting: int) -> tuple[policy.ProjectProfile, OverrideReader]:
+        """A Profile v1 written under Global v1 with one override, and its supporting Project change record."""
+        bound = self.loaded_v1()
+        found = policy.SURFACE_BY_ID[surface]
+        profile = policy.ProjectProfile(
+            profile_version=1, parent_profile_digest=None, global_baseline_digest=serialize.digest(bound),
+            global_baseline_version=1, loader_semantics_identity=policy.LOADER_SEMANTICS_IDENTITY,
+            overrides=({"policy_surface_id": surface, "strength_class": found.strength_class, "setting": setting,
+                        "direction": "strengthen" if setting > found.global_setting else "lighten",
+                        "supporting_policy_change_id": OVERRIDE_CHANGE},),
+            active_experiment_refs=(),
+        )
+        change = {"policy_change_id": OVERRIDE_CHANGE, "after_profile_digest": profile.digest, "global_baseline": bound,
+                  "global_baseline_digest": serialize.digest(bound), "affected_policy_surface": surface,
+                  "after_setting": setting}
+        return profile, OverrideReader(change)
+
+    def loaded_v1(self) -> dict:
+        return policy.load_global_baseline(WORKLINE_ROOT).record
+
+    def test_the_closed_tables_admit_the_p7_identities(self) -> None:
+        self.assertEqual((policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC, policy.COMPATIBILITY_TOTAL_ADAPTER_V1),
+                         policy.COMPATIBILITY_INTERPRETATIONS)
+        self.assertEqual({policy.ORIGIN_PROJECT: "review_policy_change",
+                          policy.ORIGIN_GLOBAL: policy.GLOBAL_EXPERIMENT_KIND}, dict(policy.EXPERIMENT_ORIGINS))
+        baseline = policy.load_global_baseline(self.root)
+        with self.assertRaises(ValidationError):  # an absent Profile is the baseline itself: never "adapted"
+            policy.effective_policy_record(baseline, None, (), compatibility=policy.COMPATIBILITY_TOTAL_ADAPTER_V1)
+        with self.assertRaises(ValidationError):
+            policy.effective_policy_record(baseline, None, (), compatibility="review-v1-p7-guessed")
+
+    def test_a_project_following_the_global_setting_freezes_the_lightening_holdout(self) -> None:
+        state = policy.resolve_policy_state(NoProfileReader(), self.root)
+        self.assertEqual((policy.SOURCE_MODE_MATERIALIZED, 3), (state.baseline.source_mode, state.baseline.version))
+        self.assertEqual([(LIGHTEN_ID, SLOTS, "lighten", 2, policy.ORIGIN_GLOBAL)],
+                         [(item.policy_change_id, item.policy_surface_id, item.direction, item.holdout_setting,
+                           item.origin) for item in state.active],
+                         "the later change on the surface supersedes the earlier; the lightening keeps the stronger "
+                         "before setting as its holdout")
+        self.assertEqual({SLOTS: 1, STEPS: 0}, state.effective["settings"])
+        self.assertEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC, state.effective["compatibility"])
+        self.assertEqual(state.effective, policy.parse_effective_policy(state.effective, "the frozen Effective Policy"))
+
+    def test_an_overridden_surface_is_no_observation_of_the_global_change(self) -> None:
+        """FLAG-C3: an override keeps its absolute setting (§31.21), so the Global lightening changes nothing there."""
+        baseline = policy.load_global_baseline(self.root)
+        profile, _ = self.overriding(SLOTS, 3)
+        self.assertEqual((), policy.global_experiments(self.root, baseline, profile))
+        lightening = policy.global_experiments(self.root, baseline, None)
+        frozen = policy.effective_policy_record(baseline, profile, (),
+                                                compatibility=policy.COMPATIBILITY_TOTAL_ADAPTER_V1)
+        self.assertEqual({SLOTS: 3, STEPS: 0}, frozen["settings"])
+        self.assertEqual(frozen, policy.parse_effective_policy(frozen, "the frozen Effective Policy"))
+        # the reader's rule is NOT loosened: that holdout on that override would still be refused
+        with self.assertRaises(ValidationError):
+            policy.parse_effective_policy(policy.effective_policy_record(
+                baseline, profile, lightening, compatibility=policy.COMPATIBILITY_TOTAL_ADAPTER_V1), "a frozen policy")
+        # an override on the OTHER surface leaves the Project following the Global slots setting: it observes it
+        steps_profile, _ = self.overriding(STEPS, 2)
+        self.assertEqual([LIGHTEN_ID], [item.policy_change_id for item in
+                                        policy.global_experiments(self.root, baseline, steps_profile)])
+
+    def test_a_profile_written_under_an_earlier_global_is_applied_through_adapter_v1(self) -> None:
+        baseline = policy.load_global_baseline(self.root)
+        profile, reader = self.overriding(SLOTS, 3)
+        self.assertIsNone(policy.compatibility_problem(profile, policy.load_global_baseline(WORKLINE_ROOT), reader))
+        self.assertEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC,
+                         policy.compatibility_interpretation(profile, policy.load_global_baseline(WORKLINE_ROOT), reader))
+        self.assertIsNone(policy.compatibility_problem(profile, baseline, reader))
+        self.assertEqual(policy.COMPATIBILITY_TOTAL_ADAPTER_V1,
+                         policy.compatibility_interpretation(profile, baseline, reader))
+        self.assertEqual({SLOTS: 3, STEPS: 0}, policy.profile_overlay(profile, baseline))
+        self.assertEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC,
+                         policy.compatibility_interpretation(None, baseline, reader))
+
+    def test_the_global_lineage_is_read_strictly_from_the_configured_root(self) -> None:
+        baseline = policy.load_global_baseline(self.root)
+        stray = self.root / "review-policy" / "changes" / "notes.txt"
+        stray.write_text("x\n", encoding="utf-8")
+        with self.assertRaises(StopError) as raised:
+            policy.global_experiments(self.root, baseline, None)
+        self.assertEqual(policy.CODE_BASELINE_UNAVAILABLE, raised.exception.code)
+        stray.unlink()
+        record = self.root / "review-policy" / "changes" / f"{LIGHTEN_ID}.yaml"
+        record.write_bytes(b"# note\n" + serialize.canonical_bytes(self.changes[1]))
+        with self.assertRaises(ValidationError) as invalid:
+            policy.global_experiments(self.root, baseline, None)
+        self.assertEqual("review_record_invalid", invalid.exception.code)
+        record.write_bytes(serialize.canonical_bytes(self.changes[1]).replace(b"\n", b"\r\n"))
+        self.assertEqual([LIGHTEN_ID], [item.policy_change_id
+                                        for item in policy.global_experiments(self.root, baseline, None)],
+                         "a CRLF checkout of a record reads as the record")
+        unrecorded = self.root_at(self.v2, [], "unrecorded")
+        with self.assertRaises(ValidationError):
+            policy.global_experiments(unrecorded, policy.load_global_baseline(unrecorded), None)
+        self.assertEqual((), policy.global_experiments(WORKLINE_ROOT, policy.load_global_baseline(WORKLINE_ROOT), None),
+                         "version 1 is no learned change")
+
+
 class SuccessorTests(unittest.TestCase):
     def test_a_successor_is_exactly_the_next_version_naming_its_exact_parent(self) -> None:
         first = v1()

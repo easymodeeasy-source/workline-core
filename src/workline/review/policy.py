@@ -80,26 +80,21 @@ SOURCE_MODES = (SOURCE_MODE_DERIVED, SOURCE_MODE_MATERIALIZED)
 #: The Global policy versions a DERIVED baseline is: only 1. A materialized Global policy version is runtime data
 #: (§31.22, RB7C-8) - any positive integer - never a row of a code table (:func:`baseline_version_admitted`).
 BASELINE_VERSIONS = (BASELINE_VERSION,)
-#: R6-2 / FC-RB7-5: the compatibility interpretation an Effective Policy binds. Before RB7: exact equality of the
-#: policy-semantic projection of the baseline a Profile was written under (recovered from its change record) and of
-#: the current one. RB7 adds its versioned total adapter here, without an Effective Policy schema v2.
+#: R6-2 / FC-RB7-5: the compatibility interpretation an Effective Policy binds. Exact equality of the policy-semantic
+#: projection of the baseline a Profile was written under (recovered from its change record) and of the current one,
+#: or - P7 (§31.21, CP RB7-PREP item 4) - the versioned total Profile compatibility adapter, which an Effective Policy
+#: binds only once a real Global change makes the two projections differ; equal projections (the initial
+#: materialization and every text-only root edit included) keep the exact interpretation. No Effective Policy schema v2.
 COMPATIBILITY_EXACT_DERIVED_SEMANTIC = "review-v1-p6-exact-derived-semantic-v1"
-COMPATIBILITY_INTERPRETATIONS = (COMPATIBILITY_EXACT_DERIVED_SEMANTIC,)
-#: P7 (§31.21, CP RB7-PREP item 4): the identity of the versioned total Profile compatibility adapter. It names the
-#: interpretation an Effective Policy binds only once a real Global change makes the two projections differ; equal
-#: projections - the initial materialization included - keep :data:`COMPATIBILITY_EXACT_DERIVED_SEMANTIC`. Declared
-#: here, once, so the adapter, its proofs and the closed table above name the same identity; the table admits it
-#: with the loader's materialized mode (RB7 step 4).
 COMPATIBILITY_TOTAL_ADAPTER_V1 = "review-v1-p7-total-adapter-v1"
-#: FC-RB7-6: who an active experiment comes from, and the identity kind it is named by. Only Project-origin
-#: experiments (an applied Project Policy Change) exist before RB7; RB7 adds a Global origin here.
+COMPATIBILITY_INTERPRETATIONS = (COMPATIBILITY_EXACT_DERIVED_SEMANTIC, COMPATIBILITY_TOTAL_ADAPTER_V1)
+#: FC-RB7-6: who an active experiment comes from, and the identity kind it is named by: an applied Project Policy
+#: Change, or - P7 (§16.10 / §31.19) - an applied Global Policy Change whose experiment governs a Project that
+#: follows the Global setting of its surface (:func:`global_experiments`).
 ORIGIN_PROJECT = "project"
-EXPERIMENT_ORIGINS: Mapping[str, str] = {ORIGIN_PROJECT: "review_policy_change"}
-#: P7 (§16.10 / §31.19, FC-RB7-6): a Global lightening's holdout experiment, named by its applied Global Policy
-#: Change (``review_global_policy_change``). Declared here once; :data:`EXPERIMENT_ORIGINS` admits it with the
-#: loader's materialized mode (RB7 step 4).
 ORIGIN_GLOBAL = "global"
 GLOBAL_EXPERIMENT_KIND = "review_global_policy_change"
+EXPERIMENT_ORIGINS: Mapping[str, str] = {ORIGIN_PROJECT: "review_policy_change", ORIGIN_GLOBAL: GLOBAL_EXPERIMENT_KIND}
 #: The loader / schema / default-semantics identity a Profile and the baseline bind (§15.9, §30.5).
 LOADER_SEMANTICS_IDENTITY = "review-v1-p6-policy-loader-v1"
 META_RULES_ID = "review-v1-p6-meta-rules-v1"
@@ -680,7 +675,16 @@ def derived_global_baseline(workline_root: Path) -> GlobalPolicyBaseline:
 
 
 def _read_global_policy(workline_root: Path) -> bytes:
-    """The bytes of ``review-policy/global-policy.yaml``, read without following any indirection.
+    """The bytes of ``review-policy/global-policy.yaml``, read without following any indirection (:func:`_read_root_file`).
+
+    Absent, indirected, unreadable or changed while read is
+    ``review_p6_baseline_unavailable``, and nothing is derived in its place.
+    """
+    return _read_root_file(workline_root, GLOBAL_POLICY_REL, f"the Global policy {GLOBAL_POLICY_REL}")
+
+
+def _read_root_file(workline_root: Path, relative: str, described: str) -> bytes:
+    """One tracked Workline-root file under ``review-policy/``, read without following any indirection.
 
     This module may not use :mod:`workline.review.fsafe` (it stays inert), so
     the read proves it directly: every component below the root is a plain
@@ -688,36 +692,75 @@ def _read_global_policy(workline_root: Path) -> bytes:
     other reparse point), the bytes are read, and the file is ``lstat``-ed again
     and must be the same file with the same size. Anything else - absent,
     indirected, unreadable, changed while read - is
-    ``review_p6_baseline_unavailable`` and nothing is derived in its place.
-    A checkout's CRLF line ends are read as LF (``core.autocrlf``), as the
-    derived baseline reads registry.md and the Skills; the committed blob a
-    Global Policy Change proves is exact either way.
+    ``review_p6_baseline_unavailable``. A checkout's CRLF line ends are read as
+    LF (``core.autocrlf``), as the derived baseline reads registry.md and the
+    Skills; the committed blob a Global Policy Change proves is exact either way.
     """
-    path = workline_root
-    parts = GLOBAL_POLICY_REL.split("/")
+    path = Path(workline_root)
+    parts = relative.split("/")
     try:
         for index, part in enumerate(parts):
             path = path / part
             info = os.lstat(path)
             plain = stat.S_ISREG(info.st_mode) if index == len(parts) - 1 else stat.S_ISDIR(info.st_mode)
-            if not plain or getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            if not plain or _reparse(info):
                 raise stop(CODE_BASELINE_UNAVAILABLE,
-                           f"the Global policy {GLOBAL_POLICY_REL} of {workline_root} is not reached through plain "
-                           f"directories to a regular file ({'/'.join(parts[:index + 1])}); it is never followed")
+                           f"{described} of {workline_root} is not reached through plain directories to a regular "
+                           f"file ({'/'.join(parts[:index + 1])}); it is never followed")
         data = path.read_bytes()
         after = os.lstat(path)
     except FileNotFoundError as exc:
         raise stop(CODE_BASELINE_UNAVAILABLE,
-                   f"the Workline root {workline_root} has no Global policy {GLOBAL_POLICY_REL}; nothing is derived in "
-                   "its place") from exc
+                   f"the Workline root {workline_root} has no {described}; nothing is derived in its place") from exc
     except OSError as exc:
-        raise stop(CODE_BASELINE_UNAVAILABLE,
-                   f"the Global policy {GLOBAL_POLICY_REL} of {workline_root} cannot be read ({exc})") from exc
+        raise stop(CODE_BASELINE_UNAVAILABLE, f"{described} of {workline_root} cannot be read ({exc})") from exc
     if (after.st_dev, after.st_ino, after.st_size) != (info.st_dev, info.st_ino, info.st_size) \
             or len(data) != after.st_size or not stat.S_ISREG(after.st_mode):
-        raise stop(CODE_BASELINE_UNAVAILABLE,
-                   f"the Global policy {GLOBAL_POLICY_REL} of {workline_root} changed while it was read")
+        raise stop(CODE_BASELINE_UNAVAILABLE, f"{described} of {workline_root} changed while it was read")
     return data.replace(b"\r\n", b"\n")
+
+
+def _reparse(info: os.stat_result) -> bool:
+    return bool(getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
+def _root_records(workline_root: Path, relative_dir: str, family: str) -> list[dict[str, Any]]:
+    """The tracked root records of one family directory (P7 change / evaluation records), read no-follow.
+
+    An absent directory holds none. Every entry must be exactly one record of
+    ``family`` (``ROOT_POLICY_LAYOUT.family_of``) - anything else there is
+    ``review_p6_baseline_unavailable``, never skipped - and every record is read
+    as :func:`_read_root_file` reads and must be its canonical bytes
+    (``review_record_invalid`` otherwise). The caller parses the records.
+    """
+    from .namespace import ROOT_POLICY_LAYOUT
+
+    directory = Path(workline_root)
+    try:
+        for part in relative_dir.split("/"):
+            directory = directory / part
+            info = os.lstat(directory)
+            if not stat.S_ISDIR(info.st_mode) or _reparse(info):
+                raise stop(CODE_BASELINE_UNAVAILABLE,
+                           f"{relative_dir} of {workline_root} is not a plain directory; it is never followed")
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise stop(CODE_BASELINE_UNAVAILABLE, f"{relative_dir} of {workline_root} cannot be listed ({exc})") from exc
+    found: list[dict[str, Any]] = []
+    for name in names:
+        relative = f"{relative_dir}/{name}"
+        if ROOT_POLICY_LAYOUT.family_of(relative) != family:
+            raise stop(CODE_BASELINE_UNAVAILABLE,
+                       f"{relative} of {workline_root} is not a {family} record of the Global policy lineage")
+        raw = _read_root_file(workline_root, relative, f"the Global {family} record {relative}")
+        try:
+            data, _ = serialize.parse_canonical(raw, relative)
+        except ValidationError as exc:
+            raise _invalid(f"the Global {family} record {relative} does not read canonically: {exc}") from exc
+        found.append(data)
+    return found
 
 
 def _global_policy_of(raw: bytes) -> dict[str, Any]:
@@ -1170,13 +1213,16 @@ def written_under(profile: ProjectProfile, reader: Any) -> tuple[dict[str, Any] 
 def compatibility_problem(profile: ProjectProfile, baseline: GlobalPolicyBaseline, reader: Any) -> str | None:
     """Why ``profile`` cannot be applied under ``baseline``, or ``None`` - the ONLY compatibility decision (FC-RB7-5).
 
-    §30.7 before RB7, as R6-2 rules it: exact equality of the policy-semantic
-    projection of the baseline the Profile was written under (recovered from
-    its change record, :func:`written_under`) and of the current baseline. A
-    text-only Workline-root edit keeps a Profile compatible; a change to the
-    surfaces, meta-rules, loader semantics or Global policy version does not,
-    until RB7's versioned total adapter proves otherwise. Anything that cannot
-    be proven is incompatible: no guess, no merge, no dropped override.
+    §30.7, as R6-2 rules it: exact equality of the policy-semantic projection
+    of the baseline the Profile was written under (recovered from its change
+    record, :func:`written_under`) and of the current baseline. A text-only
+    Workline-root edit keeps a Profile compatible. P7 (§31.21, §16.11): when a
+    real Global Policy Change made the projections differ, the versioned total
+    adapter v1 decides (:mod:`workline.review.global_policy`) - a changed
+    Global policy version and settings only, every valid Profile v1 kept as its
+    absolute local overrides; a change to the surfaces, meta-rules or loader
+    semantics is still incompatible. Anything that cannot be proven is
+    incompatible: no guess, no merge, no dropped override.
     """
     if profile.loader_semantics_identity != LOADER_SEMANTICS_IDENTITY:
         return "the Profile binds another loader semantics identity"
@@ -1187,8 +1233,13 @@ def compatibility_problem(profile: ProjectProfile, baseline: GlobalPolicyBaselin
     if problems:
         return problems[0]
     if semantic_projection(bound) != baseline.semantic_projection:
-        return ("the policy semantics of the Global baseline the Profile was written under are not the current "
-                "baseline's (exact derived-baseline compatibility); no override is guessed, merged or dropped")
+        from . import global_policy as p7
+
+        adapted = p7.profile_compatibility_problem(profile, bound, baseline.record)
+        if adapted is not None:
+            return ("the policy semantics of the Global baseline the Profile was written under are not the current "
+                    f"baseline's, and the total adapter v1 does not bridge them ({adapted}); no override is guessed, "
+                    "merged or dropped")
     for item in profile.overrides:
         surface = baseline.surface(item["policy_surface_id"])
         if item["strength_class"] != surface["strength_class"]:
@@ -1282,10 +1333,21 @@ ACTIVE_EXPERIMENT_FIELDS = ("origin", "policy_change_id", "policy_surface_id", "
 
 
 def effective_policy_record(baseline: GlobalPolicyBaseline, profile: ProjectProfile | None,
-                            active: Sequence[ActiveExperiment]) -> dict[str, Any]:
-    """The normalized Effective Policy: Global baseline + Profile or explicit absence (+ the active holdout plan)."""
+                            active: Sequence[ActiveExperiment], *,
+                            compatibility: str = COMPATIBILITY_EXACT_DERIVED_SEMANTIC) -> dict[str, Any]:
+    """The normalized Effective Policy: Global baseline + Profile or explicit absence (+ the active holdout plan).
+
+    ``compatibility`` is the interpretation under which the Profile is applied
+    (:func:`compatibility_interpretation`): an absent Profile is the baseline
+    itself and is always the exact interpretation. The overlay is the same in
+    both: each override as its absolute local setting, every other surface at
+    the current Global setting (§31.21).
+    """
     from . import p4
 
+    if compatibility not in COMPATIBILITY_INTERPRETATIONS or (
+            profile is None and compatibility != COMPATIBILITY_EXACT_DERIVED_SEMANTIC):
+        raise _invalid(f"{compatibility!r} is not a compatibility interpretation of this Effective Policy")
     settings = profile_overlay(profile, baseline)
     return serialize.canonical_data({
         serialize.SCHEMA_KEY: SCHEMA_EFFECTIVE,
@@ -1297,7 +1359,7 @@ def effective_policy_record(baseline: GlobalPolicyBaseline, profile: ProjectProf
             "source_mode": baseline.source_mode,
         },
         "profile": None if profile is None else {"profile_version": profile.profile_version, "digest": profile.digest},
-        "compatibility": COMPATIBILITY_EXACT_DERIVED_SEMANTIC,
+        "compatibility": compatibility,
         "settings": settings,
         "meta_rules_digest": meta_rules_digest(),
         "loader_semantics_identity": LOADER_SEMANTICS_IDENTITY,
@@ -1475,8 +1537,62 @@ def resolve_policy_state(reader: Any, workline_root: Path, *, require_compatible
         if problem is not None:
             raise stop(CODE_PROFILE_INCOMPATIBLE, f"{problem}: no new Review Run is started under this Profile "
                                                   "(policy maintenance / reconcile)")
-    active = active_experiments(reader, profile)
-    return PolicyState(baseline, profile, active, effective_policy_record(baseline, profile, active))
+    active = active_experiments(reader, profile) + global_experiments(workline_root, baseline, profile)
+    return PolicyState(baseline, profile, active, effective_policy_record(
+        baseline, profile, active, compatibility=compatibility_interpretation(profile, baseline, reader)))
+
+
+def compatibility_interpretation(profile: ProjectProfile | None, baseline: GlobalPolicyBaseline, reader: Any) -> str:
+    """The interpretation the next Run applies ``profile`` under (R6-2, §31.21; CP RB7-PREP item 4).
+
+    The exact derived-semantic interpretation for an absent Profile and for a
+    Profile written under a baseline of equal policy-semantic projection (the
+    initial materialization and every text-only root edit included); the total
+    adapter v1 only once a real Global Policy Change made the projections
+    differ. A Profile whose baseline cannot be recovered keeps the exact
+    interpretation here: whether it may be applied at all is
+    :func:`compatibility_problem`'s decision, never this one's.
+    """
+    if profile is None:
+        return COMPATIBILITY_EXACT_DERIVED_SEMANTIC
+    bound, _ = written_under(profile, reader)
+    if bound is None:
+        return COMPATIBILITY_EXACT_DERIVED_SEMANTIC
+    from . import global_policy as p7
+
+    return p7.compatibility_interpretation(bound, baseline.record)
+
+
+def global_experiments(workline_root: Path, baseline: GlobalPolicyBaseline,
+                       profile: ProjectProfile | None) -> tuple[ActiveExperiment, ...]:
+    """The Global-origin experiments a Project's next Run freezes (§16.10 / §31.19, FC-RB7-6).
+
+    The experiments of the current Global policy's lineage
+    (:func:`workline.review.global_policy.active_global_experiments`, read from
+    the configured Workline root's tracked change and evaluation records) that
+    govern THIS Project: those on a surface the Project follows the Global
+    setting of. A Project override is an absolute local setting the Global
+    change never alters (§31.21, §16.24), so on an overridden surface the
+    Global change makes no downward setting change - the one thing the fixed
+    lightening rule attaches a holdout to (``META_RULES["lightening_rule"]``) -
+    and that Project is no observation of it. Version 1 is no learned change
+    and has none.
+    """
+    if baseline.source_mode != SOURCE_MODE_MATERIALIZED or baseline.version == 1:
+        return ()
+    from . import global_policy as p7
+    from .namespace import ROOT_POLICY_LAYOUT
+
+    root = Path(workline_root)
+    current = _global_policy_of(_read_global_policy(root))
+    if global_policy_digest(current) != baseline.global_policy_identity:
+        raise stop(CODE_BASELINE_UNAVAILABLE,
+                   f"the Global policy {GLOBAL_POLICY_REL} of {root} changed while it was read")
+    changes = _root_records(root, ROOT_POLICY_LAYOUT.changes_dir, "change")
+    evaluations = _root_records(root, ROOT_POLICY_LAYOUT.evaluations_dir, "evaluation")
+    found = p7.active_global_experiments(changes, evaluations, current)
+    return tuple(item for item in found
+                 if profile is None or profile.setting_of(item.policy_surface_id) is None)
 
 
 def require_lineage(reader: Any, profile: ProjectProfile | None) -> None:
