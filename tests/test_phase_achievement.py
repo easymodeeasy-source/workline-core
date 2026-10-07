@@ -604,23 +604,31 @@ class DeferredAchievementTests(IntegrationRunCase):
         from workline import phase_integration as pi
         from workline import start as st
         from workline.mutation import MutationController
-        from planning_helpers import Crash, crash_at
+        from unittest import mock
 
-        for interrupted in (False, True):
+        from planning_helpers import Crash, crash_at
+        from workline import start_review as sr
+
+        for interrupted in (None, "before the commit", "after the commit"):
             with self.subTest(interrupted=interrupted):
-                store, phase_id, ids = self.marked_project("cancel-interrupted" if interrupted else "cancel",
-                                                           confirmation=True)
+                store, phase_id, ids = self.marked_project("cancel" if interrupted is None else
+                                                           "cancel-" + interrupted.split()[0], confirmation=True)
                 self.assertEqual("completed", self.integrate(store, ids["integration"], phase_review()).status)
                 review = ReviewStore(store)
                 self.assertEqual((), review.phase_completion_evidence(), "the confirmation is still pending")
                 cancel = st.Cancel(reason="the Human confirmation is no longer needed")
                 executor = lambda ctx: cancel  # noqa: E731
-                if interrupted:
-                    with crash_at(st._Session, "_commit", when=lambda n, session, prefix, *a, **k: prefix == "commit"):
+                if interrupted is not None:
+                    # RB5PR2-2: interrupted after the commit too - the resumed cancel finds its commit recorded
+                    with crash_at(st._Session, "_commit", after=interrupted == "after the commit",
+                                  when=lambda n, session, prefix, *a, **k: prefix == "commit"):
                         with self.assertRaises(Crash):
                             st.start(store, ids["confirmation"], "single-work", executor)
-                result = st.start(store, ids["confirmation"], "single-work", executor)
+                with mock.patch.object(sr, "completion_postcommit", wraps=sr.completion_postcommit) as proof:
+                    result = st.start(store, ids["confirmation"], "single-work", executor)
                 self.assertEqual("cancelled", result.status)
+                self.assertEqual([ids["confirmation"]], [call.args[2] for call in proof.call_args_list],
+                                 "the §32.39 postcommit proof runs once on every path, a recorded commit included")
                 (evidence,) = review.phase_completion_evidence()
                 view = ProjectView.load(store)
                 (cancelled,) = [e for e in view.events_for(ids["confirmation"]) if e.type == "work_cancelled"]

@@ -1202,6 +1202,10 @@ class _Session:
         """
         work = ProjectView.load(self.store).works[cancel.work_id]
         if cancel.committed:
+            # RB5PR2-2 (§32.39): the commit was made before the interruption, so the replay made it no new one - its
+            # postcommit proof (the recorded achievement stage is HEAD's bytes and HEAD's committed basis) is still
+            # owed before the cancel's success; nothing for a cancel that recorded no evidence
+            self._completion_postcommit(cancel.work_id)
             return StartResult(
                 "cancelled", work.id, self.mutation.id, tuple(self.completed), work.phase_id, cancel.reason,
                 gitcmd.head_commit(self.store.root),
