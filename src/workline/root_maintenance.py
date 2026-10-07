@@ -917,8 +917,11 @@ class RootMutation:
 
         A commit: ``prepared_commit`` / ``prepared_tree`` (full ids, fixed once
         recorded) and ``ref_moved`` (only ever false -> true, and true only
-        while the frozen branch names the prepared commit). A push:
-        ``pushed`` (only ever false -> true).
+        while the frozen branch names the prepared commit). The prepared commit
+        is durable before any ref moves (RB7C-5, RB7BL-1): a commit's FIRST
+        facts say ``ref_moved: false``, so a commit with no facts recorded never
+        moved its ref through this mutation. A push: ``pushed`` (only ever
+        false -> true).
         """
         self._writable()
         effect = self._effect(index)
@@ -933,6 +936,18 @@ class RootMutation:
             if set(found) != set(COMMIT_FACT_FIELDS) or not gitcmd.full_commit_id(found["prepared_commit"]) \
                     or not gitcmd.full_commit_id(found["prepared_tree"]) or type(found["ref_moved"]) is not bool:
                 raise _refused(f"root commit facts are exactly {', '.join(COMMIT_FACT_FIELDS)}")
+            if previous is None:
+                if found["ref_moved"]:
+                    raise _refused(f"the {effect['payload']['stage']} commit of root mutation {self.mutation_id} "
+                                   "records its prepared commit (ref_moved false) before its ref moves, never first "
+                                   "as moved")
+                named = gitcmd.branch_commit(self._lock.root, effect["payload"]["ref"])
+                if named != effect["payload"]["parent"] and (
+                        named is None or named == found["prepared_commit"]
+                        or gitcmd.descends_from(self._lock.root, named, found["prepared_commit"]) is not False):
+                    raise reconcile(f"{effect['payload']['ref']} already holds the {effect['payload']['stage']} "
+                                    "commit, or cannot be read, while its prepared commit was never recorded; a ref "
+                                    "moves only after the prepared commit is durable", REASON_EFFECT_CONFLICT)
             if previous is not None:
                 if (previous["prepared_commit"], previous["prepared_tree"]) != (found["prepared_commit"],
                                                                                 found["prepared_tree"]):
@@ -977,10 +992,11 @@ class RootMutation:
 
         Applied means recorded so, or found so now: a file effect whose exact
         bytes are at its path, a commit whose prepared commit the branch names
-        or descends from, and any recorded push intent (whether it reached the
-        remote cannot be known here). Anything of that kind is
-        ``review_p7_root_abandon_refused``: such a mutation is completed or
-        reconciled, never dropped.
+        or descends from - or, with no prepared commit recorded, whose branch
+        is anywhere but its recorded parent - and any recorded push intent
+        (whether it reached the remote cannot be known here). Anything of that
+        kind is ``review_p7_root_abandon_refused``: such a mutation is completed
+        or reconciled, never dropped.
         """
         self._writable()
         for index, effect in enumerate(self._record["effects"]):
@@ -1007,13 +1023,15 @@ def _effect_may_be_applied(root: Path, effect: Mapping[str, Any]) -> bool:
         return True
     if kind == EFFECT_COMMIT:
         facts = effect["facts"]
-        if not isinstance(facts, dict):
-            return False
-        if facts.get("ref_moved"):
+        if isinstance(facts, dict) and facts.get("ref_moved"):
             return True
         named = gitcmd.branch_commit(root, effect["payload"]["ref"])
         if named is None:
             return True  # Git cannot say: not provably unapplied
+        if not isinstance(facts, dict):
+            # No prepared commit recorded (RB7BL-1): only the branch still at the recorded parent proves that
+            # nothing moved; a branch anywhere else is not provably unapplied.
+            return named != effect["payload"]["parent"]
         if named == facts["prepared_commit"]:
             return True
         return gitcmd.descends_from(root, named, facts["prepared_commit"]) is not False
@@ -1057,6 +1075,11 @@ def _apply_file_effect(root: Path, kind: str, payload: Mapping[str, Any]) -> str
                     "immutable root record is never overwritten", REASON_EFFECT_CONFLICT)
 
 
+def _strict(value: object) -> str:
+    """A type-exact comparison key (``True`` is not ``1``) for a resume's frozen values."""
+    return json.dumps(value, sort_keys=True, default=repr)
+
+
 def _mutation_rel(mutation_id: str) -> str:
     return f"{MUTATIONS_DIR}/{mutation_id}.yaml"
 
@@ -1065,7 +1088,22 @@ _MUTATION_NAME = re.compile(r"(rpm_[0-9A-HJKMNP-TV-Z]{26})\.yaml\Z")
 
 
 def _mutation_problem(record: object, mutation_id: str) -> str | None:
-    """Why ``record`` is not exactly a root mutation record named ``mutation_id``, or None."""
+    """Why ``record`` is not exactly a root mutation record named ``mutation_id``, or None (RB7BL-4).
+
+    Types and values are checked, not key sets alone: every value a later step
+    dereferences - the write scope, each effect payload (re-checked with the very
+    rule :meth:`RootMutation.add_effect` applied when it was recorded), each
+    effect's state and facts - is proven here, so a corrupted record is
+    ``review_p7_root_mutation_unreadable`` and never a crash further on. A value
+    of a shape no check anticipated is caught here too and read the same way.
+    """
+    try:
+        return _mutation_record_problem(record, mutation_id)
+    except (TypeError, AttributeError, KeyError, IndexError, ValueError, RecursionError) as exc:
+        return f"it holds a value of an unexpected shape ({type(exc).__name__})"
+
+
+def _mutation_record_problem(record: object, mutation_id: str) -> str | None:
     if not isinstance(record, dict) or set(record) != set(MUTATION_FIELDS):
         return "it is not exactly the root mutation record fields"
     if record["schema"] != MUTATION_SCHEMA or record["version"] != MUTATION_VERSION:
@@ -1073,9 +1111,10 @@ def _mutation_problem(record: object, mutation_id: str) -> str | None:
     if record["mutation_id"] != mutation_id or not ids.is_valid_id(mutation_id, "root_policy_mutation"):
         return "its mutation_id is not the one its file is named by"
     operation = record["operation"]
-    if operation not in OPERATIONS or record["status"] not in MUTATION_STATUSES:
+    if not isinstance(operation, str) or operation not in OPERATIONS or not isinstance(record["status"], str) \
+            or record["status"] not in MUTATION_STATUSES:
         return "it names no root operation or status"
-    if not isinstance(record["invocation"], dict) or not _full_ref(record["branch"]) \
+    if not isinstance(record["invocation"], dict) or not record["invocation"] or not _full_ref(record["branch"]) \
             or not gitcmd.full_commit_id(record["base"]):
         return "its invocation, branch or base is malformed"
     global_policy = record["global_policy"]
@@ -1084,38 +1123,50 @@ def _mutation_problem(record: object, mutation_id: str) -> str | None:
             or not isinstance(global_policy["digest"], str) or _DIGEST.fullmatch(global_policy["digest"]) is None:
         return "its Global policy version / digest is malformed"
     reserved = record["reserved_ids"]
-    if not isinstance(reserved, dict) or any(not isinstance(key, str) or not isinstance(value, str)
+    if not isinstance(reserved, dict) or any(not isinstance(key, str) or not key or not isinstance(value, str)
                                              or ids.kind_of(value) not in RESERVATION_KINDS
                                              for key, value in reserved.items()):
         return "its reserved IDs are malformed"
     scope = record["write_scope"]
-    if not isinstance(scope, list) or scope != sorted(set(scope)) or any(_scope_entry_problem(entry, operation)
-                                                                         for entry in scope):
+    if not isinstance(scope, list) or not scope or not all(isinstance(entry, str) for entry in scope) \
+            or scope != sorted(set(scope)) or any(_scope_entry_problem(entry, operation) for entry in scope):
         return "its write scope is malformed"
     publication = record["publication"]
     if publication is not None and (not isinstance(publication, dict) or set(publication) != {"remote", "branch"}
-                                    or not isinstance(publication["remote"], str)
+                                    or not isinstance(publication["remote"], str) or not publication["remote"]
                                     or publication["branch"] != record["branch"]):
         return "its publication binding is malformed"
-    if not isinstance(record["notes"], dict) or not isinstance(record["effects"], list):
+    if not isinstance(record["notes"], dict) or any(not isinstance(key, str) or not key for key in record["notes"]) \
+            or not isinstance(record["effects"], list):
         return "its notes or effects are malformed"
     seen: set[tuple[str, str]] = set()
-    for effect in record["effects"]:
-        if not isinstance(effect, dict) or set(effect) != set(EFFECT_FIELDS) \
+    effects = record["effects"]
+    for index, effect in enumerate(effects):
+        if not isinstance(effect, dict) or set(effect) != set(EFFECT_FIELDS) or not isinstance(effect["kind"], str) \
                 or effect["kind"] not in OPERATION_EFFECTS[operation] or not isinstance(effect["payload"], dict) \
-                or effect["state"] not in EFFECT_STATES:
-            return "an effect is malformed"
-        fields = {EFFECT_COMMIT: COMMIT_PAYLOAD_FIELDS, EFFECT_PUSH: PUSH_PAYLOAD_FIELDS,
-                  EFFECT_GLOBAL_POLICY_REPLACE: REPLACE_PAYLOAD_FIELDS}.get(effect["kind"], CREATE_PAYLOAD_FIELDS)
-        if set(effect["payload"]) != set(fields):
-            return f"a {effect['kind']} effect payload is malformed"
-        facts = effect["facts"]
-        expected_facts = {EFFECT_COMMIT: COMMIT_FACT_FIELDS, EFFECT_PUSH: PUSH_FACT_FIELDS}.get(effect["kind"])
-        if expected_facts is None:
-            if facts is not None or effect["state"] == STATE_MARKED:
-                return f"a {effect['kind']} effect carries facts"
-        elif facts is not None and (not isinstance(facts, dict) or set(facts) != set(expected_facts)):
-            return f"a {effect['kind']} effect carries malformed facts"
+                or not isinstance(effect["state"], str) or effect["state"] not in EFFECT_STATES:
+            return f"effect {index} is malformed"
+        kind, state, facts = effect["kind"], effect["state"], effect["facts"]
+        if kind in FILE_EFFECT_KINDS:
+            if facts is not None or state == STATE_MARKED:
+                return f"effect {index} ({kind}) carries facts"
+        elif kind == EFFECT_COMMIT:
+            if (facts is None) != (state == STATE_INTENDED) or state == STATE_APPLIED:
+                return f"effect {index} ({kind}) has a state its facts do not support"
+            if facts is not None and (not isinstance(facts, dict) or set(facts) != set(COMMIT_FACT_FIELDS)
+                                      or not gitcmd.full_commit_id(facts["prepared_commit"])
+                                      or not gitcmd.full_commit_id(facts["prepared_tree"])
+                                      or type(facts["ref_moved"]) is not bool):
+                return f"effect {index} ({kind}) carries malformed facts"
+        else:
+            if (facts is None) != (state == STATE_INTENDED) or state == STATE_APPLIED:
+                return f"effect {index} ({kind}) has a state its facts do not support"
+            if facts is not None and (not isinstance(facts, dict) or set(facts) != set(PUSH_FACT_FIELDS)
+                                      or type(facts["pushed"]) is not bool):
+                return f"effect {index} ({kind}) carries malformed facts"
+        problem = _payload_problem(kind, effect["payload"], record, effects[:index])
+        if problem is not None:
+            return f"effect {index} ({kind}) is not one this mutation could have recorded: {problem}"
         key = _identity_key(effect)
         if key in seen:
             return f"two effects are recorded for {key[1]}"
@@ -1186,12 +1237,19 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
 
     One pending root mutation at a time (single-writer root maintenance). A
     pending one whose ``invocation`` is canonically equal is returned as it is
-    stored (a resume: its frozen branch, base, Global policy, write scope and
-    publication are the record's, not the arguments'); any other pending one
-    is ``review_p7_root_mutation_conflict``. Otherwise a new
-    ``root_policy_mutation`` ID and a durable record. ``rebind`` (runtime-loss
-    recovery only, §31.11) pre-seeds canonical IDs reconstructed from committed
-    records and is refused while any pending record exists.
+    stored (a resume); any other pending one is
+    ``review_p7_root_mutation_conflict``. A resume re-freezes nothing: the
+    caller passes the record's frozen ``branch``, ``base``, Global policy
+    version / digest and ``publication`` (read from :func:`pending_mutations`),
+    and an argument that differs from the record is
+    ``review_p7_root_mutation_conflict`` (RB7BL-2, §31.30: an unexpected HEAD
+    or branch is reconciled, never silently replaced by the record's). The
+    ``write_scope`` argument is not compared: its exact family paths name IDs
+    the mutation itself reserved, so a resume reads ``record["write_scope"]``.
+    Otherwise a new ``root_policy_mutation`` ID and a durable record.
+    ``rebind`` (runtime-loss recovery only, §31.11) pre-seeds canonical IDs
+    reconstructed from committed records and is refused while any pending
+    record exists.
     """
     _require_held(lock)
     if lock.operation not in OPERATIONS:
@@ -1211,6 +1269,18 @@ def open_mutation(lock: RootLock, invocation: Mapping[str, Any], *, branch: str,
         if existing["operation"] != lock.operation or existing["invocation"] != found_invocation:
             raise reconcile(f"the pending root mutation {existing['mutation_id']} ({existing['operation']}) belongs to "
                             "another invocation; it is resumed with that invocation or reconciled first",
+                            REASON_MUTATION_CONFLICT)
+        given = {
+            "branch": branch,
+            "base": base,
+            "global_policy": {"version": global_policy_version, "digest": global_policy_digest},
+            "publication": dict(publication) if isinstance(publication, Mapping) else publication,
+        }
+        differing = sorted(name for name, value in given.items() if _strict(value) != _strict(existing[name]))
+        if differing:
+            raise reconcile(f"the pending root mutation {existing['mutation_id']} froze another "
+                            + ", ".join(differing) + " than this resume passes; a resume re-freezes nothing and is "
+                            "never silently given the record's values in place of the caller's",
                             REASON_MUTATION_CONFLICT)
         return RootMutation(lock, existing)
     if not _full_ref(branch):
@@ -1609,6 +1679,19 @@ def status_report(workline_root: Path) -> dict[str, Any]:
     ``stage``) and ``next_boundary_adapter_identity``. No time, process, host or
     working-directory key at any depth, and the holder description is never
     read.
+
+    Runtime state that cannot be read has its own value in the frozen keys
+    (``authorization.status`` ``unreadable``, ``pending_mutation.status``
+    ``reconcile_required``). A CANONICAL root record that cannot be read - the
+    Global policy, a change or evaluation record that is not stored canonically,
+    an indirection on the way to one - is never read past and never guessed
+    around: the call raises its ``StopError`` (``review_record_noncanonical``,
+    ``review_containment``, the loader's own STOP, ...) and the
+    ``status`` key stays the constant ``available`` of the reports it does
+    return. The RB1 caller isolates the call (IR-RB7-5:
+    ``_isolated(lambda: root_maintenance.status_report(...))``), so the key then
+    renders as ``unavailable`` with that code, and no other section is hidden
+    (RB7BL-3).
     """
     root = Path(workline_root).resolve()
     baseline = review_policy.load_global_baseline(root)

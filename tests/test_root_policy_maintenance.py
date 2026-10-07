@@ -669,9 +669,22 @@ class MutationRecordTests(MutationCase):
             first = self.open(lock)
             run = first.reserve_id("run", "review_run")
         with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
-            again = self.open(lock, base="0" * 40)
+            # RB7BL-2: a resume re-freezes nothing, and a differing frozen value is never silently replaced
+            for overrides, named in (({"branch": "refs/heads/other"}, "branch"), ({"base": "0" * 40}, "base"),
+                                     ({"global_policy_version": 2}, "global_policy"),
+                                     ({"global_policy_version": True}, "global_policy"),
+                                     ({"global_policy_digest": "b" * 64}, "global_policy"),
+                                     ({"publication": {"remote": "origin", "branch": "refs/heads/main"}},
+                                      "publication")):
+                with self.subTest(resume=overrides):
+                    error = self.assertReconcile("review_p7_root_mutation_conflict", self.open, lock, **overrides)
+                    self.assertIn(named, str(error))
+            self.assertEqual(dict(first.record), self.stored(first.mutation_id), "a refused resume changes nothing")
+            # the write scope is the record's: its exact paths name IDs the mutation itself reserved
+            again = self.open(lock, write_scope=[ROOT_POLICY_LAYOUT.global_policy_rel])
             self.assertEqual(first.mutation_id, again.mutation_id)
-            self.assertEqual(self.head(), again.record["base"], "a resume keeps the record's frozen base")
+            self.assertEqual(sorted(self.scope), again.record["write_scope"])
+            self.assertEqual(self.head(), again.record["base"])
             self.assertEqual(run, again.reserve_id("run", "review_run"))
             self.assertReconcile("review_p7_root_mutation_conflict", self.open, lock, {"request_digest": "e" * 64})
             self.assertReconcile("review_p7_root_mutation_conflict", self.open, lock, rebind={"run": run})
@@ -793,6 +806,63 @@ class MutationRecordTests(MutationCase):
         self.assertReconcile("review_p7_root_mutation_unreadable", rm.pending_mutations, self.root)
         renamed.rename(path)
         self.assertEqual(1, len(rm.pending_mutations(self.root)))
+
+    def test_a_corrupted_canonical_record_is_unreadable_and_never_a_crash(self) -> None:
+        """RB7BL-4: values are checked, not key sets alone; a corruption is a reconcile, never a raw error."""
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            mutation = self.open(lock)
+        path = self.root / rm.MUTATIONS_DIR / f"{mutation.mutation_id}.yaml"
+        good = self.stored(mutation.mutation_id)
+        commit = {"stage": "kg1", "parent": self.head(), "ref": "refs/heads/main", "message": "kg1",
+                  "paths": [self.gate], "date": DATE}
+        facts = {"prepared_commit": self.head(), "prepared_tree": "1" * 40, "ref_moved": False}
+
+        def effect(kind, payload, state="intended", effect_facts=None):
+            return {"kind": kind, "payload": payload, "state": state, "facts": effect_facts}
+
+        def create(kind, path_value, content, digest=None):
+            return effect(kind, {"path": path_value, "content": content,
+                                 "sha256": digest or (sha(content) if isinstance(content, str) else "0" * 64)})
+
+        corruptions = {
+            "scope holds a number": {"write_scope": [1, self.change]},
+            "scope holds a mapping": {"write_scope": [{"x": 1}, self.change]},
+            "scope is unsorted": {"write_scope": [self.packet, self.change]},
+            "scope is empty": {"write_scope": []},
+            "invocation is empty": {"invocation": {}},
+            "publication of another branch": {"publication": {"remote": "origin", "branch": "refs/heads/x"}},
+            "reserved ID of another kind": {"reserved_ids": {"run": ids.new_id("work")}},
+            "file path is a number": {"effects": [create(rm.EFFECT_REVIEW_CREATE, 1, "x\n")]},
+            "file content is a number": {"effects": [create(rm.EFFECT_REVIEW_CREATE, self.gate, 1)]},
+            "file content and sha disagree": {"effects": [create(rm.EFFECT_CHANGE_CREATE, self.change, "x\n",
+                                                                 sha("y\n"))]},
+            "file outside the scope": {"effects": [create(rm.EFFECT_REVIEW_CREATE, "README.md", "x\n")]},
+            "file effect with facts": {"effects": [{**create(rm.EFFECT_CHANGE_CREATE, self.change, "x\n"),
+                                                    "state": "marked", "facts": {"pushed": True}}]},
+            "commit paths are numbers": {"effects": [effect(rm.EFFECT_COMMIT, {**commit, "paths": [1, 2]})]},
+            "commit facts of the wrong types": {"effects": [effect(rm.EFFECT_COMMIT, commit, "marked",
+                                                                   {**facts, "ref_moved": "no"})]},
+            "commit marked without facts": {"effects": [effect(rm.EFFECT_COMMIT, commit, "marked")]},
+            "commit facts while intended": {"effects": [effect(rm.EFFECT_COMMIT, commit, "intended", facts)]},
+            "commit applied": {"effects": [effect(rm.EFFECT_COMMIT, commit, "applied")]},
+            "push of a remote-less root": {"effects": [effect(rm.EFFECT_PUSH, {
+                "stage": "kp", "remote": "origin", "ref": "refs/heads/main", "commit": self.head()})]},
+            "effect kind is a list": {"effects": [effect(["root-commit"], commit)]},
+            "two effects for one path": {"effects": [create(rm.EFFECT_CHANGE_CREATE, self.change, "x\n"),
+                                                     create(rm.EFFECT_CHANGE_CREATE, self.change, "y\n")]},
+        }
+        for name, change in corruptions.items():
+            with self.subTest(corruption=name):
+                path.write_text(serialize.canonical_text({**good, **change}), encoding="utf-8", newline="\n")
+                self.assertReconcile("review_p7_root_mutation_unreadable", rm.pending_mutations, self.root)
+                self.assertReconcile("review_p7_root_mutation_unreadable", rm.pending_for_run, self.root,
+                                     self.run_id)
+                self.assertEqual({"mutation_id": None, "operation": None, "status": "reconcile_required",
+                                  "stage": None}, rm._pending_summary(self.root))
+                with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+                    self.assertReconcile("review_p7_root_mutation_unreadable", self.open, lock)
+        path.write_text(serialize.canonical_text(good), encoding="utf-8", newline="\n")
+        self.assertEqual([good], rm.pending_mutations(self.root))
 
 
 class EffectTests(MutationCase):
@@ -977,6 +1047,10 @@ class EffectTests(MutationCase):
                                                          "message": "kp", "paths": [self.change], "date": DATE})
             self.assertStop("review_p7_root_effect_refused", mutation.add_effect, rm.EFFECT_PUSH,
                             {"stage": "kp", "remote": "origin", "ref": "refs/heads/main", "commit": kp_commit})
+            self.assertStop("review_p7_root_effect_refused", mutation.mark_effect, kp,
+                            {"prepared_commit": kp_commit, "prepared_tree": kp_tree, "ref_moved": True})
+            self.assertIsNone(mutation.effects()[kp]["facts"], "a commit is never first recorded as moved")
+            mutation.mark_effect(kp, {"prepared_commit": kp_commit, "prepared_tree": kp_tree, "ref_moved": False})
             git(self.root, "update-ref", "refs/heads/main", kp_commit, commit)
             mutation.mark_effect(kp, {"prepared_commit": kp_commit, "prepared_tree": kp_tree, "ref_moved": True})
             for payload in ({"stage": "kp", "remote": "upstream", "ref": "refs/heads/main", "commit": kp_commit},
@@ -1004,8 +1078,11 @@ class EffectTests(MutationCase):
                                                             "ref": "refs/heads/main", "message": "kg1",
                                                             "paths": [self.gate], "date": DATE})
             self.assertStop("review_p7_root_effect_refused", mutation.complete)
-            commit, tree = self.commit_object(self.head())
-            git(self.root, "update-ref", "refs/heads/main", commit, self.head())
+            parent = self.head()
+            commit, tree = self.commit_object(parent)
+            mutation.mark_effect(index, {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": False})
+            self.assertStop("review_p7_root_effect_refused", mutation.complete)
+            git(self.root, "update-ref", "refs/heads/main", commit, parent)
             mutation.mark_effect(index, {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": True})
             mutation.complete()
             for call, args in ((mutation.reserve_id, ("k", "review_run")), (mutation.set_note, ("k", 1)),
@@ -1014,6 +1091,37 @@ class EffectTests(MutationCase):
                     self.assertStop("review_p7_root_effect_refused", call, *args)
             fresh = self.open(lock, {"next": 1})
             self.assertNotEqual(mutation.mutation_id, fresh.mutation_id, "a completed mutation is never resumed")
+
+    def test_a_commit_is_recorded_prepared_before_its_ref_moves(self) -> None:
+        """RB7BL-1: facts absent means the ref never moved through this mutation, and that order is enforced."""
+        parent = self.head()
+        with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
+            mutation = self.open(lock)
+            index = mutation.add_effect(rm.EFFECT_COMMIT, {"stage": "kg1", "parent": parent,
+                                                            "ref": "refs/heads/main", "message": "kg1",
+                                                            "paths": [self.gate], "date": DATE})
+            commit, tree = self.commit_object(parent)
+            # a factless commit intent whose branch is still at its recorded parent is provably unapplied
+            self.assertFalse(rm._effect_may_be_applied(self.root, mutation.effects()[index]))
+            # the forbidden order: the ref moved before the prepared commit was durable
+            git(self.root, "update-ref", "refs/heads/main", commit, parent)
+            self.assertTrue(rm._effect_may_be_applied(self.root, mutation.effects()[index]),
+                            "a factless commit whose branch moved is not provably unapplied")
+            self.assertStop("review_p7_root_effect_refused", mutation.mark_effect, index,
+                            {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": True})
+            self.assertReconcile("review_p7_root_effect_conflict", mutation.mark_effect, index,
+                                 {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": False})
+            self.assertIsNone(mutation.effects()[index]["facts"])
+            self.assertReconcile("review_p7_root_abandon_refused", mutation.abandon)
+            # an unreadable branch is not provably unapplied either, nor provably unmoved
+            with mock.patch.object(gitcmd, "branch_commit", return_value=None):
+                self.assertReconcile("review_p7_root_abandon_refused", mutation.abandon)
+                self.assertReconcile("review_p7_root_effect_conflict", mutation.mark_effect, index,
+                                     {"prepared_commit": commit, "prepared_tree": tree, "ref_moved": False})
+            # back at its parent, nothing of it is applied: it may be abandoned
+            git(self.root, "update-ref", "refs/heads/main", parent, commit)
+            mutation.abandon()
+        self.assertEqual("abandoned", self.stored(mutation.mutation_id)["status"])
 
     def test_abandon_only_while_nothing_canonical_is_applied(self) -> None:
         with rm.root_operation(self.root, rm.OPERATION_CHANGE) as lock:
@@ -1405,10 +1513,37 @@ class StatusTests(RootCase):
         self.assertEqual(evaluations, report["evaluation_ids"])
         self.assertEqual(policy.COMPATIBILITY_TOTAL_ADAPTER_V1, report["next_boundary_adapter_identity"])
         self.assertPrivate(report)
-        # a stored record that is not canonical is never read past
+        # RB7BL-3: a stored record that is not canonical is never read past: the call raises its StopError, and
+        # the RB1 caller's isolation (IR-RB7-5) renders the key unavailable with that code
         (self.root / ROOT_POLICY_LAYOUT.global_change_rel(older)).write_bytes(b"global_policy_change_id: x\r\n")
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(StopError) as caught:
             rm.status_report(self.root)
+        self.assertEqual("review_record_noncanonical", caught.exception.code)
+        from workline import status as rb1_status
+
+        rendered = rb1_status._isolated(lambda: rm.status_report(self.root))
+        self.assertEqual("unavailable", rendered["status"])
+        self.assertEqual("review_record_noncanonical", rendered["reason"]["code"])
+        self.assertPrivate(rendered)
+
+    def test_an_indirected_root_record_family_is_never_followed(self) -> None:
+        if os.name != "nt":
+            self.skipTest("junctions are a Windows construct")
+        decoy = self.new_dir("decoy-changes")
+        change = ids.new_id("review_global_policy_change")
+        (decoy / f"{change}.yaml").write_bytes(serialize.canonical_bytes(
+            {"schema": "x", "version": 1, "global_policy_change_id": change,
+             "after_global_policy_digest": self.current.global_policy_identity}))
+        (self.root / "review-policy").mkdir()
+        if not make_junction(self.root / ROOT_POLICY_LAYOUT.changes_dir, decoy):
+            self.skipTest("cannot create a junction here")
+        with self.assertRaises(StopError) as caught:
+            rm.status_report(self.root)
+        self.assertEqual("review_containment", caught.exception.code)
+        from workline import status as rb1_status
+
+        self.assertEqual("review_containment",
+                         rb1_status._isolated(lambda: rm.status_report(self.root))["reason"]["code"])
 
     def write_record(self, relative: str, record: dict) -> None:
         path = self.root / relative
