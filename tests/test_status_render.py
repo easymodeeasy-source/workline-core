@@ -67,9 +67,13 @@ class RenderTests(StatusCase):
                           "covering_integration_id", "coverage", "latest_integration_review", "evidence",
                           "progression_ready", "downstream_confirmations"}, set(phase))
         (roadmap,) = data["completion"]["roadmaps"]
+        # I-9b (§32.51 / §14.28): human_objective joins each Roadmap entry additively - pin updated deliberately (was
+        # the five keys without human_objective); a legacy-only Roadmap reads nothing new
         self.assertEqual({"roadmap_id", "all_active_phases_generated_complete", "every_reviewed_phase_progression_ready",
-                          "unready_phases", "achieved"}, set(roadmap))
+                          "unready_phases", "achieved", "human_objective"}, set(roadmap))
         self.assertEqual({"event_id": None, "evidence_id": None, "binding": "ok"}, roadmap["achieved"])
+        self.assertEqual({"status": "not_applicable", "human_required": [], "objective_unmet": []},
+                         roadmap["human_objective"])
         # RB6 (§30.30, RB6A-IR-2): the RB1 policy placeholder is filled additively - pin updated deliberately
         self.assertEqual("available", data["policy"]["status"])
         # RB7 (§31.46, RB7C-4, IR-RB7-5): the root maintenance diagnostics join additively, isolated - pin updated
@@ -155,6 +159,17 @@ class RenderTests(StatusCase):
         self.assertIn("structure_unreadable", text)
         self.assertIn("validation failed", text, "Blocked/Waiting names it too")
         self.assertIn("Current\n  unavailable - relations_invalid", text)
+
+    def test_a_failed_completion_reader_renders_one_status_line(self) -> None:
+        """RB5PR2-5: the Achievement block prints its status exactly once - "unavailable - <reason>" when the
+        completion reader failed, the bare status otherwise."""
+        failed = copy.deepcopy(self.data())
+        failed["completion"] = {"status": "unavailable", "reason": {"code": "review_record_invalid", "message": "x"}}
+        text = status.render_human(status.StatusModel(failed))
+        block = text[text.index("\nAchievement\n") + len("\nAchievement\n"):text.index("\nPolicy\n")].splitlines()
+        self.assertEqual(["  unavailable - review_record_invalid: x"], [line for line in block if line])
+        available = status.render_human(self.model())
+        self.assertIn("\nAchievement\n  available\n", available)
 
     def test_additive_fields_leave_the_base_fields_as_they_are(self) -> None:
         base = self.data()

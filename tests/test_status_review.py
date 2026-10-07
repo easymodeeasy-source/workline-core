@@ -2,7 +2,10 @@
 
 States are derived only where the validated chain shows them; an unreadable
 chain or record is ``invalid`` with its exact reason, never absent; no raw
-reviewer output appears; and Review status never changes lifecycle status.
+reviewer output appears; and the Review section never changes lifecycle status. (RB5 §32.41 / §32.42: for a
+Roadmap holding a reviewed Phase, Review HISTORY - the phase_completion evidence - narrows ``lifecycle.next.phase``
+and adds ``phase_evidence_not_ready`` blockers by design, exactly as ``roadmap.select_phase`` narrows; a legacy-only
+Project's lifecycle reads no Review record.)
 """
 
 from __future__ import annotations

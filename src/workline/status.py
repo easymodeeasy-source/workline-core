@@ -46,7 +46,7 @@ import stat
 from typing import Any, Callable, Mapping
 
 from . import gitcmd, gitops, implementation, oplock, pushurl
-from .errors import StopError
+from .errors import StopError, ValidationError
 from .mutation import (
     RECORD_FILENAME_INVALID,
     RECORD_OWNERSHIP_UNCONFIRMED,
@@ -73,7 +73,7 @@ from .recovery_disposition import (
 )
 from .registry import authority_inventory
 from .selection import MULTIPLE_TARGETS, work_continuation
-from .state import ACTIVE, AMBIGUOUS_CANDIDATES, HELD, IN_PROGRESS, UNSTARTED, ProjectView
+from .state import ACTIVE, AMBIGUOUS_CANDIDATES, COMPLETE, HELD, IN_PROGRESS, UNSTARTED, ProjectView
 from .store import PROJECT_YAML_REL, RUNTIME_DIR, WORKLINE_DIR, ProjectStore
 from .validate import validate_project, validate_structure
 
@@ -1025,8 +1025,14 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
         # narrows them - only when a Phase of the Roadmap is reviewed (a legacy-only Roadmap reads nothing new)
         reviewed_roadmap = _reviewed_roadmap(view, roadmap_id)
         held_back: list[tuple[str, str, str]] = []
+        # RB5PR1B-1: a Review-history read that fails withholds the next-Phase selection and names itself as a
+        # blocker - it never blanks the lifecycle section (the inventory and every other blocker stay, §29.31-§29.32)
+        history_failure: str | None = None
         if candidates and reviewed_roadmap:
-            candidates, held_back = _progression_ready(context, view, candidates)
+            try:
+                candidates, held_back = _progression_ready(context, view, candidates)
+            except ValidationError as exc:
+                history_failure = exc.code or "review_record_invalid"
             blockers.extend(
                 {"code": PHASE_EVIDENCE_NOT_READY, "ids": [predecessor], "candidate": candidate, "reason": reason}
                 for candidate, predecessor, reason in held_back
@@ -1039,16 +1045,28 @@ def _lifecycle(context: _Context) -> dict[str, Any]:
             blockers.append({"code": AMBIGUOUS_CANDIDATES, "kind": "phase", "ids": sorted(p.id for p in preferred)})
         else:
             reason = "all_active_phases_complete" if view.all_active_phases_complete(roadmap_id) else "no_startable_phase"
-            if held_back or (reason == "all_active_phases_complete" and reviewed_roadmap
-                             and _unready_reviewed_phases(context, view, roadmap_id)):
-                # §32.41 / §32.42: a candidate held back by its predecessor's open evidence obligation, or a complete
-                # reviewed Phase without progression-ready evidence - never point at the achievement check yet
+            if held_back:
+                # §32.41: a candidate held back by its predecessor's open evidence obligation
                 reason = PHASE_EVIDENCE_NOT_READY
+            elif reason == "all_active_phases_complete" and reviewed_roadmap:
+                # §32.42: a complete reviewed Phase without progression-ready evidence - never point at the achievement
+                # check yet (an unreadable Review history withholds instead, RB5PR1B-1)
+                try:
+                    if _unready_reviewed_phases(context, view, roadmap_id):
+                        reason = PHASE_EVIDENCE_NOT_READY
+                except ValidationError as exc:
+                    history_failure = exc.code or "review_record_invalid"
             next_phase = _next(None, reason, [], [], None)
             if reason == "no_startable_phase":
                 blockers.extend(
                     _dependency_blockers(view, [p for p in members if view.phase_state(p.id) in (UNSTARTED, IN_PROGRESS)])
                 )
+        if history_failure is not None:
+            # as STRUCTURE_INVALID withholds every selection: only the next Phase depends on Review history
+            next_phase["id"] = None
+            next_phase["reason"] = history_failure
+            next_phase["basis"] = None
+            blockers.append({"code": history_failure, "ids": []})
         phase_id = current_phase["id"]
         if phase_id is None:
             reason = current_phase["reason"]
@@ -1148,7 +1166,9 @@ def _progression_ready(context: _Context, view: ProjectView, candidates: list[An
 
 
 def _unready_reviewed_phases(context: _Context, view: ProjectView, roadmap_id: str) -> list[str]:
-    """The complete reviewed active Phases that are not progression-ready (``roadmap.unready_reviewed_phases``)."""
+    """The complete reviewed active Phases that are not progression-ready - exactly ``roadmap.unready_reviewed_phases``'
+    filter (lifecycle ``COMPLETE``, RB5PR1B-2), so a reviewed Phase whose coverage went stale is unready here too and
+    status never points at the achievement check where Roadmap would not."""
     from . import achievement
     from . import phase_integration as pi
     from .review.store import ReviewStore
@@ -1156,7 +1176,7 @@ def _unready_reviewed_phases(context: _Context, view: ProjectView, roadmap_id: s
     evidence = ReviewStore(context.store).phase_completion_evidence()
     validation = achievement.structural_validation(view)
     return [phase.id for phase in view.active_phases(roadmap_id)
-            if pi.completion_mode(view, phase.id) == pi.MODE_REVIEWED and pi.phase_generated_complete(view, phase.id)
+            if pi.completion_mode(view, phase.id) == pi.MODE_REVIEWED and view.phase_state(phase.id) == COMPLETE
             and not achievement.phase_progression_decision(view, phase.id, evidence, validation=validation).ready]
 
 
@@ -1291,10 +1311,11 @@ def _completion(context: _Context) -> dict[str, Any]:
     Every Phase of every active or achieved Roadmap: its completion mode, generated completeness, current basis,
     reviewed-integration coverage, the latest Phase Integration Review of its marked integration(s), its current
     phase_completion evidence, progression-readiness and downstream confirmations; and every such Roadmap's
-    completeness, readiness and ``roadmap_achieved`` evidence binding. Achievement records are read through the
-    PROJECT ``ReviewStore`` only (``history/achievements`` is PROJECT-only); nothing reads the Workline root. A
-    legacy Phase reports ``legacy`` with evidence ``not_applicable`` - nothing is invented for it. One structural
-    validation serves every Phase (each Roadmap basis adds its own).
+    completeness, readiness, ``roadmap_achieved`` evidence binding and Human / objective-unmet status (I-9b). Achievement
+    records are read through the PROJECT ``ReviewStore`` only (``history/achievements`` is PROJECT-only); nothing reads
+    the Workline root. A legacy Phase reports ``legacy`` with evidence ``not_applicable`` - nothing is invented for it.
+    One structural validation serves every Phase (each Roadmap basis adds its own); each reviewed Phase's latest
+    Integration Review Run is selected once and serves both its Phase entry and its Roadmap entry.
     """
     if not context.established:
         return {"status": NOT_AVAILABLE_BY_CONTRACT}
@@ -1308,20 +1329,26 @@ def _completion(context: _Context) -> dict[str, Any]:
     records = review.achievement_records()
     validation = achievement.structural_validation(view)
     roadmap_ids = sorted(r.id for r in view.roadmaps.values() if view.roadmap_lifecycle(r.id) in (ACTIVE, ACHIEVED))
-    phases = [
-        _phase_completion(context, view, review, evidence, validation, phase.id, roadmap_id)
-        for roadmap_id in roadmap_ids
-        for phase in view.roadmap_phases(roadmap_id)
-    ]
+    phases: list[dict[str, Any]] = []
+    latest: dict[str, Any] = {}
+    for roadmap_id in roadmap_ids:
+        for phase in view.roadmap_phases(roadmap_id):
+            entry, latest[phase.id] = _phase_completion(context, view, review, evidence, validation, phase.id,
+                                                        roadmap_id)
+            phases.append(entry)
     return {
         "status": "available",
         "phases": sorted(phases, key=lambda item: item["phase_id"]),
-        "roadmaps": [_roadmap_completion(view, evidence, records, roadmap_id) for roadmap_id in roadmap_ids],
+        "roadmaps": [_roadmap_completion(view, review, evidence, records, roadmap_id,
+                                         [item for item in phases if item["roadmap_id"] == roadmap_id], latest)
+                     for roadmap_id in roadmap_ids],
     }
 
 
 def _phase_completion(context: _Context, view: ProjectView, review: Any, evidence: list[Any],
-                      validation: tuple[bool, str], phase_id: str, roadmap_id: str) -> dict[str, Any]:
+                      validation: tuple[bool, str], phase_id: str, roadmap_id: str) -> tuple[dict[str, Any], Any]:
+    """The Phase entry and its latest Phase Integration Review Run's gate chain (``None`` for a legacy Phase, or
+    when ``_latest_integration_chain`` singles out no Run)."""
     from . import achievement
     from . import phase_integration as pi
 
@@ -1331,6 +1358,7 @@ def _phase_completion(context: _Context, view: ProjectView, review: Any, evidenc
     decision = achievement.phase_progression_decision(view, phase_id, evidence, validation=validation)
     covering = sorted(basis.covering_integration_ids)
     first = covering[0] if covering else None
+    chain = _latest_integration_chain(context, view, review, phase_id) if basis.reviewed else None
     return {
         "phase_id": phase_id,
         "roadmap_id": roadmap_id,
@@ -1339,8 +1367,7 @@ def _phase_completion(context: _Context, view: ProjectView, review: Any, evidenc
         "basis_digest": basis.digest,
         "covering_integration_id": first,
         "coverage": {"status": coverage.status, "reasons": list(coverage.reasons)},
-        "latest_integration_review": _latest_integration_review(context, view, review, phase_id) if basis.reviewed
-        else None,
+        "latest_integration_review": _latest_integration_review(review, chain) if chain is not None else None,
         "evidence": {"status": match.status if match is not None else "not_applicable",
                      "achievement_evidence_id": match.evidence_id if match is not None else None},
         "progression_ready": decision.ready,
@@ -1348,22 +1375,34 @@ def _phase_completion(context: _Context, view: ProjectView, review: Any, evidenc
             {"work_id": work.id, "state": view.work_state(work.id).state}
             for work in (pi.downstream_confirmations(view, phase_id, first) if first is not None else [])
         ],
-    }
+    }, chain
 
 
-def _latest_integration_review(context: _Context, view: ProjectView, review: Any, phase_id: str) -> dict[str, Any] | None:
-    """The Phase Integration Review Run of the Phase's marked integration(s) whose generation 1 was committed last.
+def _latest_integration_review(review: Any, chain: Any) -> dict[str, Any]:
+    """The latest Run's ID and disposition: its final durable one, else its G4 integration disposition when G4
+    settled, else ``open``."""
+    from .review import p4
+
+    disposition = p4.final_disposition(review, chain)
+    if disposition is None:
+        adjudication = p4.bound_adjudication(review, chain)
+        disposition = adjudication.integration_disposition if adjudication is not None \
+            and adjudication.integration_disposition else "open"
+    return {"review_run_id": chain.review_run_id, "disposition": disposition}
+
+
+def _latest_integration_chain(context: _Context, view: ProjectView, review: Any, phase_id: str) -> Any:
+    """The gate chain of the Phase Integration Review Run of the Phase's marked integration(s) whose generation 1 was
+    committed last.
 
     "Last" is the commit order of each Run's gate 000001: the Run whose adding
     commit has every other Run's gate 000001 in its history (one read of the
     add-history per Run, never mtime, ID or timestamp); a Run whose generation 1
     is not committed yet is later than every committed one. ``None`` when the
-    Phase has no such Run, or when the order does not single one out. The
-    disposition is the Run's final durable one, else its G4 integration
-    disposition when G4 settled, else ``open``.
+    Phase has no such Run, or when the order does not single one out.
     """
     from . import phase_integration as pi
-    from .review import committed, p4, paths, records
+    from .review import committed, paths, records
 
     integrations = {work.id for work in pi.reviewed_integrations(view, phase_id)}
     runs: dict[str, Any] = {}
@@ -1401,16 +1440,11 @@ def _latest_integration_review(context: _Context, view: ProjectView, review: Any
         if len(latest_ones) != 1:
             return None
         latest = latest_ones[0]
-    chain = runs[latest]
-    disposition = p4.final_disposition(review, chain)
-    if disposition is None:
-        adjudication = p4.bound_adjudication(review, chain)
-        disposition = adjudication.integration_disposition if adjudication is not None \
-            and adjudication.integration_disposition else "open"
-    return {"review_run_id": latest, "disposition": disposition}
+    return runs[latest]
 
 
-def _roadmap_completion(view: ProjectView, evidence: list[Any], records: Any, roadmap_id: str) -> dict[str, Any]:
+def _roadmap_completion(view: ProjectView, review: Any, evidence: list[Any], records: Any, roadmap_id: str,
+                        phases: list[dict[str, Any]], latest: Mapping[str, Any]) -> dict[str, Any]:
     from . import achievement
 
     basis = achievement.roadmap_basis(view, roadmap_id, evidence)
@@ -1420,7 +1454,83 @@ def _roadmap_completion(view: ProjectView, evidence: list[Any], records: Any, ro
         "every_reviewed_phase_progression_ready": not basis.unready_phases,
         "unready_phases": [{"phase_id": phase_id, "evidence_status": status} for phase_id, status in basis.unready_phases],
         "achieved": _achieved_binding(view, records, roadmap_id, basis),
+        "human_objective": _human_objective(view, review, roadmap_id, phases, latest),
     }
+
+
+def _human_objective(view: ProjectView, review: Any, roadmap_id: str, phases: list[dict[str, Any]],
+                     latest: Mapping[str, Any]) -> dict[str, Any]:
+    """I-9b (§32.51 / §14.28): the Roadmap's Human-required / objective-unmet status, where canonical input supports it.
+
+    No Roadmap-level "human required" or "not achieved" judgement is ever stored (only ``achieved`` is, §32.48), so
+    none is reported. ``not_applicable`` - and nothing is read - for a Roadmap holding no reviewed Phase. Otherwise,
+    from canonical records only: (a) the stored Phase outcome of each reviewed Phase's latest Integration Review Run
+    (``_latest_integration_chain``) once its G4 settled - ``desired_state_change_required``, and
+    ``human_confirmation_required`` while the Phase is not generated complete, are Human requirements; a
+    ``not_satisfied`` outcome is objective-unmet with its unmet objective obligations; (b) the Roadmap's unresolved
+    G4 HUMAN_WAIT Runs (``_unresolved_human_waits``); (c) the not-completed downstream confirmations its Phase
+    entries already list.
+    """
+    from . import phase_integration as pi
+    from .review import p4, records
+
+    if not _reviewed_roadmap(view, roadmap_id):
+        return {"status": "not_applicable", "human_required": [], "objective_unmet": []}
+    human: list[dict[str, Any]] = _unresolved_human_waits(view, review, roadmap_id)
+    unmet: list[dict[str, Any]] = []
+    for entry in phases:
+        if entry["completion_mode"] != pi.MODE_REVIEWED:
+            continue
+        phase_id = entry["phase_id"]
+        chain = latest.get(phase_id)
+        adjudication = p4.bound_adjudication(review, chain) if chain is not None else None
+        outcome = adjudication.phase_outcome if adjudication is not None else None
+        if outcome is not None:
+            kind = outcome["outcome"]
+            if kind == records.INTEGRATION_DESIRED_STATE_CHANGE_REQUIRED or (
+                    kind == records.INTEGRATION_HUMAN_CONFIRMATION_REQUIRED and not entry["generated_complete"]):
+                human.append({"kind": "phase_outcome", "id": chain.review_run_id, "phase_id": phase_id,
+                              "outcome": kind})
+            elif kind == records.INTEGRATION_NOT_SATISFIED:
+                unmet.append({"phase_id": phase_id, "review_run_id": chain.review_run_id,
+                              "unmet_objective_obligations": list(outcome["unmet_objective_obligations"])})
+        human.extend({"kind": "confirmation", "id": item["work_id"], "phase_id": phase_id, "state": item["state"]}
+                     for item in entry["downstream_confirmations"] if item["state"] != "completed")
+    human.sort(key=lambda item: (item["kind"], item["id"]))
+    unmet.sort(key=lambda item: item["phase_id"])
+    if human and unmet:
+        status = "human_required_and_objective_unmet"
+    else:
+        status = "human_required" if human else "objective_unmet" if unmet else "none"
+    return {"status": status, "human_required": human, "objective_unmet": unmet}
+
+
+def _unresolved_human_waits(view: ProjectView, review: Any, roadmap_id: str) -> list[dict[str, Any]]:
+    """The HUMAN half of ``roadmap_review.achievement_open_items(store, view, roadmap_id, None)`` (§32.44), replicated
+    over the same reads because that reader returns prose: the P4-family Runs whose target is the Roadmap, one of its
+    Phases or one of their Works, at canonical G4 HUMAN_WAIT, that no Run's request set aside - each with its Run ID
+    and target."""
+    from .review import history, p4
+
+    targets = {roadmap_id}
+    for phase in view.roadmap_phases(roadmap_id):
+        targets.add(phase.id)
+        targets.update(work.id for work in view.phase_works(phase.id))
+    chains = {}
+    for run_id in review.run_ids():
+        chain = review.gate_chain(run_id)
+        if chain is None or chain.generations[0].target_identity not in targets \
+                or not p4.run_contracts(review, chain) - {None}:
+            continue
+        chains[run_id] = chain
+    named = set()
+    for chain in chains.values():
+        task_id = str(chain.generations[0].accepted_tasks[0]["task_id"])
+        named.update(str(item["review_run_id"]) for item in
+                     review.read_task_input(task_id).request_envelope.get("set_aside_runs") or [])
+    return [{"kind": "review_human_wait", "id": run_id, "target_id": chain.generations[0].target_identity}
+            for run_id, chain in sorted(chains.items())
+            if run_id not in named and p4.final_disposition(review, chain) == history.DISPOSITION_HUMAN_WAIT]
 
 
 def _achieved_binding(view: ProjectView, records: Any, roadmap_id: str, basis: Any) -> dict[str, Any]:
@@ -1801,7 +1911,8 @@ def render_human(model: StatusModel) -> str:
             out.append(f"  remote publication: {push['remote_publication_state']}")
 
     heading("Achievement")
-    out.append(f"  {data['completion']['status']}")
+    # one status line (RB5PR2-5): "  <status>", or "  unavailable - <reason>" when the completion reader failed
+    out.append(_section_status(data["completion"]) or f"  {data['completion']['status']}")
     out.extend(_completion_lines(data["completion"], index))
     heading("Policy")
     out.extend(_policy_lines(data["policy"]))
@@ -1809,10 +1920,10 @@ def render_human(model: StatusModel) -> str:
 
 
 def _completion_lines(section: Mapping[str, Any], index: dict[str, str]) -> list[str]:
-    """RB5: one line per Phase and per Roadmap of the completion slot - presentation of the model only."""
+    """RB5: one line per Phase and per Roadmap of the completion slot - presentation of the model only. The status
+    line itself is the caller's (one line, available or unavailable)."""
     out: list[str] = []
     if _section_status(section) is not None:
-        out.append(f"  {_section_status(section).strip()}")
         return out
     for phase in section.get("phases") or []:
         try:
@@ -1829,7 +1940,21 @@ def _completion_lines(section: Mapping[str, Any], index: dict[str, str]) -> list
                        f"progression_ready={roadmap['every_reviewed_phase_progression_ready']} achieved={achieved}")
         except (KeyError, TypeError):
             continue
+        out.extend(_human_objective_line(roadmap))
     return out
+
+
+def _human_objective_line(roadmap: Mapping[str, Any]) -> list[str]:
+    """I-9b: one more line for a Roadmap whose Human / objective-unmet status is neither ``not_applicable`` nor
+    ``none`` - presentation of the model only."""
+    try:
+        found = roadmap["human_objective"]
+        if found["status"] in ("not_applicable", "none"):
+            return []
+        unmet = ",".join(item["phase_id"] for item in found["objective_unmet"]) or "-"
+        return [f"  {roadmap['roadmap_id']} human={len(found['human_required'])} objective_unmet={unmet}"]
+    except (KeyError, TypeError):
+        return []
 
 
 def _policy_lines(section: Mapping[str, Any]) -> list[str]:
