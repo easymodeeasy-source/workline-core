@@ -717,9 +717,44 @@ class DeferredAchievementTests(IntegrationRunCase):
         self.assertEqual(phase_b.id, rm.select_phase(store, roadmap_id).id)
         self.assertEqual([], Controller(store).list_pending())
 
-    @unittest.skip(DEFERRED)
     def test_status_projects_the_same_progression_narrowing(self) -> None:
-        """status.py (SHARED): next-Phase projection calls achievement.progression_ready_candidates (RB8-FC-08)."""
+        """L502 (I-9, R33; §32.41 / §32.42, RB8-FC-08): status projects exactly Roadmap's progression narrowing, on a
+        real interrupted state - the integration's terminal stage applied up to its work_completed, its
+        phase_completion evidence not. Status's next-Phase candidates are ``rm.startable_phases`` (never the
+        lifecycle-only ``ProjectView.startable_phases``), b is held back with a's evidence obligation as its blocker,
+        and no next Phase is selected, as ``rm.select_phase`` selects none; once the resumed START closes the
+        obligation, status's next Phase is ``rm.select_phase``'s and nothing is held back."""
+        from planning_helpers import Crash, crash_at
+        from rb5_run_helpers import phase_review
+        from workline import roadmap as rm
+        from workline import status
+        from workline.mutation import MutationController as Controller
+
+        store, phase_id, ids = self.marked_project(next_phase=True)
+        roadmap_id = self.roadmap_of(store, phase_id)
+
+        def evidence_create(n, controller, record) -> bool:
+            return record["kind"] == "create_file" and "/history/achievements/" in record["payload"]["path"]
+
+        with crash_at(Controller, "apply_effect", when=evidence_create):
+            with self.assertRaises(Crash):
+                self.integrate(store, ids["integration"], phase_review())
+        view = ProjectView.load(store)
+        (phase_b,) = [p for p in view.roadmap_phases(roadmap_id) if p.id != phase_id]
+        self.assertIn(phase_b.id, [p.id for p in view.startable_phases(roadmap_id)], "lifecycle alone would start b")
+        lifecycle = status.build_status(store.root).data["lifecycle"]
+        self.assertEqual([p.id for p in rm.startable_phases(store, roadmap_id)], lifecycle["next"]["phase"]["candidates"])
+        self.assertEqual([], lifecycle["next"]["phase"]["candidates"])
+        held = [item for item in lifecycle["blockers"] if item["code"] == "phase_evidence_not_ready"]
+        self.assertEqual([(phase_b.id, [phase_id])], [(item["candidate"], item["ids"]) for item in held])
+        self.assertIsNone(rm.select_phase(store, roadmap_id))
+        self.assertIsNone(lifecycle["next"]["phase"]["id"])
+        self.assertEqual("completed", self.integrate(store, ids["integration"], phase_review()).status)
+        lifecycle = status.build_status(store.root).data["lifecycle"]
+        self.assertEqual(phase_b.id, rm.select_phase(store, roadmap_id).id)
+        self.assertEqual(phase_b.id, lifecycle["next"]["phase"]["id"])
+        self.assertEqual([p.id for p in rm.startable_phases(store, roadmap_id)], lifecycle["next"]["phase"]["candidates"])
+        self.assertNotIn("phase_evidence_not_ready", [item["code"] for item in lifecycle["blockers"]])
 
     def test_no_separate_lifecycle_phase_event(self) -> None:
         """I-11 (R38; §14.1, §32.63): Phase completion and its achievement evidence are never lifecycle events - the
