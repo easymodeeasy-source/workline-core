@@ -754,9 +754,32 @@ class StaticInvariantTests(unittest.TestCase):
         gitops_text = (SRC / "gitops.py").read_text(encoding="utf-8")
         finalize = gitops_text[gitops_text.index("def finalize("):]
         self.assertIn("publication.require_barrier_clear(", finalize[:finalize.index("\ndef ")])
+        # RB7 (§31.48 / §6, IR-RB7-7) - pin widened deliberately by exactly one module, named by its relative path
+        # (was: mutation.py alone): the root Global Policy owner src/workline/global_policy.py pushes once, inside
+        # _publish, after its root proof and the publication barrier. review/global_policy.py never pushes, and the
+        # push primitive keeps its name.
+        self.assertIn("def push(", (SRC / "gitcmd.py").read_text(encoding="utf-8"))
         for path in sorted(SRC.rglob("*.py")):
-            if path.name != "mutation.py":
-                self.assertNotIn("gitcmd.push(", path.read_text(encoding="utf-8"), path.name)
+            if path.name == "mutation.py":
+                continue
+            text = path.read_text(encoding="utf-8")
+            if path.relative_to(SRC).as_posix() == "global_policy.py":
+                self._require_root_publication_push_point(text)
+                continue
+            self.assertNotIn("gitcmd.push(", text, path.name)
+
+    def _require_root_publication_push_point(self, text: str) -> None:
+        """src/workline/global_policy.py: one ``gitcmd.push(``, in ``_publish``, after ``_require_root_proof(`` and
+        ``publication.require_barrier_clear(`` there."""
+        self.assertEqual(1, text.count("gitcmd.push("), "the root owner pushes at one place")
+        publish = [node for node in ast.walk(ast.parse(text))
+                   if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_publish"]
+        self.assertEqual(1, len(publish), "one _publish")
+        body = ast.get_source_segment(text, publish[0]) or ""
+        self.assertIn("gitcmd.push(", body, "the one push is inside _publish")
+        for guard in ("_require_root_proof(", "publication.require_barrier_clear("):
+            self.assertIn(guard, body, f"_publish holds {guard}")
+            self.assertLess(body.index(guard), body.index("gitcmd.push("), f"{guard} comes before the push")
 
     def test_only_the_activation_producer_and_its_guard_name_the_activation_path(self) -> None:
         """Gate 3: P1's reader and validator, the Mutation Controller's owner guard, the one producer, and the one
