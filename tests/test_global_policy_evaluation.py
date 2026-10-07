@@ -16,7 +16,11 @@ change owner:
   movement (the stronger lightening floor);
 * correlated sources are one cluster: never many confirmations, for a change or
   for an evaluation (§31.43);
-* the evaluation binds its environment (attribution) and its exact change.
+* the evaluation binds its environment (attribution) and its exact change;
+* no evaluation is recorded against a change committed without its Consumption
+  (Amendment 12: the stranded-change gate is a root-maintenance entry
+  condition), and one beside the change's pending mutation meets the
+  single-writer refusal.
 
 ``retain`` / ``adjust`` / ``rollback`` rest on Relevant Opportunities OBSERVED
 under the change (a source Run that froze it as an active Global experiment):
@@ -30,8 +34,8 @@ import ast
 import unittest
 
 from global_policy_helpers import (
-    ENVIRONMENT, EVALUATION_SUBJECT, GLOBAL_POLICY_REL, KP_SUBJECT, SLOTS, GlobalPolicyCase,
-    change_request, discovery_actors, evaluation_environment, evaluation_request, maintenance, observed_sources,
+    ENVIRONMENT, EVALUATION_SUBJECT, GLOBAL_POLICY_REL, KM_SUBJECT, KP_SUBJECT, SLOTS, Crash, GlobalPolicyCase,
+    change_request, crash_at, discovery_actors, evaluation_environment, evaluation_request, maintenance, observed_sources,
     owner, root_review, sources,
 )
 from helpers import SRC
@@ -122,8 +126,6 @@ class EvaluationTests(_EvaluationCase):
         self.refused(lambda: self.evaluation("rgc_" + "0" * 26), "evaluation_invalid")
 
     def test_the_same_evaluation_request_resumes_with_the_same_evaluation_id(self) -> None:
-        from global_policy_helpers import Crash, crash_at
-
         change = self.applied()
         request = evaluation_request(change.global_policy_change_id, self.sources)
         with crash_at(owner(), "_c2_evaluation"):
@@ -134,6 +136,47 @@ class EvaluationTests(_EvaluationCase):
         result = self.evaluate(request)
         self.assertEqual(reserved, [result.evaluation_id])
         self.assertEqual(1, len(self.commits_with(EVALUATION_SUBJECT)))
+
+    def stranded_change(self, *, drop_runtime: bool) -> str:
+        """A change whose Kp is committed and whose Consumption is not (the change crashed at C-2(Kp))."""
+        with crash_at(owner(), "_c2_kp"):
+            with self.assertRaises(Crash):
+                self.change()
+        self.assertEqual(1, len(self.commits_with(KP_SUBJECT)))
+        self.assertEqual([], self.commits_with(KM_SUBJECT))
+        (pending,) = self.pending_records()
+        change_id = pending["reserved_ids"][owner().CHANGE_KEY]
+        self.assertEqual([f"review-policy/changes/{change_id}.yaml"], self.tracked("review-policy/changes/"))
+        if drop_runtime:
+            self.drop_runtime()
+        return change_id
+
+    def test_no_evaluation_is_recorded_against_a_change_without_its_consumption(self) -> None:
+        """Amendment 12 (RB7DL-9) row (a): the stranded-change gate is an entry condition of the evaluation too.
+        After runtime loss the change's Kp identity was never durably saved anywhere that survived, so no
+        evaluation is recorded on it - review_p7_run_unrecovered, before any evaluation ID is allocated."""
+        change_id = self.stranded_change(drop_runtime=True)
+        head = self.head()
+        self.stops("", lambda: self.evaluation(change_id), reason=owner().REASON_RUN_UNRECOVERED)
+        self.assertEqual(head, self.head())
+        self.assertEqual([], self.runtime_records(), "no evaluation mutation (and no evaluation ID) was opened")
+        self.assertEqual([], self.tracked("review-policy/evaluations/"))
+        self.assertFalse((self.root / "review-policy" / "evaluations").exists(), "nothing is written")
+
+    def test_an_evaluation_beside_a_pending_change_meets_the_single_writer_refusal(self) -> None:
+        """Amendment 12 (RB7DL-9) row (b): with the change's runtime kept its pending mutation owns the change (the
+        RB7DL-1 exclusion), so the evaluation meets review_p7_root_mutation_conflict; the change still finishes."""
+        change_id = self.stranded_change(drop_runtime=False)
+        head = self.head()
+        self.stops("", lambda: self.evaluation(change_id), reason=maintenance().REASON_MUTATION_CONFLICT)
+        self.assertEqual(head, self.head())
+        (pending,) = self.pending_records()
+        self.assertEqual(owner().OPERATION, pending["operation"], "only the change's own mutation is pending")
+        self.assertEqual([], self.tracked("review-policy/evaluations/"))
+        result = self.applied()  # the change's own resume completes from its recorded Kp
+        self.assertEqual((change_id, 2), (result.global_policy_change_id, result.global_policy_version))
+        self.assertEqual([result.policy_commit], self.commits_with(KP_SUBJECT))
+        self.assertEqual([], self.pending_records())
 
     def test_a_later_change_is_a_new_packet_and_a_new_higher_version(self) -> None:
         first = self.applied()

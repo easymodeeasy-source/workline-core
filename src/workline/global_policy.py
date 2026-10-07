@@ -918,7 +918,8 @@ def _consumed_by(consumptions: Sequence[Any], receipt_id: str, change_id: str | 
 
 
 def _require_no_stranded_change(op: _Op) -> None:
-    """No Global Policy Change begins while a committed change record has no Consumption of its own Receipt.
+    """No root mutation opens - a change or an evaluation (Amendment 12) - while a committed change record has no
+    Consumption of its own Receipt.
 
     Such a change is a Kp whose identity was never durably saved: it is never
     inferred from Git history, never published and never built upon -
@@ -946,7 +947,9 @@ def _require_no_stranded_change(op: _Op) -> None:
     # a change a pending root mutation reserved is that mutation's, with its Kp identity durably recorded: the
     # single-writer refusal (review_p7_root_mutation_conflict) reports that state, never the reconciliation boundary
     for record in root_maintenance.pending_mutations(op.root):
-        changes.pop(str((record.get("reserved_ids") or {}).get(CHANGE_KEY)), None)
+        owned = (record.get("reserved_ids") or {}).get(CHANGE_KEY)
+        if isinstance(owned, str):  # an evaluation mutation reserves no change
+            changes.pop(owned, None)
     if not changes:
         return
     consumptions = _committed_consumptions(op)
@@ -2163,8 +2166,11 @@ def record_global_policy_evaluation(workline_root: Path,
     with root_maintenance.root_operation(Path(workline_root), OPERATION_EVALUATION, {"request_digest": digest}) as lock:
         op, pending = _enter(Path(workline_root), OPERATION_EVALUATION, request, record, digest, None, lock)
         if pending is not None:
-            mutation = _reopen(op, pending)
+            mutation = _reopen(op, pending)  # a resume of its own pending mutation is not re-gated (Amendment 12)
         else:
+            # Amendment 12: the stranded-change gate is a root-maintenance entry condition - no evaluation is
+            # recorded against a change whose Kp identity was never durably saved (nothing allocated before it)
+            _require_no_stranded_change(op)
             # the one exact path names the evaluation ID: allocated right before the open, stored by it (Amendment 4)
             allocated = ids.new_id("review_global_policy_evaluation")
             mutation = _open(op, write_scope=[_LAYOUT.global_evaluation_rel(allocated)],

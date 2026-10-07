@@ -158,7 +158,8 @@ def _root_template() -> Path:
         target = _base() / "root-template"
         root = copy_workline_root(target)  # IR-RB7-6: it carries the root .gitignore and the tracked Global policy
         for relative in (".gitignore", GLOBAL_POLICY_REL):
-            if (root / relative).read_bytes() != (WORKLINE_ROOT / relative).read_bytes():
+            copied = root / relative
+            if not copied.is_file() or copied.read_bytes() != (WORKLINE_ROOT / relative).read_bytes():
                 raise AssertionError(f"the copied root does not carry this root's {relative} exactly")
         ignore = (root / ".gitignore").read_text(encoding="utf-8")
         if f"{RUNTIME_DIR}/" not in ignore.splitlines():
