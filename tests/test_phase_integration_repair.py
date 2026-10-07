@@ -13,13 +13,13 @@ import unittest
 
 from helpers import completing_executor, git
 from rb5_doubles import DEFERRED, ident
-from rb5_run_helpers import Discovery, IntegrationRunCase, claim, phase_review, repairing_executor
+from rb5_run_helpers import Adjudicator, Discovery, IntegrationRunCase, claim, phase_review, repairing_executor
 from workline import start as st
 from workline import start_integration_review as sir
 from workline import start_review as sr
 from workline.create import RelationSpec
-from workline.errors import ValidationError
-from workline.review import history
+from workline.errors import StopError, ValidationError
+from workline.review import history, p4
 from workline.review import integration as ri
 from workline.review import paths as review_paths
 from workline.review.store import ReviewStore
@@ -239,9 +239,108 @@ class DeferredRepairTests(IntegrationRunCase):
         self.assertEqual([integration], [w.id for w in view.effective_works(phase_id) if w.work_kind == "phase_integration_check"])
         self.assertEqual("completed", view.work_state(integration).state)
 
-    @unittest.skip(DEFERRED)
+    # ---------------------------------------------------------------- CP RB5 set C, end to end (L152)
+
+    EVIDENCE = ("e" * 64,)
+
+    def blocking_finding(self, store, run_id: str) -> str:
+        (finding,) = [f["finding_id"] for f in ReviewStore(store).read_adjudication(run_id).findings if f["blocking"]]
+        return str(finding)
+
+    def fix_of(self, store, finding_id: str) -> str:
+        review = ReviewStore(store)
+        (work,) = [found.target.id for found in (review.read_history(review_paths.HISTORY_RELATIONS, relation_id)
+                                                 for relation_id in review.history_ids(review_paths.HISTORY_RELATIONS))
+                   if found.relation_type == history.RELATION_FUTURE_WORK_LINK and found.source.id == finding_id]
+        return str(work)
+
+    def claims(self, relation_type: str, family: str, target: str, status: str = history.CAUSAL_SUPPORTED):
+        """The adjudicator's one relation claim, from the Run's one blocking problem claim (the first report's)."""
+        def relations(task):
+            return (p4.P5RelationClaim(relation_type, str(task.reports[0]["task_id"]), 0, family, target, status,
+                                       "The same defect again.", "phase-objective",
+                                       self.EVIDENCE if status == history.CAUSAL_SUPPORTED else ()),)
+        return relations
+
+    def repair_cycle(self, store, integration: str, strategy: str, relations=None, *, refused: tuple[str, ...] = ()
+                     ) -> tuple[str, str, ri.IntegrationRepairContext]:
+        """One Integration Run settled DOMAIN_REPAIR_REQUIRED (one blocking problem, ``relations`` claimed): each
+        ``refused`` strategy is answered first and refused before anything is registered, then ``strategy`` is
+        accepted; its fix Work is completed. Returns the Run, its blocking Finding and the context START was given."""
+        before = set(self.integration_runs(store, integration))
+        selector = phase_review(Discovery(claim("problem")), adjudicator=Adjudicator(relations=relations))
+        for answer in refused:
+            works = set(ProjectView.load(store).works)
+            with self.assertRaises(StopError) as raised:
+                self.integrate(store, integration, selector, executor=repairing_executor(store, strategy=answer))
+            self.assertEqual(sr.CODE_INTEGRATION_REPAIR_PLAN_INVALID, raised.exception.code, answer)
+            self.assertIn("STRATEGY_CHANGE", str(raised.exception))
+            self.assertEqual(works, set(ProjectView.load(store).works), "a refused plan registers nothing")
+        seen: list = []
+        self.integrate(store, integration, selector, executor=repairing_executor(store, seen, strategy=strategy))
+        (run_id,) = set(self.integration_runs(store, integration)) - before
+        ((_, context),) = [item for item in seen if item[1] is not None]
+        finding = self.blocking_finding(store, run_id)
+        self.assertEqual("completed", st.start(store, self.fix_of(store, finding), "single-work",
+                                                completing_executor(store)).status)
+        return run_id, finding, context
+
+    def recorded_requirement(self, store, run_id: str) -> bool:
+        return bool((ReviewStore(store).read_adjudication(run_id).obligations or {}).get("strategy_change_required"))
+
     def test_abc_linkage_across_integration_runs_uses_evidence_not_chronology(self) -> None:
-        """review/p4.py + history.py (SHARED): recurrence across integration Runs (§32.28)."""
+        """L152 (§32.28 with CP RB5 Q-C2 / Q-C3, §32.26): across Integration Runs STRATEGY_CHANGE is the supported B/C
+        relation chain on one semantic surface, end to end through START. One supported B is not two; a later Run
+        whose relation is unresolved does not count, however many Runs came before on that surface; a C through the
+        fix Work's version 2 link to a non-adjacent earlier Run's Finding that itself has a supported B is the chain
+        - and the plan reusing the strategy already linked there is refused before anything is registered."""
+        store, _, ids = self.marked_project()
+        integration = ids["integration"]
+        run_1, f1, context_1 = self.repair_cycle(store, integration, "split-the-report")
+        self.assertFalse(context_1.strategy_change_required)
+        # B: F2 recurs F1, and F1 has no B/C predecessor - not two consecutive; reusing the strategy is allowed
+        run_2, f2, context_2 = self.repair_cycle(store, integration, "split-the-report",
+                                                 self.claims(history.RELATION_CROSS_RUN_RECURRENCE, "findings", f1))
+        self.assertEqual((False, False), (context_2.strategy_change_required, self.recorded_requirement(store, run_2)))
+        # chronology alone (an unresolved B to the immediately previous Run) is A_NEW: nothing is required
+        run_3, f3, context_3 = self.repair_cycle(
+            store, integration, "split-the-report",
+            self.claims(history.RELATION_CROSS_RUN_RECURRENCE, "findings", f2, status=history.CAUSAL_UNRESOLVED))
+        self.assertEqual((False, False), (context_3.strategy_change_required, self.recorded_requirement(store, run_3)))
+        # C to the fix Work of F2 (Run 2, not the adjacent Run 3): F2 has its supported B to F1 on the same surface
+        fix_2 = self.fix_of(store, f2)
+        run_4, f4, context_4 = self.repair_cycle(store, integration, "restructure-the-report",
+                                                 self.claims(history.RELATION_REPAIR_INDUCED, p4.FIX_WORK_FAMILY, fix_2),
+                                                 refused=("split-the-report",))
+        self.assertEqual((True, True), (context_4.strategy_change_required, self.recorded_requirement(store, run_4)))
+        self.assertEqual(frozenset({"split-the-report"}), context_4.prior_strategies())
+        review = ReviewStore(store)
+        (induced,) = [found for found in (review.read_history(review_paths.HISTORY_RELATIONS, relation_id)
+                                          for relation_id in review.history_ids(review_paths.HISTORY_RELATIONS))
+                      if found.relation_type == history.RELATION_REPAIR_INDUCED]
+        link = history.integration_fix_link(review, fix_2)
+        self.assertEqual((f4, history.ENDPOINT_WORK, fix_2), (induced.source.id, induced.target.kind, induced.target.id))
+        self.assertEqual(dict(link.integration_provenance), dict(induced.integration_provenance))
+        self.assertEqual([], history.relation_problems(review, induced, work_ids=set(ProjectView.load(store).works)))
+        self.assertEqual(4, len({run_1, run_2, run_3, run_4}))
+
+    def test_a_b_b_chain_requires_a_strategy_change_end_to_end(self) -> None:
+        """CP RB5 Q-C3 / §32.26, end to end: F3 recurs F2 which recurs F1, all supported on one surface - STRATEGY_CHANGE
+        is recorded at Run 3's G4, START's repair context says so, and a plan reusing a strategy already linked on
+        that surface (from any earlier Run) is refused before anything is registered; another strategy is accepted.
+        (Other surfaces, unresolved / insufficient evidence and A_NEW are PSW's unit rows in test_rb5_relation_chain.)"""
+        store, _, ids = self.marked_project()
+        integration = ids["integration"]
+        _, f1, _ = self.repair_cycle(store, integration, "split-the-report")
+        _, f2, _ = self.repair_cycle(store, integration, "rewrite-the-writer",
+                                     self.claims(history.RELATION_CROSS_RUN_RECURRENCE, "findings", f1))
+        run_3, _, context = self.repair_cycle(store, integration, "restructure-the-report",
+                                              self.claims(history.RELATION_CROSS_RUN_RECURRENCE, "findings", f2),
+                                              refused=("split-the-report", "rewrite-the-writer"))
+        self.assertTrue(context.strategy_change_required)
+        self.assertTrue(self.recorded_requirement(store, run_3))
+        self.assertEqual(frozenset({"split-the-report", "rewrite-the-writer"}), context.prior_strategies())
+        self.assertEqual([], context.problems())
 
 
 if __name__ == "__main__":

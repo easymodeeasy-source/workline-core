@@ -4561,12 +4561,27 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
     _measured(session, run, p4.ADJUDICATION_SETTLE_GENERATION, before)
     finding_ids = [mutation.reserve_id(gate.review_finding_key(run.review_run_id, ordinal), "review_finding")
                    for ordinal in range(1, len(normalized.drafts) + 1)]
-    adjudication = p4.adjudication(
-        normalized, finding_ids, review_run_id=run.review_run_id, gate_record=third, candidate_generation=1,
-        review_contract=records.P4_PHASE_INTEGRATION_CONTRACT, descriptor=descriptor, reports=reports, prior=None,
-        policy_id=run.policy, phase_outcome=outcome, integration_disposition=disposition,
-    )
-    drafts = p4.relation_drafts(returned.adjudication, adjudication, references, policy_id=run.policy)
+
+    def build(strategy_change_required: bool | None) -> Any:
+        return p4.adjudication(
+            normalized, finding_ids, review_run_id=run.review_run_id, gate_record=third, candidate_generation=1,
+            review_contract=records.P4_PHASE_INTEGRATION_CONTRACT, descriptor=descriptor, reports=reports, prior=None,
+            policy_id=run.policy, phase_outcome=outcome, integration_disposition=disposition,
+            strategy_change_required=strategy_change_required,
+        )
+
+    # CP RB5 Q-C2 / Q-C3 (§32.26 / §32.28): a repair_induced claim may name only a fix Work an earlier repair of this
+    # integration registered (its one validated version 2 future_work_link); STRATEGY_CHANGE is the supported B/C
+    # relation chain over this G4's drafts - both pure, so the adjudication is built once to read its drafts and
+    # once more with the answer recorded. No Run order, timestamp or newest record decides anything here.
+    view = ProjectView.load(store)
+    fix_works = _integration_fix_works(review, view, str(chain.generations[0].target_identity))
+    drafts = p4.relation_drafts(returned.adjudication, build(None), references, policy_id=run.policy,
+                                fix_works=fix_works)
+    required = p4.integration_strategy_change_required(review, drafts, fix_works=fix_works, work_ids=set(view.works))
+    adjudication = build(required)
+    drafts = p4.relation_drafts(returned.adjudication, adjudication, references, policy_id=run.policy,
+                                fix_works=fix_works)
     relation_ids = [mutation.reserve_id(history.review_relation_key(run.review_run_id, ordinal), "review_relation")
                     for ordinal in range(1, len(drafts) + 1)]
     record = adjudication.to_record()
@@ -4581,7 +4596,7 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
     extra = [(review_paths.adjudication_rel(run.review_run_id), record)]
     # §28.8 / §28.12 / §28.5, ruling OQ-C: the Finding summaries, the relations and - for HUMAN_WAIT and every
     # G4-terminal disposition - the Run summary, in this same G4
-    extra += p4.g4_history(adjudication, gate_four, drafts, relation_ids, references).extra()
+    extra += p4.g4_history(adjudication, gate_four, drafts, relation_ids, references, fix_works=fix_works).extra()
     _integration_generation(session, run, 4, p4.TRANSITION_SETTLE, gate_four, extra)
     history.require_history_ready(ReviewStore(store), run.review_run_id, history.BOUNDARY_FINDINGS,
                                   history_contract=history.HISTORY_CONTRACT)
@@ -4880,6 +4895,22 @@ def _prior_repair_links(review: ReviewStore, view: ProjectView, work_id: str) ->
                                         str(provenance["source_review_run_id"]), found.target.id))
     return tuple(sorted(links, key=lambda link: (link.source_review_run_id, link.source_finding_id,
                                                  link.target_work_id)))
+
+
+def _integration_fix_works(review: ReviewStore, view: ProjectView, work_id: str) -> dict[str, Any]:
+    """CP RB5 Q-C2: each fix Work an earlier domain repair of integration ``work_id`` registered, mapped to its one
+    validated version 2 ``future_work_link`` (``history.integration_fix_link``) - the only Works a ``repair_induced``
+    claim of this integration's adjudication may name. Two links for one Work are a conflict, never a choice."""
+    found: dict[str, Any] = {}
+    for link in _prior_repair_links(review, view, work_id):
+        try:
+            relation = history.integration_fix_link(review, link.target_work_id)
+        except ValidationError as exc:
+            raise _integration_reconcile(f"fix Work {link.target_work_id} of integration {work_id}: {exc}",
+                                         "review_record_invalid") from exc
+        if relation is not None:
+            found[link.target_work_id] = relation
+    return found
 
 
 def integration_repair_context(store: ProjectStore, work_id: str, review_run_id: str) -> Any:

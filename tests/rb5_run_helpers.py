@@ -64,11 +64,13 @@ class Adjudicator:
     The Phase outcome is ``outcome`` when given; else ``desired_state_change_required`` with a HUMAN claim,
     ``not_satisfied`` with a blocking one and ``objectively_satisfied`` otherwise - always about the Candidate's
     own canonical Phase objective (its desired-state digest). ``bare=True`` returns the P4 part alone.
+    ``relations(task)``, when given, returns the P5 cross-run relation claims of the adjudication (CP RB5 Q-C2 / Q-C3).
     """
 
     def __init__(self, outcome: str | None = None, *, identity: str = "integration-adjudicator", version: str = "1",
-                 bare: bool = False) -> None:
+                 bare: bool = False, relations: Any = None) -> None:
         self.outcome, self.identity, self.version, self.bare = outcome, identity, version, bare
+        self.relations = relations
         self.tasks: list[Any] = []
 
     def __call__(self, task: Any) -> Any:
@@ -98,6 +100,7 @@ class Adjudicator:
         adjudication = p4.P4AdjudicationReturn(
             task.task_id, self.identity, self.version, True, tuple(dispositions),
             repair_purpose="repair the blocking integration problems" if blocking else None,
+            relation_claims=tuple(self.relations(task)) if self.relations is not None else (),
         )
         if self.bare:
             return adjudication
