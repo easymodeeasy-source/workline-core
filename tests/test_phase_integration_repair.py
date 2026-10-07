@@ -19,7 +19,7 @@ from workline import start_integration_review as sir
 from workline import start_review as sr
 from workline.create import RelationSpec
 from workline.errors import StopError, ValidationError
-from workline.review import history, p4
+from workline.review import history, p4, serialize
 from workline.review import integration as ri
 from workline.review import paths as review_paths
 from workline.review.store import ReviewStore
@@ -323,6 +323,36 @@ class DeferredRepairTests(IntegrationRunCase):
         self.assertEqual(dict(link.integration_provenance), dict(induced.integration_provenance))
         self.assertEqual([], history.relation_problems(review, induced, work_ids=set(ProjectView.load(store).works)))
         self.assertEqual(4, len({run_1, run_2, run_3, run_4}))
+
+    def test_two_links_for_one_fix_work_are_a_conflict_at_the_next_g4(self) -> None:
+        """RB5PR1B-4 (CP RB5 Q-C2; history.integration_fix_link): a fix Work named by two version 2 future_work_links
+        is a conflict, never a choice - the next Integration Run's G4 stops reconcile required with reason
+        review_record_conflict (the history core's own code, as the review Skill names it), before anything of that
+        G4 is recorded: no new relation, no second repair."""
+        from workline import ids as id_module
+        from workline.errors import ReconcileRequired
+
+        store, phase_id, ids = self.marked_project()
+        integration = ids["integration"]
+        _, finding, _ = self.repair_cycle(store, integration, "split-the-report")
+        fix = self.fix_of(store, finding)
+        review = ReviewStore(store)
+        (link,) = [found for found in (review.read_history(review_paths.HISTORY_RELATIONS, relation_id)
+                                       for relation_id in review.history_ids(review_paths.HISTORY_RELATIONS))
+                   if found.relation_type == history.RELATION_FUTURE_WORK_LINK]
+        twin = dataclasses.replace(link, relation_id=id_module.new_id("review_relation"))
+        path = review_paths.history_relation_rel(twin.relation_id)
+        (store.root / path).write_text(serialize.canonical_text(twin.to_record()), encoding="utf-8", newline="\n")
+        git(store.root, "add", "--", path)
+        git(store.root, "commit", "-q", "-m", "fixture: a second future_work_link for the same fix Work")
+        relations = set(review.history_ids(review_paths.HISTORY_RELATIONS))
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.integrate(store, integration, phase_review(Discovery(claim("problem"))),
+                           executor=repairing_executor(store, strategy="restructure-the-report"))
+        self.assertEqual(history.PROBLEM_CONFLICT, raised.exception.reason)
+        self.assertEqual(relations, set(ReviewStore(store).history_ids(review_paths.HISTORY_RELATIONS)))
+        self.assertEqual(1, len([w for w in ProjectView.load(store).effective_works(phase_id)
+                                 if w.name == "Fix the integrated report"]))
 
     def test_a_b_b_chain_requires_a_strategy_change_end_to_end(self) -> None:
         """CP RB5 Q-C3 / §32.26, end to end: F3 recurs F2 which recurs F1, all supported on one surface - STRATEGY_CHANGE

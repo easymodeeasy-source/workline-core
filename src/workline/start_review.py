@@ -4906,8 +4906,9 @@ def _integration_fix_works(review: ReviewStore, view: ProjectView, work_id: str)
         try:
             relation = history.integration_fix_link(review, link.target_work_id)
         except ValidationError as exc:
+            # RB5PR1B-4: the history core's own code is kept - two links for one Work are review_record_conflict
             raise _integration_reconcile(f"fix Work {link.target_work_id} of integration {work_id}: {exc}",
-                                         "review_record_invalid") from exc
+                                         str(getattr(exc, "code", None) or history.PROBLEM_INVALID)) from exc
         if relation is not None:
             found[link.target_work_id] = relation
     return found
