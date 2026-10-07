@@ -17,10 +17,8 @@ Unit level over the inert core :mod:`workline.review.global_policy`:
 * :class:`EvaluationRecordTests`: the pure Global evaluation record and post-change independence (§31.41-§31.43);
   :class:`ExactRollbackTests` (§31.20); :class:`ActiveGlobalExperimentTests` (§16.10).
 
-The in-memory fixtures here are RB7-C's own; the other RB7-C test files import them.
-
-``WAIT_PSW_IR_RB7_2``: until PSW delivers ``p4.ROOT_POLICY_ID`` / ``ROOT_POLICY_RECORD``, the root family policy hash a
-Candidate binds is stubbed (:func:`root_policy_hash_stub`); the rows that are about that hash itself skip.
+The in-memory fixtures here are RB7-C's own; the other RB7-C test files import them. Every Candidate binds the real
+root family policy hash (``p4.family_policy_hash(p4.ROOT_POLICY_ID)``, IR-RB7-2): nothing is stubbed.
 """
 
 from __future__ import annotations
@@ -31,7 +29,6 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any
 import unittest
-from unittest import mock
 
 from workline.errors import ReconcileRequired, StopError, ValidationError
 from workline.review import global_policy as gp
@@ -49,12 +46,6 @@ CHANGE_ID = "rgc_" + "1" * 26
 EVALUATION_ID = "rge_" + "1" * 26
 RUN_ID = "rr_" + "7" * 26
 RECEIPT_ID = "rcp_" + "7" * 26
-#: The PSW IR-RB7-2 shared pieces this leaf codes against (RB7_FOUNDATION_INTERFACES §7.2).
-PSW_P4 = hasattr(p4, "ROOT_POLICY_ID")
-WAIT_PSW_IR_RB7_2 = "WAIT_PSW_IR_RB7_2: p4.ROOT_POLICY_ID / ROOT_POLICY_RECORD (root non-history family policy)"
-STUB_ROOT_POLICY_HASH = hashlib.sha256(b"WAIT_PSW_IR_RB7_2 stub root family policy hash").hexdigest()
-#: RB7-F step 4 admits Global-origin experiments in the P6 loader (``policy.EXPERIMENT_ORIGINS``).
-GLOBAL_ORIGIN_ADMITTED = policy.ORIGIN_GLOBAL in policy.EXPERIMENT_ORIGINS
 SECRET_ROOT = Path(tempfile.gettempdir()) / "private-checkout-of-alpha"
 
 
@@ -64,14 +55,6 @@ def ident(prefix: str, number: int) -> str:
 
 def digest_of(*parts: object) -> str:
     return hashlib.sha256("|".join(str(part) for part in parts).encode("utf-8")).hexdigest()
-
-
-def root_policy_hash_stub(test: unittest.TestCase) -> None:
-    """WAIT_PSW_IR_RB7_2: until PSW lands the root family policy, a Candidate binds a stub hash (nothing else)."""
-    if not PSW_P4:
-        patcher = mock.patch.object(gp, "_root_policy_hash", return_value=STUB_ROOT_POLICY_HASH)
-        patcher.start()
-        test.addCleanup(patcher.stop)
 
 
 # --------------------------------------------------------------------------- Global policies
@@ -193,7 +176,6 @@ def candidate_for(before: dict[str, Any], request: gp.GlobalPolicyChangeRequest,
 
 def applied_change(test: unittest.TestCase, before: dict[str, Any] = V1, **request: Any) -> dict[str, Any]:
     """The stored change record of an authorized strengthen of ``before`` (required slots 1 -> 2 by default)."""
-    root_policy_hash_stub(test)
     material = candidate_for(before, change_request(two_independent(), **request), two_independent())
     return gp.change_record(material, review_run_id=RUN_ID, receipt_id=RECEIPT_ID)
 
@@ -486,8 +468,6 @@ class SourceSnapshotTests(unittest.TestCase):
         self.assertIn("evidence", gp.witness_problem(bound, fewer) or "")
 
     def test_a_post_change_run_is_witnessed_by_the_global_experiment_it_froze(self) -> None:
-        if not GLOBAL_ORIGIN_ADMITTED:
-            self.skipTest("WAIT_RB7F_STEP4: policy.EXPERIMENT_ORIGINS admits the Global origin with the loader switch")
         baseline = policy.parse_baseline(
             policy.materialized_baseline_record(successor(V1, slots=2), (), ()), "the baseline")
         active = (policy.ActiveExperiment(CHANGE_ID, SLOTS, "strengthen", None, origin=policy.ORIGIN_GLOBAL),)
@@ -688,9 +668,6 @@ class EligibilityTests(unittest.TestCase):
 # =========================================================================== the Promotion Packet (§31.22-§31.23)
 
 class PacketTests(unittest.TestCase):
-    def setUp(self) -> None:
-        root_policy_hash_stub(self)
-
     def build(self, before: dict[str, Any] = V1, snapshots: list[dict[str, Any]] | None = None,
               **request: Any) -> dict[str, Any]:
         snapshots = two_independent() if snapshots is None else snapshots
@@ -813,6 +790,50 @@ class PacketTests(unittest.TestCase):
                 self.assertEqual(gp.CODE_NOT_ELIGIBLE, raised.exception.code)
                 self.assertIn("unrepresentative_opportunities", str(raised.exception))
 
+    def test_a_thin_fourth_cluster_adds_context_and_never_subtracts(self) -> None:
+        # RB7CE-1, §31.18 L11999 / §31.19 "at least": alpha exercised the pre-change setting once (four Runs were
+        # lighter); beta / gamma / delta twice each - the qualifying triple is the witness set, alpha blocks nothing
+        thin = [(2, 3), (1, 1), (1, 1), (1, 1), (1, 1)]
+        snapshots = [snapshot("alpha", 1, runs=5, ran_under=thin)] + [
+            snapshot(name, n, ran_under=(2, 3)) for name, n in (("beta", 2), ("gamma", 3), ("delta", 4))]
+        packet = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)
+        found = packet["eligibility"]
+        self.assertTrue(found["eligible"], found["problems"])
+        self.assertEqual([{"sources": ["beta"]}, {"sources": ["delta"]}, {"sources": ["gamma"]}],
+                         found["independent_clusters"])
+        self.assertEqual(["alpha", "beta", "delta", "gamma"], found["supporting_sources"],
+                         "a thin source is context, not an exclusion: it keeps its lineage")
+        self.assertEqual(packet, gp.parse_promotion_packet(packet, "the Packet"))
+
+    def test_a_thin_cluster_unresolved_with_a_qualifying_one_is_never_chosen(self) -> None:
+        # RB7CE-1 unresolved-pair variant: alpha (one exercised Run) sorts first and is unresolved with beta
+        shared = digest_of("shared library")
+        snapshots = [snapshot("alpha", 1, runs=2, ran_under=[(2, 3), (1, 1)],
+                              dependencies=[{"identity": shared, "common_cause": gp.CAUSE_UNKNOWN}]),
+                     snapshot("beta", 2, ran_under=(2, 3),
+                              dependencies=[{"identity": shared, "common_cause": gp.CAUSE_RULED_OUT}]),
+                     snapshot("gamma", 3, ran_under=(2, 3)), snapshot("kappa", 4, ran_under=(2, 3))]
+        self.assertEqual(gp.RELATION_UNRESOLVED, gp.relation(snapshots[0], snapshots[1])[0])
+        found = self.build(V2_SLOTS3, snapshots=snapshots, direction="lighten", after=2)["eligibility"]
+        self.assertTrue(found["eligible"], found["problems"])
+        self.assertEqual([{"sources": ["beta"]}, {"sources": ["gamma"]}, {"sources": ["kappa"]}],
+                         found["independent_clusters"])
+
+    def test_too_few_clusters_and_too_thin_clusters_are_told_apart(self) -> None:
+        # only two independent clusters at all: the cluster floor itself is unmet, whatever their support
+        two = [snapshot("alpha", 1, ran_under=(2, 3)), snapshot("beta", 2, ran_under=(2, 3))]
+        with self.assertRaises(StopError) as raised:
+            self.build(V2_SLOTS3, snapshots=two, direction="lighten", after=2)
+        self.assertIn("too_few_independent_clusters", str(raised.exception))
+        self.assertNotIn("unrepresentative_opportunities", str(raised.exception))
+        # three clusters, one thin: the shortfall is the thin cluster's
+        thin = [snapshot("alpha", 1, runs=2, ran_under=[(2, 3), (1, 1)]), snapshot("beta", 2, ran_under=(2, 3)),
+                snapshot("gamma", 3, ran_under=(2, 3))]
+        with self.assertRaises(StopError) as raised:
+            self.build(V2_SLOTS3, snapshots=thin, direction="lighten", after=2)
+        self.assertIn("unrepresentative_opportunities", str(raised.exception))
+        self.assertNotIn("too_few_independent_clusters", str(raised.exception))
+
     def test_a_change_that_lowers_the_setting_is_held_to_the_lighten_floor_whatever_its_word(self) -> None:
         with self.assertRaises(StopError) as raised:
             self.build(V2_SLOTS3, direction="adjust", after=2)
@@ -933,6 +954,25 @@ class EvaluationRecordTests(unittest.TestCase):
             evaluate(self.change, gp.RESULT_RETAIN, correlated)
         self.assertEqual(gp.CODE_EVALUATION_INVALID, raised.exception.code)
 
+    def test_one_post_change_run_named_by_a_project_and_its_fork_is_one_observation(self) -> None:
+        # RB7CE-2, §31.18: the retain gate counts distinct observed Runs, as the eligibility floor does
+        change = applied_change(self, measurement={**MEASUREMENT, "minimum_opportunities": 2, "minimum_clusters": 1})
+
+        def project_and_fork(own_run: bool) -> list[dict[str, Any]]:
+            shared = {"family": RUNS, "id": ident("rr", 1100), "digest": digest_of("alpha", "post-change run")}
+            first = [shared] + ([{"family": RUNS, "id": ident("rr", 1101), "digest": digest_of("alpha", "own")}]
+                                if own_run else [])
+            return [snapshot("alpha", 11, records=first, global_changes=(CHANGE_ID,), ran_under=(2, 2)),
+                    snapshot("alpha-fork", 21, records=[shared], global_changes=(CHANGE_ID,), ran_under=(2, 2),
+                             lineage=digest_of("lineage", 11))]
+
+        with self.assertRaises(StopError) as raised:
+            evaluate(change, gp.RESULT_RETAIN, project_and_fork(own_run=False))
+        self.assertEqual(gp.CODE_EVALUATION_INVALID, raised.exception.code)
+        self.assertIn("proves 1 in 1", str(raised.exception))
+        found = evaluate(change, gp.RESULT_RETAIN, project_and_fork(own_run=True))
+        self.assertEqual(policy.NEXT_END_OBSERVATION, found["next_action"])
+
     def test_chronology_alone_is_never_causal_evidence(self) -> None:
         unobserved = [snapshot("alpha", 11, ran_under=(2, 2)), snapshot("beta", 12, ran_under=(2, 2))]
         for result in (gp.RESULT_RETAIN, gp.RESULT_ADJUST, gp.RESULT_ROLLBACK):
@@ -1022,7 +1062,6 @@ class ActiveGlobalExperimentTests(unittest.TestCase):
         self.assertEqual((), gp.active_global_experiments([], [], V1), "version 1 is no learned change")
 
     def test_a_lightening_freezes_the_stronger_before_setting_as_its_holdout(self) -> None:
-        root_policy_hash_stub(self)
         snapshots = three_independent()
         material = candidate_for(V2_SLOTS3, change_request(snapshots, direction="lighten", after=2), snapshots)
         lighten = gp.change_record(material, review_run_id=RUN_ID, receipt_id=RECEIPT_ID)

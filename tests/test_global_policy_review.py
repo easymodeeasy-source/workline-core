@@ -6,7 +6,7 @@ Unit level over the inert core :mod:`workline.review.global_policy`:
 * reviewer floors ``max(2|3, pre-change slots)`` decided by the movement, never by the direction word, and never by
   the proposed after-state; distinct reviewer identity / version bindings and one separately bound adjudicator;
 * the root requests are the common P4 requests under the root policy - no history contract, no prior history, no
-  set-aside summary, no decision evidence, no Effective Policy (WAIT_PSW_IR_RB7_2 until PSW lands the root branch);
+  set-aside summary, no decision evidence, no Effective Policy (the IR-RB7-2 root branch of p4);
   the root policy is refused under every other contract and in a Work P4 Context; static effective policy hash;
 * G4 from the validated Gate chain alone: a declined discovery and REPAIR_REQUIRED are terminal ``not_authorized``
   (no Repair Batch; the same verdict recovery gives),
@@ -34,13 +34,10 @@ from workline.review import history, p4, policy, records, recovery, serialize
 from workline.review.store import GateChain
 
 from test_global_policy_promotion import (
-    CHANGE_ID, EVALUATION_ID, PACKET_ID, PSW_P4, RECEIPT_ID, RUN_ID, SECRET_ROOT, V1, V2_SLOTS3, WAIT_PSW_IR_RB7_2,
-    applied_change, candidate_for, change_request, digest_of, evaluate, ident, observed, root_policy_hash_stub,
-    successor, three_independent, two_independent,
+    CHANGE_ID, EVALUATION_ID, PACKET_ID, RECEIPT_ID, RUN_ID, SECRET_ROOT, V1, V2_SLOTS3, applied_change, candidate_for,
+    change_request, digest_of, evaluate, ident, observed, successor, three_independent, two_independent,
 )
 
-PSW_RECORDS = hasattr(records, "GLOBAL_POLICY_REVIEW_KIND")
-WAIT_PSW_IR_RB7_1 = "WAIT_PSW_IR_RB7_1: records root contract / P7 kind constants / Global Policy Consumption v4"
 SOURCE = Path(gp.__file__).read_text(encoding="utf-8")
 LOADER = digest_of("loader identity")
 GOOD_FACTS = {"current_before_global_digest": policy.global_policy_digest(V1), "sources_current": True,
@@ -121,17 +118,21 @@ class IdentityTests(unittest.TestCase):
         self.assertEqual(("global-policy-change", "global-policy-evaluation"), (gp.OPERATION, gp.OPERATION_EVALUATION))
 
     def test_the_identities_are_exactly_the_shared_records_constants(self) -> None:
-        if not PSW_RECORDS:
-            self.skipTest(WAIT_PSW_IR_RB7_1)
-        self.assertEqual(records.GLOBAL_POLICY_REVIEW_KIND, gp.REVIEW_KIND)
-        self.assertEqual(records.GLOBAL_POLICY_TARGET_IDENTITY, gp.TARGET_IDENTITY)
-        self.assertEqual(records.P7_GLOBAL_POLICY_CHANGE_CONTRACT, gp.CONTRACT)
+        # FLAG-C1 closed: re-exports of the one records definition (IR-RB7-1), not restated values
+        self.assertIs(records.GLOBAL_POLICY_REVIEW_KIND, gp.REVIEW_KIND)
+        self.assertIs(records.GLOBAL_POLICY_TARGET_IDENTITY, gp.TARGET_IDENTITY)
+        self.assertIs(records.P7_GLOBAL_POLICY_CHANGE_CONTRACT, gp.CONTRACT)
         self.assertIn(gp.CONTRACT, records.P4_CONTRACTS)
+        self.assertIn(gp.ADAPTER_V1_IDENTITY, records.GLOBAL_POLICY_COMPATIBILITY_ADAPTERS)
+        for name, value in (("REVIEW_KIND", "records.GLOBAL_POLICY_REVIEW_KIND"),
+                            ("TARGET_IDENTITY", "records.GLOBAL_POLICY_TARGET_IDENTITY"),
+                            ("CONTRACT", "records.P7_GLOBAL_POLICY_CHANGE_CONTRACT"), ("POLICY_ID", "p4.ROOT_POLICY_ID")):
+            with self.subTest(name=name):
+                self.assertIn(f"\n{name} = {value}\n", SOURCE, "an alias of the shared name, never a restated literal")
 
     def test_the_root_policy_is_exactly_the_shared_p4_constant(self) -> None:
-        if not PSW_P4:
-            self.skipTest(WAIT_PSW_IR_RB7_2)
-        self.assertEqual(p4.ROOT_POLICY_ID, gp.POLICY_ID)
+        self.assertIs(p4.ROOT_POLICY_ID, gp.POLICY_ID)
+        self.assertEqual(p4.family_policy_hash(p4.ROOT_POLICY_ID), gp.root_meta_policy()["root_policy_hash"])
 
     def test_the_p5_human_wait_disposition_this_core_reads(self) -> None:
         self.assertEqual(history.DISPOSITION_HUMAN_WAIT, gp._P5_HUMAN_WAIT)
@@ -181,7 +182,6 @@ class ReviewerFloorTests(unittest.TestCase):
 
 class CandidateTests(unittest.TestCase):
     def setUp(self) -> None:
-        root_policy_hash_stub(self)
         self.material = candidate_for(V1, change_request(two_independent()), two_independent())
 
     def test_the_candidate_reconstructs_without_runtime_memory(self) -> None:
@@ -234,8 +234,6 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(["alpha", "beta"], [item["source_id"] for item in evidence["source_snapshots"]])
 
     def test_the_root_runs_bind_the_static_root_family_policy_hash(self) -> None:
-        if not PSW_P4:
-            self.skipTest(WAIT_PSW_IR_RB7_2)
         expected = p4.family_policy_hash(gp.POLICY_ID)
         self.assertEqual(expected, gp.review_context(V1, loader_identity=LOADER)["root_policy_hash"])
         self.assertEqual(expected, self.material["root_meta_policy"]["root_policy_hash"])
@@ -246,8 +244,6 @@ class CandidateTests(unittest.TestCase):
 
 class RootRequestTests(unittest.TestCase):
     def setUp(self) -> None:
-        if not (PSW_P4 and PSW_RECORDS):
-            self.skipTest(f"{WAIT_PSW_IR_RB7_1}; {WAIT_PSW_IR_RB7_2}")
         self.material = candidate_for(V1, change_request(two_independent()), two_independent())
         self.context = gp.review_context(V1, loader_identity=LOADER)
 
@@ -337,7 +333,6 @@ class G4OutcomeTests(unittest.TestCase):
 
 class MetaVerifierTests(unittest.TestCase):
     def setUp(self) -> None:
-        root_policy_hash_stub(self)
         self.material = candidate_for(V1, change_request(two_independent()), two_independent())
 
     def test_a_current_candidate_passes_every_item(self) -> None:
@@ -388,7 +383,6 @@ class ExactRollbackMetaVerifierTests(unittest.TestCase):
     """Amendment 7 / §31.28: "rollback exception exactness when used" is re-proven over the stored records."""
 
     def setUp(self) -> None:
-        root_policy_hash_stub(self)
         self.change = applied_change(self)
         self.before = successor(V1, slots=2)
         self.evaluation = evaluate(self.change, gp.RESULT_ROLLBACK, observed(CHANGE_ID))
@@ -433,7 +427,6 @@ class ExactRollbackMetaVerifierTests(unittest.TestCase):
 
 class RecoveryAdapterTests(unittest.TestCase):
     def setUp(self) -> None:
-        root_policy_hash_stub(self)
         self.material = candidate_for(V1, change_request(two_independent()), two_independent())
         self.hash = gp.candidate_hash(self.material)
         self.consumed: set[str] = set()
@@ -517,7 +510,6 @@ class RecoveryAdapterTests(unittest.TestCase):
 
 class PersistenceRecordTests(unittest.TestCase):
     def setUp(self) -> None:
-        root_policy_hash_stub(self)
         self.material = candidate_for(V1, change_request(two_independent()), two_independent())
         self.change = gp.change_record(self.material, review_run_id=RUN_ID, receipt_id=RECEIPT_ID)
 
@@ -552,8 +544,6 @@ class PersistenceRecordTests(unittest.TestCase):
         self.assertNotIn(str(SECRET_ROOT), text)
 
     def test_the_persisted_projection_consumption_v4_binds(self) -> None:
-        if not PSW_RECORDS:
-            self.skipTest(WAIT_PSW_IR_RB7_1)
         found = gp.persisted_global_policy(self.material, global_policy_change_id=CHANGE_ID, policy_commit="b" * 40,
                                            policy_parent="a" * 40, branch="refs/heads/main",
                                            policy_delta_digest=digest_of("delta"), loader_identity=LOADER)

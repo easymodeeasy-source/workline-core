@@ -49,14 +49,13 @@ if TYPE_CHECKING:  # imported lazily inside recovery_adapter() only (RB7-F's loa
 
 # --------------------------------------------------------------------------- identities (§31.25, RB7_FOUNDATION_INTERFACES §1 / §5.1)
 
-#: The root Review kind, target and contract: the frozen values ``records`` owns (PSW IR-RB7-1). Stated here so this
-#: inert core reads before the shared records change lands; the WAIT_PSW_IR_RB7_1 pin proves they are exactly the
-#: records' constants.
-REVIEW_KIND = "global-policy-change-v1"
-TARGET_IDENTITY = "global-policy"
-CONTRACT = "review-v1-global-policy-change-p4-v1"
-#: The non-history root family policy (``p4.ROOT_POLICY_ID``, PSW IR-RB7-2; WAIT_PSW_IR_RB7_2 pins the equality).
-POLICY_ID = "review-v1-p7-root-policy-v1"
+#: The root Review kind, target and contract: re-exported, defined once in ``records`` (IR-RB7-1).
+REVIEW_KIND = records.GLOBAL_POLICY_REVIEW_KIND
+TARGET_IDENTITY = records.GLOBAL_POLICY_TARGET_IDENTITY
+CONTRACT = records.P7_GLOBAL_POLICY_CHANGE_CONTRACT
+#: The non-history root family policy, defined once in ``p4`` (IR-RB7-2): every root Run's static
+#: ``effective_policy_hash`` is ``p4.family_policy_hash(POLICY_ID)`` (RB7C-1).
+POLICY_ID = p4.ROOT_POLICY_ID
 AUTHORIZED_OPERATION_STAGE = "global-policy-change:persist-global-policy"
 #: The owner operations (``root_maintenance.OPERATIONS``; this core never imports the runtime).
 OPERATION = "global-policy-change"
@@ -1205,7 +1204,19 @@ def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
         problems.append("mechanism_project_specific")
     counted = [cluster["sources"] for cluster in computed["clusters"]
                if any(member in supporting for member in cluster["sources"])]
-    independent = _independent_clusters(counted, computed["matrix"])
+    exercised = {source_id: _exercised(by_id[source_id]["opportunities"][surface_id], pre_change_setting)
+                 for source_id in supporting}
+
+    def distinct_exercised(cluster: Sequence[str]) -> int:
+        # §31.18: one Review Run named by several members of one cluster (a Project and its fork) is one opportunity
+        return len({run for member in cluster for run in exercised.get(member, ())})
+
+    # Under the lighten floor the witness clusters are chosen ONLY among the representative ones (each holding at
+    # least SINGLE_EVENT_FLOOR distinct exercised Runs): a thinner cluster adds context and no independent cluster
+    # (§31.18 L11999) - it never subtracts from a qualifying set (§31.19's floors are "at least").
+    representative = [cluster for cluster in counted if distinct_exercised(cluster) >= policy.SINGLE_EVENT_FLOOR] \
+        if floor == FLOOR_LIGHTEN else counted
+    independent = _independent_clusters(representative, computed["matrix"])
     lineages = _lineage_groups([by_id[source_id] for source_id in supporting])
     opportunities = {source_id: [entry["review_run_id"] for entry in by_id[source_id]["opportunities"][surface_id]]
                      for source_id in supporting}
@@ -1214,14 +1225,10 @@ def _eligibility(record: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any
         if lineages < FLOOR_LINEAGES[floor]:
             problems.append("too_few_lineages")
         if len(independent) < FLOOR_CLUSTERS[floor]:
-            problems.append("too_few_independent_clusters")
-        exercised = {source_id: _exercised(by_id[source_id]["opportunities"][surface_id], pre_change_setting)
-                     for source_id in supporting}
-        # §31.18: one Review Run named by several members of one cluster (a Project and its fork) is one opportunity
-        if floor == FLOOR_LIGHTEN and any(
-                len({run for member in cluster for run in exercised.get(member, ())}) < policy.SINGLE_EVENT_FLOOR
-                for cluster in independent):
-            problems.append("unrepresentative_opportunities")
+            # the shortfall is the thin clusters' when the counted clusters alone would have met the cluster floor
+            thin = floor == FLOOR_LIGHTEN \
+                and len(_independent_clusters(counted, computed["matrix"])) >= FLOOR_CLUSTERS[floor]
+            problems.append("unrepresentative_opportunities" if thin else "too_few_independent_clusters")
     return serialize.canonical_data({
         "eligible": not problems,
         "floor": floor,
@@ -2552,7 +2559,7 @@ def _next_action(result: str, change: Mapping[str, Any]) -> str:
 def _observation_problem(result: str, change: Mapping[str, Any], snapshots: Sequence[Mapping[str, Any]],
                          computed: Mapping[str, Any]) -> str | None:
     observed = _observed_under(snapshots, change)
-    total = sum(len(items) for items in observed.values())
+    total = len({run for items in observed.values() for run in items})  # §31.18: one Run counts once, whoever names it
     if result in (RESULT_ADJUST, RESULT_ROLLBACK) and total < 1:
         return (f"a {result} rests on at least one relevant opportunity observed under "
                 f"{change['global_policy_change_id']}; chronology alone is never causal evidence")

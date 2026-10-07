@@ -29,7 +29,7 @@ from workline.review import global_policy as gp
 from workline.review import policy
 
 from test_global_policy_promotion import (
-    CHANGE_ID, SLOTS, STEPS, V1, change_request, digest_of, root_policy_hash_stub, successor, two_independent,
+    CHANGE_ID, SLOTS, STEPS, V1, change_request, digest_of, successor, two_independent,
 )
 
 SURFACES = {SLOTS: range(1, 5), STEPS: range(0, 4)}
@@ -139,7 +139,6 @@ class ProofTests(unittest.TestCase):
         self.assertEqual(64, len(gp.compatibility_proof_digest(proof)))
 
     def test_an_unprovable_case_blocks_automatic_promotion(self) -> None:
-        root_policy_hash_stub(self)
         with mock.patch.object(gp, "adapter_v1_problem", return_value="a future Profile schema has no adapter"):
             with self.assertRaises(StopError) as raised:
                 gp.compatibility_proof(V1, successor(V1, slots=2))
