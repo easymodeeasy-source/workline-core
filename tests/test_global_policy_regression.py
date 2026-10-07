@@ -9,7 +9,11 @@ RB7-F foundation rows:
   was, and the root's class B entry uses root-runtime scratch and can never name
   ``.workline/`` - no root operation creates the Project namespace;
 * the two read-only Git facts the opaque root repository identity is built from
-  (§31.13): the common directory and the object format.
+  (§31.13): the common directory and the object format;
+* rules/git "Root policy maintenance" (§31.47, AO-1) and no new routing ID;
+* the two root CLI commands (§31.12, RB7C-6): bound like every command but
+  ``status``, targeting the launcher's own root, the mutation-capable one refused
+  inside a Project before the lock.
 
 The §31.59 rows that need the root owner (Project Review / Mutation Controller
 unchanged end to end, no ``.workline`` after every root operation) are added with
@@ -20,6 +24,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -242,6 +247,100 @@ class RulesGitRootMaintenanceTests(unittest.TestCase):
         ids = re.findall(r"<!-- workline-id: ([^ ]+) -->", self.registry())
         self.assertNotIn("skills/global-policy", ids)
         self.assertFalse([found for found in ids if "root" in found or "global-policy" in found])
+
+
+class RootCliBindingTests(WorklineTestCase):
+    """RB7C-6 / §31.12: the two root commands bind to the launcher's own root; the binding exception stays ``status``."""
+
+    STATUS_KEYS = {"status", "global_policy", "current_change_id", "evaluation_ids", "authorization",
+                   "pending_mutation", "next_boundary_adapter_identity"}
+
+    def p7_root(self, name: str = "workline-root") -> Path:
+        """A git-initialized copy of this root carrying its tracked Global policy and root ignore rule."""
+        from helpers import WORKLINE_ROOT, copy_workline_root
+        from workline.review import policy
+
+        root = copy_workline_root(self.tmp / name)
+        for relative in (".gitignore", policy.GLOBAL_POLICY_REL):
+            target = root.joinpath(*relative.split("/"))
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(WORKLINE_ROOT.joinpath(*relative.split("/")).read_bytes().replace(b"\r\n", b"\n"))
+        git(root, "init", "-q", "-b", "main")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "base")
+        return root
+
+    def run_root(self, root: Path, *args: str, cwd: Path) -> "subprocess.CompletedProcess":
+        from helpers import launcher_command, run_python
+
+        return run_python(launcher_command(root, *args), cwd=cwd)
+
+    def test_the_binding_exception_is_still_status_alone(self) -> None:
+        from workline import cli
+
+        self.assertEqual("status", cli.READ_ONLY_STATUS_COMMAND)
+        for command in (cli.ROOT_STATUS_COMMAND, cli.ROOT_AUTHORIZE_COMMAND):
+            with self.subTest(command=command):
+                self.assertTrue(cli.binds_invocation_project([command]))
+                self.assertTrue(cli.binds_invocation_project([command, "--json"]))
+
+    def test_status_from_the_root_reports_and_creates_nothing(self) -> None:
+        root = self.p7_root()
+        done = self.run_root(root, "root-policy-maintenance-status", "--json", cwd=root)
+        self.assertEqual(0, done.returncode, done.stdout + done.stderr)
+        report = json.loads(done.stdout)
+        self.assertEqual(self.STATUS_KEYS, set(report))
+        self.assertEqual(("materialized-global-policy", 1),
+                         (report["global_policy"]["source_mode"], report["global_policy"]["version"]))
+        self.assertEqual("not_required", report["authorization"]["status"])
+        human = self.run_root(root, "root-policy-maintenance-status", cwd=root)
+        self.assertEqual(0, human.returncode, human.stdout + human.stderr)
+        self.assertIn("global policy: materialized-global-policy v1", human.stdout)
+        self.assertFalse((root / ".workline-root-runtime").exists(), "status writes no runtime")
+        self.assertFalse((root / ".workline").exists())
+        self.assertEqual("", git(root, "status", "--porcelain"))
+
+    def test_authorize_from_the_root_writes_only_its_authorization(self) -> None:
+        root = self.p7_root()
+        bare = self.tmp / "root-remote.git"
+        git(self.tmp, "init", "--bare", "-q", "-b", "main", str(bare))
+        git(root, "remote", "add", "origin", str(bare))
+        done = self.run_root(root, "root-policy-maintenance-authorize", "--remote", "origin", "--branch",
+                             "refs/heads/main", "--locator", str(bare), cwd=root)
+        self.assertEqual(0, done.returncode, done.stdout + done.stderr)
+        self.assertIn("remote=origin branch=refs/heads/main", done.stdout)
+        self.assertTrue((root / ".workline-root-runtime" / "maintenance-authorization.yaml").is_file())
+        self.assertEqual("", git(root, "status", "--porcelain"), "the root runtime is ignored; nothing else changed")
+        report = json.loads(self.run_root(root, "root-policy-maintenance-status", "--json", cwd=root).stdout)
+        self.assertEqual({"status": "valid", "remote": "origin", "branch": "refs/heads/main"}, report["authorization"])
+        self.assertNotIn(str(bare), json.dumps(report))
+        self.assertNotIn(str(bare).replace("\\", "\\\\"), json.dumps(report))
+        self.assertFalse((root / ".workline").exists())
+
+    def test_authorize_inside_a_project_is_refused_before_the_lock(self) -> None:
+        root = self.p7_root()
+        project = self.new_dir("project")
+        git(project, "init", "-q", "-b", "main")
+        started = self.run_root(root, "project-start", str(project), "--workline-root", str(root), cwd=root)
+        self.assertEqual(0, started.returncode, started.stdout + started.stderr)
+        done = self.run_root(root, "root-policy-maintenance-authorize", "--remote", "origin", "--branch",
+                             "refs/heads/main", "--locator", "unused", cwd=project)
+        self.assertEqual(1, done.returncode, done.stdout + done.stderr)
+        self.assertIn("review_p7_root_project_context", done.stdout)
+        self.assertFalse((root / ".workline-root-runtime").exists(), "refused before the lock: nothing created")
+
+    def test_root_commands_inside_a_project_of_another_root_are_bound(self) -> None:
+        root = self.p7_root()
+        store = self.new_project("other-root-project")  # configured to this checkout's root, not to the copy
+        for args in (("root-policy-maintenance-status", "--json"),
+                     ("root-policy-maintenance-authorize", "--remote", "origin", "--branch", "refs/heads/main",
+                      "--locator", "unused")):
+            with self.subTest(command=args[0]):
+                done = self.run_root(root, *args, cwd=store.root)
+                self.assertEqual(1, done.returncode, done.stdout + done.stderr)
+                self.assertIn("workline_implementation_mismatch", done.stdout)
+        self.assertFalse((root / ".workline-root-runtime").exists())
 
 
 class RootRepositoryFactsTests(WorklineTestCase):

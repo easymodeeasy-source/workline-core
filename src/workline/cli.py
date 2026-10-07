@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
+from . import root_maintenance
 from .bootstrap import backfill_bootstrap
 from .create import RelatedSpec, WorkSpec, create_standalone_work
 from .errors import StopError
-from .implementation import require_configured_implementation
+from .implementation import require_configured_implementation, running_workline_root
 from .project_start import project_start
 from .push_pin import pin_push_destination
+from .pushurl import redact
 from .recovery_disposition import dispose_recovery
 from .registry import validate_registry
 from .status import build_status, render_human, render_json
@@ -33,6 +36,45 @@ def binds_invocation_project(argv: list[str]) -> bool:
     position - stays bound.
     """
     return not (len(argv) > 0 and argv[0] == READ_ONLY_STATUS_COMMAND)
+
+
+#: P7 root policy maintenance (§31.12). Both are BOUND like every command but ``status``
+#: (:func:`binds_invocation_project` is unchanged): inside a Project configured to another Workline root the
+#: launcher refuses them before anything is imported; their target is always the launcher's own root, never a
+#: caller Project's configured root, and the mutation-capable one also refuses inside any Project (RB7C-6).
+ROOT_STATUS_COMMAND = "root-policy-maintenance-status"
+ROOT_AUTHORIZE_COMMAND = "root-policy-maintenance-authorize"
+
+
+def _launcher_root() -> Path:
+    """The Workline root this process runs the implementation of: the only root its root commands touch."""
+    found = running_workline_root()
+    if found is None:
+        raise StopError(
+            "the Workline root whose implementation this process runs cannot be proven; nothing was read or written",
+            code="workline_implementation_unavailable",
+        )
+    return found
+
+
+def _render_root_status(report: dict) -> str:
+    """The human rendering of :func:`root_maintenance.status_report` (the same model; never a locator)."""
+    found = report["global_policy"]
+    authorization = report["authorization"]
+    pending = report["pending_mutation"]
+    lines = [
+        f"global policy: {found['source_mode']} v{found['version']} {found['digest']}",
+        f"current change: {report['current_change_id'] or 'none'}",
+        f"evaluations: {', '.join(report['evaluation_ids']) or 'none'}",
+        "authorization: " + authorization["status"] + (
+            f" (remote {authorization['remote']}, branch {authorization['branch']})"
+            if authorization.get("remote") else ""),
+        "pending root mutation: " + ("none" if pending is None else
+                                     f"{pending['mutation_id']} {pending['operation']} {pending['status']}"
+                                     + (f" at {pending['stage']}" if pending.get("stage") else "")),
+        f"next-boundary adapter: {report['next_boundary_adapter_identity']}",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _related(items: list[str] | None, rel_type: str) -> list[RelatedSpec]:
@@ -151,6 +193,22 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("project_root")
     status.add_argument("--json", action="store_true", help="print the versioned machine-readable status model")
 
+    # P7 (§31.12, RB7C-6): Workline-root policy maintenance of THIS launcher's own Workline root - never a Project.
+    root_status = subparsers.add_parser(
+        ROOT_STATUS_COMMAND,
+        help="report the read-only policy maintenance status of this launcher's Workline root "
+        "(no lock, no write, no remote contact, no repair; the push locator is never shown)",
+    )
+    root_status.add_argument("--json", action="store_true", help="print the machine-readable report")
+    root_authorize = subparsers.add_parser(
+        ROOT_AUTHORIZE_COMMAND,
+        help="record the Human-approved root publication authorization of this launcher's Workline root "
+        "(run from the Workline root, never from inside a Workline Project)",
+    )
+    root_authorize.add_argument("--remote", required=True, help="the remote name, exactly as configured")
+    root_authorize.add_argument("--branch", required=True, help="the exact full destination branch ref (refs/heads/...)")
+    root_authorize.add_argument("--locator", required=True, help="the exact active push locator you approve")
+
     args = parser.parse_args(argv)
 
     if args.command == READ_ONLY_STATUS_COMMAND:
@@ -260,6 +318,20 @@ def main(argv: list[str] | None = None) -> int:
                     ProjectStore(Path(args.project_root)), spec, source_finding_id=args.source_finding_id
                 )
             print(f"create-work: {result.work_id} head={result.head}")
+            return 0
+
+        if args.command == ROOT_STATUS_COMMAND:
+            report = root_maintenance.status_report(_launcher_root())
+            sys.stdout.write(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n" if args.json
+                             else _render_root_status(report))
+            sys.stdout.flush()
+            return 0
+
+        if args.command == ROOT_AUTHORIZE_COMMAND:
+            found = root_maintenance.authorize(_launcher_root(), remote=args.remote, branch=args.branch,
+                                               locator=args.locator)
+            print(f"{ROOT_AUTHORIZE_COMMAND}: remote={found.remote} branch={found.branch} "
+                  f"locator={redact(found.locator)}")
             return 0
     except StopError as exc:
         print(f"STOP [{exc.code}]: {exc.message}")
