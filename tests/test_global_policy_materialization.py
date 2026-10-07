@@ -654,6 +654,108 @@ class GlobalLighteningOverrideTests(WorklineTestCase):
                            "direction": "lighten", "holdout_setting": 3}], effective["active_experiments"])
         self.assertEqual(1, policy.required_holdout_slots(effective))
 
+    # CP ruling RB7 FLAG-C3 (CP_RULINGS_WAVE_20261007_B §8-§11): only Global-origin experiments on an overridden
+    # surface are filtered; Project-local P6 experiment state, evidence and Profile state are never dropped.
+
+    def decided_under(self, global_record: dict, surface: str, setting: int, direction: str, *,
+                      local_holdout: int | None = None, change_id: str = OVERRIDE_CHANGE) -> ProfileReader:
+        """A Profile v1 with ONE override decided under ``global_record``; with ``local_holdout``, that Project change
+        is a still-active Project-local P6 lightening experiment holding that holdout. And the reader of both."""
+        loaded = self.loaded_v1()
+        bound = policy.materialized_baseline_record(global_record, loaded["root_authority_digests"],
+                                                    loaded["source_policy_identities"])
+        found = policy.SURFACE_BY_ID[surface]
+        profile = policy.ProjectProfile(
+            profile_version=1, parent_profile_digest=None, global_baseline_digest=serialize.digest(bound),
+            global_baseline_version=bound["baseline_version"], loader_semantics_identity=policy.LOADER_SEMANTICS_IDENTITY,
+            overrides=({"policy_surface_id": surface, "strength_class": found.strength_class, "setting": setting,
+                        "direction": direction, "supporting_policy_change_id": change_id},),
+            active_experiment_refs=() if local_holdout is None else (change_id,),
+        )
+        change = {"policy_change_id": change_id, "after_profile_digest": profile.digest, "global_baseline": bound,
+                  "global_baseline_digest": serialize.digest(bound), "affected_policy_surface": surface,
+                  "after_setting": setting, "direction": direction,
+                  "holdout_plan": None if local_holdout is None else {"holdout_setting": local_holdout}}
+        return ProfileReader(profile, change)
+
+    def started(self, reader, root: Path | None = None) -> dict:
+        """The Effective Policy a new P6-capable Run freezes, bound to exactly the actors it asks for; read back."""
+        from workline.review import p4
+
+        root = self.root if root is None else root
+        state = policy.resolve_policy_state(reader, root)
+        effective = policy.new_run_effective_policy(
+            reader, root, p4.P6_POLICY_ID, discovery_actors(policy.setting(state.effective, SLOTS)),
+            discovery_actors(policy.required_holdout_slots(state.effective), "holdout"))
+        self.assertEqual(effective, policy.parse_effective_policy(effective, "the frozen Effective Policy"))
+        self.assertGreaterEqual(policy.required_holdout_slots(effective), 0)
+        return effective
+
+    def test_row_1_a_stronger_override_freezes_no_global_experiment(self) -> None:
+        effective = self.started(self.decided_under(v1(), SLOTS, 4, "strengthen"))
+        self.assertEqual(({SLOTS: 4, STEPS: 0}, [], 0),
+                         (effective["settings"], effective["active_experiments"], policy.required_holdout_slots(effective)))
+
+    def test_row_2_an_override_equal_to_the_pre_change_setting_freezes_no_global_experiment(self) -> None:
+        effective = self.started(self.decided_under(v1(), SLOTS, 3, "strengthen"))
+        self.assertEqual(({SLOTS: 3, STEPS: 0}, [], 0),
+                         (effective["settings"], effective["active_experiments"], policy.required_holdout_slots(effective)))
+
+    def test_row_3_a_lighter_override_keeps_its_local_experiment_and_freezes_no_global_one(self) -> None:
+        # decided under v2 (Global slots 3) as a Project-local lightening to 1 whose own holdout (3) is still active
+        reader = self.decided_under(self.v2, SLOTS, 1, "lighten", local_holdout=3)
+        baseline = policy.load_global_baseline(self.root)
+        self.assertEqual((), policy.global_experiments(self.root, baseline, reader.profile))
+        effective = self.started(reader)
+        self.assertEqual({SLOTS: 1, STEPS: 0}, effective["settings"])
+        self.assertEqual([{"origin": policy.ORIGIN_PROJECT, "policy_change_id": OVERRIDE_CHANGE,
+                           "policy_surface_id": SLOTS, "direction": "lighten", "holdout_setting": 3}],
+                         effective["active_experiments"], "the Project-local P6 experiment stays authoritative")
+        self.assertEqual(2, policy.required_holdout_slots(effective))
+        self.assertEqual(policy.COMPATIBILITY_TOTAL_ADAPTER_V1, effective["compatibility"])
+
+    def test_row_4_no_override_keeps_the_global_experiment_and_its_holdout(self) -> None:
+        effective = self.started(NoProfileReader())
+        self.assertEqual([(policy.ORIGIN_GLOBAL, LIGHTEN_ID, 3)],
+                         [(item["origin"], item["policy_change_id"], item["holdout_setting"])
+                          for item in effective["active_experiments"]])
+        self.assertEqual(1, policy.required_holdout_slots(effective))
+
+    def test_row_5_the_filter_is_per_surface(self) -> None:
+        steps_id = "rgc_" + "4" * 26
+        v4 = policy.global_policy_record(4, policy.global_policy_digest(self.v3), {SLOTS: 2, STEPS: 1})
+        root = self.root_at(v4, self.changes + [global_change(steps_id, self.v3, v4, "strengthen", surface=STEPS)],
+                            "per-surface")
+        both = [(item.policy_change_id, item.policy_surface_id)
+                for item in policy.global_experiments(root, policy.load_global_baseline(root), None)]
+        self.assertEqual([(LIGHTEN_ID, SLOTS), (steps_id, STEPS)], both)
+        for overridden, kept, holdouts in ((STEPS, (LIGHTEN_ID, SLOTS, 3), 1), (SLOTS, (steps_id, STEPS, None), 0)):
+            with self.subTest(overridden=overridden):
+                reader = self.decided_under(v1(), overridden, 2 if overridden == STEPS else 4, "strengthen")
+                effective = self.started(reader, root)
+                self.assertEqual([kept], [(item["policy_change_id"], item["policy_surface_id"], item["holdout_setting"])
+                                          for item in effective["active_experiments"]],
+                                 "the inherited surface keeps its Global experiment; the overridden one has none")
+                self.assertEqual(holdouts, policy.required_holdout_slots(effective))
+
+    def test_an_override_removed_later_freezes_the_global_experiment_again(self) -> None:
+        first = self.decided_under(v1(), SLOTS, 4, "strengthen")
+        baseline = policy.load_global_baseline(self.root)
+        self.assertEqual((), policy.global_experiments(self.root, baseline, first.profile))
+        # a later Profile version, decided under the current Global, removes the override
+        removed = policy.ProjectProfile(
+            profile_version=2, parent_profile_digest=first.profile.digest, global_baseline_digest=baseline.digest,
+            global_baseline_version=3, loader_semantics_identity=policy.LOADER_SEMANTICS_IDENTITY, overrides=(),
+            active_experiment_refs=())
+        change = {"policy_change_id": "rpc_" + "5" * 26, "after_profile_digest": removed.digest,
+                  "global_baseline": baseline.record, "global_baseline_digest": baseline.digest,
+                  "affected_policy_surface": SLOTS, "after_setting": 2, "direction": "lighten", "holdout_plan": None}
+        effective = self.started(ProfileReader(removed, change))
+        self.assertEqual([(policy.ORIGIN_GLOBAL, LIGHTEN_ID, 3)],
+                         [(item["origin"], item["policy_change_id"], item["holdout_setting"])
+                          for item in effective["active_experiments"]])
+        self.assertEqual(policy.COMPATIBILITY_EXACT_DERIVED_SEMANTIC, effective["compatibility"])
+
 
 class SuccessorTests(unittest.TestCase):
     def test_a_successor_is_exactly_the_next_version_naming_its_exact_parent(self) -> None:
