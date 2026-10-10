@@ -23,6 +23,7 @@
   - `code inspection`: 現行のworkline-core（実装・canonical仕様・repository状態）の確認で特定した。
   - `design deferral`: 設計段階で意図的に後回しにした論点。
   - `self-hosting assessment`: workline-coreのself-hosting診断で特定した。
+  - `completion-sprint execution`: workline-core自身のCompletion Sprint（開発のorchestration・review・検証）の実行中に観測した。
 - このrepositoryはpublicである。private Projectの名称・識別子・固有仕様・ファイル名・commit、ローカルの絶対パス、AI sessionログからの引用、個人情報・認証情報は書かない。private Projectでの発見は `real-project migration` 程度に一般化する。
 
 ## Notes
@@ -90,6 +91,14 @@
 | BL-055 | Prevent shadow authority from being introduced into established Workline Projects | OPEN |
 | BL-056 | Operation strands its own mutation when decided text contains a lone carriage return | RESOLVED |
 | BL-057 | PlanningReview reviewer identity/version can strand planning on unrepresentable text | RESOLVED |
+| BL-070 | Autonomous Convergence / Human Relay Elimination | OPEN |
+| BL-071 | Execution Stall / Resource Saturation / Runaway Detection & Mitigation | OPEN |
+| BL-072 | Durable Ownership Continuity / Orphan Prevention | OPEN |
+| BL-073 | Candidate Maturity / Validation Eligibility | OPEN |
+| BL-074 | Semantic Surface Writer Lease / Collision Enforcement | OPEN |
+| BL-075 | Landing-Gated Dependency Serialization / Stacked Candidate Execution | OPEN |
+| BL-076 | Progressive Review Pipelining / Stable-Leaf Review Reuse | OPEN |
+| BL-077 | Replan payload refusal after the terminal event freezes Project writes | OPEN |
 | BL-100 | Remove non-Workline systems and legacy operational surfaces from workline-core | OPEN |
 
 ## Items
@@ -1034,6 +1043,135 @@
 - Self-hosting prerequisite: no
 - Evidence class: code inspection, reproduction
 - Resolution: (1) 原因: 入口検査（P2 contract §5.1、`review.planning.validate_planning_review`）が `reviewer_identity` / `reviewer_version` にsingle-lineのshapeだけを求め、canonical Review formが表せる値かを求めていなかった。この2つはgeneration 1でTaskInputとaccepted descriptorへdurableに入るので、最初のencodeは `planning.accepted_descriptor` の `serialize.digest(task_input.to_record())` であり、lock取得後・planning mutationと予約の記録後にraw `UnicodeEncodeError` になっていた。`StopError` ではないので `abandon_on_stop` も `_abandon_if_nothing_started` も働かず、effectを持たないplanning mutationがpendingで残った。 (2) 新しい規則: `reviewer_identity` と `reviewer_version` は、非空の `str`・自身の `strip()` と等しい・`str.splitlines` が切る文字を含まないという従来のshapeに加えて、canonical Review textであること（その値を持つReview recordについて `serialize.canonical_bytes` が成功し、`serialize.canonical_roundtrips` が成立すること）を要求する。両方が必要である。`canonical_roundtrips` はparse済みdataを比べるだけでencodeせず、lone surrogateでも成立するからである。 (3) 拒否は変わらず `review_contract_invalid` であり、新しいSTOP codeは作らない。`review_candidate_unrepresentable` はこのfieldに使わない（それはrequest identityとCandidateの境界である）。 (4) 拒否の位置は§5.1の入口gateのままで、lockより前・Project stateを読むより前・mutation openより前・予約より前である。Roadmap作成とPhase entryは同じgateを共有する。 (5) canonical serializer（`src/workline/review/serialize.py`）は変えていない。表せない値を拒むのは正しい振る舞いである。共用の `_single_line_text` も変えていない。`report_record` の `PlanningReviewFinding.code` が同じ述語を使い、report側のrepresentabilityはreportをcanonical化する境界が `review_report_invalid` で既に閉じているからである。代わりに `_persistable_reviewer_text` を追加し、`validate_planning_review` だけが使う。 (6) 有効なUnicodeは引き続き受け入れる。identifier構文は導入せず、ASCIIにも制限しない。全code pointを掃いた結果、shapeが受け入れてcanonical formが表せないのは U+D800〜U+DFFFの2,048個だけである。日本語・accent付きLatin・astral（emoji・CJK拡張）・語間の空白・punctuation・tab・NBSP・BOM・noncharacter・PUA・結合文字・RTL・ZWJはすべて受け入れる。空文字列・前後の空白・改行系文字の拒否は従来のままで、detailも従来の文言を保つ。 (7) identityとversionは対称に扱う。片方だけの修正はpinで検出する。 (8) 既にstrandしたrecord: 拒否がlockより前なので、pendingのplanning mutationはbyte単位で無変のまま残る。有効なreviewer identity / versionで同じrequestを再実行すれば、同じmutationがresumeして完了する（Roadmap作成とPhase entryの両方で実測）。migrationは入れない。 (9) legacy `review=None` は影響を受けない。新しい述語はreview-v1の引数検査からしか到達しないことをpinした。P1 Review semantics、P2 architecture、BL-056、P3は変えていない。`registry.md` とcanonical Skillsは未変更である（「不正な `review` 引数はlockより前に `review_contract_invalid`」を既に述べており、本件はその述語を補っただけである）。 (10) 測定: `tests/test_review_planning_applicability.py`。baselineではidentity / versionのどちらでも lone high / lone low / 埋め込みsurrogateが入口を通り、Roadmap作成とPhase entryの両方が `serialize.canonical_bytes` でraw `UnicodeEncodeError` になり、8件の予約を持つpending mutationを残した。修正後は全ケース `review_contract_invalid` で、lock未取得・mutation 0・予約 0・Review namespaceなし・domain effectなし・HEAD不変・runtime temporary fileなし・reviewer callback未呼出し、`.workline` はentry単位で無変である。誤った実装のmutant 5本（identityだけ・versionだけ・`canonical_roundtrips` だけ・`_accept` で捕える・共用 `_single_line_text` を強化）はすべて検出した。full suiteは実行していない（productionの変更はreview-v1の引数検査だけで、focusedな近傍検査の外に新しい相互作用は見つからなかった）。 (11) 変わった既存test（開示）: `tests/test_review_planning_preflight.py` の `OneSerializerTests` は、P1 serializerを全体で壊して canonical-input preflightがそれを使うことを示しており、review-v1 invocationでP1 serializerを最初に使うのがpreflightであることに暗黙に依存していた。§5.1のgateはentry順のstep 1で、preflightのstep 4より先に同じserializerを使うので、この前提だけが変わった。testの主題（preflight）はそのままですべて検査し続け、gate（独自のcoverageを持つ）を除外し、暗黙の順序依存は明示のpinにした。productionの拒否は変わっていない。
+
+### BL-070 Autonomous Convergence / Human Relay Elimination
+
+- ID: BL-070
+- Title: Autonomous Convergence / Human Relay Elimination
+- Status: OPEN
+- Kind: execution orchestration, process
+- Owner: Completion Sprint RB13（`WORKLINE_COMPLETION_SPRINT.md` §40）
+- Problem: workline-core自身の開発（Completion Sprint）では、実装は自動で進められても、収束の経路、つまりcandidate packageを実行環境と独立reviewの間で運ぶことと、review後のrepair・re-reviewを起動することが、人の中継に依存している。2026-10-10のHuman decision H-NEW-03により、現在のSprintで人が実行環境（Claude Code）とControl Plane（ChatGPT）の間で情報を運ぶことはHuman oversightであり、単なる転送ではないことが明確になった。したがってこの項目が扱うのは不要な転送の手間だけである。人の監督、Human-owned decision、landing authorityは取り除かない。完成したWorkline Projectの通常実行に、ChatGPT等の外部Control Planeとの必須の通信を加えない。
+- Why it matters: 転送が人の可用性に律速されると、独立reviewとrepairの往復が止まる。送ったpackageが実際には相手に届いていない、承認を沈黙から推測する、といったhandoffの失敗も起こる。一方で中継の除去を誤って解釈すると、人の監督やHuman-owned decisionをAIの判断に置き換えることになる。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §40（RB13）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: なし（Workline Projectのruntimeに外部Control Planeへの必須の依存を加えない。Sprint §40.2）
+- Backfill likely: no
+- Human confirmation likely: yes（Human oversightとHuman-owned decisionの境界に関わるため）
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution
+
+### BL-071 Execution Stall / Resource Saturation / Runaway Detection & Mitigation
+
+- ID: BL-071
+- Title: Execution Stall / Resource Saturation / Runaway Detection & Mitigation
+- Status: OPEN
+- Kind: execution orchestration, liveness
+- Owner: Completion Sprint RB11（`WORKLINE_COMPLETION_SPRINT.md` §38）
+- Problem: 実行（test suite、review process、writer）は技術的には生きていても、想定よりはるかに長くかかることがある。原因は、資源の競合による飽和、進捗のないprocessやrunaway、計算資源が空いているのに少数の長いtaskが全体の時間を支配するstraggler / underutilizationである。これらを検出・区別・緩和する仕組みが無く、人の注意に依存している。2026-10-10のHuman decision H-NEW-02により、reviewer / executorに固定のruntime timeoutは入れない。liveness・stall・資源飽和・runawayは外部orchestratorが検出し、wall-clock時間が長いことだけでstalledとは判定しない。
+- Why it matters: 遅いが進んでいる実行と止まった実行を区別できないと、正常な長時間の実行を誤って止める、所有を証明できないprocessを止める、あるいは本当に止まった実行に気付かず時間を失う。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §38（RB11）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: なし（external orchestrationの能力。Workline Projectのruntimeに固定timeoutを入れない）
+- Backfill likely: no
+- Human confirmation likely: no（境界はH-NEW-02で決定済み。policyを超える停止は人が決める）
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution
+
+### BL-072 Durable Ownership Continuity / Orphan Prevention
+
+- ID: BL-072
+- Title: Durable Ownership Continuity / Orphan Prevention
+- Status: OPEN
+- Kind: runtime, execution orchestration, recovery
+- Owner: Completion Sprint RB11（`WORKLINE_COMPLETION_SPRINT.md` §38）
+- Problem: durableなchild operationやReview Runが残っているのに、それを再開するのに必要なowner recordが失われることがある。その結果、所有者のいないdurable stateが残り、恒久的なreconcileの繰り返しになり得る。一時的なSTOPやerrorが、childの継続に必要な唯一のdurableな所有・recovery材料を消してはならない。起点の事例はRB3-C1の実装中に見つかり、その局所的な修正はRB3-C1に含まれている。関連する既知の空白として、RB10 N4のrecovery disposition（Sprint §35）は、RB1のread-only status classifierにSTART owner probeが無いため、pendingのSTART recordを扱えない（pre-existing、fail-closed）。
+- Why it matters: ownerを失ったdurable stateは、自動では再開も破棄もできず、人の手作業を要する。所有を推測して採用したり、経過時間だけでlockや記録を消したりすると、別のwriterの作業や回復材料を壊す。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §38（RB11）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: あり（START owner probeは全Projectのread-only statusとrecovery dispositionに関わる。範囲はRB11 contractの凍結で決まる）
+- Backfill likely: no
+- Human confirmation likely: yes（既にstrandしたrecordの破壊的な回復は、具体Projectごとに人の承認が要る）
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution, code inspection
+
+### BL-073 Candidate Maturity / Validation Eligibility
+
+- ID: BL-073
+- Title: Candidate Maturity / Validation Eligibility
+- Status: OPEN
+- Kind: execution orchestration, validation policy
+- Owner: Completion Sprint RB12（`WORKLINE_COMPLETION_SPRINT.md` §39）
+- Problem: checkpoint、static candidate、full suiteの対象、formal reviewの対象、landing candidateは成熟度が違うが、orchestrationがそれらを同じように扱い、未成熟なbytesに高コストの検証を費やすことがある。Completion Sprintでは、同じbytesに対するreview・Control Planeの判断・人の証明要求がまだ開いているうちに起動したfull suiteが、後で無効になる事例があった。
+- Why it matters: 後で無効になる検証は時間と計算資源を失い、最終candidateの証拠がどのbytesに属するかを曖昧にする。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §39（RB12）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: なし（external orchestrationの能力。Workline runtimeは既存の凍結済みrefusalを保つ。Sprint §39.2）
+- Backfill likely: no
+- Human confirmation likely: no
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution
+
+### BL-074 Semantic Surface Writer Lease / Collision Enforcement
+
+- ID: BL-074
+- Title: Semantic Surface Writer Lease / Collision Enforcement
+- Status: OPEN
+- Kind: execution orchestration, write exclusivity
+- Owner: Completion Sprint RB11（`WORKLINE_COMPLETION_SPRINT.md` §38）
+- Problem: 「1つのsemantic surfaceには1人のwriter」という規則は、主にorchestratorの注意と手作業の記録で守られており、並行するlane・worktreeが同じsemantic surfaceを同時に変えることを機械的に防ぐ仕組みが無い。2026-10-10のHuman decision H-NEW-01により、semantic-surface writer leaseはexternal execution orchestrationに属する。Workline Projectのruntimeは既存のworking treeごとのsingle-writer semanticsを保ち、native multi-writer modelを入れず、Project operation lockをleaseに変えない。
+- Why it matters: 別のbranchで別のbytesを書いても、同じ意味を変える2つのwriterは安全に共存できない。手作業の記録では、所有の重複、経過時間による古いownerからの奪取、所有の推測による採用を確実には防げない。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §38（RB11）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: なし（H-NEW-01によりexternal orchestration only。Workline Projectのsingle-writer semanticsは変えない）
+- Backfill likely: no
+- Human confirmation likely: no（境界はH-NEW-01で決定済み）
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution
+
+### BL-075 Landing-Gated Dependency Serialization / Stacked Candidate Execution
+
+- ID: BL-075
+- Title: Landing-Gated Dependency Serialization / Stacked Candidate Execution
+- Status: OPEN
+- Kind: execution orchestration, scheduling
+- Owner: Completion Sprint RB12（`WORKLINE_COMPLETION_SPRINT.md` §39）
+- Problem: 初期のschedulerは、親candidateのlandingを子のproduction実装を始める条件にしていた。そのため実装がfull suite・review・landingの待ち時間の後ろに直列化され、並行のはずのSprintが実質1本のproduction laneに戻った。凍結した親candidateの上で子を実装し、landingは親の後に限るstacked / dependent candidateを明示的に扱う仕組みが無い。一方、textとして衝突なく適用できたcarryが意味を壊した事例もあり、clean applyはsemanticなcarryの証明にならない。2026-10-10のControl Plane rulingにより、runtimeで先行Workの完了前にstacked Workを実行することは認めない。stacked candidate developmentはexternal orchestrationの概念であり、Worklineのdependency semanticsは変えない。
+- Why it matters: 親のlandingまで子の実装を止めると全体が直列化する。逆に、親が変わった子をそのまま扱う、clean applyをcarryの証明とみなす、といった扱いは、reviewしていない意味の変化をlandingさせる。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §39（RB12）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: なし（Worklineのdependency semanticsは変えない。Sprint §39.2）
+- Backfill likely: no
+- Human confirmation likely: no
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution
+
+### BL-076 Progressive Review Pipelining / Stable-Leaf Review Reuse
+
+- ID: BL-076
+- Title: Progressive Review Pipelining / Stable-Leaf Review Reuse
+- Status: OPEN
+- Kind: execution orchestration, review evidence
+- Owner: Completion Sprint RB12（`WORKLINE_COMPLETION_SPRINT.md` §39）
+- Problem: 大きなcandidateでは、統合前に安定した部分（leaf）を早くreviewすれば最終段のreviewを減らせるが、その早期reviewを最終candidateの証拠として再利用してよい条件が定まっていない。Completion Sprintの観測では、reviewしたbytesが最終candidateで同一であることは安価に示せるが、それだけでは足りなかった。下位のproduction codeや呼び出し側が変わると、同じbytesのtestやcodeの意味が変わるからである。
+- Why it matters: 条件なしに再利用すると、reviewされていない意味の変化が最終candidateに入る。再利用しなければ、最終段のreview時間が全体を支配する。
+- Likely scope: scope・決定済みの境界・contract・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §39（RB12）である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: なし（早期reviewの再利用はexternal orchestrationの証拠としてだけ扱い、runtimeのReview authorizationの意味には持ち込まない。Sprint §39.2）
+- Backfill likely: no
+- Human confirmation likely: no
+- Self-hosting prerequisite: no
+- Evidence class: completion-sprint execution
+
+### BL-077 Replan payload refusal after the terminal event freezes Project writes
+
+- ID: BL-077
+- Title: Replan payload refusal after the terminal event freezes Project writes
+- Status: OPEN
+- Kind: implementation, validation boundary, liveness
+- Severity: MID（暫定。Control Planeの判断）
+- Owner: pre-RB9 hardening（`WORKLINE_COMPLETION_SPRINT.md` §37.21）。RB8・RB11のscopeではない。
+- Problem: replanを伴う3つのowner（Roadmapのplan exclusion、STARTのstandalone plan exclusion、STARTのcancel / replan）は、先にterminal eventをworking treeへ適用してから、新しいWorkの登録payloadを登録処理で判定する。payloadが不正だと、terminal eventだけが適用された後で拒否され、Project全体への以後の書込みが拒否される状態になる。静的な解析で確認済みであり、動的な再現はhardening candidateの証拠に含める。
+- Why it matters: 不正な入力1つでProject全体が書込み不能になる。fail-closedではあるが、無害な残余としては扱えない。既にstrandしたrecordの回復には人の手作業が要り、その手順は削除・Git reset・Git revert・record除去を許可しない。
+- Likely scope: scope・必要な方向・受入条件の正本は `WORKLINE_COMPLETION_SPRINT.md` §37.21である。この項目は追跡用であり、設計を持たない。
+- Cross-project impact: あり（replanを使う全Project）
+- Backfill likely: no（既にstrandしたrecordには、破壊的な操作を許可しない人の手動回復checklistを用意する。破壊的な回復は具体Projectごとに人の承認が要る）
+- Human confirmation likely: no（valid pathの意味は保つ。ただし既にstrandしたrecordの破壊的な回復は、具体Projectごとに人の承認が要る）
+- Self-hosting prerequisite: no
+- Evidence class: code inspection, completion-sprint execution
 
 ### BL-100 Remove non-Workline systems and legacy operational surfaces from workline-core
 
