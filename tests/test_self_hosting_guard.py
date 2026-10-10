@@ -1,6 +1,10 @@
-"""BL-012: a Workline root is never changed as a Workline Project of its own.
+"""BL-012 / BL-013: a Workline root is never changed as a Workline Project of its own.
 
-Self-hosting is unsupported under the current Workline rules. A state-changing
+Self-hosting is intentionally unsupported (BL-013, WORKLINE_COMPLETION_SPRINT
+§17.12 - §17.15, §33.14 - §33.16): workline-core is the Workline root / runtime
+repository and is not itself a Workline Project, and canonical ``rules/git``
+states why and what alone could reopen it. The BL-012 guard is unchanged by
+that: a state-changing
 operation runs only when the Project root and its Workline root are proven to be
 different directories, compared by file identity. Project開始 refuses a target
 that is its Workline root, and every operation on an established Project that
@@ -39,6 +43,7 @@ from helpers import (
     scripted_executor,
 )
 from test_implementation_identity import BOOTSTRAP_SHA256, activation, driver_command, workline_state
+from global_policy_helpers import GlobalPolicyCase, run_remote_less_change
 
 from workline import bootstrap as bs
 from workline import gitcmd, oplock, self_hosting, yamlish
@@ -47,11 +52,18 @@ from workline import roadmap as rm
 from workline import start as st
 from workline.bootstrap import render_bootstrap
 from workline.create import RelatedSpec, WorkSpec, create_standalone_work
-from workline.errors import ForeignProjectMutation, ImplementationMismatch, SelfHostingUnsupported, StopError
+from workline.errors import (
+    ForeignProjectMutation,
+    ImplementationMismatch,
+    SelfHostingUnsupported,
+    StopError,
+    ValidationError,
+)
 from workline.mutation import INTENT_VERSION, MutationController
 from workline.phase_create import PhaseSpec
 from workline.push_pin import pin_push_destination
 from workline.registry import validate_registry
+from workline.review import policy as review_policy
 from workline.state import ProjectView
 from workline.store import (
     BOOTSTRAP_REL_PATH,
@@ -512,6 +524,20 @@ class SelfHostedProjectTests(SelfHostingTestCase):
         self.assertFalse(store.locks.exists())
         self.assertEqual(workline_state(store), before)
 
+    def test_read_only_status_diagnoses_the_unsupported_layout(self) -> None:
+        """§17.15 / §33.22: the read-only status CLI still runs on the layout and reports it, writing nothing."""
+        store, _ = self.self_hosted_project()
+        before, files = workline_state(store), tree(store.root)
+        result = run_python(launcher_command(store.root, "status", ".", "--json"), cwd=store.root)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["validation"]["status"], "failed")
+        self.assertIn(SELF_HOSTING, [problem["code"] for problem in data["validation"]["problems"]])
+        self.assertTrue(data["project"]["established"])
+        self.assertFalse(store.locks.exists())
+        self.assertEqual(workline_state(store), before)
+        self.assertEqual(tree(store.root), files)
+
     def test_validation_reports_self_hosting_and_never_passes(self) -> None:
         store, _ = self.self_hosted_project()
         problems = validate_project(store)
@@ -613,6 +639,159 @@ class UnchangedSurfaceTests(unittest.TestCase):
         self.assertIn("### Unsupported self-hosting", text)
         self.assertIn("`workline_self_hosting_unsupported`", text)
         self.assertNotRegex(text, r"BL-\d{3}")
+
+    def test_no_review_policy_can_enable_self_hosting(self) -> None:
+        """§17.14 / §33.16: P6 / P7 policy cannot enable self-hosting - no adaptive surface or Global setting names it."""
+        for surface in ("review.self_hosting", "review.self-hosting.allow", "review.allow_self_hosting",
+                        "workline.self_hosting_override"):
+            with self.subTest(surface=surface):
+                self.assertEqual(review_policy.surface_problem(surface)[0], review_policy.CODE_SURFACE_NON_ADAPTIVE)
+                with self.assertRaises(StopError):
+                    review_policy.require_surface(surface)
+        for surface in ("review.selfhosting", "review.self_host"):
+            with self.subTest(surface=surface):
+                self.assertIsNotNone(review_policy.surface_problem(surface), "an unknown surface is refused too")
+        settings = {item: review_policy.SURFACE_BY_ID[item].global_setting for item in review_policy.SURFACE_BY_ID}
+        self.assertIsNotNone(review_policy.global_policy_record(1, None, settings))
+        with self.assertRaises(ValidationError):
+            review_policy.global_policy_record(1, None, {**settings, "review.self_hosting": 1})
+
+
+# --------------------------------------------------------------------------- BL-013: the canonical reason
+
+
+def section(text: str, start: str, end: str) -> str:
+    begin = text.index(start)
+    return text[begin:text.index(end, begin + len(start))]
+
+
+class CanonicalRationaleTests(unittest.TestCase):
+    """§17.13 - §17.15 / §33.15 - §33.16: canonical authority says why self-hosting is intentionally unsupported."""
+
+    def setUp(self) -> None:
+        self.registry = REGISTRY.read_text(encoding="utf-8")
+        self.rules = section(self.registry, "### Unsupported self-hosting", "### Workline implementation")
+        self.project_start = (WORKLINE_ROOT / ".claude" / "skills" / "project-start" / "SKILL.md").read_text(encoding="utf-8")
+        self.readme = (WORKLINE_ROOT / "README.md").read_text(encoding="utf-8")
+
+    def test_rules_git_states_the_supported_mode_and_that_it_is_intentional(self) -> None:
+        for phrase in (
+            "self-hostingは、意図的にサポートしない",
+            "workline-coreはWorkline root / runtime repositoryであり、それ自身はWorkline Projectではない",
+            "self-hostingは未完成の通常modeではなく、サポートしないcapabilityである",
+            "したがってself-hostingは、サポートしないcapabilityであり、未完成の通常modeではない",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.rules)
+        for temporary in ("暫定", "再評価する", "現在のWorkline rulesではサポートしない"):
+            with self.subTest(temporary=temporary):
+                self.assertNotIn(temporary, self.rules)
+        self.assertNotRegex(self.rules, r"BL-\d|BACKLOG")
+
+    def test_rules_git_states_every_reason(self) -> None:
+        reasons = self.rules[self.rules.index("self-hostingを意図的にサポートしない理由:"):]
+        for reason in (
+            "development / runtimeの分離は、self-hostingのcontractとして定義されていない",
+            "どのWorkline revisionが自分自身の変更を統治するかを定めるrelease / version境界が無い",
+            "mutation / recoveryの記録形式は、編集中のimplementationとともに変わり得る",
+            "break-glass / reconcileは、壊れているかもしれない同じruntimeだけに依存して安全に行えない",
+            "Workline root context（Project開始、Root policy maintenance）とProject contextは、routingもauthorityも別である",
+            "public / privateの開示境界（計画・evidenceをどこまでpublicなrootへ置くか）は、self-hostingのrelease modelとして定義されていない",
+            "可搬なroot / version identity（`project.yaml` が保存するWorkline rootのpathを含む）は、self-hostingのrelease modelではない",
+        ):
+            with self.subTest(reason=reason):
+                self.assertIn(reason, reasons)
+
+    def test_rules_git_states_the_reopening_gate(self) -> None:
+        gate = self.rules[self.rules.index("self-hostingを再び検討できるのは"):]
+        self.assertIn("明示的なproduct / spec作業として、少なくとも次を定義・検証した後だけである", gate)
+        for condition in ("runtime / development分離", "release / version identity", "mutation / recovery互換方針",
+                          "壊れたruntimeに依存しないbreak-glass経路", "root-vs-Projectのrouting semantics",
+                          "開示・公開の規則", "可搬なroot / version identity"):
+            with self.subTest(condition=condition):
+                self.assertIn(condition, gate)
+        self.assertIn("Project-local / GlobalのReview policy（P6 / P7）はself-hostingを有効にできない", gate)
+        self.assertIn("Worklineの完成はself-hostingに依存しない", gate)
+        self.assertIn("Root policy maintenanceはself-hostingではなく、Workline rootに `.workline/project.yaml` を作らない", gate)
+
+    def test_rules_git_keeps_the_bl_012_guard(self) -> None:
+        for phrase in (
+            "state-changing operationは、Project rootとWorkline rootが別の実体directoryだと機械的に証明できる場合だけ実行する",
+            "同じ実体directory                          → STOP",
+            "両方存在するがfile identityを判定できない  → 別directoryだと証明できないためSTOP",
+            "STOPは `workline_self_hosting_unsupported` とし、何も書かない",
+            "成立済みProjectのcanonical validationは、この配置を `workline_self_hosting_unsupported` のproblemとして報告してPASSにせず",
+            "この配置を許可するoverride（flag・引数・環境変数・owner名・人間確認による例外・専用mode）は設けない",
+            "既存のこの配置を自動修復・解除しない",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, self.rules)
+
+    def test_project_start_and_readme_mirror_it_without_a_backlog_item(self) -> None:
+        self.assertIn("self-hostingは意図的にサポートしないcapabilityである（理由と再開の条件は `rules/git` のUnsupported self-hosting）",
+                      self.project_start)
+        self.assertIn("（`rules/git` のUnsupported self-hosting。self-hostingは意図的にサポートしない。", self.project_start)
+        self.assertNotIn("これはself-hostingでありサポートしないため", self.project_start)
+        self.assertIn("Workline root（workline-core）はWorkline root / runtime repositoryであり、それ自身はWorkline Projectではない",
+                      self.readme)
+        mentions = [line for line in self.readme.splitlines() if "self-hostingは" in line]
+        self.assertGreaterEqual(len(mentions), 3)
+        for line in mentions:
+            with self.subTest(line=line[:40]):
+                self.assertIn("意図的にサポートしない", line)
+                self.assertIn("Unsupported self-hosting", line)
+                self.assertNotRegex(line, r"BL-\d|BACKLOG|現在サポートしない|現在のWorkline rules")
+        guarantees = next(line for line in self.readme.splitlines() if line.startswith("保証しないこと"))
+        self.assertIn("`rules/git` のWorkline implementation", guarantees)
+        self.assertNotRegex(guarantees, r"BL-\d|BACKLOG")
+
+    def test_the_guard_module_is_no_longer_called_temporary(self) -> None:
+        doc = self_hosting.__doc__ or ""
+        self.assertIn("intentionally unsupported", doc)
+        self.assertIn("unsupported capability, not an incomplete normal mode", doc)
+        self.assertIn("``rules/git`` (Unsupported self-hosting)", doc)
+        self.assertNotRegex(doc, r"(?i)temporary|reconsider|BL-\d|BACKLOG")
+
+    def test_project_start_stays_the_only_establishment_and_pre_project_writer(self) -> None:
+        """RB8C-8 scoping: ProjectSTART is the only operation that establishes a Project or writes before one exists."""
+        description = self.project_start.split("---")[1]
+        self.assertIn("This is the only Workline operation that establishes a Project or writes anything before a "
+                      "Workline Project exists", description)
+        self.assertIn("Workline Projectを成立させるoperation、およびProject成立前に書き込むWorkline operationは、"
+                      "Project開始（`pre-project`）だけである", self.registry)
+
+
+# --------------------------------------------------------------------------- RB7 root maintenance is not self-hosting
+
+
+class RootMaintenanceIsNotSelfHostingTests(GlobalPolicyCase):
+    """§17.12 / §17.15 / §33.22: Global Policy / root maintenance never makes the Workline root a Project.
+
+    A committed copy of this root with its materialized Global policy, its own
+    launcher run from the root (not a Project): the read-only maintenance
+    status and an applied remote-less Global Policy Change leave no
+    ``.workline`` at all, and the unchanged guard still refuses Project開始 of
+    that root.
+    """
+
+    def test_root_maintenance_never_creates_a_project_and_the_guard_still_refuses(self) -> None:
+        status = run_python(launcher_command(self.root, "root-policy-maintenance-status", "--json"), cwd=self.root)
+        self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
+        self.assertFalse(os.path.lexists(self.root / ".workline"))
+        applied = run_remote_less_change(self.root, self.sources)
+        self.assertEqual(applied["status"], "applied")
+        self.assertFalse(os.path.lexists(self.root / ".workline"), "root maintenance never creates .workline/project.yaml")
+        self.assertEqual((self.root / "src" / "workline" / "self_hosting.py").read_bytes(),
+                         Path(self_hosting.__file__).read_bytes())
+
+        before = tree(self.root)
+        with self.assertRaises(SelfHostingUnsupported):
+            ps.project_start(self.root, self.root)
+        refused = run_python(launcher_command(self.root, "project-start", self.root, "--workline-root", self.root),
+                             cwd=self.root)
+        self.assertIn(f"STOP [{SELF_HOSTING}]", refused.stdout, refused.stdout + refused.stderr)
+        self.assertEqual(tree(self.root), before)
+        self.assertFalse(os.path.lexists(self.root / ".workline"))
 
 
 if __name__ == "__main__":

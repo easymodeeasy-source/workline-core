@@ -19,6 +19,8 @@ project     → established Workline Project内で使う
 router      → Project内entryからのSkill選択自身を担う
 ```
 
+Workline Projectを成立させるoperation、およびProject成立前に書き込むWorkline operationは、Project開始（`pre-project`）だけである。`project` のSkillはProject成立前に使わない。唯一の例外は `skills/roadmap` のLegacy Project migrationで、既存（legacy）ProjectのProject開始の前に、対象の特定、1つの固定したidentityに対するread-onlyのmigration inventory、責任によるA〜F分類、Project開始後の移行計画の準備だけを行ってよい。この例外は何も書かず（Roadmap / Phase / Work、Git、`.workline`、Skillのinstall / copy、legacy authorityのretire、capabilityを変える自動化の変更のどれも行わない）、routingもしない。`skills/roadmap` のcontextは `project` のままであり、新しいcontext値を作らない。
+
 参照:
 
 ```text
@@ -156,7 +158,7 @@ POSIX:   python3 -I -B "<R>/run-workline.py" status <project-root> [--json]
 
 ### Unsupported self-hosting
 
-Workline rootを、それ自身をWorkline rootとするWorkline Projectとして管理するself-hostingは、現在のWorkline rulesではサポートしない。
+Workline rootを、それ自身をWorkline rootとするWorkline Projectとして管理するself-hostingは、意図的にサポートしない。workline-coreはWorkline root / runtime repositoryであり、それ自身はWorkline Projectではない。self-hostingは未完成の通常modeではなく、サポートしないcapabilityである（理由と再開の条件は下記）。
 
 state-changing operationは、Project rootとWorkline rootが別の実体directoryだと機械的に証明できる場合だけ実行する。Workline rootは、成立済みProjectでは `.workline/project.yaml` の `workline.root`、Project開始では明示されたWorkline rootである。
 
@@ -187,7 +189,23 @@ foreignなcontextからはtargetの配置を評価しない。配置がsupported
 
 この配置を許可するoverride（flag・引数・環境変数・owner名・人間確認による例外・専用mode）は設けない。既存のこの配置を自動修復・解除しない（project.yamlを書き換えず、`.workline` やpending mutationを削除しない）。
 
-これはself-hostingを正式にサポートするまでの暫定guardであり、サポートを判断する際に再評価する。Workline rootとProject rootが親子関係にある配置や、別のWorkline rootがWorkline rootを統治する配置はこの照合の対象外である（nested Workline Projectの扱いはProject contextに従う）。
+Workline rootとProject rootが親子関係にある配置や、別のWorkline rootがWorkline rootを統治する配置はこの照合の対象外である（nested Workline Projectの扱いはProject contextに従う）。
+
+self-hostingを意図的にサポートしない理由:
+
+- development / runtimeの分離は、self-hostingのcontractとして定義されていない。implementationはconfigured rootのworking treeをそのまま実行するので（Workline implementation）、self-hostingのWorkは、自分の完了を統治するruleと実装をその実行中に変更できてしまう。
+- どのWorkline revisionが自分自身の変更を統治するかを定めるrelease / version境界が無い。
+- mutation / recoveryの記録形式は、編集中のimplementationとともに変わり得る。self-hostingのoperationは、自分のpending mutationを再開不能にし得る。
+- break-glass / reconcileは、壊れているかもしれない同じruntimeだけに依存して安全に行えない（manual fallbackは禁止されている）。
+- Workline root context（Project開始、Root policy maintenance）とProject contextは、routingもauthorityも別である。1つのdirectoryで両方を兼ねない。
+- public / privateの開示境界（計画・evidenceをどこまでpublicなrootへ置くか）は、self-hostingのrelease modelとして定義されていない。
+- 可搬なroot / version identity（`project.yaml` が保存するWorkline rootのpathを含む）は、self-hostingのrelease modelではない。
+
+したがってself-hostingは、サポートしないcapabilityであり、未完成の通常modeではない。
+
+self-hostingを再び検討できるのは、明示的なproduct / spec作業として、少なくとも次を定義・検証した後だけである: runtime / development分離、release / version identity、mutation / recovery互換方針、壊れたruntimeに依存しないbreak-glass経路、root-vs-Projectのrouting semantics、開示・公開の規則、可搬なroot / version identity。Project-local / GlobalのReview policy（P6 / P7）はself-hostingを有効にできない（self-hostingはadaptiveなpolicy surfaceではない）。Worklineの完成はself-hostingに依存しない。
+
+Workline rootのGlobal policyを変えるRoot policy maintenanceはself-hostingではなく、Workline rootに `.workline/project.yaml` を作らない。
 
 ### Workline implementation
 
@@ -681,6 +699,33 @@ terminal Work（completed / cancelled / plan_excluded）のRelatedも、そのWo
 Phaseのeffective current-plan Work集合は、当該Phaseに所属するWorkのうち `cancelled` / `plan_excluded` を除いたものから生成する。これは新しいmembership正本ではない。cancel / plan exclusionを決めたoperation ownerは、影響する `requires_completion` / integration / `planned_next` / `return_to` をreplanし、構造validationを通す責任を持つ。`plan_excluded` は未開始未来計画にだけ使い、開始済みWorkはcancelで扱う。
 
 `unfinished integration` は、このeffective current-plan Work集合に属する `work_kind: phase_integration_check` のうちgenerated stateが `completed` でないWorkだけを指す。`cancelled` / `plan_excluded` integrationは数えない。
+
+### Historical fact correction
+
+historical factとして保護する記録（event、`derived`、origin、terminal WorkのRelated等）が、後から内容そのものとして誤っていたと主張・証明された場合も、Worklineはそれをad-hocな訂正で黙って編集・削除・無視・再解釈しない。historical factを訂正・supersede・invalidateする汎用のoperationとrecordは、現在定義されていない（Review Receiptの `Supersession` はReviewの許可の無効化であり、historical factの訂正ではない）。
+
+```text
+元のhistorical record
+→ 物理的にimmutableのまま。書き換え・削除しない
+
+historical factの汎用の訂正 / supersession operation
+→ 現在は定義されていない
+
+訂正された意味を必要とするdownstream operation
+→ 推測しない
+→ STOPし、その具体的な事例について明示的なdesign / product作業を開く
+```
+
+将来の汎用の訂正mechanismは、少なくとも次を満たさなければならない。これは制約であり、schemaではない。
+
+1. 元のrecordを物理的に削除・書換えしない
+2. 訂正自体を正式なcanonical recordとして残す
+3. downstream readerが、訂正によりsuperseded / invalidatedになったhistorical factを機械的に判定できる
+4. superseded / invalidatedなhistorical factを現在の真実として扱わない（後続WorkやAIが元の記録だけを事実として再利用しない）
+
+具体的な誤記録が起きた場合は、その具体的なevidenceをそのまま保存し、historical recordを手編集せず、明示的なdesign / product作業を開いて、その事例に対する最も狭い訂正contractを設計し、evidenceが支える範囲だけを一般化する。訂正がHuman-ownedな意味・要件の境界を変える場合だけ `rules/human-confirmation` に従う。
+
+これは記録した事実そのものが誤っていた場合だけの規則である。terminal WorkのRelatedは、後でtargetが変わった・消えたことを理由に訂正の対象にならず、上記のとおりhistorical factのまま残る。
 
 ---
 

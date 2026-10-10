@@ -1,6 +1,6 @@
 ---
 name: project-start
-description: Initialize a local folder as a new Workline Project. This is the only Workline Skill usable before a Workline Project exists — use it when a folder that has no .workline/project.yaml yet — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
+description: Initialize a local folder as a new Workline Project. This is the only Workline operation that establishes a Project or writes anything before a Workline Project exists (the Roadmap Skill's legacy-project migration preflight before it only reads) — use it when a folder that has no .workline/project.yaml yet — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
 ---
 
 # Project開始
@@ -8,6 +8,8 @@ description: Initialize a local folder as a new Workline Project. This is the on
 対象local folderをWorkline利用可能な新規Projectとして初期化する。
 
 これはpre-project操作である。Workline root側から使用する。established Project（`.workline/project.yaml` を持つroot）を再初期化する経路ではない。
+
+Project開始は、Workline Projectを成立させる唯一のoperationであり、Project成立前に書き込む唯一のWorkline operationである。既存（legacy）Projectの移行でも同じであり、`skills/roadmap` のLegacy Project migrationがProject開始の前に行うpreflight inventoryは読むだけである。Project開始はlegacy authorityの棚卸し、旧current stateの推測、historyの移行、旧自動化のretire、移行の達成判定を行わない。legacy Projectにも通常と同じcanonical構造とbootstrapだけを置き、移行のcutoverの境界になる。移行そのものは、成立後の通常のMigration Roadmapである（`skills/roadmap`）。
 
 `rules/git` のProject contextに従い、別の成立済みWorkline Projectのcontextから対象folderをProject開始しない。成立済みWorkline Projectの配下に新しいWorkline Projectを作らない（nested Workline Projectは作らない）。canonical implementationはどちらも書き込む前にSTOPする（`foreign_project_mutation` / `nested_workline_project`）。Project開始のmutationは、その実行が対象rootに与えた許可の内側でだけ書き込まれ、owner名だけでは許可されない。
 
@@ -57,7 +59,7 @@ A / Bで解決した場合、確認のためだけのAskUserQuestionを出さな
 
 明示pathとcwdが競合する場合は勝手に選ばず、STOP / clarificationとする。
 
-Workline rootをClaude Codeで開いたsessionで「ここ」「このroot」等からcwdをProject rootに解決すると、Project rootがWorkline root自身になる。これはself-hostingでありサポートしないため、canonical implementationは `workline_self_hosting_unsupported` でSTOPする。別のfolderを推測してtargetにしない。
+Workline rootをClaude Codeで開いたsessionで「ここ」「このroot」等からcwdをProject rootに解決すると、Project rootがWorkline root自身になる。これはself-hostingである。Workline root（workline-core）はWorkline root / runtime repositoryであり、それ自身はWorkline Projectではなく、self-hostingは意図的にサポートしないcapabilityである（理由と再開の条件は `rules/git` のUnsupported self-hosting）。そのためcanonical implementationは `workline_self_hosting_unsupported` でSTOPする。別のfolderを推測してtargetにしない。
 
 ### Workline root
 
@@ -92,7 +94,7 @@ concrete Skillからowning Workline rootを一意解決できなければ、conf
 
 1. Project rootが存在するdirectoryであることを確認する。
 2. Workline rootが存在するdirectoryであることを確認する。
-3. Project rootとWorkline rootが別の実体directoryであることを確認する（`rules/git` のUnsupported self-hosting。同じ実体directory、または別だと証明できない場合は `workline_self_hosting_unsupported` で何も書かずSTOP）。
+3. Project rootとWorkline rootが別の実体directoryであることを確認する（`rules/git` のUnsupported self-hosting。self-hostingは意図的にサポートしない。同じ実体directory、または別だと証明できない場合は `workline_self_hosting_unsupported` で何も書かずSTOP。overrideは無い）。
 4. 実行中のWorkline implementationがそのWorkline rootのものであることを確認する（`rules/git` のWorkline implementation。不一致なら何も書かずSTOP）。
 5. `<workline-root>/registry.md` を読み、必須4 rule IDと必須7 Skill IDを一意解決する。
 6. 各required Skill targetがroot内のreadable non-empty fileへ解決することを確認する。

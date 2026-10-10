@@ -1,10 +1,13 @@
 """Unsupported self-hosting (``rules/git``: Unsupported self-hosting).
 
 Self-hosting — managing a Workline root as a Workline Project of its own — is
-unsupported under the current Workline rules. A state-changing operation runs
-only when the Project root and its Workline root are proven to be different
-directories on disk. The Workline root is ``workline.root`` in an established
-Project's ``.workline/project.yaml``, or the Workline root Project開始 is given.
+intentionally unsupported: workline-core is the Workline root / runtime
+repository and is not itself a Workline Project, and self-hosting is an
+unsupported capability, not an incomplete normal mode. A state-changing
+operation runs only when the Project root and its Workline root are proven to
+be different directories on disk. The Workline root is ``workline.root`` in an
+established Project's ``.workline/project.yaml``, or the Workline root
+Project開始 is given.
 
 Directories are compared by file identity (``os.path.samefile``), never by the
 way they are spelled, so a case difference, other separators, a trailing
@@ -25,8 +28,10 @@ canonical validation reports the topology as a problem instead of passing it.
 
 Nothing here repairs a Project that already has this shape: ``project.yaml``
 is not rewritten and ``.workline`` is not removed, and nothing turns the check
-off. It is a temporary guard, to be reconsidered if self-hosting is ever
-designed and supported.
+off. Why self-hosting is unsupported, and the explicit product / spec work that
+alone could reopen it, are canonical in ``rules/git`` (Unsupported self-hosting);
+no Review policy can enable it. The refusal itself does not depend on that
+rationale and is the same in every case above.
 """
 
 from __future__ import annotations

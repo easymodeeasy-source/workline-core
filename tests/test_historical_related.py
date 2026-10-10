@@ -11,6 +11,12 @@ Workline does not create the state its own rule refuses to run in: a Work may
 not declare a deletion result that removes what another started, non-terminal
 Work still has to read. No route for editing a started Work's Related edges is
 added here; the Roadmap route stays unstarted-only.
+
+BL-020 (WORKLINE_COMPLETION_SPRINT §17.16 - §17.20, §33.17 - §33.19): a
+historical fact proven wrong in itself is a different question. No such case
+exists, so there is no correction event, record or schema, and no fixture
+pretends one; the future boundary is read here from canonical
+``rules/ai-decision``, never from a backlog item.
 """
 
 from __future__ import annotations
@@ -22,19 +28,28 @@ import unittest
 from unittest import mock
 
 from helpers import WorklineTestCase, completing_executor, git, scripted_executor
-from workline import gitcmd
+from workline import gitcmd, ids
 from workline import roadmap as rm
 from workline import start as st
 from workline.create import RelatedSpec
 from workline.errors import SpecViolation, StopError
 from workline.mutation import MutationController
 from workline.state import ProjectView
-from workline.store import ProjectStore
+from workline.store import PHASE_EVENTS, ROADMAP_EVENTS, WORK_EVENTS, ProjectStore
 from workline.validate import validate_project
 
 AUTHORITY = "A.md"
 MISSING = "docs/gone.md"
-BACKLOG = Path(__file__).resolve().parents[1] / "BACKLOG.md"
+ROOT = Path(__file__).resolve().parents[1]
+REGISTRY = ROOT / "registry.md"
+SRC = ROOT / "src" / "workline"
+
+
+def ai_decision_rules() -> str:
+    """The canonical ``rules/ai-decision`` section of registry.md: its marker up to the next rule marker."""
+    text = REGISTRY.read_text(encoding="utf-8")
+    start = text.index("<!-- workline-id: rules/ai-decision -->")
+    return text[start:text.index("<!-- workline-id:", start + 1)]
 
 
 def events_of(store: ProjectStore, work_id: str) -> list[str]:
@@ -576,17 +591,75 @@ class ScopeTests(HistoricalRelatedCase):
         self.assertEqual(ProjectView.load(store).work_state(reader).state, "unstarted")
         self.assertEqual(validate_project(store), [])
 
-    def test_backlog_tracks_the_correction_requirements_under_bl_020(self) -> None:
-        text = BACKLOG.read_text(encoding="utf-8")
-        section = text.split("### BL-020")[1].split("### BL-021")[0]
+
+
+class CorrectionBoundaryTests(unittest.TestCase):
+    """BL-020: the future historical-fact correction boundary lives in canonical ``rules/ai-decision`` (§33.19).
+
+    Read from registry.md only. Nothing here creates a correction record or a
+    correction fixture: no such record, event or schema exists.
+    """
+
+    def correction_section(self) -> str:
+        rules = ai_decision_rules()
+        return rules[rules.index("### Historical fact correction"):]
+
+    def test_historical_related_remains_immutable_history(self) -> None:
+        rules = ai_decision_rules()
+        self.assertIn("origin / derived / events等の起きた事実\n→ 現在計画に合わせて書き換えない", rules)
+        self.assertIn("`derived` はhistorical factとして保護する", rules)
+        self.assertIn(
+            "terminal Work（completed / cancelled / plan_excluded）のRelatedも、そのWorkが当時読む / 満たす必要があった"
+            "もののhistorical factとして保護する。後続Workがtargetを正式に削除しても、edgeを削除・書換えしない。",
+            rules,
+        )
+        self.assertIn(
+            "後でtargetが変わった・消えたことを理由に訂正の対象にならず", self.correction_section(),
+            "BL-009 stays as it is: a later change of the target is no correction",
+        )
+
+    def test_the_four_future_correction_constraints_are_canonical(self) -> None:
+        section = self.correction_section()
         for requirement in (
-            "元の記録を物理削除・書換えしない",
-            "訂正自体を正式な記録として残す",
-            "downstream readerが訂正の存在を機械的に判定できる",
-            "superseded / invalidatedなhistorical factを現在の真実として扱わない",
+            "1. 元のrecordを物理的に削除・書換えしない",
+            "2. 訂正自体を正式なcanonical recordとして残す",
+            "3. downstream readerが、訂正によりsuperseded / invalidatedになったhistorical factを機械的に判定できる",
+            "4. superseded / invalidatedなhistorical factを現在の真実として扱わない",
         ):
-            self.assertIn(requirement, section)
-        self.assertIn("BL-009", section, "the requirement's origin is traceable")
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, section)
+        self.assertIn("これは制約であり、schemaではない", section)
+
+    def test_no_generic_correction_is_claimed_and_a_needing_operation_stops(self) -> None:
+        section = self.correction_section()
+        self.assertIn("元のhistorical record\n→ 物理的にimmutableのまま。書き換え・削除しない", section)
+        self.assertIn("historical factを訂正・supersede・invalidateする汎用のoperationとrecordは、現在定義されていない", section)
+        self.assertIn("historical factの汎用の訂正 / supersession operation\n→ 現在は定義されていない", section)
+        self.assertIn(
+            "訂正された意味を必要とするdownstream operation\n→ 推測しない\n"
+            "→ STOPし、その具体的な事例について明示的なdesign / product作業を開く",
+            section,
+        )
+        self.assertIn("historical recordを手編集せず", section)
+
+    def test_no_backlog_item_is_needed_to_read_the_boundary(self) -> None:
+        self.assertNotRegex(ai_decision_rules(), r"BL-\d|BACKLOG")
+        files = {value.name for value in globals().values() if isinstance(value, Path) and value.suffix}
+        self.assertEqual({"registry.md"}, files, "this suite reads canonical authority only, never a backlog file")
+
+    def test_no_correction_record_event_or_schema_exists(self) -> None:
+        for kind in ids.PREFIXES:
+            with self.subTest(id_kind=kind):
+                self.assertNotRegex(kind, r"correct|supersed|invalidat")
+        for event_type in WORK_EVENTS + PHASE_EVENTS + ROADMAP_EVENTS:
+            with self.subTest(event=event_type):
+                self.assertNotRegex(event_type, r"correct|supersed|invalidat")
+        for path in sorted(SRC.rglob("*.py")):
+            with self.subTest(module=path.relative_to(SRC).as_posix()):
+                self.assertNotIn("correction", path.name)
+                source = path.read_text(encoding="utf-8")
+                self.assertNotRegex(source, r"(?im)^\s*(?:class|def)\s+\w*correction")
+                self.assertNotRegex(source, r"(?i)[\"'](?:historical_)?(?:fact_)?corrections?[\"']")
 
 
 if __name__ == "__main__":

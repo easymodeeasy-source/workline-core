@@ -26,7 +26,7 @@ repository内の過去のcheckpoint / audit / fix / contract文書（`REVIEW_SYS
 <project-root>    Workline Project（.workline/project.yaml の workline.root が configured Workline root を指す）
 ```
 
-Workline root自身はProjectにしない（self-hostingは現在サポートしない）。
+Workline root（workline-core）はWorkline root / runtime repositoryであり、それ自身はWorkline Projectではない。self-hostingは意図的にサポートしないcapabilityであり、未完成の通常modeではない（理由と再開の条件は `registry.md` の `rules/git` のUnsupported self-hosting）。
 
 ## Runtime
 
@@ -105,7 +105,7 @@ Python 3.11以上で起動する
 
 `-I` はPYTHONPATH・user site-packages・作業directory由来のimportを抑えるが、system site-packagesやその `.pth` は残り得る。identityを保証するのは `-I` ではなく、load済みmoduleのorigin検証である。これはsecurity sandboxではない。`-B`（とlauncher自身の設定）により、canonical runtimeはWorkline rootへbytecode cacheを書かない。
 
-保証しないこと（`BACKLOG.md` BL-013）: committed revision・main branch・clean tree・released version・dev / runtime分離・process間のrevision一致・実行中のsource変更。`<R>` のworking treeが、未commitの変更も含めてそのまま実行される。
+保証しないこと（`rules/git` のWorkline implementation。dev / runtime分離はUnsupported self-hostingを参照）: committed revision・main branch・clean tree・released version・dev / runtime分離・process間のrevision一致・実行中のsource変更。`<R>` のworking treeが、未commitの変更も含めてそのまま実行される。
 
 ## Claude Codeアプリ運用
 
@@ -119,9 +119,11 @@ Claude Codeアプリで <workline-root> を開く
 → 対象directoryがWorkline Projectになる
 ```
 
-ProjectSTARTだけがWorkline root側から使うpre-project操作である。
+Projectを成立させるのはProjectSTARTだけであり、Project成立前に書き込むWorkline操作もProjectSTARTだけである。
 
-Workline root自身はProjectSTARTのtargetにしない（self-hostingは現在サポートしない）。
+既存（legacy）ProjectをWorklineへ移す場合は、Roadmap Skillのread-onlyなmigration preflight（対象の棚卸しと責任によるA〜F分類。何も書かない）をProjectSTARTの前に行い、ProjectSTARTの後に通常のMigration Roadmapとして移行する（`skills/roadmap` のLegacy Project migration）。
+
+Workline root自身はProjectSTARTのtargetにしない（self-hostingは意図的にサポートしない。`rules/git` のUnsupported self-hosting）。
 
 ProjectSTARTは canonical `.workline` structure に加えて、Project側entryを1個だけ設置する。
 
@@ -258,7 +260,7 @@ activationはreview-v1を自動選択しない。review-v1は呼び出しごと�
 
 review-v1 WorkのCandidate snapshot materialはcanonicalなrepository contentである。reviewerを呼ぶ前にcommitされ、Review対象の結果のbytesをそのまま含みうる（Reviewが許可しなかった結果のbytesも含む）。
 
-Workline implementationのrepository（workline-core）自身をそのProjectとしてactivateしない。self-hostingは現在のWorkline rulesでサポートしておらず（`rules/git` のUnsupported self-hosting）、activationも `workline_self_hosting_unsupported` でSTOPする。
+Workline implementationのrepository（workline-core）自身をそのProjectとしてactivateしない。self-hostingは意図的にサポートしないcapabilityであり（`rules/git` のUnsupported self-hosting）、activationも `workline_self_hosting_unsupported` でSTOPする。
 
 ### Human recovery disposition
 

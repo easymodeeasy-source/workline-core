@@ -1,6 +1,6 @@
 ---
 name: roadmap
-description: Convert a human goal into a Workline Roadmap and meaningful Phases, maintain future planning, select startable Phases, expand a Phase into Works when it is actually entered, and explicitly judge Roadmap achievement. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml) for Roadmap creation, planning changes, Phase selection/entry, Roadmap or Phase hold/resume/cancel, and achievement checks. Not for generic product roadmaps, planning documents, or any repository that is not a Workline Project.
+description: Convert a human goal into a Workline Roadmap and meaningful Phases, maintain future planning, select startable Phases, expand a Phase into Works when it is actually entered, and explicitly judge Roadmap achievement. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml) for Roadmap creation, planning changes, Phase selection/entry, Roadmap or Phase hold/resume/cancel, and achievement checks. One exception: Legacy Project migration, whose read-only preflight (inventory and A-F classification of an existing project's legacy authority, writing nothing) may run before ProjectSTART; the migration itself is an ordinary Migration Roadmap after ProjectSTART. Not for generic product roadmaps, planning documents, or any repository that is not a Workline Project apart from that preflight.
 ---
 
 # Roadmap
@@ -23,6 +23,7 @@ description: Convert a human goal into a Workline Roadmap and meaningful Phases,
 - future-plan maintenance
 - hold / resume / cancel / plan exclusion
 - Roadmap achievementの明示判定
+- Legacy Project migrationの手順（Project開始前のread-only preflightと、Project開始後のMigration Roadmap）
 
 直接Phase / Work fileを書かず、登録はPhase CREATE / CREATE + Mutation Controllerを使う。
 
@@ -416,6 +417,168 @@ markerを持つintegrationのPhase（reviewed Phase）は、STARTのPhase Integr
 - **work-plan-exclude**: 未開始Workのplan exclusionでreviewed Phaseのbasisが再び閉じるなら、同じoperationがcovering integrationのconsumed Reviewを引くphase_completion evidenceを、replanの後・commitの前の `achievement` stageに記録する（原因はその `plan_excluded` event）。Phase plan exclusionはevidenceを作らない。
 - **Roadmap achievement（H-2）**: reviewed Phaseを含むRoadmapの `achieved` は、構造化した `RoadmapAchievementDecision`（judgement・evaluator identity / version・public-safe rationale・evidence refs・任意のHuman Decision Evidence ref）でだけ記録し、文字列のjudgementは拒否する（legacyだけのRoadmapの文字列judgementは従来どおり）。callerはH-2の下でAIとして `achieved` を自分で決めてよく、AIだからという理由だけでHuman確認を足さない。`achieved` 以外のjudgementは読み取りだけで、何も書かない。
 - **achievedの記録**: 決定時のRoadmap basisを凍結し、`roadmap-achievement` operationのlock内で同じbasisを再計算して一致を確かめ、全active Phaseの生成完了・全reviewed Phaseのprogression-ready・構造validation PASS・decisionが現在のPhase evidenceを全て引くこと・decisionが引くReview Run / Human Decision Evidenceが正本recordとして検証できること・未解決のHUMAN決定とblockingなReview obligationが無いことを確かめる（どれかが欠ければ何も書かない）。`roadmap_achieved` eventのIDとroadmap_achievement evidenceのIDを予約し、eventとそれを参照するevidenceを1つの `achievement` stageとして記録し、commit・pushしてから、commitしたevent / evidence / basisの一致を読み戻して証明する（違えば `review_achievement_basis_mismatch` のreconcile、置き換えない）。中断した記録は同じdecisionの再実行がそのstageから終える。
+
+## Legacy Project migration
+
+既存の（Workline以前の文書・手順・自動化をauthorityとして運用してきた）legacy ProjectをWorklineへ移す、再利用できる手順である。このSkillが所有する。新しいlifecycle・Controller・Skill・永続schema・runtime operationではなく、各段は既存のownerの通常のoperationで行う。
+
+Project開始（`skills/project-start`）は変わらず、Workline Projectを成立させる唯一のoperationである。Project開始はlegacy authorityの棚卸し、旧current stateの推測、historyの移行、旧自動化のretire、移行の達成判定を行わない。
+
+```text
+Project開始前のread-only preflight（inventory → A〜F分類 → 移行計画）
+→ Project開始（cutover）
+→ Migration Roadmap（current / futureの意味の移行、B / Cの保持、A / Fのretire）
+→ shadow-authority check
+→ fresh-session standalone recovery
+→ validation
+→ Migration Roadmap achievement（Phase達成evidence（RB5）とRoadmap achievement）
+```
+
+### Project開始前のread-only preflight（唯一の例外）
+
+このSkillはestablished Workline Projectの中でだけ使う。唯一の例外として、legacy Projectの移行では、Project開始の前に次だけを行ってよい（対象folderを読むだけで、Workline root側のsessionから行える）。
+
+- 対象のProject directory / repositoryを特定する
+- 1つの固定したidentityに対するread-onlyのmigration inventory（下記）を取る
+- legacy authorityを責任でA〜Fに分類する（下記）
+- Project開始後の移行計画（Migration Roadmapの案）を準備する
+
+Project開始の前には次のどれも行わない。
+
+- Roadmap / Phase / Workを作る
+- Gitを変更する（`git init`・commit・index・ref・configの変更を含む）
+- legacy authorityをretire・削除・無効化する
+- canonical Skillをinstall / copyする
+- `.workline` を作る
+- capabilityを変えるproject-local Skill / 自動化の変更をする
+
+preflightは何も書かず、routingもしない。registryの `skills/roadmap` のcontext（`project`）も、Project routerも変えない。preflightのGitの読取りはoptional lockを使わずに行う（`git --no-optional-locks`、または `GIT_OPTIONAL_LOCKS=0`。そうしないと `git status` がindexのstat cacheを書き戻し得る）。Gitの安全性は `rules/git` に従う。
+
+### Migration inventory
+
+inventoryは、1つの固定した対象identityに対する1回のread-onlyな観測である。移行sessionの作業記録として、少なくとも次を持つ。
+
+- Project rootの実体identity
+- Git top-level（あれば）
+- 現在のbranchの完全なref名、またはdetached / unbornであること
+- HEAD（あれば）
+- Git statusのpath
+- 棚卸ししたauthorityごとのpathと、その意味上の責任
+- cutoverまでのmaterialな変更を検出できるだけの、exactなfile / content identity（content digest等）
+- legacyのcurrent state / task / progression authority
+- legacyのRoadmap / plan authority
+- Project-localのCONTRACT / safety authority
+- Project-localのSkill / automation / hook / agent
+- 進行中のobligationと将来のobligation
+- domain固有のauthority
+- 現在の運用に必要な外部authorityへの参照
+- 以前のWorklineの残骸（`.workline`、`.claude/skills/workline/SKILL.md` 等）
+
+これは手順のevidenceであり、新しいcanonicalな永続schemaではない。secret、非公開の生の内容、不要なtranscript / 推論を、Worklineのcanonical history（Roadmap / Phase / Workの本文、commit message等）へ残さない。cutoverまでに、棚卸ししたauthorityがmaterialに変わったら、古いsnapshotを移行せず、inventoryを取り直して照合してから進む。
+
+### A〜F分類（責任で決め、file名で決めない）
+
+```text
+A  Workline-owned responsibility          → current / futureの意味をcanonical Workline（Migration Roadmap）へ移し、
+                                             旧い規範的な役割をretireする
+B  Workline所有でないProject / domain authority → Project-local authorityとして保持する
+C  より厳しいProject固有のsafety          → 保持する。移行で弱めない
+D  派生 / read-onlyのview                 → 有用ならderived / non-authoritativeとしてだけ残す
+E  historical evidence                   → 有用ならhistory / non-authorityとして残す
+F  obsolete                              → 通常のownerと必要なHuman境界を通してだけretire / 削除する
+```
+
+ROADMAP・TODO・BACKLOG・STATUS・CLAUDE等の名前やvocabularyはclassを決めない。棚卸しした各artifactの責任は、当てはまるclassをちょうど1つ受ける。1つのartifactが複数の責任を持つ場合は、責任ごとに分類し、file全体を1つのclassへ押し込んで正当なlocal authorityを失わない。
+
+### Project開始はcutoverの境界
+
+inventoryの後、通常のProject開始を実行する。Project開始は既存のcanonical構造とbootstrapだけを置き、migrationの振る舞いを持たない（Project開始のimplementationに移行の処理を足さない）。成立した時点から、Workline所有の責任（planning・lifecycle・progression・routing・Review・Git ownership）はcanonical Workline authorityが持つ。legacyのplanning / task / status artifactは、移行のevidence / historyとして残ってよいが、もう1つのlive progression controllerとしては残らない。二重authorityの期間を最小にし、長く続く2-controller modeに頼らない。B / Cのauthorityは、自分の責任についてだけauthorityを保つ。
+
+以前のWorklineの残骸がProject開始を止める場合（例: `.claude/skills/workline/SKILL.md` が期待するbootstrapと違い、bootstrap conflictでSTOPする）は、inventoryでそれを見つけ、そのownerとHuman境界で解決してから進む。Project開始の側で上書き・推測修復はしない。
+
+### Migration Roadmap
+
+Project開始の直後に、通常のRoadmap / Phase / Work operation（このSkillのRoadmap作成・Phase entry、STARTの実行）でMigration Roadmapを作る。現在のdesired stateをRoadmap / Phase / Workとして表し、次を表す。
+
+- 本当に進行中のobligation（legacyで途中まで済んだ作業は、残りを成立状態とする未開始のWorkになる）
+- 本当に将来のobligation
+- dependency（`requires_completion` / `planned_next`）
+- Related / authorityへのlink（保持したB / Cへの `obey` / `must_read` 等）
+- 必要なretire / 保持のWork
+- 通常のHuman境界が本当に当たる意味の曖昧さはHUMANとして残し、推測しない
+
+次は作らない。
+
+- 過去の `work_started` / `work_completed`
+- 過去のPhase / Roadmap lifecycle event
+- 過去のReview Run / Receipt
+- 過去のevidence record
+- Workline以前に終わった作業のchronology
+
+Workline以前に終わった作業は、Projectを履歴上完全に見せるためだけにlifecycleへbackfillしない。
+
+### Local safety / domain authorityの保持
+
+A authorityをretireする前に、Worklineがまだ表していない、なお有効なsafety / 運用ruleを見つけ、それを適切なProject-local authority（C）へ保持する。有効なsafety文が1つ含まれているだけの理由で、obsoleteなlegacy workflow / controllerを残さない。
+
+Project / domainのB authorityとより厳しいsafetyのC authorityは、自分の責任についてだけauthorityである。移行はCを決して弱めない。
+
+### Project-local Skill・自動化・hook
+
+```text
+独自のProject / domain capability                            → 保持する
+Workline semanticsを複製せずcanonical ownerを呼ぶだけ         → 保持する
+Workline planning / lifecycle / Review / Git ownershipの複製  → retire / refactor
+capabilityを変える変更                                       → 通常の rules/human-confirmation
+```
+
+canonical Workline SkillをProjectへcopyしない。Project側のWorkline entryは、Project開始が置く1つの薄いbootstrapだけである。
+
+### 重なるlegacy authorityのretire
+
+class Aのlegacy authorityは、それぞれ曖昧さの無いretireの結果を受ける。
+
+- 安全な時に、通常のownerを通して削除する
+- 規範的な主張を取り除く・置き換える
+- historical / non-authoritativeであると明示する
+- 必要なHuman境界の下で、古い自動化を無効化する
+- 運用者の案内を、canonical Workline entryへ向け直す
+
+retireと保持の作業は、Migration Roadmapの通常のWorkとしてSTARTが実行する。keywordの一致でretireしない。B / Cの責任をretireしない。古く見えるだけの理由で、capabilityを変える自動化を黙って編集しない（Human境界は通常の質問・回答待ちで扱い、そのためだけのWorkを作らない）。
+
+### Shadow-authority check
+
+意味の移行とretireの後、read-onlyのshadow-authority detector（`workline.shadow_authority`。`status` のpolicy sectionにも同じ診断が出る）を実行する。detectorは狭いまま使う: 正の構造的・観測evidence、canonical bootstrapのexact path、構造上関係するProject-local Skill authorityだけを読み、README・BACKLOG・TODO・STATUS等のproseを語の一致で探さない。
+
+移行の達成には、confirmedのshadow authorityが無いことと、それが証明された結果であること（`confirmed_count` が0、`bootstrap_inspected`、`complete`）が要る。suspectedはadvisoryなevidenceであり、detectorのcontractでconfirmedにならない限り失敗として扱わない。bootstrapを検査できなかった結果は、shadow authorityが無いことの証明ではない。detectorに移行・retire・修復をさせない。
+
+### Fresh-session standalone recovery
+
+古い文書を編集しただけでは、移行は終わらない。移行のchatやprivateなscratchを持たない新しいsession / processが、supportedなbootstrap / canonical authority（Project bootstrap、`status`、canonical API）だけからProjectを開き、次を決定できなければならない。
+
+- configured Workline root
+- current Roadmap
+- current Phase
+- current / next Work
+- dependency / Related obligation
+- 残ったdomain authority
+- 残ったより厳しいlocal safety authority
+
+retireしたlegacy progression authorityが、現在のWorkline stateの再構成に必要なら、移行は終わっていない。この確認はtop-level operationの間（question wait・holdや、進行に関わるpending mutationが無い時）に行う。
+
+### Migration achievement
+
+Migration Roadmapは、別のcompletion / achievementの仕組みを作らない。次がすべて成り立った後でだけachievementの対象になる。
+
+- canonicalなcurrent / futureのWorkline stateが表されている
+- local safety / domain authorityが保持されている
+- 重なるlegacy authorityがretire済み、またはnon-authoritativeである
+- confirmedのshadow authorityが無い（上記）
+- fresh-session standalone recoveryがPASSした
+- 通常のvalidationがPASSする
+- 未解決の移行のHUMAN決定が無い
+
+その後は、通常のPhase達成evidence（RB5）とRoadmap achievementの意味とevidenceに従う。既に移行に成功している既存Projectはbackfillしない。
 
 ## Review-v1 planning（明示opt-in）
 
