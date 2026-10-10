@@ -97,7 +97,7 @@
 | BL-073 | Candidate Maturity / Validation Eligibility | OPEN |
 | BL-074 | Semantic Surface Writer Lease / Collision Enforcement | OPEN |
 | BL-075 | Landing-Gated Dependency Serialization / Stacked Candidate Execution | OPEN |
-| BL-076 | Progressive Review Pipelining / Stable-Leaf Review Reuse | OPEN |
+| BL-076 | Progressive Review Pipelining / Early Stable-Leaf Review | OPEN |
 | BL-077 | Replan payload refusal after the terminal event freezes Project writes | OPEN |
 | BL-100 | Remove non-Workline systems and legacy operational surfaces from workline-core | OPEN |
 
@@ -1140,10 +1140,10 @@
 - Self-hosting prerequisite: no
 - Evidence class: completion-sprint execution
 
-### BL-076 Progressive Review Pipelining / Stable-Leaf Review Reuse
+### BL-076 Progressive Review Pipelining / Early Stable-Leaf Review
 
 - ID: BL-076
-- Title: Progressive Review Pipelining / Stable-Leaf Review Reuse
+- Title: Progressive Review Pipelining / Early Stable-Leaf Review
 - Status: OPEN
 - Kind: execution orchestration, review evidence
 - Owner: Completion Sprint RB12（`WORKLINE_COMPLETION_SPRINT.md` §39）
@@ -1162,7 +1162,7 @@
 - Title: Replan payload refusal after the terminal event freezes Project writes
 - Status: OPEN
 - Kind: implementation, validation boundary, liveness
-- Severity: MID（暫定。Control Planeの判断）
+- Severity: major（CP provisional: MID。Completion Sprintの区分（`WORKLINE_COMPLETION_SPRINT.md` §4 H-4）ではblockingのProblem MIDに当たる）
 - Owner: pre-RB9 hardening（`WORKLINE_COMPLETION_SPRINT.md` §37.21）。RB8・RB11のscopeではない。
 - Problem: replanを伴う3つのowner（Roadmapのplan exclusion、STARTのstandalone plan exclusion、STARTのcancel / replan）は、先にterminal eventをworking treeへ適用してから、新しいWorkの登録payloadを登録処理で判定する。payloadが不正だと、terminal eventだけが適用された後で拒否され、Project全体への以後の書込みが拒否される状態になる。静的な解析で確認済みであり、動的な再現はhardening candidateの証拠に含める。
 - Why it matters: 不正な入力1つでProject全体が書込み不能になる。fail-closedではあるが、無害な残余としては扱えない。既にstrandしたrecordの回復には人の手作業が要り、その手順は削除・Git reset・Git revert・record除去を許可しない。

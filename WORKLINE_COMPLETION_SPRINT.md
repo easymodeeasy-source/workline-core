@@ -89,6 +89,15 @@ This permission includes completion-control and normative documentation surfaces
 
 It does not by itself authorize the Control Plane to modify production source code or tests.
 
+Dated note (2026-10-10; the 2026-10-03 text above is kept as history and this note supersedes nothing in it): Control Plane ruling CP-A4 of 2026-10-10 governs every future canonical production change, documentation-only changes included. Each such change needs:
+
+- exact SHA / tree / base identity;
+- the required independent review (§20, §39.4);
+- candidate-specific landing authorization;
+- a serialized, race-gated landing (§20).
+
+There is no blanket scope-only publication authorization. The documentation-only BL-007 closeout publication stays in production history by a limited retroactive ratification of the Control Plane: exact-SHA authorization and independent exact-candidate review did not take place for it at the time. It is not a standing exception.
+
 ### 2.3 Execution Writer
 
 An Execution Writer owns work that requires an executable/local development environment:
@@ -239,7 +248,7 @@ Question: after Control Plane review PASS, exact candidate identity, required te
 
 This does not block design.
 
-Current status (2026-10-10; an added note, the HD-2W text above is the historical snapshot and is not rewritten): HD-2W was resolved at the first production landing, RB3-C1 (ending at commit `4c249e9`), as §37.14 required. The decision and its evidence are recorded in the private execution archive; this repository holds no copy of them. The resolution never replaces exact-candidate review, the race gate or candidate-specific landing authorization (§20, §37.14, §40.3).
+Current status (2026-10-10; an added note, the HD-2W text above is the historical snapshot and is not rewritten): HD-2W was resolved on 2026-10-04 at the first production landing, RB3-C1 (ending at commit `4c249e9`), as §37.14 required. The Human answered YES: after Control Plane review PASS, exact candidate identity, required tests and race gate, the Execution Writer may fast-forward main without per-landing Human confirmation. The decision record and its evidence are in the private execution archive; this repository holds no copy of them. The resolution never replaces exact-candidate review, the race gate or candidate-specific landing authorization (§20, §37.14, §2.2 dated note).
 
 ---
 
@@ -289,6 +298,9 @@ RB3-C1 design -> RB10-N4 design
 RB3-C1 landed semantics + RB1 status -> RB10-N4 integration
 
 RB1 + RB2 + RB3 + RB4 + RB5 + RB6 + RB7 + RB8 + RB10 + RB11 + RB12 + RB13
+-> RB9
+
+§37.21 pre-RB9 hardening candidates, closed with a validated fix
 -> RB9
 ~~~
 
@@ -5830,7 +5842,7 @@ RB10 is DESIGN_READY. The only bounded execution-dependent design residue is N3(
 
 RB9 is the global completion barrier.
 
-It begins only when RB1-RB8, RB10, RB11, RB12 and RB13 are LANDED/DONE as applicable, the §37.21 pre-RB9 hardening candidates are closed, and no production writer remains active.
+It begins only when RB1-RB8, RB10, RB11, RB12 and RB13 are LANDED/DONE as applicable, the §37.21 pre-RB9 hardening candidates are closed with a validated fix, and no production writer remains active.
 
 RB9 does not add a new feature program. It proves that the implemented Workline is internally complete, that obsolete development surfaces no longer masquerade as Workline concepts, and that the exact final production candidate works from both a fresh session and a real Project.
 
@@ -5840,6 +5852,7 @@ Before Stage A, prove:
 
 - RB1 through RB8, RB10, RB11, RB12 and RB13 each have an evidence-backed final disposition;
 - both §37.21 pre-RB9 hardening candidates (BL-077 and the Phase Integration Review Context currency gap) are closed with a validated fix; neither is waived by an implicit acceptance against the HIGH/MID rule below;
+- the evidence Stage A relies on, including evidence recorded in the private execution archive, is durably available at a Human-approved, verified destination;
 - every runtime rule frozen in this Completion Sprint that was implemented is also present in its canonical runtime owner;
 - no required runtime behavior exists only in WORKLINE_COMPLETION_SPRINT.md, BACKLOG.md or a historical REVIEW_SYSTEM_* file;
 - no unresolved blocking Problem HIGH/MID remains;
@@ -5875,7 +5888,7 @@ Stage A also covers residual obligations embedded inside items whose top-level B
 
 A RESOLVED top-level item does not erase one of these explicitly retained residual evidence obligations.
 
-Stage A also covers the requirements this Sprint adopted outside RB1-RB10: BL-070..BL-077 (owned by §38-§40 and §37.21; tracked in BACKLOG.md only as non-design tracking entries), the Phase Integration Review Context currency gap (§37.21), and the cross-RB residual obligations that the Control Plane classified individually (§37.20; their evidence is recorded in the private execution archive). Before BACKLOG.md is retired, each one that is still unresolved has a durable successor record, so that no adopted requirement and no deferred obligation is lost.
+Stage A also covers the requirements this Sprint adopted outside RB1-RB10: BL-070..BL-077 (owned by §38-§40 and §37.21; tracked in BACKLOG.md only as non-design tracking entries), the Phase Integration Review Context currency gap (§37.21), and every cross-RB residual obligation of the 2026-10 residual inventory, each classified individually under §37.20 (their evidence is recorded in the private execution archive). Before BACKLOG.md is retired, each one that is still unresolved has a durable successor record, so that no adopted requirement and no deferred obligation is lost.
 
 Permitted final item dispositions are exactly:
 
@@ -6545,11 +6558,13 @@ Prohibited:
 
 Push-guard, landing-guard and race-gate tests use a local bare repository or another explicitly non-production remote. The production remote is never used as a test surface. Control Plane canonical-document updates separately authorized by §2.2 are not rehearsal/test pushes.
 
+Dated note (2026-10-10; the sentence above is kept and is not rewritten): a Control Plane canonical-document update is a canonical production change. From 2026-10-10 it lands only under the CP-A4 conditions recorded in the §2.2 dated note: exact SHA / tree / base identity, the required independent review, candidate-specific landing authorization, and a serialized, race-gated landing.
+
 If main moves after Review, carry a positive proof or rebuild/re-review on the new main.
 
 Landing is serialized and race-gated.
 
-Cross-reference (added 2026-10-10; it supersedes nothing in this section): the review-independence classes FORMAL_INDEPENDENT, INTERNAL_ADVISORY and INVALID_OR_UNVERIFIED, which name what kind of evidence a candidate review is, are defined in §39.4.
+Cross-reference (added 2026-10-10; it supersedes nothing in this section): Human decision H-NEW-05, which defines what a formal independent review requires and applies to every formal review, and the review-independence classes FORMAL_INDEPENDENT, INTERNAL_ADVISORY and INVALID_OR_UNVERIFIED, which name what kind of evidence a candidate review is, are recorded in §39.4.
 
 ---
 
@@ -6630,6 +6645,7 @@ RB10 DONE
 RB11 DONE
 RB12 DONE
 RB13 DONE
+§37.21 pre-RB9 hardening candidates closed with a validated fix
 
 RB9 completion-map audit PASS
 BL-100 complete
@@ -6659,6 +6675,8 @@ Status note: §§25.1-25.5 are the preparation snapshot that produced the implem
 The Control Plane design pass is complete.
 
 All ten Review Blocks now have a frozen completion contract.
+
+Current status (2026-10-10; an added note, the two lines above are the preparation snapshot and are not rewritten): they refer to RB1-RB10. The Sprint now has thirteen Review Blocks (§6). RB11-RB13 were added later; their contracts are not frozen and their design is not complete. Their stages are in §37.20.
 
 The remaining work is implementation planning and execution, not open-ended architecture exploration.
 
@@ -16429,7 +16447,7 @@ landing_authorization = HD-2W unresolved until first reviewed candidate is ready
 Current status (2026-10-10; an added note, the status block above is the historical snapshot of the plan freeze and is not rewritten):
 
 - PRODUCTION_DISPATCH: production dispatch proceeded on the `5a09d82` baseline, which follows the final cold-read repair commits (for example `b798c5c`). The first production landing was RB3-C1 (ending at commit `4c249e9`). An explicit Gate 0 (§37.1) PASS record is missing (not proven): none was found in this repository or in the private execution archive.
-- landing_authorization: HD-2W was resolved at that first landing (§5). Landings are recorded per candidate: the landed commits are in the history of main, and each landing's authorization and race-gate evidence is recorded in the private execution archive. Every landing still needs exact-candidate review (§20, §37.14) and candidate-specific landing authorization (§40.3).
+- landing_authorization: HD-2W was resolved at that first landing (§5). Landings are recorded per candidate: the landed commits are in the history of main, and each landing's authorization and race-gate evidence is recorded in the private execution archive. Every landing still needs exact-candidate review (§20, §37.14) and candidate-specific landing authorization (§2.2 dated note).
 - RB11-RB13 dispatch state is §37.20. Pre-RB9 hardening is §37.21.
 
 This section converts the frozen RB contracts and implementation briefs into one dispatch / collision / landing schedule.
@@ -16768,12 +16786,12 @@ LANDING_AUTHORIZED         authorization for one exact candidate (SHA, tree and 
 Current stages (2026-10-10):
 
 ~~~
-RB11  CONTRACT_PROPOSED
+RB11  RESEARCH_PREPARED  decision-applied freeze proposal in preparation; not yet delivered to the Control Plane
 RB12  RESEARCH_PREPARED  decision-applied; waits on the RB11 interfaces (§39.3)
 RB13  RESEARCH_PREPARED  waits on RB11 and RB12
 ~~~
 
-None of the three is CONTRACT_FROZEN. No IMPLEMENTATION_AUTHORIZED or LANDING_AUTHORIZED stage exists for any of them.
+None of the three is CONTRACT_PROPOSED or CONTRACT_FROZEN. No IMPLEMENTATION_AUTHORIZED or LANDING_AUTHORIZED stage exists for any of them.
 
 Dispatch state:
 
@@ -16787,19 +16805,19 @@ RB9             WAIT all production blocks DONE (RB1-RB8, RB10-RB13) + §37.21 h
 
 - Read-only RB11-RB13 research may run before their production gates. It is not production and creates no candidate.
 - An earlier dispatch point for RB12 or RB13, for example a stacked candidate on a frozen parent candidate, needs an explicit Control Plane decision for that RB.
-- Each RB11-RB13 production candidate needs its own exact identity, FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 and LANDING_AUTHORIZED for that exact candidate.
+- Each RB11-RB13 production candidate needs its own exact identity, FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 (by default one exact-tree Full) and LANDING_AUTHORIZED for that exact candidate.
 
 Residuals:
 
 - A residual enters an RB11-RB13 contract only when the Control Plane explicitly adopts it. Each residual is classified individually as existing frozen scope, genuine design input, optional LOW follow-up, separate future development, or pre-RB9 correctness hardening.
 - LOW residuals are never incorporated en masse. A deferred or LOW residual keeps its identity, severity, factual evidence, future home and triggering conditions. Low priority never excuses losing an obligation during BL-100 cleanup.
 
-Human decisions H-NEW-01..H-NEW-06 of 2026-10-10 are frozen and bind RB11-RB13 as a whole. Each is recorded with the block that owns its subject:
+Human decisions H-NEW-01..H-NEW-06 of 2026-10-10 are frozen. They bind all remaining Completion Sprint work, including RB11-RB13; part B of H-NEW-03 and of H-NEW-06 governs completed Workline execution. Each is recorded with the block that owns its subject; that placement does not narrow its scope:
 
 ~~~
 H-NEW-01  writer lease: external orchestration only             §38.2
 H-NEW-02  no fixed reviewer / executor runtime timeout          §38.2
-H-NEW-03  Human relay is oversight; no GPT dependency           §40.2
+H-NEW-03  Human relay is oversight; no mandatory GPT dependency §40.2
 H-NEW-04  no direct Control Plane connection                    §40.2
 H-NEW-05  formal independent review                             §39.4
 H-NEW-06  bounded autonomy                                      §40.2
@@ -16842,7 +16860,7 @@ Phase Integration Review Context currency:
 
 For each of the two candidates:
 
-- it is its own exact candidate, with FORMAL_INDEPENDENT review (§39.4), one exact-tree Full and LANDING_AUTHORIZED for that exact candidate;
+- it is its own exact candidate, with FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 (by default one exact-tree Full) and LANDING_AUTHORIZED for that exact candidate;
 - no production edit starts before its scope is authorized and an exclusive writer owns the affected surfaces;
 - the fix is never folded silently into RB8, RB11 or another candidate;
 - RB9 entry (§19, §19.1, §37.13) requires it closed with a validated fix; it is never waived by an implicit acceptance against §19.1's HIGH/MID rule.
@@ -16854,15 +16872,15 @@ For each of the two candidates:
 Stage:
 
 ~~~
-CONTRACT_PROPOSED
-not CONTRACT_FROZEN; no implementation or landing authorization
+RESEARCH_PREPARED (decision-applied freeze proposal in preparation; not yet delivered to the Control Plane)
+not CONTRACT_PROPOSED; not CONTRACT_FROZEN; no implementation or landing authorization
 ~~~
 
-A decision-applied freeze proposal has been delivered to the Control Plane. It is not authority until the Control Plane freezes the RB11 contract, for RB11 alone (§37.20). The research, the proposal and their evidence are recorded in the private execution archive. The only adversarial review of the research is INTERNAL_ADVISORY (§39.4).
+A decision-applied freeze proposal is in preparation. It has not been delivered to the Control Plane. It is not authority until the Control Plane freezes the RB11 contract, for RB11 alone (§37.20). The research, the proposal draft and their evidence are recorded in the private execution archive. The adversarial review of the research is INTERNAL_ADVISORY (§39.4).
 
 ### 38.1 Purpose and scope
 
-RB11 provides the execution-control foundation of the Sprint's own execution:
+RB11 provides the execution-control foundation for externally orchestrated execution:
 
 - BL-071 — detection and mitigation of execution stalls, resource saturation, runaway execution, stragglers and underutilization;
 - BL-072 — durable ownership continuity and orphan prevention;
@@ -16875,6 +16893,8 @@ Adopted design input: the START dispose-recovery gap. RB10 N4 recovery dispositi
 Other residuals proposed as RB11 additions enter the contract only if the Control Plane adopts them after a scope and reachability review. Residuals that already fall within BL-071 or BL-072 may be included only to that extent (§37.20).
 
 ### 38.2 Human decisions owned here
+
+These decisions are recorded here because RB11 owns their subject. Their scope is all remaining Completion Sprint work (§37.20).
 
 H-NEW-01 — writer lease: external orchestration only (2026-10-10):
 
@@ -16930,7 +16950,7 @@ These Control Plane rulings are decided and apply from 2026-10-10. The RB11 cont
 8. The orchestrator keeps launch and owner handles. Runtime status may expose the diagnostic hints that `ProjectOperationBusy` already carries. Diagnostic fields never become authority to steal or adopt ownership.
 9. Watchdog boundaries:
    - a watchdog may stop only a precisely identified, owned process, under an authorized policy;
-   - a watchdog stop never ends a Review in a meaningful sense: it yields no verdict and no Review outcome;
+   - a watchdog does not terminate a Review meaningfully;
    - nothing is killed by name, pattern or parent-process traversal alone;
    - no stale lock is deleted on elapsed time alone;
    - Git process boundaries are respected.
@@ -16942,8 +16962,8 @@ Before the freeze, RB11 needs a decision-applied design, a surface map, a failur
 
 ### 38.4 Runtime / external boundary
 
-- Workline runtime: keeps one writer per working tree (H-NEW-01). RB11 runtime changes are limited to the bounded improvements of ruling 4, such as the staged START probe of ruling 1. No Workline Project gains a dependency on the orchestrator, the Control Plane or any external service (§40.2).
-- External orchestration: the writer lease, liveness / stall / saturation monitoring, launch and owner handles, and the watchdog. They are Sprint tooling; no Workline Project needs them.
+- Workline runtime: keeps one writer per working tree (H-NEW-01). RB11 runtime changes are limited to the bounded improvements of ruling 4, such as the staged START probe of ruling 1. No Workline Project gains a mandatory dependency on the orchestrator or the Control Plane (§40.2).
+- External orchestration: the writer lease, liveness / stall / saturation monitoring, launch and owner handles, and the watchdog. They belong to externally orchestrated execution; no Workline Project has a mandatory dependency on them (§40.2).
 - Human: decides every destructive or case-specific recovery action in the concrete Project, and answers re-asked questions.
 - Control Plane: freezes the RB11 contract, rules on any admission widening, and authorizes each landing for one exact candidate.
 
@@ -16961,14 +16981,15 @@ RB11 does not include:
 - admission of begun review-v1 Runs with Work-mode commit stages without the reproducer and proof of ruling 1;
 - automatic widening to non-START owners;
 - the BL-077 fix or the Phase Integration Review Context currency fix (§37.21);
-- a direct Control Plane channel or any GPT dependency (§40.2);
+- a direct Control Plane channel, or a mandatory GPT / external Control Plane dependency (§40.2);
 - a landing without LANDING_AUTHORIZED for the exact candidate.
 
 ### 38.6 Gates
 
+- CONTRACT_PROPOSED: only when the completed freeze proposal is delivered to the Control Plane and the delivery is recorded with the proposal's identity.
 - CONTRACT_FROZEN: a Control Plane decision for RB11 alone. The implementation brief is §41, added only at that freeze.
 - Production: after RB8 lands, and only with IMPLEMENTATION_AUTHORIZED (§37.20).
-- Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2, and LANDING_AUTHORIZED for the exact candidate.
+- Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 (by default one exact-tree Full), and LANDING_AUTHORIZED for the exact candidate.
 
 ---
 
@@ -16988,7 +17009,7 @@ The Control Plane's policy rulings (§39.2) are applied to the research. The con
 
 - BL-073 — candidate maturity and validation eligibility: expensive validation is spent only on candidates mature enough for it;
 - BL-075 — landing-gated dependency serialization and stacked candidate execution;
-- BL-076 — progressive review pipelining and stable-leaf review reuse.
+- BL-076 — Progressive Review Pipelining / Early Stable-Leaf Review.
 
 The grouping is frozen (§37.20).
 
@@ -17031,6 +17052,8 @@ A lease or owner record is identity only. RB12 never reads it as maturity or cor
 
 ### 39.4 Review independence
 
+H-NEW-05 and the review-independence classes below are recorded here because RB12 owns review evidence. They apply to every formal review in this Sprint, not only to RB12 (§20, §37.20).
+
 H-NEW-05 — formal independent review (2026-10-10):
 
 - A formal independent review needs a genuinely new review session or process, not merely an internal subagent context of the implementation session.
@@ -17066,7 +17089,7 @@ RB12 does not include:
 
 - CONTRACT_FROZEN: only after the RB11 contract establishes the §39.3 interfaces, by a Control Plane decision for RB12 alone. The implementation brief is §42, added only at that freeze.
 - Production: after RB11 lands, and only with IMPLEMENTATION_AUTHORIZED (§37.20).
-- Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2, and LANDING_AUTHORIZED for the exact candidate.
+- Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 (by default one exact-tree Full), and LANDING_AUTHORIZED for the exact candidate.
 
 ---
 
@@ -17084,7 +17107,7 @@ The Human decisions and Control Plane rulings below are applied to the research.
 
 ### 40.1 Purpose and interpretation
 
-BL-070 concerns the convergence path of the Sprint's own execution: carrying candidate packages between execution and independent review, and triggering repair and re-review, still depend on a Human relay.
+BL-070 concerns the convergence path of externally orchestrated execution, as observed in the Completion Sprint: carrying candidate packages between execution and independent review, and triggering repair and re-review, still depend on a Human relay.
 
 The Human's 2026-10-10 clarification fixes how this objective is read:
 
@@ -17093,6 +17116,8 @@ The Human's 2026-10-10 clarification fixes how this objective is read:
 - RB13 is not permission to turn a semantic Human decision into an AI decision. Human-owned decisions and landing authority are preserved.
 
 ### 40.2 Human decisions owned here
+
+These decisions are recorded here because RB13 owns their subject. Their scope is all remaining Completion Sprint work (§37.20); part B of H-NEW-03 and of H-NEW-06 governs completed Workline execution.
 
 H-NEW-03 — Human relay is oversight (2026-10-10):
 
@@ -17146,7 +17171,7 @@ These Control Plane rulings are decided and apply from 2026-10-10. The RB13 cont
 16. RB13 consumes the frozen RB11 / RB12 interfaces, not research-only assumptions.
 17. Earlier rulings apply to RB13:
     - substitute reviews are INTERNAL_ADVISORY (§39.4);
-    - the documentation-only BL-007 closeout publication stays in production history by a limited retroactive ratification of the Control Plane; exact-SHA authorization and independent exact-candidate review did not take place for it at the time, and it is not a standing exception;
+    - the documentation-only BL-007 closeout publication stays in production history by a limited retroactive ratification of the Control Plane; exact-SHA authorization and independent exact-candidate review did not take place for it at the time, and it is not a standing exception (§2.2 dated note);
     - the §37.21 hardening obligations apply;
     - a conflicting attribution of authority in the execution record is resolved from primary evidence;
     - re-authentication of the review tooling stays Human-owned;
@@ -17175,7 +17200,7 @@ RB13 does not include:
 
 - CONTRACT_FROZEN: only after the RB11 and RB12 contracts are frozen, by a Control Plane decision for RB13 alone. The implementation brief is §43, added only at that freeze.
 - Production: after RB12 lands, and only with IMPLEMENTATION_AUTHORIZED (§37.20).
-- Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2, and LANDING_AUTHORIZED for the exact candidate.
+- Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 (by default one exact-tree Full), and LANDING_AUTHORIZED for the exact candidate.
 
 ---
 
