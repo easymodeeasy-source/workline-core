@@ -119,7 +119,7 @@ Claude Codeアプリで <workline-root> を開く
 → 対象directoryがWorkline Projectになる
 ```
 
-Projectを成立させるのはProjectSTARTだけであり、Project成立前に書き込むWorkline操作もProjectSTARTだけである。
+対象folderをProjectとして成立させるのはProjectSTARTだけであり、Project成立前にその対象folderへ書き込むWorkline操作もProjectSTARTだけである（Workline root自身のRoot policy maintenanceはProjectの操作ではない）。
 
 既存（legacy）ProjectをWorklineへ移す場合は、Roadmap Skillのread-onlyなmigration preflight（対象の棚卸しと責任によるA〜F分類。何も書かない）をProjectSTARTの前に行い、ProjectSTARTの後に通常のMigration Roadmapとして移行する（`skills/roadmap` のLegacy Project migration）。
 

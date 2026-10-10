@@ -1,6 +1,6 @@
 ---
 name: project-start
-description: Initialize a local folder as a new Workline Project. This is the only Workline operation that establishes a Project or writes anything before a Workline Project exists (the Roadmap Skill's legacy-project migration preflight before it only reads) — use it when a folder that has no .workline/project.yaml yet — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
+description: Initialize a local folder as a new Workline Project. This is the only Workline operation that establishes the target folder as a Project or writes anything into it before a Workline Project exists there (the Roadmap Skill's legacy-project migration preflight before it only reads, and the Workline root's own policy maintenance is no Project operation) — use it when a folder that has no .workline/project.yaml yet — named explicitly, or indicated as the current directory ("このルート", "ここ", "this folder") — must be connected to the common Workline registry, receive the canonical .workline structure, resolve its Git boundary, and get the required initial local commit without starting a Roadmap.
 ---
 
 # Project開始
@@ -9,7 +9,7 @@ description: Initialize a local folder as a new Workline Project. This is the on
 
 これはpre-project操作である。Workline root側から使用する。established Project（`.workline/project.yaml` を持つroot）を再初期化する経路ではない。
 
-Project開始は、Workline Projectを成立させる唯一のoperationであり、Project成立前に書き込む唯一のWorkline operationである。既存（legacy）Projectの移行でも同じであり、`skills/roadmap` のLegacy Project migrationがProject開始の前に行うpreflight inventoryは読むだけである。Project開始はlegacy authorityの棚卸し、旧current stateの推測、historyの移行、旧自動化のretire、移行の達成判定を行わない。legacy Projectにも通常と同じcanonical構造とbootstrapだけを置き、移行のcutoverの境界になる。移行そのものは、成立後の通常のMigration Roadmapである（`skills/roadmap`）。
+Project開始は、対象folderをWorkline Projectとして成立させる唯一のoperationであり、Project成立前にその対象folderへ書き込む唯一のWorkline operationである（Workline root自身のRoot policy maintenanceはProjectのoperationではない。`rules/git`）。既存（legacy）Projectの移行でも同じであり、`skills/roadmap` のLegacy Project migrationがProject開始の前に行うpreflight inventoryは読むだけである。Project開始はlegacy authorityの棚卸し、旧current stateの推測、historyの移行、旧自動化のretire、移行の達成判定を行わない。legacy Projectにも通常と同じcanonical構造とbootstrapだけを置き、移行のcutoverの境界になる。移行そのものは、成立後の通常のMigration Roadmapである（`skills/roadmap`）。
 
 `rules/git` のProject contextに従い、別の成立済みWorkline Projectのcontextから対象folderをProject開始しない。成立済みWorkline Projectの配下に新しいWorkline Projectを作らない（nested Workline Projectは作らない）。canonical implementationはどちらも書き込む前にSTOPする（`foreign_project_mutation` / `nested_workline_project`）。Project開始のmutationは、その実行が対象rootに与えた許可の内側でだけ書き込まれ、owner名だけでは許可されない。
 

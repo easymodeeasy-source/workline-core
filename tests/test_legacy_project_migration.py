@@ -203,29 +203,32 @@ def work_ids_by_name(store: ProjectStore, phase_id: str) -> dict[str, str]:
 
 # --------------------------------------------------------------------------- the fresh session's view
 
+#: The fresh session's own reading: it is handed no ID at all and derives the current Roadmap and Phase from the
+#: canonical lifecycle itself (RB8A-6) - exactly one active Roadmap, exactly one in-progress Phase of it.
 _DRIVER = textwrap.dedent(
     """\
     import json
     from pathlib import Path
-    from workline.state import ProjectView
+    from workline.state import ACTIVE, IN_PROGRESS, ProjectView
     from workline.store import ProjectStore
 
     store = ProjectStore(Path.cwd())
     view = ProjectView.load(store)
-    phase_id = {phase_id!r}
-    obligations = {{}}
+    (roadmap_id,) = [r for r in view.roadmaps if view.roadmap_lifecycle(r) == ACTIVE]
+    (phase_id,) = [p.id for p in view.roadmap_phases(roadmap_id) if view.phase_state(p.id) == IN_PROGRESS]
+    obligations = {}
     for work in view.phase_works(phase_id):
         state = view.work_state(work.id)
         if state.terminal:
             continue
-        obligations[work.id] = {{
+        obligations[work.id] = {
             "state": state.state,
             "related": sorted([r.type, r.to, (store.root / r.to).is_file()] for r in view.related_from(work.id)),
             "requires": sorted([r.from_id, view.entity_state_label(r.from_id)]
                                for r in view.relations_to(work.id, "requires_completion")),
-        }}
-    print("FRESH " + json.dumps({{"configured_root": str(store.workline_root()), "obligations": obligations}},
-                                sort_keys=True))
+        }
+    print("FRESH " + json.dumps({"configured_root": str(store.workline_root()), "roadmap": roadmap_id,
+                                 "phase": phase_id, "obligations": obligations}, sort_keys=True))
     """
 )
 
@@ -244,12 +247,14 @@ class MigrationCase(IntegrationRunCase):
         git(root, "commit", "-q", "-m", "the legacy project")
         return root
 
-    def fresh_session(self, root: Path, phase_id: str) -> tuple[dict, dict]:
-        """Status and the read obligations, each from a new isolated process with no migration state (§33.11)."""
+    def fresh_session(self, root: Path) -> tuple[dict, dict]:
+        """Status and the read obligations, each from a new isolated process with no migration state (§33.11).
+
+        Neither process is given anything from the migration session but the Project directory it opens.
+        """
         status = run_python(launcher_command(WORKLINE_ROOT, "status", ".", "--json"), cwd=root)
         self.assertEqual(status.returncode, 0, status.stdout + status.stderr)
-        driven = run_python(driver_command(), cwd=root,
-                            stdin=activation(WORKLINE_ROOT) + _DRIVER.format(phase_id=phase_id))
+        driven = run_python(driver_command(), cwd=root, stdin=activation(WORKLINE_ROOT) + _DRIVER)
         self.assertEqual(driven.returncode, 0, driven.stdout + driven.stderr)
         line = next(item for item in driven.stdout.splitlines() if item.startswith("FRESH "))
         return json.loads(status.stdout), json.loads(line[len("FRESH "):])
@@ -280,28 +285,64 @@ class RoadmapSkillPreflightTests(unittest.TestCase):
         self.assertIn("Use ONLY inside an established Workline Project (one that already has .workline/project.yaml) for "
                       "Roadmap creation, planning changes, Phase selection/entry, Roadmap or Phase hold/resume/cancel, "
                       "and achievement checks.", description)
-        self.assertIn("One exception: Legacy Project migration, whose read-only preflight (inventory and A-F "
+        self.assertIn("The one exception is Legacy Project migration, whose read-only preflight (inventory and A-F "
                       "classification of an existing project's legacy authority, writing nothing) may run before "
                       "ProjectSTART", description)
         self.assertIn("the migration itself is an ordinary Migration Roadmap after ProjectSTART", description)
         self.assertLess(len(description), 1024)
 
-    def test_the_preflight_allows_four_things_and_forbids_six(self) -> None:
+    def test_canonical_skill_frontmatter_values_are_plain_yaml_scalars(self) -> None:
+        """RB8A-1: no unquoted ``": "`` inside a frontmatter value, so a strict YAML loader reads every description."""
+        for path in sorted((WORKLINE_ROOT / ".claude" / "skills").glob("*/SKILL.md")):
+            frontmatter = path.read_text(encoding="utf-8").split("---")[1]
+            for line in frontmatter.strip().splitlines():
+                key, separator, value = line.partition(": ")
+                with self.subTest(skill=path.parent.name, key=key):
+                    self.assertEqual(separator, ": ")
+                    self.assertRegex(key, r"^[a-z][a-z-]*$")
+                    if not value.startswith('"'):
+                        self.assertNotIn(": ", value)
+                        self.assertNotIn(" #", value)
+
+    def test_the_preflight_allows_exactly_four_things_and_forbids_the_rest(self) -> None:
         allowed = self.preflight[:self.preflight.index("Project開始の前には次のどれも行わない。")]
-        for item in ("- 対象のProject directory / repositoryを特定する",
-                     "- 1つの固定したidentityに対するread-onlyのmigration inventory（下記）を取る",
-                     "- legacy authorityを責任でA〜Fに分類する（下記）",
-                     "- Project開始後の移行計画（Migration Roadmapの案）を準備する"):
-            with self.subTest(allowed=item):
-                self.assertIn(item, allowed)
+        self.assertEqual([line for line in allowed.splitlines() if line.startswith("- ")],
+                         ["- 対象のProject directory / repositoryを特定する",
+                          "- 1つの固定したidentityに対するread-onlyのmigration inventory（下記）を取る",
+                          "- legacy authorityを責任でA〜Fに分類する（下記）",
+                          "- Project開始後の移行計画（Migration Roadmapの案）を準備する"],
+                         "exactly the four allowed pre-Project actions (§33.2), nothing more")
         forbidden = self.preflight[self.preflight.index("Project開始の前には次のどれも行わない。"):]
         for item in ("- Roadmap / Phase / Workを作る", "- Gitを変更する（`git init`・commit・index・ref・configの変更を含む）",
                      "- legacy authorityをretire・削除・無効化する", "- canonical Skillをinstall / copyする",
-                     "- `.workline` を作る", "- capabilityを変えるproject-local Skill / 自動化の変更をする"):
+                     "- `.workline` を作る", "- capabilityを変えるproject-local Skill / 自動化の変更をする",
+                     "- 以前のWorklineの残骸（`.workline`・bootstrap）を書き換え・削除する"):
             with self.subTest(forbidden=item):
                 self.assertIn(item, forbidden)
         self.assertIn("preflightは何も書かず、routingもしない", forbidden)
         self.assertIn("`git --no-optional-locks`", forbidden)
+
+    def test_prior_workline_residue_stops_the_migration_and_only_a_human_resolves_it(self) -> None:
+        """RB8B-1 / RB8A-3: residue is found and reported, the migration stops; nothing in Workline writes it away."""
+        cutover = self.section[self.section.index("### Project開始はcutoverの境界"):self.section.index("### Migration Roadmap")]
+        for phrase in (
+            "以前のWorklineの残骸（`.workline`、`.claude/skills/workline/SKILL.md` 等）があれば、inventoryでそれを見つけて"
+            "報告し、移行はそこで止まる",
+            "このSkillもProject開始も、Project開始の前にその残骸を書き換え・削除・置換しない",
+            "対象folderへProject成立前に書き込むWorkline operationはProject開始だけであり",
+            "残骸は人がWorklineの外で解決する",
+            "中断した・abandonedになったProject開始が残したresidueは、Project開始自身のrecoveryに従う",
+            "人が解決した後、inventoryを取り直して照合してから進む",
+        ):
+            with self.subTest(phrase=phrase[:40]):
+                self.assertIn(phrase, cutover)
+        self.assertNotIn("そのownerとHuman境界で解決してから進む", self.section)
+
+    def test_a_suspected_class_a_artifact_is_judged_by_the_retirement_condition(self) -> None:
+        """RB8A-4: the advisory gate does not waive an unretired class-A local Skill."""
+        shadow = self.section[self.section.index("### Shadow-authority check"):self.section.index("### Fresh-session")]
+        self.assertIn("inventoryでclass Aとしたartifactを名指すsuspectedは、このgateで見逃されたことにならず", shadow)
+        self.assertIn("重なるlegacy authorityがretire済み、またはnon-authoritativeである", self.section)
 
     def test_project_start_stays_the_only_establishment_owner(self) -> None:
         self.assertIn("Project開始（`skills/project-start`）は変わらず、Workline Projectを成立させる唯一のoperationである",
@@ -310,11 +351,13 @@ class RoadmapSkillPreflightTests(unittest.TestCase):
                       "移行の達成判定を行わない", self.section)
         self.assertIn("新しいlifecycle・Controller・Skill・永続schema・runtime operationではなく", self.section)
         project_start_skill = PROJECT_START_SKILL.read_text(encoding="utf-8")
-        self.assertIn("Project開始は、Workline Projectを成立させる唯一のoperationであり、Project成立前に書き込む唯一の"
-                      "Workline operationである", project_start_skill)
+        self.assertIn("Project開始は、対象folderをWorkline Projectとして成立させる唯一のoperationであり、Project成立前に"
+                      "その対象folderへ書き込む唯一のWorkline operationである（Workline root自身のRoot policy maintenance"
+                      "はProjectのoperationではない。`rules/git`）", project_start_skill)
         self.assertIn("before a Workline Project exists", project_start_skill.split("---")[1])
-        self.assertIn("Workline Projectを成立させるoperation、およびProject成立前に書き込むWorkline operationは、"
-                      "Project開始（`pre-project`）だけである", self.registry)
+        self.assertIn("対象folderをWorkline Projectとして成立させるoperation、およびProject成立前にその対象folderへ書き込む"
+                      "Workline operationは、Project開始（`pre-project`）だけである（Workline root自身のRoot policy "
+                      "maintenanceはProjectのoperationではなく、この対象ではない。`rules/git`）", self.registry)
 
     def test_the_registry_carve_out_is_prose_and_roadmap_stays_a_project_skill(self) -> None:
         carve_out = next(line for line in self.registry.splitlines() if "唯一の例外は `skills/roadmap` のLegacy Project migration" in line)
@@ -659,7 +702,7 @@ class LegacyProjectMigrationAcceptanceTests(MigrationCase):
         artifact deleted and committed answers exactly the same.
         """
         self.assertEqual([], MutationController(store).list_pending(), "between top-level operations (RB8C-9)")
-        status, fresh = self.fresh_session(store.root, phase_id)
+        status, fresh = self.fresh_session(store.root)
 
         self.assertEqual(status["snapshot_consistency"], "stable_read")
         configured = status["project"]["configured_workline_root"]
@@ -668,6 +711,8 @@ class LegacyProjectMigrationAcceptanceTests(MigrationCase):
         lifecycle = status["lifecycle"]
         self.assertEqual(lifecycle["current"]["roadmap"]["id"], roadmap_id)
         self.assertEqual(lifecycle["current"]["phase"]["id"], phase_id)
+        self.assertEqual((fresh["roadmap"], fresh["phase"]), (roadmap_id, phase_id),
+                         "the driver derives the current Roadmap and Phase itself (RB8A-6)")
         self.assertIsNone(lifecycle["current"]["work"]["id"])
         self.assertEqual(lifecycle["current"]["work"]["reason"], "no_work_in_flight")
         self.assertEqual(lifecycle["next"]["work"]["id"], carry["summary"])
@@ -690,11 +735,12 @@ class LegacyProjectMigrationAcceptanceTests(MigrationCase):
         self.assertEqual(retired, ["NOTES.md", "PLAN.md"], "the rest is already gone")
         git(recovered, "rm", "-q", "--", *retired)
         git(recovered, "commit", "-q", "-m", "drop the retired legacy authority")
-        status_without, fresh_without = self.fresh_session(recovered, phase_id)
+        status_without, fresh_without = self.fresh_session(recovered)
         for key in ("current", "next", "blockers"):
             with self.subTest(lifecycle=key):
                 self.assertEqual(status_without["lifecycle"][key], lifecycle[key])
-        self.assertEqual(fresh_without["obligations"], fresh["obligations"])
+        self.assertEqual(fresh_without, {**fresh, "configured_root": fresh_without["configured_root"]})
+        self.assertTrue(os.path.samefile(fresh_without["configured_root"], WORKLINE_ROOT))
         self.assertEqual(status_without["validation"]["status"], "pass")
         self.assertProvenNoShadow(status_without["policy"]["shadow_authority"])
 

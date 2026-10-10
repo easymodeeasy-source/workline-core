@@ -1,6 +1,6 @@
 ---
 name: roadmap
-description: Convert a human goal into a Workline Roadmap and meaningful Phases, maintain future planning, select startable Phases, expand a Phase into Works when it is actually entered, and explicitly judge Roadmap achievement. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml) for Roadmap creation, planning changes, Phase selection/entry, Roadmap or Phase hold/resume/cancel, and achievement checks. One exception: Legacy Project migration, whose read-only preflight (inventory and A-F classification of an existing project's legacy authority, writing nothing) may run before ProjectSTART; the migration itself is an ordinary Migration Roadmap after ProjectSTART. Not for generic product roadmaps, planning documents, or any repository that is not a Workline Project apart from that preflight.
+description: Convert a human goal into a Workline Roadmap and meaningful Phases, maintain future planning, select startable Phases, expand a Phase into Works when it is actually entered, and explicitly judge Roadmap achievement. Use ONLY inside an established Workline Project (one that already has .workline/project.yaml) for Roadmap creation, planning changes, Phase selection/entry, Roadmap or Phase hold/resume/cancel, and achievement checks. The one exception is Legacy Project migration, whose read-only preflight (inventory and A-F classification of an existing project's legacy authority, writing nothing) may run before ProjectSTART; the migration itself is an ordinary Migration Roadmap after ProjectSTART. Not for generic product roadmaps, planning documents, or any repository that is not a Workline Project apart from that preflight.
 ---
 
 # Roadmap
@@ -451,6 +451,7 @@ Project開始の前には次のどれも行わない。
 - canonical Skillをinstall / copyする
 - `.workline` を作る
 - capabilityを変えるproject-local Skill / 自動化の変更をする
+- 以前のWorklineの残骸（`.workline`・bootstrap）を書き換え・削除する
 
 preflightは何も書かず、routingもしない。registryの `skills/roadmap` のcontext（`project`）も、Project routerも変えない。preflightのGitの読取りはoptional lockを使わずに行う（`git --no-optional-locks`、または `GIT_OPTIONAL_LOCKS=0`。そうしないと `git status` がindexのstat cacheを書き戻し得る）。Gitの安全性は `rules/git` に従う。
 
@@ -494,7 +495,7 @@ ROADMAP・TODO・BACKLOG・STATUS・CLAUDE等の名前やvocabularyはclassを�
 
 inventoryの後、通常のProject開始を実行する。Project開始は既存のcanonical構造とbootstrapだけを置き、migrationの振る舞いを持たない（Project開始のimplementationに移行の処理を足さない）。成立した時点から、Workline所有の責任（planning・lifecycle・progression・routing・Review・Git ownership）はcanonical Workline authorityが持つ。legacyのplanning / task / status artifactは、移行のevidence / historyとして残ってよいが、もう1つのlive progression controllerとしては残らない。二重authorityの期間を最小にし、長く続く2-controller modeに頼らない。B / Cのauthorityは、自分の責任についてだけauthorityを保つ。
 
-以前のWorklineの残骸がProject開始を止める場合（例: `.claude/skills/workline/SKILL.md` が期待するbootstrapと違い、bootstrap conflictでSTOPする）は、inventoryでそれを見つけ、そのownerとHuman境界で解決してから進む。Project開始の側で上書き・推測修復はしない。
+以前のWorklineの残骸（`.workline`、`.claude/skills/workline/SKILL.md` 等）があれば、inventoryでそれを見つけて報告し、移行はそこで止まる。このSkillもProject開始も、Project開始の前にその残骸を書き換え・削除・置換しない（対象folderへProject成立前に書き込むWorkline operationはProject開始だけであり、Project開始は期待するbootstrapと違うfileをbootstrap conflict、壊れた `.workline` を `partial_workline` としてSTOPし、上書き・推測修復をしない）。残骸は人がWorklineの外で解決する。中断した・abandonedになったProject開始が残したresidueは、Project開始自身のrecoveryに従う。人が解決した後、inventoryを取り直して照合してから進む。
 
 ### Migration Roadmap
 
@@ -550,7 +551,7 @@ retireと保持の作業は、Migration Roadmapの通常のWorkとしてSTARTが
 
 意味の移行とretireの後、read-onlyのshadow-authority detector（`workline.shadow_authority`。`status` のpolicy sectionにも同じ診断が出る）を実行する。detectorは狭いまま使う: 正の構造的・観測evidence、canonical bootstrapのexact path、構造上関係するProject-local Skill authorityだけを読み、README・BACKLOG・TODO・STATUS等のproseを語の一致で探さない。
 
-移行の達成には、confirmedのshadow authorityが無いことと、それが証明された結果であること（`confirmed_count` が0、`bootstrap_inspected`、`complete`）が要る。suspectedはadvisoryなevidenceであり、detectorのcontractでconfirmedにならない限り失敗として扱わない。bootstrapを検査できなかった結果は、shadow authorityが無いことの証明ではない。detectorに移行・retire・修復をさせない。
+移行の達成には、confirmedのshadow authorityが無いことと、それが証明された結果であること（`confirmed_count` が0、`bootstrap_inspected`、`complete`）が要る。suspectedはadvisoryなevidenceであり、detectorのcontractでconfirmedにならない限り失敗として扱わない。ただし、inventoryでclass Aとしたartifactを名指すsuspectedは、このgateで見逃されたことにならず、下記のMigration achievementの「重なるlegacy authorityがretire済み、またはnon-authoritativeである」で判定する。bootstrapを検査できなかった結果は、shadow authorityが無いことの証明ではない。detectorに移行・retire・修復をさせない。
 
 ### Fresh-session standalone recovery
 

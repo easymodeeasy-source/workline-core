@@ -753,12 +753,18 @@ class CanonicalRationaleTests(unittest.TestCase):
         self.assertNotRegex(doc, r"(?i)temporary|reconsider|BL-\d|BACKLOG")
 
     def test_project_start_stays_the_only_establishment_and_pre_project_writer(self) -> None:
-        """RB8C-8 scoping: ProjectSTART is the only operation that establishes a Project or writes before one exists."""
+        """RB8C-8 / RB8B-2 scoping: ProjectSTART is the only operation that establishes the target folder as a Project
+        or writes into it before it is one; the Workline root's own policy maintenance is no Project operation."""
         description = self.project_start.split("---")[1]
-        self.assertIn("This is the only Workline operation that establishes a Project or writes anything before a "
-                      "Workline Project exists", description)
-        self.assertIn("Workline Projectを成立させるoperation、およびProject成立前に書き込むWorkline operationは、"
-                      "Project開始（`pre-project`）だけである", self.registry)
+        self.assertIn("This is the only Workline operation that establishes the target folder as a Project or writes "
+                      "anything into it before a Workline Project exists there", description)
+        self.assertIn("the Workline root's own policy maintenance is no Project operation", description)
+        self.assertIn("対象folderをWorkline Projectとして成立させるoperation、およびProject成立前にその対象folderへ書き込む"
+                      "Workline operationは、Project開始（`pre-project`）だけである（Workline root自身のRoot policy "
+                      "maintenanceはProjectのoperationではなく、この対象ではない。`rules/git`）", self.registry)
+        self.assertIn("対象folderをProjectとして成立させるのはProjectSTARTだけであり、Project成立前にその対象folderへ"
+                      "書き込むWorkline操作もProjectSTARTだけである（Workline root自身のRoot policy maintenanceは"
+                      "Projectの操作ではない）", self.readme)
 
 
 # --------------------------------------------------------------------------- RB7 root maintenance is not self-hosting

@@ -19,7 +19,7 @@ project     → established Workline Project内で使う
 router      → Project内entryからのSkill選択自身を担う
 ```
 
-Workline Projectを成立させるoperation、およびProject成立前に書き込むWorkline operationは、Project開始（`pre-project`）だけである。`project` のSkillはProject成立前に使わない。唯一の例外は `skills/roadmap` のLegacy Project migrationで、既存（legacy）ProjectのProject開始の前に、対象の特定、1つの固定したidentityに対するread-onlyのmigration inventory、責任によるA〜F分類、Project開始後の移行計画の準備だけを行ってよい。この例外は何も書かず（Roadmap / Phase / Work、Git、`.workline`、Skillのinstall / copy、legacy authorityのretire、capabilityを変える自動化の変更のどれも行わない）、routingもしない。`skills/roadmap` のcontextは `project` のままであり、新しいcontext値を作らない。
+対象folderをWorkline Projectとして成立させるoperation、およびProject成立前にその対象folderへ書き込むWorkline operationは、Project開始（`pre-project`）だけである（Workline root自身のRoot policy maintenanceはProjectのoperationではなく、この対象ではない。`rules/git`）。`project` のSkillは、対象folderがWorkline Projectとして成立する前にそのfolderへ使わない。唯一の例外は `skills/roadmap` のLegacy Project migrationで、既存（legacy）ProjectのProject開始の前に、対象の特定、1つの固定したidentityに対するread-onlyのmigration inventory、責任によるA〜F分類、Project開始後の移行計画の準備だけを行ってよい。この例外は何も書かず（Roadmap / Phase / Work、Git、`.workline`、Skillのinstall / copy、legacy authorityのretire、capabilityを変える自動化の変更のどれも行わない）、routingもしない。`skills/roadmap` のcontextは `project` のままであり、新しいcontext値を作らない。
 
 参照:
 
