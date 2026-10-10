@@ -43,16 +43,16 @@
 | BL-008 | Python interpreter resolution | RESOLVED |
 | BL-009 | Historical deleted Related / must_read semantics | RESOLVED |
 | BL-010 | Generated artifact hygiene | RESOLVED |
-| BL-011 | Reusable migration procedure | OPEN |
+| BL-011 | Reusable migration procedure | RESOLVED |
 | BL-012 | Unsupported self-hosting guard | RESOLVED |
-| BL-013 | Self-hosting readiness | DEFERRED |
+| BL-013 | Self-hosting readiness | RESOLVED |
 | BL-014 | Deterministic tie-break among startable candidates | RESOLVED |
 | BL-015 | Silent no-op on Phase re-entry | RESOLVED |
 | BL-016 | Default result commit message type | RESOLVED |
 | BL-017 | Declared write scope broader than actual writes | RESOLVED |
 | BL-018 | Unused assignment in Phase expansion | RESOLVED |
 | BL-019 | Runtime recovery record retention and ignore policy | RESOLVED |
-| BL-020 | Correction of mis-recorded historical facts | DEFERRED |
+| BL-020 | Correction of mis-recorded historical facts | RESOLVED |
 | BL-021 | Concurrent operation exclusion | RESOLVED |
 | BL-022 | ProjectSTART abandoned pre-effect recovery | RESOLVED |
 | BL-023 | Phase expansion cannot resume after an interruption | RESOLVED |
@@ -254,7 +254,7 @@
 
 - ID: BL-011
 - Title: Reusable migration procedure
-- Status: OPEN
+- Status: RESOLVED
 - Kind: procedure
 - Problem: 既存Projectを旧authority（Workline以前の手順・文書・自動化）からWorklineへ移す手順が、再利用可能な形で存在しない。最初の移行は、その場の指示とRoadmap設計で進められた。
 - Why it matters: 移行のたびに手順を設計し直すと、ownership inventoryの漏れ、local safety ruleの喪失、旧authorityとの二重正本、standalone recoveryの未確認が起きやすい。
@@ -264,6 +264,7 @@
 - Human confirmation likely: yes（canonical Skill / 共通ルールにする場合。非正本guideなら不要）
 - Self-hosting prerequisite: no
 - Evidence class: real-project migration, design deferral
+- Resolution: 再利用できるLegacy Project migrationの手順を、canonical `skills/roadmap`（Legacy Project migration）の手順として置いた。新しいlifecycle・Controller・Skill・永続schema・runtime operationは作っていない。Project開始は変えず、Workline Projectを成立させる唯一のoperation・Project成立前に書き込む唯一のoperationのままであり、legacy authorityの棚卸し・旧stateの推測・historyの移行・旧自動化のretire・移行の達成判定をしない（`skills/project-start`）。Roadmap Skillには1つだけ狭い例外を置いた: Project開始の前に、対象の特定、1つの固定したidentityに対するread-onlyのinventory、責任によるA〜F分類、移行計画の準備だけを行い、Roadmap / Phase / Work・Git・`.workline`・Skillのinstall / copy・retire・capabilityを変える自動化の変更のどれも行わない（registryのcontextは `project` のまま、新しいcontext値・routingは無い。`registry.md` のcontextの説明）。Project開始の後は通常のMigration Roadmapで、本当のcurrent / futureのobligation・dependency・Related・B（domain）とC（より厳しいsafety）を保持し、重なるA authorityをその通常のownerでretireし、過去のlifecycle・Review・Receipt・evidenceを作らない。達成には、RB6のshadow-authority detectorでconfirmedが無いこと（証明されたnone）、fresh-session standalone recovery、通常のvalidationが要り、達成自体はRB5のPhase / Roadmap achievementに従う。disposableな代表的legacy Project fixture（`tests/test_legacy_project_migration.py`）が、inventory → 分類 → Project開始 → Migration Roadmap → 保持とretire → shadow check → 別processからの回復 → validation → RB5 achievementを通して確かめる。既存Projectのbackfillは無い。
 
 ### BL-012 Unsupported self-hosting guard
 
@@ -285,7 +286,7 @@
 
 - ID: BL-013
 - Title: Self-hosting readiness
-- Status: DEFERRED
+- Status: RESOLVED
 - Kind: design
 - Problem: workline-coreをWorkline自身で管理する（self-hosting）前提が揃っていない。現時点ではself-hostしない判断をしており、次の条件が揃った時点で再評価する。
   - runtime / development separation（他Projectを統治する実装と、開発中の作業ツリーの分離）
@@ -302,6 +303,7 @@
 - Human confirmation likely: yes
 - Self-hosting prerequisite: n/a（この項目自体が再評価条件）
 - Evidence class: self-hosting assessment, real-project migration, design deferral
+- Resolution: self-hostingを実装せず、意図的にサポートしないcapabilityとして完了させた。workline-coreはWorkline root / runtime repositoryであり、それ自身はWorkline Projectではない。理由（development / runtime分離がself-hostingのcontractでないこと、release / version境界が無いこと、mutation / recovery形式が編集中のimplementationとともに変わり得ること、break-glass / reconcileが同じ壊れ得るruntimeに依存できないこと、Workline root contextとProject contextが別のauthorityであること、public / privateの開示境界がrelease modelとして無いこと、可搬なroot / version identityがrelease modelでないこと）と、明示的なproduct / spec作業だけが再開できる条件（P6 / P7のpolicyでは有効にできず、Worklineの完成はself-hostingに依存しない）を、BACKLOGに依存しないcanonical `rules/git`（Unsupported self-hosting）に置き、project-start SkillとREADMEはそれを参照する。BL-012のguardの振る舞い（同じ実体directoryと証明不能なidentityのfail-closed、Project開始の書込み前STOP、成立済みの配置でのlock / write前STOP、read-onlyの診断、validationをPASSにしないこと、overrideと自動修復が無いこと）とSTOPのmessageは変えておらず、`self_hosting.py` はmodule説明の文言だけを変えた。Root policy maintenanceはself-hostingではなく、Workline rootに `.workline/project.yaml` を作らない。runtimeのrelease modelは作っていない。
 
 ### BL-014 Deterministic tie-break among startable candidates
 
@@ -884,7 +886,7 @@
 
 - ID: BL-020
 - Title: Correction of mis-recorded historical facts
-- Status: DEFERRED
+- Status: RESOLVED
 - Kind: spec, design
 - Problem: 正しい手順で記録されたevent、derived relation、origin等の「起きた事実」が、後から内容として誤りだったと分かった場合の正式な訂正方式がない。これらは書換え・物理削除をしない原則で保護されている。
 - Why it matters: 誤記録が見つかった時に、書換え禁止を守ったまま現在の解釈を正す手段がなく、手編集の誘惑や、誤った履歴を前提にした判断が残る。
@@ -899,6 +901,7 @@
 - Human confirmation likely: yes（共通ルール / event schemaの変更）
 - Self-hosting prerequisite: no
 - Evidence class: design deferral
+- Resolution: 実装項目としては、現在の実例が無いため訂正のevent・schema・汎用supersession operation・fixtureを作らずにretireした（repositoryに、誤記録と証明され正式な訂正を要したhistorical event・derived relation・origin・Relatedは見つかっていない）。将来の安全境界はcanonical `rules/ai-decision`（Historical fact correction）へ移した: 元のhistorical recordはimmutableで書き換え・削除しない、汎用の訂正operationは現在定義されていない、訂正された意味を必要とするdownstream operationは推測せずSTOPして具体的な事例についての明示的なdesign / product作業を開く、将来の汎用mechanismは正式なcanonical recordを持ち、downstream readerがsuperseded / invalidatedな事実を機械的に判定でき、それを現在の真実として扱わない。これらはschemaではなく制約である。BL-009のhistorical Relatedの意味は変えていない。`tests/test_historical_related.py` の訂正要件の検査は、この項目ではなくcanonical `rules/ai-decision` を読むよう移した。
 
 ### BL-021 Concurrent operation exclusion
 
