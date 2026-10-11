@@ -254,7 +254,7 @@ Current status (2026-10-10; an added note, the HD-2W text above is the historica
 
 ## 6. Completion topology
 
-The Completion Sprint has thirteen Review Blocks.
+The Completion Sprint has fourteen Review Blocks.
 
 ~~~
 RB1   BL-006 read-only status/context
@@ -270,11 +270,14 @@ RB10  runtime hardening
 RB11  BL-071 + BL-072 + BL-074 / Execution Control Foundation
 RB12  BL-073 + BL-075 + BL-076 / Candidate / Pipeline Orchestration
 RB13  BL-070 / Autonomous Convergence
+RB14  WSCA Finding Closure and Integration Verification
 ~~~
 
 The old nine-block topology is obsolete.
 
 RB11-RB13 were added by Human decision on 2026-10-07. Their grouping is frozen (§37.20). They do not change the scope, contracts or dispositions of RB1-RB10. Their contracts are not frozen; their current stages are in §37.20 and §38-§40.
+
+RB14 was added on 2026-10-11 by Human instruction relayed by the Control Plane, which assigned its block number and scope (§44). It does not change the scope, contracts or dispositions of RB1-RB13. Its contract is not frozen; its stage is in §37.20 and §44.
 
 ---
 
@@ -292,12 +295,12 @@ RB3-C1
 RB4 -> RB5
 RB4 -> RB6 -> RB7
 RB5 + RB7 -> RB8
-RB8 -> RB11 -> RB12 -> RB13
+RB8 -> RB11 -> RB12 -> RB13 -> RB14
 
 RB3-C1 design -> RB10-N4 design
 RB3-C1 landed semantics + RB1 status -> RB10-N4 integration
 
-RB1 + RB2 + RB3 + RB4 + RB5 + RB6 + RB7 + RB8 + RB10 + RB11 + RB12 + RB13
+RB1 + RB2 + RB3 + RB4 + RB5 + RB6 + RB7 + RB8 + RB10 + RB11 + RB12 + RB13 + RB14
 -> RB9
 
 §37.21 pre-RB9 hardening candidates, closed with a validated fix
@@ -307,12 +310,14 @@ RB1 + RB2 + RB3 + RB4 + RB5 + RB6 + RB7 + RB8 + RB10 + RB11 + RB12 + RB13
 Structural critical path:
 
 ~~~
-RB3 -> RB4 -> RB6 -> RB7 -> RB8 -> RB11 -> RB12 -> RB13 -> RB9
+RB3 -> RB4 -> RB6 -> RB7 -> RB8 -> RB11 -> RB12 -> RB13 -> RB14 -> RB9
 ~~~
 
 RB10 N2/N3/N6 may advance earlier when collision-free.
 
 The RB8 -> RB11 edge is an execution / landing serialization and semantic-baseline edge. It is not evidence of a source-code dependency. Read-only research and non-conflicting preparation may run before the preceding RB lands; production candidate identity and landing order follow this topology (§37.20).
+
+The RB13 -> RB14 edge (added 2026-10-11) is an execution-order edge. RB14 integration verification begins only after the relevant production RBs have landed and canonical main is stable (§44.7). Read-only RB14 preparation may run earlier and creates no candidate.
 
 ---
 
@@ -5842,7 +5847,7 @@ RB10 is DESIGN_READY. The only bounded execution-dependent design residue is N3(
 
 RB9 is the global completion barrier.
 
-It begins only when RB1-RB8, RB10, RB11, RB12 and RB13 are LANDED/DONE as applicable, the §37.21 pre-RB9 hardening candidates are closed with a validated fix, and no production writer remains active.
+It begins only when RB1-RB8, RB10, RB11, RB12, RB13 and RB14 are LANDED/DONE as applicable, the §37.21 pre-RB9 hardening candidates are closed with a validated fix, and no production writer remains active.
 
 RB9 does not add a new feature program. It proves that the implemented Workline is internally complete, that obsolete development surfaces no longer masquerade as Workline concepts, and that the exact final production candidate works from both a fresh session and a real Project.
 
@@ -5850,7 +5855,7 @@ RB9 does not add a new feature program. It proves that the implemented Workline 
 
 Before Stage A, prove:
 
-- RB1 through RB8, RB10, RB11, RB12 and RB13 each have an evidence-backed final disposition;
+- RB1 through RB8, RB10, RB11, RB12, RB13 and RB14 each have an evidence-backed final disposition (for RB14, including the final classification of every carried WSCA finding, §44.6);
 - both §37.21 pre-RB9 hardening candidates (BL-077 and the Phase Integration Review Context currency gap) are closed with a validated fix; neither is waived by an implicit acceptance against the HIGH/MID rule below;
 - the evidence Stage A relies on, including evidence recorded in the private execution archive, is durably available at a Human-approved, verified destination;
 - every runtime rule frozen in this Completion Sprint that was implemented is also present in its canonical runtime owner;
@@ -5866,7 +5871,7 @@ If any runtime requirement still lives only in sprint/history text, RB9 stops an
 
 Build one completion map for every pre-RB9 Completion Sprint implementation/backlog requirement that must be disposed before BL-100 cleanup, and for every still-live BACKLOG item.
 
-This Stage-A final-disposition map includes RB1-RB8, RB10, RB11, RB12, RB13, their named BL/runtime-hardening/execution-control requirements (including BL-070..BL-077 and the §37.21 hardening candidates), and any earlier completion requirement whose authority/disposition must be known before cleanup.
+This Stage-A final-disposition map includes RB1-RB8, RB10, RB11, RB12, RB13, RB14 (with its WSCA finding register, §44.3), their named BL/runtime-hardening/execution-control requirements (including BL-070..BL-077 and the §37.21 hardening candidates), and any earlier completion requirement whose authority/disposition must be known before cleanup.
 
 It does NOT require a final Stage-A disposition for RB9 itself or for RB9's later Stage B cleanup, Stage C/D/E final-candidate work, E3, E4, §19.27 final proof or §19.28 final report. Those actions are closed by their own later gates. Requiring their final disposition here would be circular.
 
@@ -6190,7 +6195,7 @@ Required final evidence includes:
 
 - registry validation PASS;
 - full tests PASS;
-- focused completion tests for RB1-RB8/RB10-RB13;
+- focused completion tests for RB1-RB8/RB10-RB14;
 - no unexpected tracked working-tree change from the suite;
 - canonical docs/runtime cross-check;
 - BL-100 absence/archive checks;
@@ -6475,7 +6480,7 @@ After E3 and E4 PASS, re-read live main and prove:
 - canonical runtime authority validates;
 - full suite evidence belongs to that candidate;
 - no final acceptance action changed workline-core bytes;
-- RB1-RB8 and RB10-RB13 are DONE;
+- RB1-RB8 and RB10-RB14 are DONE;
 - every preceding RB9 stage required by §24 up through E3/E4 is PASS/complete;
 - BL-100 is complete;
 - no unresolved completion Human decision remains;
@@ -6493,7 +6498,7 @@ The Completion Sprint final report records at least:
 
 1. final live main SHA;
 2. final tree SHA;
-3. RB1-RB8 and RB10-RB13 final disposition, plus RB9 disposition recorded as DONE by issuance of this report after §19.27 PASS;
+3. RB1-RB8 and RB10-RB14 final disposition, plus RB9 disposition recorded as DONE by issuance of this report after §19.27 PASS;
 4. capability/landing checkpoint SHAs;
 5. formal Control Plane review outcomes;
 6. Repair Batch/recurrence/STRATEGY_CHANGE outcomes;
@@ -6645,6 +6650,7 @@ RB10 DONE
 RB11 DONE
 RB12 DONE
 RB13 DONE
+RB14 DONE
 §37.21 pre-RB9 hardening candidates closed with a validated fix
 
 RB9 completion-map audit PASS
@@ -16641,6 +16647,7 @@ RB10 DONE
 RB11 DONE
 RB12 DONE
 RB13 DONE
+RB14 DONE
 §37.21 pre-RB9 hardening candidates closed with a validated fix
 and no production writer remains active
 ~~~
@@ -16793,6 +16800,14 @@ RB13  RESEARCH_PREPARED  waits on RB11 and RB12
 
 None of the three is CONTRACT_PROPOSED or CONTRACT_FROZEN. No IMPLEMENTATION_AUTHORIZED or LANDING_AUTHORIZED stage exists for any of them.
 
+RB14 (added 2026-10-11; the 2026-10-10 block above is not rewritten). The stage vocabulary above applies to RB14 as well:
+
+~~~
+RB14  RESEARCH_PREPARED  WSCA static screening complete; isolated probes complete; full-source integration deferred (§44)
+~~~
+
+RB14 is not CONTRACT_PROPOSED or CONTRACT_FROZEN. No IMPLEMENTATION_AUTHORIZED or LANDING_AUTHORIZED stage exists for it.
+
 Dispatch state:
 
 ~~~
@@ -16800,8 +16815,11 @@ After RB8 LAND:
 RB11            WAIT RB11 CONTRACT_FROZEN + IMPLEMENTATION_AUTHORIZED, then DISPATCH
 RB12            WAIT RB11 LAND + RB12 CONTRACT_FROZEN + IMPLEMENTATION_AUTHORIZED, then DISPATCH
 RB13            WAIT RB12 LAND + RB13 CONTRACT_FROZEN + IMPLEMENTATION_AUTHORIZED, then DISPATCH
-RB9             WAIT all production blocks DONE (RB1-RB8, RB10-RB13) + §37.21 hardening closed
+RB14            WAIT RB13 LAND + stable canonical main + RB14 CONTRACT_FROZEN + integration-verification authorization (§44.8); repairs also need IMPLEMENTATION_AUTHORIZED
+RB9             WAIT all production blocks DONE (RB1-RB8, RB10-RB14) + §37.21 hardening closed
 ~~~
+
+Amended 2026-10-11: the RB14 row was added and the RB9 row extended to RB14 (§44).
 
 - Read-only RB11-RB13 research may run before their production gates. It is not production and creates no candidate.
 - An earlier dispatch point for RB12 or RB13, for example a stacked candidate on a frozen parent candidate, needs an explicit Control Plane decision for that RB.
@@ -17215,3 +17233,126 @@ Reserved. No RB12 implementation brief exists. It is added by a separate canonic
 ## 43. RB13 implementation brief — reserved
 
 Reserved. No RB13 implementation brief exists. It is added by a separate canonical change only after RB13 is CONTRACT_FROZEN (§40.6). Until then this section authorizes nothing.
+
+## 44. RB14 — WSCA Finding Closure and Integration Verification
+
+Added 2026-10-11 by Human instruction relayed by the Control Plane. The Control Plane assigned the block number and this scope. RB14 is its own Review Block, not an extension of RB11, RB12 or RB13. It is not a general cleanup bucket.
+
+Stage:
+
+~~~
+RESEARCH_PREPARED
+WSCA static screening complete; isolated probes complete; full-source integration deferred
+not CONTRACT_PROPOSED; not CONTRACT_FROZEN; no implementation or landing authorization
+~~~
+
+### 44.1 Purpose and scope
+
+The independent Workline-wide safety-coverage audit (WSCA) has finished its exploration. RB14 closes its follow-up:
+
+- revalidate the carried WSCA findings against the then-current canonical main;
+- execute the prepared focused integration scenarios in a disposable, independent checkout;
+- classify each finding from observed evidence;
+- repair only confirmed, in-scope correctness gaps, each as its own exact candidate;
+- deliver RB14 completion evidence to RB9.
+
+RB14 does not repeat the WSCA exploration. A complete static re-exploration is not run by default. A changed dependency or semantic consumer can require targeted reinspection even when its source file is unchanged.
+
+### 44.2 Existing audit evidence (historical)
+
+The WSCA audit was made against the pinned reference `c892956a13f68fec0133dc6442e8c6313c586b3b`. It recorded:
+
+- 310 primary files statically screened;
+- six common source / contract files inspected;
+- nine isolated function-scope tests;
+- six full-source integration scenarios designed;
+- no completed full-source integration test.
+
+These are historical audit results, not a proof that Workline is complete or safe. Static screening is not a semantic or path-complete code audit. A function-scope probe is not owner-integrated evidence. The WSCA reports, observations, source identities, limitations and test fixtures are preserved in the private execution archive. For this evidence, that archive is a staging location, not its final destination. The WSCA ZIP files, their test and research scripts and the other research evidence are not added to this repository, and they are not published in it; this section restates them in public-safe form. Their final, Human-approved destination is decided at the RB9 entry gate (§19.1).
+
+### 44.3 Finding register
+
+Validation candidates. None is yet classified as a confirmed defect:
+
+~~~
+R1-04  shared-responsibility coverage guard (P4 repair coverage)
+R3-01  POSIX durability acknowledgement
+R4-02  semantic relevance of Policy evidence
+R5-01  Registry validation / readback race
+~~~
+
+Retained distinctions. These are not automatically repaired:
+
+~~~
+R2-01  applicability / liveness guarantee question; not automatically a defect
+R4-01  reviewer minimum is satisfied under the current contract; not a confirmed defect
+R4-03  no defect under the frozen disjoint Policy contract; no repair without new concrete evidence
+~~~
+
+No Human policy question is raised for a finding before owner-level evidence (§44.5) establishes the exact contract question. This includes R4-02. If that evidence shows that the resolution needs a change of Human-owned rules, the exact question goes to the Human before any repair is designed.
+
+### 44.4 Exclusions, separate owners and the disposition rule
+
+RB14 does not include, and does not duplicate:
+
+- BL-077 and Phase Integration Review Context currency, which stay with §37.21;
+- work still actively assigned to another Review Block. In particular, RB11 execution control, RB12 candidate / pipeline orchestration and RB13 convergence stay with those blocks;
+- a change to any frozen Human decision;
+- new feature work, general cleanup, or BL-100 classification (RB9).
+
+Owner / disposition rule for a WSCA finding confirmed under §44.5:
+
+1. **Actively assigned work.** If the finding falls within work still actively assigned to another RB, that is, an RB not yet DONE whose frozen or proposed scope covers it, it is routed to that RB with its evidence. RB14 does not repair it.
+2. **§37.21 gaps.** If it is one of the §37.21 gaps, it stays with §37.21.
+3. **Code of a completed RB.** If it is a newly confirmed residual in code historically implemented by a completed RB, RB14 may repair it as a **new exact candidate**. That candidate has its own FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 and LANDING_AUTHORIZED. The completed RB is **not reopened**, and its historical landing records are **not rewritten**.
+4. **No owner.** If no rule above assigns it, the Control Plane decides the owner before any repair.
+
+### 44.5 Verification stages
+
+At the authorized RB14 execution gate (§44.8):
+
+1. pin the then-current canonical main SHA;
+2. compare it with the WSCA reference SHA;
+3. examine changes in the affected sources and their consumers;
+4. revalidate each carried finding against the current code;
+5. execute the prepared focused integration scenarios in a disposable, independent exact-SHA checkout, without network credentials, GitHub writes or changes to any user Project;
+6. classify each finding from observed evidence as one of:
+   - REPRODUCED_IN_OWNER;
+   - REPRODUCED_FUNCTION_ONLY;
+   - GUARD_PREVENTED;
+   - DESIGN_BOUNDARY;
+   - UNRESOLVED;
+7. repair only confirmed, in-scope correctness gaps;
+8. give each repair its own exact candidate, FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 and LANDING_AUTHORIZED for that exact candidate;
+9. record confirmed fixes, already-resolved items, false positives, accepted limitations and residuals;
+10. prepare RB14 completion evidence for RB9.
+
+Test results stay PENDING until execution logs exist. A skipped test is not a PASS.
+
+### 44.6 Acceptance
+
+RB14 is DONE only when:
+
+- every carried finding (§44.3) has a final classification backed by recorded evidence from the pinned main;
+- every confirmed in-scope correctness gap is closed with a landed, validated fix;
+- every UNRESOLVED finding, accepted limitation or out-of-scope routing has an explicit Control Plane or Human disposition;
+- no RB14 production writer remains active;
+- the RB14 completion evidence is available to RB9.
+
+### 44.7 Dependencies
+
+- Execution order: RB11 -> RB12 -> RB13 -> RB14 -> RB9 (§7).
+- RB14 integration verification begins only after the relevant production RBs have landed and canonical main is stable.
+- RB10 and the §37.21 pre-RB9 hardening remain separate RB9 prerequisites. RB14 does not replace them.
+- Read-only RB14 preparation may run earlier. It creates no candidate.
+
+### 44.8 Gates
+
+- CONTRACT_PROPOSED: a completed RB14 contract proposal is delivered to the Control Plane, and the delivery is recorded.
+- CONTRACT_FROZEN: a Control Plane decision for RB14 alone. The implementation brief is §45, added only at that freeze.
+- Integration verification execution: a separate Control Plane authorization, after the §44.7 conditions hold.
+- Production repair: IMPLEMENTATION_AUTHORIZED for RB14. Then, per candidate, FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 and LANDING_AUTHORIZED for the exact candidate.
+
+## 45. RB14 implementation brief — reserved
+
+Reserved. No RB14 implementation brief exists. It is added by a separate canonical change only after RB14 is CONTRACT_FROZEN (§44.8). Until then this section authorizes nothing.
