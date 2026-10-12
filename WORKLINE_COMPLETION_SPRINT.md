@@ -275,7 +275,7 @@ RB14  WSCA Finding Closure and Integration Verification
 
 The old nine-block topology is obsolete.
 
-RB11-RB13 were added by Human decision on 2026-10-07. Their grouping is frozen (§37.20). They do not change the scope, contracts or dispositions of RB1-RB10. Their contracts are not frozen; their current stages are in §37.20 and §38-§40.
+RB11-RB13 were added by Human decision on 2026-10-07. Their grouping is frozen (§37.20). They do not change the scope, contracts or dispositions of RB1-RB10. Their contracts were not frozen when they were added; their current stages are in §37.20 and §38-§40.
 
 RB14 was added on 2026-10-11 by Human instruction relayed by the Control Plane, which assigned its block number and scope (§44). It does not change the scope, contracts or dispositions of RB1-RB13. Its contract is not frozen; its stage is in §37.20 and §44.
 
@@ -16808,6 +16808,14 @@ RB14  RESEARCH_PREPARED  WSCA static screening complete; isolated probes complet
 
 RB14 is not CONTRACT_PROPOSED or CONTRACT_FROZEN. No IMPLEMENTATION_AUTHORIZED or LANDING_AUTHORIZED stage exists for it.
 
+RB11 (added by the RB11 contract-freeze amendment, prepared 2026-10-12 and published only after the Control Plane's freeze decision; the 2026-10-10 and RB14 blocks above are not rewritten). RB11 became CONTRACT_PROPOSED on 2026-10-11, when its completed proposal was delivered to the Control Plane, and passed one FORMAL_INDEPENDENT full-contract review on 2026-10-11 (§38). The Control Plane's freeze decision for RB11 alone precedes the publication of this block (§38.6):
+
+~~~
+RB11  CONTRACT_FROZEN  contract identity in §38 and §41; IMPLEMENTATION_AUTHORIZED not granted
+~~~
+
+No IMPLEMENTATION_AUTHORIZED or LANDING_AUTHORIZED stage exists for RB11 implementation. RB12 and RB13 are neither CONTRACT_PROPOSED nor CONTRACT_FROZEN.
+
 Dispatch state:
 
 ~~~
@@ -16890,11 +16898,22 @@ For each of the two candidates:
 Stage:
 
 ~~~
-RESEARCH_PREPARED (decision-applied freeze proposal in preparation; not yet delivered to the Control Plane)
-not CONTRACT_PROPOSED; not CONTRACT_FROZEN; no implementation or landing authorization
+CONTRACT_FROZEN (Control Plane decision for RB11 alone; it precedes the publication of this text, §38.6)
+no implementation authorization; no landing authorization for any RB11 implementation candidate
 ~~~
 
-A decision-applied freeze proposal is in preparation. It has not been delivered to the Control Plane. It is not authority until the Control Plane freezes the RB11 contract, for RB11 alone (§37.20). The research, the proposal draft and their evidence are recorded in the private execution archive. The adversarial review of the research is INTERNAL_ADVISORY (§39.4).
+Stage history (the stage text of 2026-10-10 read RESEARCH_PREPARED; it was replaced by the RB11 contract-freeze amendment, prepared 2026-10-12):
+
+~~~
+2026-10-10  RESEARCH_PREPARED    §38 added; decision-applied freeze proposal in preparation
+2026-10-11  CONTRACT_PROPOSED    completed proposal delivered to the Control Plane (delivery recorded); one FORMAL_INDEPENDENT
+                                 full-contract review (§39.4) passed, with eight LOW findings, each given a Control Plane disposition (§41)
+            CONTRACT_FROZEN      Control Plane decision for RB11 alone, before this text was published
+~~~
+
+The frozen contract is the reviewed contract: the integrated contract (manifest sha256 3e4d94a773dbdf40e7907d72b44b571a4ee1a09362ffdc6d2816d09d7e664562) with core v6e (sha256 0c0fd5f2c56ce001083d4146a6b9043f329428970dc499ce3c1d34ed64ef4606), applied with the Control Plane's dispositions of the formal review (RF-1..RF-8) and its Human acceptance timing decision (Q-1). §41 is its implementation brief and lists every component by sha256. The contract, its decision records, the review result (sha256 a88f3d6e9f7aadd2010ed8e658b0ba1ef0d9ed2b1827d0e4554c4e33ab2103b4) and the review evidence are recorded in the private execution archive. The adversarial review of the research is INTERNAL_ADVISORY (§39.4).
+
+The freeze fixes the reviewed behavior. It closes no implementation, candidate, non-production or activation proof obligation; each stays NOT VERIFIED until its own gate (§41.0, §41.27). The freeze does not presume the Human's acceptance of the recorded operational constraints F-3, F-4 and OC-1..OC-5; that acceptance is required before G-ACT (§41). If a later Human answer changes normative contract meaning, an explicit, reviewed contract amendment precedes activation.
 
 ### 38.1 Purpose and scope
 
@@ -16989,6 +17008,8 @@ Before the freeze, RB11 needs a decision-applied design, a surface map, a failur
 
 RB11 tools escalate to the Human-supervised channel (§40.2). No RB11 tool deletes, or schedules for automatic deletion, Human files, dirty changes, pending records, `index.lock` or historical refs. None performs Git reset, revert, force push or history rewrite. Each such action needs explicit, case-specific Human authorization in the concrete Project.
 
+The Human manual-reconcile checklist of ruling 10 (§38.3) is operational tooling documentation, referenced from here. The RB11 implementation publishes it (§41.17), identified by exact identity. It is not a Workline runtime rule or Skill, and it is no source of new authority. It keeps every STOP-H (case-specific Human stop), the UNPROVEN label on F-38 until G-TB26, and the BL-077 cross-reference.
+
 RB11 does not include:
 
 - a Workline runtime lease or multi-writer model, or a Project operation lock turned into a lease;
@@ -17005,7 +17026,7 @@ RB11 does not include:
 ### 38.6 Gates
 
 - CONTRACT_PROPOSED: only when the completed freeze proposal is delivered to the Control Plane and the delivery is recorded with the proposal's identity.
-- CONTRACT_FROZEN: a Control Plane decision for RB11 alone. The implementation brief is §41, added only at that freeze.
+- CONTRACT_FROZEN: a Control Plane decision for RB11 alone. The implementation brief is §41. It is prepared and independently reviewed as part of one exact freeze-amendment candidate before that decision, and published only when that candidate lands, after the decision and a separate LANDING_AUTHORIZED for that candidate.
 - Production: after RB8 lands, and only with IMPLEMENTATION_AUTHORIZED (§37.20).
 - Candidate: FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 (by default one exact-tree Full), and LANDING_AUTHORIZED for the exact candidate.
 
@@ -17063,7 +17084,7 @@ W-2  external writer lease, including the test slot and the landing lock
 W-3  liveness / stall / saturation signals
 W-4  host stability and environment telemetry
 W-5  orphan detection for candidates, reviews, test runs and writers
-W-6  durable plan / step registry for sibling writers
+W-6  read-only view of non-terminal leases, their units and predecessor chains (identity only; no queue or plan / step order; HD-RB11-DP5)
 ~~~
 
 A lease or owner record is identity only. RB12 never reads it as maturity or correctness evidence (H-NEW-01).
@@ -17222,9 +17243,539 @@ RB13 does not include:
 
 ---
 
-## 41. RB11 implementation brief — reserved
+## 41. RB11 implementation brief — BL-071 + BL-072 + BL-074 — Execution Control Foundation
 
-Reserved. No RB11 implementation brief exists. It is added by a separate canonical change only after RB11 is CONTRACT_FROZEN (§38.6), as §26-§36 did for RB1-RB10. Until then this section authorizes nothing.
+Status:
+
+~~~
+CONTRACT_FROZEN  by the Control Plane's decision for RB11 alone, which precedes the publication of this section (§38.6);
+                 the frozen contract is identified by the components below
+IMPLEMENTATION_BRIEF_FROZEN with that contract
+IMPLEMENTATION_AUTHORIZED not granted; it comes only after the G-RB11-IMPL decisions, as a separate authorization (§41.0, I-8)
+LANDING_AUTHORIZED not granted for any RB11 implementation candidate; it is given per exact candidate (G-RB11-LAND)
+autonomous production landing by the new landing authority waits G-ACT
+~~~
+
+Chronology. This section was prepared and independently reviewed as part of one exact freeze-amendment candidate before the freeze decision. It is published only when that candidate lands, after the Control Plane's freeze decision and a separate LANDING_AUTHORIZED for that candidate (§38.6). Neither preparing nor reviewing it froze the contract.
+
+This section is the canonical implementation-control brief for §38 and the frozen RB11 contract. It does not replace them. Where wording conflicts, the frozen contract remains the semantic contract, under its own precedence:
+- Human decisions and Control Plane rulings come first.
+- Core v6e is normative for the BL-074 lease, landing, observation ledger, retention refs and base refs.
+- The rev-11 components are normative only as register F classifies them.
+- Research evidence is never normative.
+
+Apart from the Control Plane's dispositions of the formal contract review that it carries, this section adds no transition, guard, state or proof obligation.
+
+It authorizes nothing by itself. Implementation starts only with IMPLEMENTATION_AUTHORIZED (§37.20), after the G-RB11-IMPL decisions (§41.0).
+
+Terms (core v6e §1):
+- LA = PLA: the lease authority, which is also the protected landing authority.
+- D1: the executor domain (lanes and the orchestrator).
+- D2: the authority domain.
+- D3: the evidence domain. It is designed only and not provisioned (B-3R).
+
+Contract components. They are kept in the private execution archive and incorporated here by reference. A-H below are the parts of the integrated contract.
+
+~~~
+core v6e          Option B minimal core, v6e; normative for BL-074    0c0fd5f2c56ce001083d4146a6b9043f329428970dc499ce3c1d34ed64ef4606
+core v6d          historical checkpoint; v6d references are read as
+                  contract A §0.2 states                               2ddacfc557b0bff4027000838cdfccdb8358f09105f4976bea813c8e521ddb75
+contract A-H      decision-applied design (A), surface map (B), failure matrix (C), test matrix (D),
+                  brief proposal (E), rev-11 reuse / override register (F), proof-obligation
+                  disposition register (G), freeze proposal and gate record (H), change map;
+                  manifest (also covers the integration report)        3e4d94a773dbdf40e7907d72b44b571a4ee1a09362ffdc6d2816d09d7e664562
+rev-11 DC         design contract                                      6a9c2adea35f4de6afcab964cb395dbf5635e3dc341fd09fac4195726bddb251
+rev-11 ADM        admission matrix                                     4030b084d2ba59340aa3f57a11a3561cd18a8bce9e471a3cc70ca7479da75f1c
+rev-11 GH         GitHub enforcement design                            2286ac7f0fc8e18157ecc71cd365d4ace63cd905a15cf156aa86d8d6282d948d
+rev-11 PO         proof obligations                                    7561a9cfcc510355b24e5aad5193fa552f4b7b8297ec59f9d47be41644d2a188
+rev-11 TFI        test and fault-injection matrix                      7248f7e4e2ea7ec306a039dd75427ebd83141d5fc9e3fb0dc61d19d69cb65040
+rev-11 BRIEF      implementation brief proposal                        4a8063fd1a6ac2757e7210cb56584eedd90692997cf393fc93569862fe9f5335
+rev-11 WATCHDOG   watchdog contract proposal                           7a5a2537e3be5573c291bd8d5036b892a1b28bf89fa40214cf2f00721cc880ad
+rev-11 HB         Human boundary matrix                                3e478376cc77b2be42a5881489c4592a09ae1162b8b2037bbc1ba4b12ebff62b
+rev-11 CHECKLIST  Human manual-reconcile checklist                     4054792412f7176df98b7b08f2ec77eec6ced037e295d2b3f734211ce02e31ce
+register PO-B     earlier proof-obligation register (the PO-B
+                  details that G.5 incorporates)                      5d659a6fc23e7e6dad2c586da02e83c31ba8f26d25560e3fe09a0dd021d0b8f1
+register HD       earlier Human decision register (the HA / PC
+                  details that A §7.3 incorporates)                   0f463af99cba93ed83a31c16395294360466bf30360f3a064715393fc492b9a3
+audit note        R-1 / R-2 audit handling; supporting, not normative 15a8b4c2c73c55a9f8c49e6c936fd79fa3fd51106f2b558652e8d450d6637675
+CP ruling FRZ     the seven FRZ items PO-12, PO-13, PO-14, PO-29,
+                  PO-38, PO-39, PO-49 (supersedes the "no per-item
+                  record" statements of G.7, A §16, H.4, H.7; RF-3)   950f48ab3b61c22d65bc83d487ab833fcd1932bfa9b04dfdd5f213a1bbe1374e
+CP ruling RF      dispositions RF-1..RF-8 of the formal review and
+                  the Human acceptance timing                          f4942540bebc4e204d98f1007f58ae90252eba43ac1df6319ca4f686e088ec53
+CP ruling Q       freeze-preparation decisions Q-1..Q-3                da6815b2fcfaf3beca4ec8d41e9ec4987dd8a48bb84de3b93d644d36e957c4aa
+formal review     result of the FORMAL_INDEPENDENT full-contract
+                  review (PASS)                                        a88f3d6e9f7aadd2010ed8e658b0ba1ef0d9ed2b1827d0e4554c4e33ab2103b4
+~~~
+
+- **Status line of core v6e:** it keeps the words "not CONTRACT_FROZEN". The freeze state is shown by the Control Plane's decision, §38 and §37.20 (contract A §15, WD-1).
+- **RF dispositions:** the Control Plane's dispositions of the formal contract review (RF-1..RF-8, 2026-10-11) are applied below where they bind implementation.
+- **Earlier registers:** the register PO-B, register HD and audit note rows pin the earlier registers by full sha256 (RF-4).
+- **Decision records:** the RF and Q decision records, and the full list of decision records, are in the RB11 freeze decision record in the private execution archive.
+
+Gates used in this section (contract H.4):
+
+~~~
+G-RB11F        the RB11 CONTRACT_FROZEN decision (§38.6)
+G-RB11-IMPL    the implementation-method decisions and IMPLEMENTATION_AUTHORIZED (§41.0)
+G-RB11-CAND    exact-candidate verification: evidence, FORMAL_INDEPENDENT review (§39.4), Full
+G-RB11-LAND    landing of one exact candidate through the existing production procedure
+G-GH-NONPROD   non-production GitHub verification; preparation may run in parallel, the tests run only after
+               Human approval of HA-1, HA-2T, HA-3T, HA-5T and HA-12T
+G-ACT          enabling autonomous production landing by the new landing authority
+G-RB11-S2, G-TB26, G-BL077, G-SUCC   BL-072-side gates outside the core path; unchanged from rev-11
+~~~
+
+### 41.0 Decisions before implementation (G-RB11-IMPL)
+
+These decisions come from the Control Plane's freeze-preparation ruling. I-5 and I-7 were added by the Execution Writer; they are not Control Plane ruling items.
+
+| # | Decision | Obligations | Decided by |
+|---|---|---|---|
+| I-1 | The registry's durable store and its transaction method. The store has an integrity check and rollback detection: evidence that no committed transaction is missing (N-11 (3), PO-43) | PO-B9, PO-43 | CP |
+| I-2 | An execution model that meets PO-17: one execution queue, or an OS lock plus in-process exclusion | PO-17 | CP |
+| I-3 | How TX-PREP and TX-SUB are implemented to meet PO-B9 | PO-B9 | CP |
+| I-4 | D2 hosting (CP-8) and how the landing authority's inbox is made durable | B-2, PO-B10 | CP, with Human approval |
+| I-5 | The client (HTTP / GraphQL) and a configuration that never retries (Writer addition under PO-B7) | PO-B7 | CP |
+| I-6 | Implementation scope and responsibility boundaries: the BL-071 / BL-072 parts, where the tools live (PO-38), PO-64 isolation and whether D3 is in scope, and the boundary with RB12 (CP-12) | PO-38, PO-64, B-3R | CP (Human) |
+| I-7 | N-1..N-13 are decided (contract A §14) and the 19 FRZ items are disposed (contract G.7). The implementation scope follows those dispositions (Writer addition) | — | CP |
+| I-8 | The separate IMPLEMENTATION_AUTHORIZED | — | CP / Human |
+
+These decisions also carry three dispositions of the formal contract review:
+
+- **RF-1 (I-3, PO-B9; implementation and candidate gate):**
+  - P7r writes ABORTED (EV-NEVER-SENT) by an atomic check-and-write. The transaction that writes the record also verifies that the INTENT is still OPEN and that PREPARED(1) is absent. If either check fails, nothing is written.
+  - PO-17 (the registry lock) and PO-43 (no store rollback) remain mandatory premises of this path. Nothing claims that the P7r ABORTED path is safe without them.
+  - T-OB-60 gains a P7r-against-P7r case (§41.20).
+- **RF-2 (I-1, I-3):**
+  - Each operation re-derives the N-11 (4) stop from stored bytes at its entry (contract A §3.1, notes 1 and 2). That entry check needs a defined set of predicates over the stored, append-only history.
+  - The set covers every invariant in the scope of contract A §3.1 note 1. That includes the transition and ordering invariants: S2, S6 and S9; S11 (RET and BASE-RET at record time); and S8's rule that status moves only forward.
+  - The predicate set is decided with I-1 and I-3. Its refusal behavior is verified by T-OB-03 and T-OB-107.
+- **RF-7 (G-RB11-IMPL, PO-B4):**
+  - At G-RB11-IMPL, the content-check scope of routine reconciliation (core v6e §3.3, RECONCILIATION) is defined under PO-B4.
+  - R-CLEAR always performs its existing full verification.
+  - No weakening of fail-closed behavior is authorized.
+
+### 41.1 Dependency and responsibility
+
+RB11 production waits for:
+
+~~~
+RB8 LANDED (satisfied: b597e2d)
+AND
+RB11 CONTRACT_FROZEN (§38.6; RB11 alone)
+AND
+RB11 IMPLEMENTATION_AUTHORIZED, with exclusive writer ownership of each surface (H-NEW-01)
+~~~
+
+Owners:
+- The runtime items RT-1..RT-4 belong to the Workline recovery / status authority: RB1 status and the N4 consumer.
+- The external items E-1..E-7 belong to the execution orchestrator. No Workline Project needs them (C-H2).
+
+Bootstrap:
+- **Until E-1 is accepted:** RB11's own production writes follow the existing lease protocol. That protocol is §3 of the dependent-production addendum, together with the prose surface-lease ledger. Both are in the private execution archive.
+- **The new registry:** it lives in D2 and becomes authority only at activation (G-ACT).
+- **Until activation:** RB11 itself lands through the existing procedure (the HD-2W push gate), under the Control Plane's authorization for each candidate (G-RB11-LAND).
+- **HD-2W:** the G-ACT restriction on autonomous landing applies to the new landing authority. RB11's unverified items do not automatically forbid or change the existing HD-2W landing authority or its procedure (CD-8).
+
+### 41.2 Responsibility split
+
+~~~
+Runtime (product):  RT-1 START probe (staged), RT-2 status hints, RT-3 not adopted (PO-28 disposition), RT-4 pins
+External (Sprint):  E-1 lease-authority registry (core v6e), E-2 enforcement layers, E-3 launch registry,
+                    E-4 watchdog, E-5 launcher slot checks, E-6 migration of the prose surface-lease ledger,
+                    E-7 landing-authority service and request client (core §3.4, §3.6)
+Human:              the checklist (documentation only)
+~~~
+
+### 41.3 RT-1a — START owner probe, stage 1a
+
+As rev-11 BRIEF §41.3, unchanged. Register F classifies §41.3-§41.9 as REUSED_EXACT (row R-BR-RT).
+
+### 41.4 RT-1b — stage 1b
+
+As rev-11 BRIEF §41.4, unchanged. Stage 1b is included only if PO-05 is shown.
+
+### 41.5 Classes that must stay refused
+
+As rev-11 BRIEF §41.5, unchanged.
+
+### 41.6 RT-2 — status holder hints
+
+As rev-11 BRIEF §41.6, unchanged.
+
+### 41.7 RT-3 — not adopted
+
+Not adopted (the FRZ disposition of PO-28; contract G.7).
+
+### 41.8 RT-4 — characterization pins
+
+As rev-11 BRIEF §41.8, unchanged.
+
+### 41.9 Canonical text
+
+As rev-11 BRIEF §41.9, with T-01 / T-02 adopted (PO-12):
+- only the wording at `src/workline/start.py:3513-3522` and `.claude/skills/start/SKILL.md:362` (at `c892956`) is corrected;
+- code and reason are unchanged;
+- the correction lands with stage 1.
+
+The §38 checklist pointer listed in that table is introduced by the RB11 freeze amendment (§38.5), not by the implementation candidate (RF-5, §41.17).
+
+### 41.10 E-1 — the lease authority (LA = PLA) registry
+
+E-1 implements core v6e §2-§3a. It replaces the rev-11 registry (the old §41.10 of the rev-11 brief).
+
+- **State.** As core §2:
+  - the authority records each active reason separately;
+  - each reason has its own exit: OG and UNRESOLVED_OBSERVATION → P11; configuration drift → CONFIG_BASELINE; retention violation → R-CLEAR only;
+  - ACTIVATED and REBASELINED carry their base records.
+- **Transitions.** P1-P11 (core §3.2):
+  - P2 admits a predecessor chain of any depth (N-10);
+  - P11 has guard (vi), the base ref.
+- **P9's "the chain" (RF-8; binding freeze interpretation).**
+  - In P9's guard "No open INTENT in the chain", the chain is the target lease and its transitive successors.
+  - Core v6e is not altered, and P9's behavior is not otherwise expanded.
+  - If implementing this reading needs a normative design change beyond the alternatives the formal review examined, implementation stops and the issue returns to the Control Plane.
+  - Those alternatives are the target lease with its transitive successors, and the whole predecessor chain.
+- **Retention.** Core §3.3:
+  - steps 1-7, RET, ORPHAN, IDEMPOTENT RESUBMISSION and RECONCILIATION;
+  - the definition of VD, and the content check;
+  - R-CLEAR: one hold of the lock, one transaction, and no other reason or state changed.
+  - The content-check scope of routine reconciliation is defined at G-RB11-IMPL under PO-B4 (RF-7, §41.0).
+- **Base refs.** Core §3.3a: read, import, base ref, verify, commit point; BASE-RET; unreferenced base refs; a separate namespace; no deletion. This includes the ACTIVATED import path.
+- **Atomicity.** Core §3.1:
+  - one lock, which also excludes threads, tasks and schedulers inside the process;
+  - the P7 section;
+  - TX-SUB does not rest on the lock alone;
+  - the operations that hold the lock are those listed in core §3.1, including ACTIVATED, CONFIG_BASELINE and R-CLEAR.
+  - The P7r ABORTED (EV-NEVER-SENT) write is an atomic check-and-write (RF-1, §41.0).
+- **Invariants.**
+  - S1-S11 are checked after each local transaction (core §5).
+  - A violation has the effect of N-11 (4) (contract A §3.1).
+  - The entry check's predicates over stored history are defined at G-RB11-IMPL (RF-2, §41.0).
+- **Store integrity.**
+  - Every operation checks it at its entry: under the lock, before any guard.
+  - On failure the operation is refused and writes nothing (N-11 (3); C-A11).
+  - The stop is not recorded; it is re-derived from the stored state.
+- **Forbidden.** F1-F17 (core §4), including the core v6e prohibitions for HP-1 / HP-2, OBS-1 and OBS-2.
+- **Method.** The implementation method follows the I-1..I-3 decisions (§41.0).
+- **PO-43** is restated for the chosen store, including rollback detection.
+
+### 41.11 E-2 — enforcement layers
+
+~~~
+L1  grant: the authority transactions P1 / P2 / P10 (D1 cannot write the registry; CP-1; depends on B-2 and premise P12)
+L2  allowlist of dispatch permissions (only if PO-16 / H-23 is verified)
+    agreement of P(c) and the entry, in the pinned environment (PO-55)
+L3  pre-commit path check in the lane worktree, from the mirror (advisory only; never an authority input)
+L4  integration / take gate: withdrawn (rev 5)
+L5  the authority lands: core P7 (the P7a guards, TX-PREP, P7b, TX-SUB, one updateRefs call, P7c, P7r, P7e,
+    sigma and its effects, the C15 order); configuration admission (GH §8 (a)-(d) and (g)) and the
+    observation ledger (core §3.6).
+    There are no AC, landing-set, D(R, W), DU, partial-landing, closing-landing or reporter fields.
+    The landing-time drift check includes C15 step 9 by reference (N1-A).
+    The INTENT admission digest is the digest of I's request: the same function as PREPARED(1);
+    it is carried in the check summary (N2-A)
+L6  GitHub rulesets, set by the Human (HA-5T / HA-5P):
+    R1 = deletion + non_fast_forward + linear history + a required check pinned to the landing authority's App; no bypass
+    R2 = update; the bypass is the landing authority's App only
+~~~
+
+L5 is mandatory and runs only inside the authority. Its goal is GitHub-side pre-rejection (enforcement level E-1 of rev-11 GH; not the registry item E-1). It:
+- depends on premises P1-P8 and P14-P17;
+- is BLOCKED for executors until B-1;
+- is BLOCKED for BL-074 acceptance until B-4.
+
+### 41.12 E-3 — launch registry and owner continuity
+
+- **Launch records.** A launch record (C-O1) is written at every launch of a writer, reviewer, focused run, Full or measurement.
+- **Holder liveness.**
+  - Positive evidence of holder liveness (rev-11 DC §5.4) is used for launches and for the watchdog.
+  - It is not used for lease ownership (N3-A): the core lease has no holder-liveness attribute.
+- **Re-dispatch (N3-A).**
+  - The orchestrator starts a new dispatch of the same lane only when the earlier dispatch has ended with positive evidence (ENDED_POSITIVE).
+  - If the earlier dispatch is UNKNOWN, it does not re-dispatch; it escalates.
+  - The dispatch identity lives only in the launch record. The lease authority records a requested dispatch id as a D1 claim.
+- **The orchestrator's lane-state file** only displays registry state as far as ownership goes (F-23). T-44 is kept as evidence (OBS-3).
+
+### 41.13 E-4 — watchdog
+
+- Rev-11 BRIEF §41.13 and rev-11 WATCHDOG C-W1..C-W8 apply unchanged.
+- The holder-liveness notification to the lease registry (rev-11 WATCHDOG §7) is excluded (N3-A).
+- Watchdog observations are used only for:
+  - reports to the orchestrator and the Human;
+  - the W-3 / W-5 records.
+- They never trigger P8 or P9 automatically.
+
+### 41.14 E-5 — launcher slot checks
+
+The Full launcher, and any heavy launcher, refuses when (FM-49, T-A12):
+- `slot:full` or `slot:test-exclusive` is held by another owner; or
+- another runner's HEARTBEAT is live.
+
+Where the slots live is decided by N9-A:
+- the test slot is a resource of the D1 launcher tooling, and its holder is identified by its durable launch record (C-O1, W-1);
+- the landing lock is the landing authority's P7 section;
+- the rev-11 `slot` kind is removed from the lease authority.
+
+The regression pin stays: the focused-run launcher's refusal on a held slot (exit code 3) stays pinned (T-A12).
+
+### 41.15 E-6 — migration of the prose surface-lease ledger
+
+- No grants during migration (reused; the condition is N6-A below).
+- The prose ledger is kept as history and is never rewritten.
+- An ambiguous holder becomes UNKNOWN and waits for a Human / Control Plane decision **before ACTIVATED**.
+
+N6-A: ACTIVATED is not admitted while an existing grant remains.
+- **Entering ACTIVATED.**
+  - ACTIVATED is entered only when the ledger holds no valid grant.
+  - Each holder sends SURFACE_RELEASE.
+  - Unlanded commits stay on their branches, and nothing is deleted.
+- **The quiescence check** is a D1 procedure (the orchestrator and the Human checklist, §41.17). It is not a guard of the lease authority, which does not read D1.
+- **After ACTIVATED.**
+  - A lease is obtained only by P1 (b := M_rec).
+  - Unlanded work is rebuilt as explicit forward-carry commits on a new lease. It needs new validation, an independent review and an exact authorization (dependent-production addendum §2; core §3.5 step 4; HD-RB11-DP4-ALT2 item 6).
+- **The ACTIVATED input itself** follows core §3.3a. The lease authority reads the remote `main` itself, imports it, and creates and verifies the base ref before recording.
+- **Still excluded:** rev-11's "import as is, start RC, deploy the reporter".
+
+### 41.16 W-1..W-6 publication
+
+The interfaces of contract A §6 are documented for RB12 / RB13: schemas, read rules, and the rule that a lease is not proof.
+
+- RB12 consumes them only after RB11 is frozen.
+- **W-2** has three parts (N9-A):
+  - the lease authority's writer lease;
+  - the launcher slot;
+  - the landing authority's landing section.
+- **W-5** (N5-A) consists of:
+  - launch records;
+  - writer-lease orphans;
+  - the unfinished-work register.
+- **W-6** (N4-A) is a read-only view of the registry. It carries identity only: no queue and no plan / step order.
+- The §39.3 wording for W-6 is corrected by the RB11 freeze amendment.
+
+### 41.17 Human checklist publication
+
+As rev-11 BRIEF §41.17. Where it is published follows the PO-39 disposition:
+- the Human checklist is published as operational tooling documentation, referenced from §38 (§38.5);
+- it is not made a Workline rule (`registry.md`) or a Skill.
+
+The §38.5 reference is introduced with the RB11 freeze amendment, not deferred to the implementation candidate (RF-5). The checklist itself is published by the implementation.
+
+The checklist keeps:
+- every STOP-H;
+- the UNPROVEN label on F-38 until G-TB26;
+- the BL-077 cross-reference (PO-40). The BL-077 wording decides how T-28 is recorded. The references are consolidated into one place when the checklist is published (PO-40 disposition);
+- the quiescence procedure before G-ACT (N6-A): confirm that every ledger grant is released and that every ambiguous entry has a Human / Control Plane decision, then enter ACTIVATED.
+
+### 41.18 Expected implementation surfaces
+
+Runtime: the runtime list of rev-11 BRIEF §41.18, unchanged (contract B.1).
+
+External tools live where the PO-38 disposition puts them:
+- not in the product repository (workline-core);
+- identified by exact identity (sha256; C-S3);
+- the D1 tools in the orchestrator store, and the landing authority in D2;
+- the concrete D2 hosting is decided at G-RB11-IMPL (CP-8).
+
+The external tools are:
+- the landing-authority service (D2): registry, retention, isolated import, observation ledger, P7 section, base refs, reconciliation and R-CLEAR;
+- the request client (D1);
+- the mirror writer;
+- the launch registry;
+- the watchdog;
+- the pre-commit check (advisory);
+- the launcher slot checks;
+- the migration script;
+- tool self-tests (scratch directories only).
+
+Not built:
+- an integration / take gate;
+- a snapshot component;
+- a carry-proof checker;
+- a reporter;
+- a REQUESTED queue.
+
+### 41.19 Focused tests — runtime
+
+As rev-11 BRIEF §41.19: TFI §A.2, §B.1-§B.4 and the runtime rows of §F.
+
+### 41.20 Focused tests — tooling
+
+These rows of contract D:
+- the TFI §A.1 rows (watchdog, launcher);
+- the TFI §D rows classified KEEP or KEEP_RESCOPE;
+- T-OB-01..T-OB-111, the Option B rows. T-OB-93..T-OB-111 cover core v6e and the decided items.
+
+Two rows are extended by the review disposition. Both are G-RB11-CAND rows:
+- **T-OB-43 (RF-6):**
+  - adds a scheduled P7r by the same landing-authority instance;
+  - in that case P7r finds an OPEN INTENT whose PREPARED(1) carries the current instance id, after P7b ended early (TX-SUB failed or its outcome is unknown);
+  - P7r never submits.
+- **T-OB-60 (RF-1):** adds two P7r runs racing on the same INTENT.
+
+The non-production GitHub rows are not candidate rows: T-G01..T-G33 and T-G35..T-G38, with T-G21b dropped. They run as G-GH-NONPROD after the HA-1 approvals.
+
+### 41.21 Fault-injection matrix
+
+The rev-11 TFI §E techniques TFI-F1..TFI-F35 that apply to Option B are used, plus the T-OB fault injection of contract D. They cover:
+- crashes before and after TX-PREP and TX-SUB;
+- a transaction with an unknown outcome;
+- a configuration with the lock disabled;
+- concurrency inside the process;
+- a waiting submission;
+- the retention interruption points A-C;
+- the crash points of core §3.3a steps 2-5: an unreferenced base ref, and a retry for the same W;
+- a crash before R-CLEAR commits, an incomplete check, and restoration with corrupt bytes;
+- store integrity failure and rollback (N-11 (3)).
+
+All of this runs in scratch Projects, scratch registries and scratch suite directories, with local bare remotes, using only self-spawned decoys.
+
+### 41.22 BL closure evidence (N7-A; PO-34 disposed)
+
+| BL | Closes when (N7-A) |
+|---|---|
+| BL-071 | As rev-11:<br>• the watchdog and the launcher slot checks are accepted (TFI §A.1 rows on exact tool identity);<br>• the W-3 / W-4 records are used through one full validation cycle;<br>• RT-2 lands;<br>• no fixed runtime timeout is added;<br>• the network-Git question is recorded as Control-Plane-owned (PO-11) |
+| BL-072 | As rev-11:<br>• RT-1a lands, and RT-1b too if PO-05 holds;<br>• the RT-4 pins land;<br>• the checklist is published;<br>• launch-registry continuity is accepted (T-D16 / T-D17 / T-D30, under the N3-A rule: re-dispatch only after ENDED_POSITIVE, UNKNOWN escalates; T-OB-111);<br>• every remaining dead end is listed with its PO and gate.<br>A G-SUCC record alone does not close stage 2, F-37, F-38 / T-B26, PO-50 or T-46 (H-4.1). Whether BL-072 itself may close is decided by the Control Plane at completion; that decision is part of N7-A, and PO-34 itself is disposed |
+| BL-074 | Option B version (N7-A):<br>• **Acceptance.** The lease authority (core v6e §2-§3a) is accepted on exact tool identity: the T-OB rows, and the TFI §D rows classified KEEP or KEEP_RESCOPE.<br>• **Activation.** Activation and migration are done: G-ACT, with ACTIVATED after the N6-A quiescence.<br>• **Production wave.** S1-S11 are verified over at least one multi-lane production wave. That wave includes at least one P2 successor, as rev-11's "with stacked successors" required; depth 3 or more is allowed (T-OB-110; N7-A (1)).<br>• **Pre-rejection.** GitHub-side pre-rejection (enforcement level E-1) holds for every actor other than the owner:<br>&nbsp;&nbsp;– B-1 and B-2 are resolved;<br>&nbsp;&nbsp;– premises P1-P4, P6-P10, P12-P14, P15a, P16-P18 and P25 are proven in non-production. Premises P10 and P25 are read in the sense of register F §F.3: P10 is the correctness of the records that appear, and P25 is P25-det. P25-comp is not a closure condition (N7-A (2));<br>&nbsp;&nbsp;– P15b closes by its own path: GitHub documentation, or Control Plane acceptance under CP-3 / CP-10 (B-4).<br>• **Not claimed yet.** Exclusivity in D1 is not claimed until PO-64 (lane write isolation) is resolved. S4 authenticity is not claimed until B-3R is resolved.<br>• **CP-9** decides whether B-3 must be resolved.<br>• **No detection-only closure.** A qualified, detection-only guarantee does not close BL-074.<br>• **What G-ACT includes for BL-074 (N7-A (3)).**<br>&nbsp;&nbsp;– Each of these obligations is met at its register-G gate (classes as in G): PO-17, PO-B9, PO-43, PO-B4 (including base refs, BASE-RET, VD and the content check), PO-B5a, PO-B5c, PO-B7, premise P10, readback authenticity and App key custody.<br>&nbsp;&nbsp;– The Human's G-ACT judgment: acceptance of F-3 / F-4 / OC-1..OC-5. HP-1 / HP-2 are decided. That acceptance is not presumed at the contract freeze. If a later Human answer changes normative contract meaning, an explicit, reviewed contract amendment precedes activation (Control Plane, 2026-10-11, Q-1) |
+
+No BL leaves Completion scope. The BL-071 and BL-072 rows are the rev-11 rows with N-9 and N-3 applied. Whether BL-072 may close while H-4.1 items are carried is decided by the Control Plane at completion. That decision is part of N7-A; PO-34 itself is disposed.
+
+### 41.23 Regression order
+
+As rev-11 BRIEF §41.23. Step 5 (tool self-tests and fault injection) includes the T-OB rows.
+
+### 41.24 Stop conditions
+
+Stop the affected seam and report to the Control Plane if any condition below arises.
+
+Reused from rev-11 BRIEF §41.24 (its runtime, watchdog, GitHub and general items):
+
+~~~
+a probe path needs any write, scratch, hermetic.enter or allowlist extension
+a raising call's class cannot be shown to be R, or its check ID cannot be added without changing behavior
+the probe's first refusal differs from the owner's
+the probe would apply START-run predicates to another START-owned operation
+a change would admit a class listed in §41.5
+a lease or watchdog transition would depend on elapsed time (including heartbeat age)
+the registry cannot publish durably, or a fold anomaly would be read as absence
+the landing base W would not be the remote main read by the authority itself, or W != M_rec
+the replay-writes-nothing condition cannot be established (PO-52)
+a watchdog stop would leave a live descendant, rely on an inferred in-process phase,
+  or not go through the handle used for verification
+any tool step would delete, reset, revert, discard or force anything
+a lease holder or launch owner cannot be proved
+an existing pin must change beyond ADM §F
+FORMAL_INDEPENDENT review is unavailable at a review gate
+a finding requires reopening a Control Plane HIGH ruling or Q-N4-A
+an unverified premise turns out to be essential to safety
+(rev 5) the registry would be writable from D1, or a second authority would exist
+(rev 5) an admin credential would be reachable from D1
+(rev 5) a GitHub configuration change is detected or cannot be verified
+(rev 5) an authorization would be treated as authentic while B-3 is open
+(rev 5) a bypass would be broadened, `exempt` used, or force used
+(rev 5) a merge commit would land
+(rev 5) a read followed by a push would be described as atomic
+(rev 5) a check conclusion other than success or failure would be emitted
+(rev 5) any GitHub resource, setting, App, key or credential would be created or changed by RB11
+(rev 6) a decision that changes ownership, ends a lease or moves M_rec would be applied from D1;
+  D2's Git would run against a D1 repository
+(rev 7) a checkpoint would advance after an incomplete window, or an incomplete window would pass
+(rev 8) a bundle would be imported outside the quarantine, a ref other than the lane-scoped one written,
+  a v3 capability other than object-format admitted, or gc / prune run on the authority's clone
+(rev 9) a failed quarantine would be deleted without a Human decision in D2, or a lane's bound exceeded;
+  the reference model would be committed, or its results presented as proof or test evidence
+(rev 10) the global cap would be exceeded or removed without a Human decision
+~~~
+
+Added by Option B. These list violations of core rules as stop conditions; they are not new rules:
+- **F1-F17.** The implementation would allow a transition that any of F1-F17 forbids. In particular F17:
+  - a second INTENT, or PREPARED(2);
+  - a submission under a PREPARED(1) of an instance other than the current one;
+  - a submission while SUBMITTED(1) exists;
+  - a transparent retry;
+  - a PREPARED(1) or SUBMITTED(1) written outside TX-PREP / TX-SUB;
+  - a call before TX-SUB is confirmed;
+  - making a `failure`-check post a condition of P7a;
+  - recording an unconfirmed post as posted.
+- **Invariants.** Any of S1-S11 is broken after a local transaction.
+- **Unproven safety claims.**
+  - Safety of several INTENTs is claimed while PO-17 or PO-B9 is not shown.
+  - The P7r ABORTED (EV-NEVER-SENT) path is claimed to be safe independently of PO-17 and PO-43 (RF-1).
+- **Unrecorded retention refs.** A retention ref with no record is used as a tip, F, candidate, base or landing input (F16).
+- **Ledger handling.**
+  - An authentic record that passed stage A is recorded as "not admitted".
+  - An entry is classified, exempted or disposed of by time, window, checkpoint, B_obs or ACTIVATED.
+- **Excluded concepts.** A concept that Option B removed comes back through reuse (contract A §0.2).
+- **Other dispositions.** The implementation differs from the N-1..N-13 dispositions (contract A §14) or the FRZ dispositions (contract G.7).
+- **Core v6e and the decided items:**
+  - **R-CLEAR.**
+    - R-CLEAR removes the reason without a complete re-verification.
+    - R-CLEAR changes another reason, a lease, an INTENT, an authorization, a candidate, M_rec, B_last or B_obs.
+  - **Retention and base refs.**
+    - A retention ref or base ref is overwritten or deleted, or a ref holding another value is "repaired".
+    - ACTIVATED / REBASELINED is recorded without a verified base ref.
+    - A base ref is used as a guard, tip, F, candidate, landing input or authority.
+  - **VD.**
+    - VD is used as proof of content.
+    - A ref is recreated without the content check.
+  - **P2.** P2's decision differs from the core v6e chain rule:
+    - it admits a holder outside the chain;
+    - it refuses a holder inside the chain;
+    - it refuses because of a predecessor's INTENT.
+  - **Undecided attempts.**
+    - An undecided attempt is released or finalized without evidence.
+    - A resend, a second attempt, or a new INTENT for the same candidate is made.
+    - P7e records ABORTED.
+    - A non-evidence observation is treated as failure.
+  - **Store integrity and invariants (N-11).**
+    - An operation proceeds without checking store integrity.
+    - An operation proceeds after an invariant violation.
+    - An external call is made after detection.
+    - A stop is recorded as a new durable state.
+  - **The observation window (N12-A).** CONFIG_BASELINE closes an observation window.
+  - **The watchdog (N3-A).** A watchdog observation triggers P8 / P9, or a dispatch is used as an ownership input.
+  - **Activation (N6-A).** ACTIVATED is entered while a valid ledger grant remains.
+  - **P9's "the chain" (RF-8).** Implementing it needs a normative design change beyond the alternatives the formal review examined (§41.10).
+
+Dropped as specific to M2-S: the rev 6-rev 11 M2-S items of rev-11 BRIEF §41.24. Examples: DECLARED unlanded content, carry proofs, AC, D(R, b), the start rule, ADOPT, the closing landing, J, and the M2-S form of base ancestry (register F, row R-BR-STOP).
+
+### 41.25 Explicit non-scope
+
+The whole of contract A §12 (RB11 MUST NOT).
+
+### 41.26 Candidate report format
+
+Rev-11 BRIEF §41.26 is reused, with these additions:
+- the T-OB results;
+- the PO-17 and PO-B9 evidence, each on its own;
+- references to the N-1..N-13 dispositions (contract A §14) and the FRZ dispositions (contract G.7);
+- the result of the bounded core v6e check (sha256 `3c9e2eb08ce1014166dd81b50857fd49bea0c02cb10582e9f6f8fbb4f6c1be29`). It is bounded evidence only (PO-72).
+
+### 41.27 Implementation completion gate
+
+RB11 is complete only when all of the following hold.
+
+- **RT-1a** lands:
+  - every ALLOW raising call is proven per call (PO-30, PO-45);
+  - `pending_resumable` is proven positively (PO-47);
+  - every class of §41.5 is pinned as refused.
+- **RT-1b** lands, or is explicitly dropped with PO-05 evidence.
+- **RT-2 and RT-4.** RT-2 lands, the RT-4 pins land, and the canonical text is updated.
+- **E-1..E-7** are accepted on exact tool identity:
+  - the T-OB rows, the TFI §A.1 and §D rows classified KEEP or KEEP_RESCOPE, and the fault injection pass;
+  - evidence exists for PO-17, PO-B9, PO-43 (including rollback detection), PO-B4 (including base refs, BASE-RET, VD and the content check), PO-41, PO-55, P24, PO-21 and PO-33.
+- **HD-RB11-1** is DECIDED (a). Closing BL-074 needs the conditions of §41.22. Every GitHub configuration step needs its own Human approval, and RB11 never performs one.
+- **W-1..W-6** are published, as N3-A, N4-A, N5-A and N9-A decide.
+- **The checklist** is published as the PO-39 disposition states: operational tooling documentation, referenced from §38 (§38.5).
+- **Proof obligations.** Every PO of register G is either:
+  - closed with evidence; or
+  - carried with an explicit gate, owner and successor record (G-SUCC).
+- **Tests.** The focused tests, the Full suite, and the RB1 / N4 / RB3-C1 regressions pass.
+- **Candidate and review.**
+  - The exact candidate SHA, tree and diff are fixed for FORMAL_INDEPENDENT review.
+  - The review passes, and a fresh post-Full audit is done.
+- **No early landing.** Nothing is pushed or landed before the Control Plane's authorization for that candidate.
 
 ## 42. RB12 implementation brief — reserved
 
