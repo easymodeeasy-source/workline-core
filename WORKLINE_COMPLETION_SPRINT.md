@@ -17410,7 +17410,7 @@ Human:              the checklist (documentation only)
 
 ### 41.3 RT-1a — START owner probe, stage 1a
 
-As rev-11 BRIEF §41.3, unchanged. Register F classifies §41.3-§41.9 as REUSED_EXACT (row R-BR-RT).
+As rev-11 BRIEF §41.3, unchanged. Register F classifies §41.3-§41.9 as REUSED_EXACT (row R-BR-RT). The reason values of its `unknown_or_invalid` result are clarified in §41.29.
 
 ### 41.4 RT-1b — stage 1b
 
@@ -17621,7 +17621,7 @@ Not built:
 
 ### 41.19 Focused tests — runtime
 
-As rev-11 BRIEF §41.19: TFI §A.2, §B.1-§B.4 and the runtime rows of §F.
+As rev-11 BRIEF §41.19: TFI §A.2, §B.1-§B.4 and the runtime rows of §F. T-B22 is read as clarified in §41.29.
 
 ### 41.20 Focused tests — tooling
 
@@ -18103,6 +18103,31 @@ These properties are verified at G-RB11-CAND by checks SA-V1..SA-V10, on a scrat
 - Every other provision of the frozen contract keeps its authority, except where SA-1 explicitly identifies a qualification. If such a clause turns out to rest on operating-system isolation and cannot be met in this configuration, the affected seam stops and is reported to the Control Plane.
 - SA-1 applies to RB11 implementation, verification, deployment and activation. It does not apply to RB12-RB14, to the Workline runtime's own semantics, or to HD-2W landings before landings move to the PLA.
 - SA-1 authorizes no implementation, no D2 service, no production storage, no credential, App or ruleset change, no G-ACT and no landing. Every proof obligation stays NOT VERIFIED.
+
+### 41.29 Scoped clarification — RT-1a reason values and T-B22 (Control Plane, 2026-10-12)
+
+A forward Control Plane clarification of two conflicts in the reused rev-11 components, found by the formal review of an L-RT repair candidate. RB11 stays CONTRACT_FROZEN; core v6e, contract A-H and the rev-11 components keep their text. This subsection grants no implementation, landing or activation authority.
+
+~~~
+clarification record   scoped normative clarification of RRR-1 and RRR-2    6668d986012e3a4a8208fd6c0838d2da0da853a92dfe6ed5099445222e0ef7f4
+decision directive     Control Plane directive resolving RRR-1 / RRR-2     575aa4d923bc9c8680be8ba5cb1081925b522f29f6958b59778092eb755a77e0
+~~~
+
+**RT-1a reason values (RRR-1).** The rev-11 brief §41.3 says that an `unknown_or_invalid` result carries "no other reason value" than `no_read_only_resume_probe` or the two fixed START-operation reasons, while rev-11 brief §41.5, ADM §A.1 S6.2 and TFI T-B09 / T-B45 / T-B48 name three more. The permitted set is the closed union of exactly these six values:
+- `no_read_only_resume_probe`;
+- `start_operation_not_probed_review_generation`;
+- `start_operation_not_probed_plan_exclusion`;
+- `push_classification_requires_network` (a `git_push` effect at replay);
+- `work_commit_replay_not_inspectable` (a Work-mode commit stage);
+- `post_replay_not_read_only` (a replay that would write).
+
+No alias and no other value is emitted; any other code a replay or a refusal carries is reported as `no_read_only_resume_probe`. START admission, the ALLOW classification, owner recognition, recovery authorization, write permissions and resumability are unchanged.
+
+**T-B22 (RRR-2).** TFI T-B22 expects `recovery_disposition_unnecessary` for an Integration Run that is "consumed / not_authorized". The unchanged runtime reaches that code for a consumed Run; for a not-authorized Run it refuses with `recovery_disposition_target_ineligible`, and the gates involved must not change (§41.18). Contract D's row names only the consumed case. The two cases are separated:
+- consumed Integration Run → `recovery_disposition_unnecessary` (T-B22 as clarified);
+- not-authorized or otherwise ineligible Integration Run → `recovery_disposition_target_ineligible` (a separate characterization of unchanged behaviour).
+
+In both cases nothing is disposed. Only the not-authorized half of TFI T-B22's expectation is superseded; the original row is kept as history. No runtime behaviour changes.
 
 ## 42. RB12 implementation brief — reserved
 
