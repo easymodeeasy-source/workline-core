@@ -3632,8 +3632,8 @@ def _require_work_review_not_closing(view: ProjectView, work: Entity, review: An
             "review_marker_mismatch, and a START in another mode or of another Work meets it as a pending write-scope "
             f"conflict (reconcile required). Its exit is a Human reconciliation of mutation {pending.id}: the Human "
             "recovery disposition (RB10 N4, dispose-recovery) sets a pending mutation aside only once RB1's read-only "
-            "classifier proves it pending_reconcile_required, which that classifier does not prove for a START "
-            "record: reconcile required",
+            "classifier proves it pending_reconcile_required, which that classifier does not prove for this record, "
+            "because this refusal depends on the Project's current state: reconcile required",
             reason=CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE,
         ), "start.3512")
     raise with_check(StopError(
