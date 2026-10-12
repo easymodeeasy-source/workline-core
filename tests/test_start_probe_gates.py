@@ -5,7 +5,8 @@
   (``_reuse_refused_result``, 916 / 920 or its writes), so the probe ends ``unknown_or_invalid`` at S7.3, never S8.
 * RTR-6: the individual S7.2 gates (terminal, roadmap_inactive, read targets, protected targets, the COMPLETED branch)
   and the outer-mode "not followed" guards, each a row of its own.
-* RTR-3 (BRIEF §41.3 "no other reason value"): the reason codes S6.1 may report.
+* RTR-3 (BRIEF §41.3 "no other reason value", as clarified in Sprint §41.29): the reason codes S6.1 may report. The
+  closed set of six and its emission sites are pinned in ``test_start_probe_reasons``.
 """
 
 from __future__ import annotations
@@ -214,7 +215,8 @@ class ReplayReasonTests(GateCase):
         found = self.assertUnknown(code=start_probe.WORK_COMMIT_NOT_INSPECTABLE)
         self.assertEqual(found.step, "S6.1")
 
-    def test_the_reason_codes_are_exactly_the_six_the_frozen_text_names(self) -> None:
+    def test_the_reason_constants_spell_the_six_values_and_two_are_the_named_replay_codes(self) -> None:
+        """Constants against literals only (RRR-3): what the probe emits is pinned in test_start_probe_reasons."""
         self.assertEqual(
             {start_probe.NO_PROBE, start_probe.NOT_PROBED_GENERATION, start_probe.NOT_PROBED_PLAN_EXCLUSION,
              start_probe.POST_REPLAY_NOT_READ_ONLY, start_probe.PUSH_NEEDS_NETWORK,

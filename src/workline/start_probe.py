@@ -71,11 +71,11 @@ PENDING_RESUMABLE = "pending_resumable"
 PENDING_RECONCILE = "pending_reconcile_required"
 UNKNOWN_OR_INVALID = "unknown_or_invalid"
 
-#: The reason codes of ``unknown_or_invalid`` - the only ones (rev-11 BRIEF §41.3 "no other reason value"): today's
-#: ``no_read_only_resume_probe``, the two fixed START-operation reasons of ADM §A.1 S1.1, and the three the frozen text
-#: names for the replay steps - ``push_classification_requires_network`` (T-B45, §41.5) and
-#: ``work_commit_replay_not_inspectable`` (§41.5, T-B09) at S6.1, ``post_replay_not_read_only`` (ADM §A.1 S6.2, T-B48).
-#: Every other replay code, and every other refusal's code, is reported as ``no_read_only_resume_probe``.
+#: The reason codes of ``unknown_or_invalid``. Rev-11 BRIEF §41.3 says "no other reason value" than today's
+#: ``no_read_only_resume_probe`` and the two fixed START-operation reasons of ADM §A.1 S1.1, while BRIEF §41.5,
+#: ADM §A.1 S6.2 and TFI T-B09 / T-B45 / T-B48 name three more; the Control Plane clarification of RRR-1 (option (b),
+#: Sprint §41.29) makes the permitted set the closed union of exactly these six (UNKNOWN_REASONS below). Every other
+#: replay code, and every other refusal's code, is reported as ``no_read_only_resume_probe``.
 NO_PROBE = "no_read_only_resume_probe"
 NOT_PROBED_GENERATION = "start_operation_not_probed_review_generation"
 NOT_PROBED_PLAN_EXCLUSION = "start_operation_not_probed_plan_exclusion"
@@ -84,6 +84,17 @@ PUSH_NEEDS_NETWORK = "push_classification_requires_network"
 WORK_COMMIT_NOT_INSPECTABLE = "work_commit_replay_not_inspectable"
 #: The replay codes S6.1 reports as they are; any other code of an unproven or reconcile replay is NO_PROBE.
 _NAMED_REPLAY_CODES = frozenset({PUSH_NEEDS_NETWORK, WORK_COMMIT_NOT_INSPECTABLE})
+
+#: The closed set of reason values an ``unknown_or_invalid`` result carries (clarification record §2.2). No alias, no
+#: seventh value: a code outside it is reported as NO_PROBE (``_closed_reason``).
+UNKNOWN_REASONS = frozenset({
+    NO_PROBE,  # BRIEF §41.3 L239; ADM §A.1 S1.1 L191
+    NOT_PROBED_GENERATION,  # BRIEF §41.3 L239-240 (the fixed reasons of ADM §A.1 S1.1); ADM §A.1 S1.1 L191
+    NOT_PROBED_PLAN_EXCLUSION,  # BRIEF §41.3 L239-240 (the fixed reasons of ADM §A.1 S1.1); ADM §A.1 S1.1 L191
+    PUSH_NEEDS_NETWORK,  # BRIEF §41.5 L265; TFI T-B45 L258
+    WORK_COMMIT_NOT_INSPECTABLE,  # BRIEF §41.5 L267; TFI T-B09 L247
+    POST_REPLAY_NOT_READ_ONLY,  # ADM §A.1 S6.2 L212; TFI T-B48 L261 (TFI-F18 L622)
+})
 
 #: The START-owned operations other than ``start`` that get a fixed reason (PO-50; no record value is echoed).
 _OTHER_OPERATIONS = {"review-generation": NOT_PROBED_GENERATION, "start-plan-exclude": NOT_PROBED_PLAN_EXCLUSION}
@@ -181,6 +192,11 @@ def probe(store: ProjectStore, record: dict[str, Any], pending: list[dict[str, A
     return found.classification, found.reason()
 
 
+def _closed_reason(code: object) -> str:
+    """The reason value of an ``unknown_or_invalid`` result: ``code`` if it is one of UNKNOWN_REASONS, else NO_PROBE."""
+    return code if isinstance(code, str) and code in UNKNOWN_REASONS else NO_PROBE
+
+
 def inspect(store: ProjectStore, record: dict[str, Any], pending: list[dict[str, Any]]) -> StartProbe:
     """The probe, with where START's walk ended and the check ID of its first refusal (for tests and diagnosis).
 
@@ -216,7 +232,7 @@ class _Walk:
 
     # ---------------------------------------------------------------- answers
     def unknown(self, step: str, message: str, code: str = NO_PROBE, check_id: str | None = None) -> _Ended:
-        return _Ended(StartProbe(UNKNOWN_OR_INVALID, code, message, step, check_id))
+        return _Ended(StartProbe(UNKNOWN_OR_INVALID, _closed_reason(code), message, step, check_id))
 
     def resumable(self, step: str, message: str) -> _Ended:
         return _Ended(StartProbe(PENDING_RESUMABLE, "resume_proven", message, step))
@@ -538,5 +554,6 @@ def _no_executor(context: Any) -> Any:
 
 __all__ = [
     "ALLOW", "LEGACY_KEYS", "NO_PROBE", "NOT_PROBED_GENERATION", "NOT_PROBED_PLAN_EXCLUSION", "PENDING_RECONCILE",
-    "PENDING_RESUMABLE", "POST_REPLAY_NOT_READ_ONLY", "StartProbe", "UNKNOWN_OR_INVALID", "inspect", "probe",
+    "PENDING_RESUMABLE", "POST_REPLAY_NOT_READ_ONLY", "StartProbe", "UNKNOWN_OR_INVALID", "UNKNOWN_REASONS", "inspect",
+    "probe",
 ]
