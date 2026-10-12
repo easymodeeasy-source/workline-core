@@ -26,7 +26,7 @@ from .create import (
     register_works,
     resolve_ref,
 )
-from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
+from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError, with_check
 from .ids import is_valid_id, new_id
 from .mutation import (
     FILE_EFFECT_KINDS,
@@ -829,7 +829,7 @@ def _recorded_stages(effects: list[dict[str, Any]], refuse) -> list[str]:
         if stages and stages[-1] == stage:
             continue
         if stage in stages:
-            raise refuse(f"stage {stage!r} recorded in two places")
+            raise with_check(refuse(f"stage {stage!r} recorded in two places"), "ops.832")
         stages.append(stage)
     return stages
 
@@ -848,22 +848,28 @@ def _recorded_progress(
         try:
             classification = _classify_recorded(controller, file_effects, position)
         except (KeyError, TypeError, AttributeError, ValueError, OSError, StopError) as exc:
-            raise refuse(f"effect {effect.get('seq')} ({effect.get('kind')}) that cannot be classified ({exc})") from exc
+            raise with_check(
+                refuse(f"effect {effect.get('seq')} ({effect.get('kind')}) that cannot be classified ({exc})"), "ops.851"
+            ) from exc
         if classification == MISMATCH:
-            raise refuse(f"effect {effect.get('seq')} ({effect['kind']}) applied with an unexpected result")
+            raise with_check(
+                refuse(f"effect {effect.get('seq')} ({effect['kind']}) applied with an unexpected result"), "ops.853"
+            )
         if classification == UNAPPLIED:
             unapplied.append(effect)
         elif unapplied:
-            raise refuse(f"effect {effect.get('seq')} ({effect['kind']}) applied while an earlier one is not")
+            raise with_check(
+                refuse(f"effect {effect.get('seq')} ({effect['kind']}) applied while an earlier one is not"), "ops.857"
+            )
         else:
             applied.append(effect)
     # A stage is recorded only once every stage before it is applied, so what is still to apply can only belong to the
     # last stage recorded - never to a stage another one follows, and never once the commit is recorded.
     if unapplied and (committed or {effect.get("stage") for effect in unapplied} != {last_stage}):
-        raise refuse(
+        raise with_check(refuse(
             f"effect {unapplied[0].get('seq')} ({unapplied[0]['kind']}) of stage {unapplied[0].get('stage')!r} not "
             "applied although a later stage is recorded"
-        )
+        ), "ops.863")
     return applied, unapplied
 
 

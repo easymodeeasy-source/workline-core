@@ -24,7 +24,7 @@ from typing import Any, Callable
 
 from . import gitcmd, gitops, yamlish
 from .create import RelatedSpec, RelationSpec, WorkSpec, register_works, resolve_ref
-from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError
+from .errors import ReconcileRequired, SpecViolation, StopError, ValidationError, with_check
 from .ids import is_valid_id
 from .mutation import (
     FILE_EFFECT_KINDS,
@@ -228,8 +228,28 @@ def _structure_or_stop(store: ProjectStore, context: str) -> ProjectView:
     view = ProjectView.load(store)
     problems = validate_structure(view)
     if problems:
-        raise ValidationError(f"{context}: {problems_text(problems)}", code="structure_invalid")
+        raise with_check(
+            ValidationError(f"{context}: {problems_text(problems)}", code="structure_invalid"), "start.231"
+        )
     return view
+
+
+def _commit_plan(
+    store: ProjectStore, mutation: Mutation, prefix: str, paths: list[str], *, include_canonical: bool = True
+) -> tuple[str, list[str]]:
+    """The Git stage an ordinary (legacy) commit of START records, and the paths it commits; read only.
+
+    The stage name the next ``prefix`` stage takes, and of the paths the commit
+    owns - ``paths`` and, with ``include_canonical``, every canonical path this
+    mutation's effects write - the ones that differ from HEAD. Nothing to commit
+    is an empty list: :meth:`_Session._commit` then records no stage at all.
+    Shared by that commit and by RB1's read-only START classifier, which asks
+    what the commit would carry without recording it.
+    """
+    stage = stage_name(mutation, prefix)
+    owned = sorted(set(paths) | (set(owned_canonical_paths(mutation)) if include_canonical else set()))
+    dirty = gitcmd.changed_against_head(store.root, owned)
+    return stage, sorted(p for p in owned if p in dirty)
 
 
 def _tracked_files(store: ProjectStore) -> list[str]:
@@ -269,7 +289,9 @@ def require_read_targets(store: ProjectStore, view: ProjectView, work: Entity) -
     missing = [r for r in read_obligations(store, view, work.id) if not _ref_resolves(store, r.to)]
     if missing:
         detail = ", ".join(f"{r.type} {r.to} (relation {r.id})" for r in missing)
-        raise StopError(f"Work {work.id} cannot resolve what it must read: {detail}", code="related_target_missing")
+        raise with_check(
+            StopError(f"Work {work.id} cannot resolve what it must read: {detail}", code="related_target_missing"), "start.272"
+        )
 
 
 def reading_plan(store: ProjectStore, view: ProjectView, work: Entity) -> list[str]:
@@ -373,7 +395,9 @@ def completion_precheck(
     if structural:
         problems.append("structure invalid: " + problems_text(structural))
     if problems:
-        raise StopError("completion precheck failed: " + "; ".join(problems), code="completion_precheck_failed")
+        raise with_check(
+            StopError("completion precheck failed: " + "; ".join(problems), code="completion_precheck_failed"), "start.376"
+        )
 
 
 def _deletion_blocked_by_readers(
@@ -515,10 +539,7 @@ class _Session:
 
             start_review.commit_stage(self, prefix, message)
             return
-        stage = stage_name(self.mutation, prefix)
-        owned = sorted(set(paths) | (set(owned_canonical_paths(self.mutation)) if include_canonical else set()))
-        dirty = gitcmd.changed_against_head(self.store.root, owned)
-        to_commit = sorted(p for p in owned if p in dirty)
+        stage, to_commit = _commit_plan(self.store, self.mutation, prefix, paths, include_canonical=include_canonical)
         if not to_commit:
             return
         gitops.finalize(self.mutation, stage, message, to_commit, destination=self.destination)
@@ -535,7 +556,7 @@ class _Session:
         view = _structure_or_stop(self.store, "start precheck")
         work = view.works.get(work_id)
         if work is None:
-            raise ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable")
+            raise with_check(ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable"), "start.538")
         state = view.work_state(work_id)
         if state.state == COMPLETED:
             # Only a resumed START gets here, once replaying its recorded finalization has
@@ -544,7 +565,9 @@ class _Session:
             self._completion_postcommit(work_id)
             return StartResult("completed", work_id, self.mutation.id, phase_id=work.phase_id)
         if state.terminal:
-            raise SpecViolation(f"Work {work_id} is {state.state}; terminal Works are not started")
+            raise with_check(
+                SpecViolation(f"Work {work_id} is {state.state}; terminal Works are not started"), "start.547"
+            )
         # Before anything of this cycle is recorded and before the executor can run: a marked integration never
         # takes this ordinary path (§32.14, §14.27).
         if _phase_integration_gate(work, self.review, self.phase_review, self.semantics):
@@ -562,9 +585,13 @@ class _Session:
         phase = view.phases.get(work.phase_id) if work.phase_id else None
         if phase is not None:
             if view.phase_lifecycle(phase.id) != ACTIVE:
-                raise StopError(f"Phase {phase.id} is {view.phase_lifecycle(phase.id)}", code="phase_inactive")
+                raise with_check(
+                    StopError(f"Phase {phase.id} is {view.phase_lifecycle(phase.id)}", code="phase_inactive"), "start.565"
+                )
             if view.roadmap_lifecycle(phase.roadmap_id or "") != ACTIVE:
-                raise StopError(f"Roadmap {phase.roadmap_id} is {view.roadmap_lifecycle(phase.roadmap_id or '')}", code="roadmap_inactive")
+                raise with_check(
+                    StopError(f"Roadmap {phase.roadmap_id} is {view.roadmap_lifecycle(phase.roadmap_id or '')}", code="roadmap_inactive"), "start.567"
+                )
         # A derivation this cycle decided may have made the Work wait for the Works it derived;
         # that is checked where the Work is next entered or completes, not between the attempts
         # of the cycle that decided it - nor before a move's own removal of the target (BL-049).
@@ -576,10 +603,10 @@ class _Session:
             if own.get(relation.id) != relation.to_record()
         ]
         if unsatisfied:
-            raise StopError(
+            raise with_check(StopError(
                 f"Work {work_id} has unresolved requires_completion: " + ", ".join(f"{r.from_id} ({label})" for r, label in unsatisfied),
                 code="dependency_unsatisfied",
-            )
+            ), "start.579")
         require_read_targets(self.store, view, work)
         # Refuse here, before this Work writes anything, when a target another started
         # Work must read could not be put back if this execution removed it.
@@ -660,7 +687,7 @@ class _Session:
                 self._lifecycle(work, ["work_target_removed"])
                 self._commit("commit", _move_message(work.display, "human_ng"), [])
                 return StartResult("moved", work_id, self.mutation.id, phase_id=work.phase_id, head=gitcmd.head_commit(self.store.root))
-            raise ValidationError(f"executor returned an unknown outcome: {outcome!r}")
+            raise with_check(ValidationError(f"executor returned an unknown outcome: {outcome!r}"), "start.663")
 
     # protected read targets -------------------------------------------------
     def _protected_read_targets(self, view: ProjectView, work_id: str) -> dict[str, tuple[bytes, int]]:
@@ -702,12 +729,12 @@ class _Session:
                         continue
                     except OSError as exc:
                         reason = f"it cannot be read ({exc.strerror or exc})"
-                raise StopError(
+                raise with_check(StopError(
                     f"Work {work_id} cannot run while {other_id} must read {relation.to} "
                     f"(relation {relation.id}): {reason}, so Workline could not put it back "
                     "if this execution removed it",
                     code="related_target_unprotectable",
-                )
+                ), "start.705")
         return snapshot
 
     def _put_back_protected(self, snapshot: dict[str, tuple[bytes, int]]) -> tuple[list[str], list[str]]:
@@ -752,7 +779,7 @@ class _Session:
             message += "; put back as it stood before this execution: " + ", ".join(restored)
         if unrestored:
             message += "; could not be put back: " + ", ".join(unrestored)
-        raise StopError(message, code="related_target_removed")
+        raise with_check(StopError(message, code="related_target_removed"), "start.755")
 
     # changes that were there before this operation ---------------------------
     def _protect_preexisting(self) -> None:
@@ -832,7 +859,7 @@ class _Session:
             message += "; put back as it stood before this operation: " + ", ".join(restored)
         if unrestored:
             message += "; could not be put back: " + ", ".join(unrestored)
-        raise StopError(message, code="dirty_overlap")
+        raise with_check(StopError(message, code="dirty_overlap"), "start.835")
 
     # the result a refusal keeps ---------------------------------------------
     def _keep_refused_result(self, work: Entity, outcome: object, overlap: list[str], contested: list[str]) -> None:
@@ -897,10 +924,10 @@ class _Session:
         if note is None:
             return None
         if not _reusable_result(note):
-            raise ReconcileRequired(
+            raise with_check(ReconcileRequired(
                 f"mutation {self.mutation.id} holds a refused result this START does not read back; nothing is "
                 "replayed and the record is left as it is: reconcile required"
-            )
+            ), "start.900")
         return note if note["work_id"] == work_id else None
 
     def _reuse_refused_result(self, kept: dict[str, Any]) -> object:
@@ -913,14 +940,14 @@ class _Session:
         """
         still = sorted(set(gitops.record_preexisting_dirty(self.mutation, self.store.root)) & set(kept["overlap"]))
         if still:
-            raise StopError(gitops.OVERLAP_MESSAGE + ", ".join(still), code="dirty_overlap")
+            raise with_check(StopError(gitops.OVERLAP_MESSAGE + ", ".join(still), code="dirty_overlap"), "start.916")
         for entry in kept["contested"]:
             target = self.store.root / entry["path"]
             if target.is_symlink():
-                raise ReconcileRequired(
+                raise with_check(ReconcileRequired(
                     f"the result kept for {kept['work_id']} names {entry['path']}, which is now a link; nothing is "
                     "written and the record is left as it is: reconcile required"
-                )
+                ), "start.920")
             if entry["content"] is None:
                 if target.exists():
                     target.unlink()
@@ -947,11 +974,11 @@ class _Session:
         """
         _, unrestored = self._put_back_protected(snapshot)
         if unrestored:
-            raise StopError(
+            raise with_check(StopError(
                 "the Work failed and Workline could not put back what another started Work must read: "
                 + ", ".join(unrestored),
                 code="related_target_unrestored",
-            ) from failure
+            ), "start.950") from failure
 
     # completion ------------------------------------------------------------
     def _complete(self, view: ProjectView, work: Entity, outcome: Completed) -> StartResult:
@@ -1044,7 +1071,9 @@ class _Session:
         self._commit(f"{work.id}:finalize", f"chore(workline): complete {work.display}", [])
         after = ProjectView.load(self.store)
         if after.work_state(work.id).state != COMPLETED:
-            raise StopError(f"{work.id} is not completed after finalization", code="postcheck_failed")
+            raise with_check(
+                StopError(f"{work.id} is not completed after finalization", code="postcheck_failed"), "start.1047"
+            )
         self._completion_postcommit(work.id)
         self.completed.append(work.id)
         return StartResult("completed", work.id, self.mutation.id, tuple(self.completed), work.phase_id, head=gitcmd.head_commit(self.store.root))
@@ -1069,7 +1098,7 @@ class _Session:
         """
         work = ProjectView.load(self.store).works.get(work_id)
         if work is None:
-            raise ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable")
+            raise with_check(ValidationError(f"Work unresolvable: {work_id}", code="entity_unresolvable"), "start.1072")
         return self._finalize_completion(work)
 
     # hold ------------------------------------------------------------------
@@ -1107,7 +1136,9 @@ class _Session:
         """
         work = ProjectView.load(self.store).works.get(hold.work_id)
         if work is None:
-            raise ValidationError(f"Work unresolvable: {hold.work_id}", code="entity_unresolvable")
+            raise with_check(
+                ValidationError(f"Work unresolvable: {hold.work_id}", code="entity_unresolvable"), "start.1110"
+            )
         if not hold.committed:
             # The display the hold was decided on, so the commit a retry makes carries the message the hold
             # decided on rather than one made from a display changed since (BL-047); a record written before
@@ -1115,7 +1146,9 @@ class _Session:
             self._commit("commit", finalization_message(_HELD, hold.display or work.display), [])
         after = ProjectView.load(self.store)
         if after.work_state(work.id).state != HELD:
-            raise StopError(f"{work.id} is not held after finalization", code="postcheck_failed")
+            raise with_check(
+                StopError(f"{work.id} is not held after finalization", code="postcheck_failed"), "start.1118"
+            )
         return StartResult(
             "held", work.id, self.mutation.id, tuple(self.completed), work.phase_id, hold.reason,
             gitcmd.head_commit(self.store.root),
@@ -1310,7 +1343,9 @@ class _Session:
         after = _structure_or_stop(self.store, "derivation replay postcheck")
         for work_id in work_ids.values():
             if after.works.get(work_id) is None:
-                raise ValidationError(f"postcheck: {work_id} not resolvable after its registration was replayed", code="postcheck_failed")
+                raise with_check(
+                    ValidationError(f"postcheck: {work_id} not resolvable after its registration was replayed", code="postcheck_failed"), "start.1313"
+                )
         self._drop_refused_result(work.id)
         return work_ids
 
@@ -1419,7 +1454,9 @@ class _Session:
         """
         work = ProjectView.load(self.store).works.get(move.work_id)
         if work is None:
-            raise ValidationError(f"Work unresolvable: {move.work_id}", code="entity_unresolvable")
+            raise with_check(
+                ValidationError(f"Work unresolvable: {move.work_id}", code="entity_unresolvable"), "start.1422"
+            )
         if not move.committed:
             # The display the move was decided on, so the commit a retry makes carries the message that move
             # decided rather than one made from a display changed since (BL-048); a move kept before its display
@@ -1428,7 +1465,9 @@ class _Session:
             self._commit("commit", _move_message(decided, move.moved_by), [])
         state = ProjectView.load(self.store).work_state(work.id)
         if state.terminal or state.has_target:
-            raise StopError(f"{work.id} is {state.state} and still carries its target after the move", code="postcheck_failed")
+            raise with_check(
+                StopError(f"{work.id} is {state.state} and still carries its target after the move", code="postcheck_failed"), "start.1431"
+            )
         return StartResult(
             "moved", work.id, self.mutation.id, tuple(self.completed), work.phase_id,
             head=gitcmd.head_commit(self.store.root),
@@ -1436,9 +1475,9 @@ class _Session:
 
     def _human_ng(self, view: ProjectView, work: Entity, outcome: HumanNG) -> dict[str, str]:
         if work.work_kind != "human_confirmation":
-            raise SpecViolation("HumanNG applies to human_confirmation Works only")
+            raise with_check(SpecViolation("HumanNG applies to human_confirmation Works only"), "start.1439")
         if not outcome.fix_works:
-            raise ValidationError("HumanNG needs at least one fix Work")
+            raise with_check(ValidationError("HumanNG needs at least one fix Work"), "start.1441")
         relations = [RelationSpec("requires_completion", "integration", work.id)]
         relations += list(outcome.relations)
         derive = Derive(dict(outcome.fix_works), outcome.integration, tuple(relations), move=True)
@@ -1527,33 +1566,33 @@ def _completion_to_finish(mutation: Mutation, work_id: str, mode: str) -> str | 
     if not unfinished:
         return None
     if len(unfinished) > 1:
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {mutation.id} recorded terminal lifecycle events for "
             + ", ".join(sorted({event["entity"] for _, _, event in unfinished}))
             + " that no commit finalizes; START finalizes one Work before it runs another, so this is not a "
             "record it can continue, and it is left pending, exactly as it is: reconcile required"
-        )
+        ), "start.1530")
     position, stage, event = unfinished[0]
     subject, event_type = event["entity"], event["type"]
     if event_type == "work_completed":
         if not (position == len(stages) - 1 and (mode == "outer" or subject == work_id) and _recorded_completion(mutation, stage, subject)):
-            raise ReconcileRequired(
+            raise with_check(ReconcileRequired(
                 f"START mutation {mutation.id} recorded work_completed for {subject} without the commit that finalizes "
                 "it, but not as this START records a completion of that Work, so it cannot show that finalizing it "
                 "is its own to do; it is left pending, exactly as it is: reconcile required"
-            )
+            ), "start.1540")
         if _in_head_event_log(mutation.store, [recorded.get("id") for recorded in _stage_events(mutation, stage)]):
-            raise ReconcileRequired(
+            raise with_check(ReconcileRequired(
                 f"START mutation {mutation.id} recorded the completion of {subject}, but a commit it did not record "
                 "already holds those events, so its own finalization commit and push cannot be shown; it is left "
                 "pending, exactly as it is: reconcile required"
-            )
+            ), "start.1546")
         return subject
-    raise ReconcileRequired(
+    raise with_check(ReconcileRequired(
         f"START mutation {mutation.id} recorded {event_type} for {subject} without the commit that finalizes it, "
         "and not as a cancel this START has shown from its record, so it can neither finish it nor go on past it "
         "to report another outcome; it is left pending, exactly as it is: reconcile required"
-    )
+    ), "start.1552")
 
 
 def _stage_events(mutation: Mutation, stage: str) -> list[dict]:
@@ -1669,10 +1708,10 @@ _REFUSED_FIELDS = {"version", "work_id", "overlap", "outcome", "contested"}
 def _require_registrable(outcome: Derive) -> None:
     """Refuse a derivation that names no Work, or names one under the key its re-integration is registered as."""
     if not outcome.works and outcome.integration is None:
-        raise ValidationError("Derive without Works")
+        raise with_check(ValidationError("Derive without Works"), "start.1672")
     for key in outcome.works:
         if key == "integration":
-            raise ValidationError("reserved Work key: integration")
+            raise with_check(ValidationError("reserved Work key: integration"), "start.1675")
 
 
 def _semantics_of(mutation: Mutation) -> str:
@@ -1725,7 +1764,7 @@ def _reviewed_derivation_checks(judged: ProjectView, work: Entity, outcome: Deri
     if (outcome.integration is not None and unfinished is None) or reviewed_unfinished:
         problems = reviewed_derivation_problems(outcome.works, reviewed=True)
         if problems:
-            raise ValidationError("; ".join(problems))
+            raise with_check(ValidationError("; ".join(problems)), "start.1728")
     if reviewed_unfinished and outcome.integration is None and normal:
         require_no_pre_existing_closure_gap(judged, phase_id, unfinished_id)
 
@@ -1786,10 +1825,14 @@ def _derivation_registration(
     if phase_id is not None:
         unfinished = judged.unfinished_integrations(phase_id)
         if len(unfinished) >= 2:
-            raise SpecViolation(f"Phase {phase_id} has {len(unfinished)} unfinished integrations: structural anomaly, STOP")
+            raise with_check(
+                SpecViolation(f"Phase {phase_id} has {len(unfinished)} unfinished integrations: structural anomaly, STOP"), "start.1789"
+            )
         if outcome.integration is not None:
             if unfinished:
-                raise SpecViolation("an unfinished integration already exists; START must not create another")
+                raise with_check(
+                    SpecViolation("an unfinished integration already exists; START must not create another"), "start.1792"
+                )
             specs["integration"] = WorkSpec(
                 outcome.integration.name,
                 outcome.integration.desired_state,
@@ -1818,12 +1861,12 @@ def _derivation_registration(
                     if outcome.works[key].before_integration:
                         relations.append(RelationSpec("requires_completion", key, unfinished[0].id))
             else:
-                raise StopError(
+                raise with_check(StopError(
                     f"Phase {phase_id} has no unfinished integration; START must design a re-integration for the new Work(s)",
                     code="reintegration_required",
-                )
+                ), "start.1821")
     elif outcome.integration is not None:
-        raise SpecViolation("standalone Works have no phase integration")
+        raise with_check(SpecViolation("standalone Works have no phase integration"), "start.1826")
     relations += list(outcome.relations)
     return specs, relations
 
@@ -2052,10 +2095,10 @@ def _cancel_decision(
             DECIDED_DISPLAY: display,
         }
     except (AttributeError, TypeError) as exc:
-        raise ValidationError(
+        raise with_check(ValidationError(
             f"cancel decision: the replan is not one a cancel decision can record ({exc}); a cancel is recorded only "
             "together with everything it decided, so nothing of it is recorded"
-        ) from exc
+        ), "start.2055") from exc
     kept = _read_back(decision)
     if kept is _UNKEPT:
         # The display is how a Project shows the Work, not part of what the cancel decides: one the record
@@ -2065,18 +2108,18 @@ def _cancel_decision(
         kept = _read_back(decision)
     if kept is _UNKEPT:
         where, value = _unkept_part(decision, "cancel")
-        raise ValidationError(
+        raise with_check(ValidationError(
             f"cancel decision: {where} ({type(value).__name__}) cannot be kept exactly by the recovery record; a "
             "cancel is recorded only together with everything it decided, so nothing of it is recorded"
-        )
+        ), "start.2068")
     # Only a decision a resume can read back as one is recorded: what the registration would refuse anyway is refused
     # here, before the cancel's events, instead of after them.
     problem = _decision_problem(kept)
     if problem is not None:
-        raise ValidationError(
+        raise with_check(ValidationError(
             f"cancel decision: {problem}; a cancel is recorded only together with everything it decided, so nothing "
             "of it is recorded"
-        )
+        ), "start.2076")
     return kept
 
 
@@ -2116,7 +2159,7 @@ def _typed(value: object) -> object:
         return ["dict", [[_typed(key), _typed(item)] for key, item in value.items()]]
     if isinstance(value, list):
         return ["list", [_typed(item) for item in value]]
-    raise TypeError(f"{type(value).__name__} is not a value a recovery record keeps")
+    raise with_check(TypeError(f"{type(value).__name__} is not a value a recovery record keeps"), "start.2119")
 
 
 def _unkept_part(value: object, where: str) -> tuple[str, object]:
@@ -2205,21 +2248,31 @@ def _cancel_to_finish(
     if invocation is None:
         invocation = {"operation": OWNER, "work_id": entry.id, "mode": mode}
     try:
-        records = [
-            record for record in MutationController(store).list_pending()
-            if record["owner"] == OWNER and record["invocation"] == invocation
-        ]
+        pending = MutationController(store).list_pending()
     except ReconcileRequired:
         return None
+    return _cancel_to_finish_in(store, entry, mode, invocation, pending)
+
+
+def _cancel_to_finish_in(
+    store: ProjectStore, entry: Entity, mode: str, invocation: dict[str, Any], pending: list[dict[str, Any]]
+) -> _ProvenCancel | None:
+    """:func:`_cancel_to_finish` over the pending records ``pending``: every step after the listing, read only.
+
+    START passes the records it lists itself; RB1's read-only START classifier
+    passes the pending set status hands it (which honours a recovery
+    disposition's ``excluding``). Nothing is listed or written here.
+    """
+    records = [record for record in pending if record["owner"] == OWNER and record["invocation"] == invocation]
     if not any(_cancel_event(effect) is not None for record in records for effect in _effects_of(record)):
         return None
     if len(records) > 1:
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"{len(records)} unfinished START mutations of {entry.id} ({mode}) "
             + ", ".join(sorted(record["mutation_id"] for record in records))
             + ", and one of them recorded a cancel; START carries on exactly one, and they are left as they are: "
             "reconcile required"
-        )
+        ), "start.2217")
     (record,) = records
     refuse = _cancel_refusal(record)
     read = _read_cancel_record(record, refuse)
@@ -2271,20 +2324,22 @@ def _read_cancel_record(record: dict[str, Any], refuse) -> _CancelRecord:
         and isinstance(effect.get("payload"), dict)
         for effect in effects
     ):
-        raise refuse("effects that cannot be read")
+        raise with_check(refuse("effects that cannot be read"), "start.2274")
     stages = _recorded_stages(effects, refuse)
     cancelled = [effect for effect in effects if _cancel_event(effect) is not None]
     if len(cancelled) != 1:
-        raise refuse("more than one work_cancelled event; START cancels one Work and then stops")
+        raise with_check(
+            refuse("more than one work_cancelled event; START cancels one Work and then stops"), "start.2278"
+        )
     (cancel_effect,) = cancelled
     stage = cancel_effect["stage"]
     if _CANCEL_DECISION not in cancel_effect["payload"]:
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {record['mutation_id']} recorded the cancel of {_cancel_event(cancel_effect).get('entity')} "
             "without the decision that cancel made: it was written before START recorded what a cancel decides, so "
             "neither its replan nor its outcome can be shown, and nothing stands in for them - not the Project, the "
             "events, a recorded commit or the IDs it reserved; it is left pending, exactly as it is: reconcile required"
-        )
+        ), "start.2282")
     by_stage = {name: [effect for effect in effects if effect["stage"] == name] for name in stages}
     lifecycle = by_stage[stage]
     events = [effect["payload"].get("record") for effect in lifecycle]
@@ -2295,27 +2350,35 @@ def _read_cancel_record(record: dict[str, Any], refuse) -> _CancelRecord:
         and all(isinstance(event[field], str) and event[field] for field in _EVENT_FIELDS)
         for effect, event in zip(lifecycle, events)
     ):
-        raise refuse(f"a cancel stage {stage!r} holding something other than lifecycle events")
+        raise with_check(
+            refuse(f"a cancel stage {stage!r} holding something other than lifecycle events"), "start.2298"
+        )
     work_id = events[-1]["entity"]
     if (
         [event["type"] for event in events] not in _CANCEL_EVENTS
         or any(event["entity"] != work_id for event in events)
         or not is_valid_id(work_id, "work")
     ):
-        raise refuse(f"a cancel stage {stage!r} holding other events than the cancel of one Work records")
+        raise with_check(
+            refuse(f"a cancel stage {stage!r} holding other events than the cancel of one Work records"), "start.2305"
+        )
     position = stages.index(stage)
     number = len({name for name in stages[:position] if name.startswith(f"{work_id}:lifecycle:")})
     if stage != f"{work_id}:lifecycle:{number}":
-        raise refuse(f"a cancel stage named {stage!r}, where the cancel of {work_id} records it as its next lifecycle stage")
+        raise with_check(
+            refuse(f"a cancel stage named {stage!r}, where the cancel of {work_id} records it as its next lifecycle stage"), "start.2309"
+        )
     reserved = record.get("reserved_ids")
     if not isinstance(reserved, dict):
-        raise refuse("reservations that are not a mapping")
+        raise with_check(refuse("reservations that are not a mapping"), "start.2312")
     if any(reserved.get(f"{stage}:event:{index}") != event["id"] for index, event in enumerate(events)):
-        raise refuse("cancel events under IDs the cancel did not reserve for them")
+        raise with_check(refuse("cancel events under IDs the cancel did not reserve for them"), "start.2314")
     if any(set(effect["payload"]) != {"record"} for effect in lifecycle[:-1]) or set(lifecycle[-1]["payload"]) != {
         "record", _CANCEL_DECISION
     }:
-        raise refuse("cancel events carrying something other than the decision on the work_cancelled event")
+        raise with_check(
+            refuse("cancel events carrying something other than the decision on the work_cancelled event"), "start.2318"
+        )
     return _CancelRecord(
         effects, stages, by_stage, stage, position, work_id, events, reserved, lifecycle[-1]["payload"][_CANCEL_DECISION]
     )
@@ -2451,30 +2514,40 @@ def _prove_cancel(
     decision = read.decision
     problem = _decision_problem(decision)
     if problem is not None:
-        raise refuse(f"a cancel decision with {problem}")
+        raise with_check(refuse(f"a cancel decision with {problem}"), "start.2454")
     work_id, stages, reserved, position = read.work_id, read.stages, read.reserved, read.position
     if decision["work_id"] != work_id:
-        raise refuse(f"a decision to cancel {decision['work_id']} on the events cancelling {work_id}")
+        raise with_check(
+            refuse(f"a decision to cancel {decision['work_id']} on the events cancelling {work_id}"), "start.2457"
+        )
     current = ProjectView.load(store)
     work = current.works.get(work_id)
     if work is None:
-        raise refuse(f"the cancel of {work_id}, which does not resolve")
+        raise with_check(refuse(f"the cancel of {work_id}, which does not resolve"), "start.2461")
     if mode == "single-work" and work_id != entry.id:
-        raise refuse(f"the cancel of {work_id}, where this single-work START runs {entry.id} alone")
+        raise with_check(
+            refuse(f"the cancel of {work_id}, where this single-work START runs {entry.id} alone"), "start.2463"
+        )
     if work.phase_id != entry.phase_id:
-        raise refuse(f"the cancel of {work_id}, outside the scope this START runs from {entry.id}")
+        raise with_check(
+            refuse(f"the cancel of {work_id}, outside the scope this START runs from {entry.id}"), "start.2465"
+        )
 
     # stages: the prefix is the one the cancel recorded its replan under, and only what the decision records follows
     prefix = decision["prefix"]
     expected_prefix = f"{work_id}:cancel:{len({name for name in stages[:position] if name.startswith(f'{work_id}:cancel:')})}"
     if prefix != expected_prefix:
-        raise refuse(f"the replan prefix {prefix!r}, where the cancel records its replan under {expected_prefix!r}")
+        raise with_check(
+            refuse(f"the replan prefix {prefix!r}, where the cancel records its replan under {expected_prefix!r}"), "start.2471"
+        )
     replan = _decided_replan(decision)
     works_stage, relations_stage, remove_stage = f"{prefix}:works", f"{prefix}:relations", f"{prefix}:remove"
     replanned = _replan_stages(prefix, replan)
     after = stages[position + 1:]
     if after[: len(replanned)] != replanned[: len(after)]:
-        raise refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} in that order")
+        raise with_check(
+            refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} in that order"), "start.2477"
+        )
     evidence_stage = f"{prefix}:achievement"
     if after[len(replanned): len(replanned) + 1] == [evidence_stage]:
         # RB5 (§32.37): the phase_completion evidence the cancel closed, recorded after its replan and before its
@@ -2485,14 +2558,18 @@ def _prove_cancel(
         evidence_id = reserved.get(evidence_stage)
         if not isinstance(evidence_id, str) or [effect["kind"] for effect in evidence] != ["create_file"] \
                 or evidence[0]["payload"].get("path") != review_paths.history_achievement_rel(evidence_id):
-            raise refuse(f"a {evidence_stage} stage other than the phase_completion evidence the cancel closes")
+            raise with_check(
+                refuse(f"a {evidence_stage} stage other than the phase_completion evidence the cancel closes"), "start.2488"
+            )
         replanned = replanned + [evidence_stage]
     committed = len(after) > len(replanned)
     commit_stage: str | None = None
     if committed:
         commit_stage = f"commit:{len({name for name in stages[: position + 1 + len(replanned)] if name.startswith('commit:')})}"
         if after[len(replanned):] != [commit_stage]:
-            raise refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} and then its commit")
+            raise with_check(
+                refuse(f"the stages {after} after the cancel stage, where its decision records {replanned} and then its commit"), "start.2495"
+            )
     for index, name in enumerate(stages[:position]):
         for effect in read.by_stage[name]:
             event = effect["payload"].get("record") if effect["kind"] == "append_event" else None
@@ -2501,13 +2578,15 @@ def _prove_cancel(
             if event.get("type") != "work_completed" or not any(
                 later.startswith(f"{event.get('entity')}:finalize:") for later in stages[index + 1: position]
             ):
-                raise refuse(f"a terminal lifecycle stage {name!r} no commit finalized before the cancel")
+                raise with_check(
+                    refuse(f"a terminal lifecycle stage {name!r} no commit finalized before the cancel"), "start.2504"
+                )
 
     # reservations: the decision's keys name them, and the IDs are never decided again
     def reserved_id(key: str, kind: str) -> str:
         value = reserved.get(key)
         if not isinstance(value, str) or not is_valid_id(value, kind):
-            raise refuse(f"no {kind} ID reserved under {key!r}")
+            raise with_check(refuse(f"no {kind} ID reserved under {key!r}"), "start.2510")
         return value
 
     work_ids = {key: reserved_id(f"{works_stage}:work:{key}", "work") for key in replan.new_works}
@@ -2515,7 +2594,7 @@ def _prove_cancel(
     relation_ids = [reserved_id(f"{relation_stage}:rel:{index}", "relation") for index in range(len(replan.add_relations))]
     used = list(work_ids.values()) + relation_ids + [event["id"] for event in read.events]
     if len(set(used)) != len(used):
-        raise refuse("one reserved ID used for two things the decision makes")
+        raise with_check(refuse("one reserved ID used for two things the decision makes"), "start.2518")
     additions = [
         Relation(relation_ids[index], spec.type, resolve_ref(spec.from_ref, work_ids), resolve_ref(spec.to_ref, work_ids))
         for index, spec in enumerate(replan.add_relations)
@@ -2539,22 +2618,26 @@ def _prove_cancel(
                 read.by_stage[works_stage], replan.new_works, work_ids, additions, related_ids, derivation_ids
             )
         except (AttributeError, TypeError, ValueError) as exc:
-            raise refuse(f"new Works the registration cannot write ({exc})") from exc
+            raise with_check(refuse(f"new Works the registration cannot write ({exc})"), "start.2542") from exc
         if not matches:
-            raise refuse(f"a {works_stage} stage other than the registration its decision makes")
+            raise with_check(
+                refuse(f"a {works_stage} stage other than the registration its decision makes"), "start.2544"
+            )
     if relations_stage in read.by_stage:
         if _as_recorded(read.by_stage[relations_stage]) != _as_recorded(Effect.add_relation("roadmap", r) for r in additions):
-            raise refuse(f"a {relations_stage} stage other than the relations its decision adds")
+            raise with_check(
+                refuse(f"a {relations_stage} stage other than the relations its decision adds"), "start.2547"
+            )
     if remove_stage in read.by_stage:
         if _as_recorded(read.by_stage[remove_stage]) != _as_recorded(Effect.remove_relation("roadmap", r) for r in removals):
-            raise refuse(f"a {remove_stage} stage other than the removals its decision makes")
+            raise with_check(refuse(f"a {remove_stage} stage other than the removals its decision makes"), "start.2550")
     file_effects = [effect for effect in read.effects if effect["kind"] in FILE_EFFECT_KINDS]
     finalize = read.by_stage[commit_stage] if committed else None
     if finalize is not None:
         try:
             owned = set(_owned_paths(file_effects))
         except (KeyError, TypeError) as exc:
-            raise refuse(f"file effects that cannot be read ({exc})") from exc
+            raise with_check(refuse(f"file effects that cannot be read ({exc})"), "start.2557") from exc
         commit = finalize[0]["payload"]
         paths = commit.get("paths")
         if (
@@ -2565,16 +2648,16 @@ def _prove_cancel(
             or not all(isinstance(path, str) for path in paths)
             or not set(paths) <= owned
         ):
-            raise refuse(f"a {commit_stage} stage other than the commit carrying the cancel")
+            raise with_check(refuse(f"a {commit_stage} stage other than the commit carrying the cancel"), "start.2568")
 
     # progress: what was applied is what the record says was done first, and only its last stage can be part-way
     applied, unapplied = _recorded_progress(store, file_effects, stages[-1], committed, refuse)
     if not committed and _in_head_event_log(store, [event["id"] for event in read.events]):
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {record['mutation_id']} recorded the cancel of {work_id}, but a commit it did not record "
             "already holds those events, so its own commit and push cannot be shown; it is left pending, exactly as "
             "it is: reconcile required"
-        )
+        ), "start.2573")
     proven = _ProvenRecord(
         dict(reserved), read.effects, read.by_stage, current, work_ids, additions,
         removals if remove_stage in read.by_stage else None, finalize, file_effects, applied, unapplied,
@@ -2598,17 +2681,21 @@ def _decide_cancel(proven: _ProvenRecord, read: _CancelRecord, cancel: _DecidedC
     work_id, types = read.work_id, read.types
     state = view.work_state(work_id)
     if state.state != IN_PROGRESS or state.has_target != ("work_target_removed" in types):
-        raise refuse(
+        raise with_check(refuse(
             f"a cancel of {work_id} as it never stood: without the cancel it is {state.state} "
             f"{'with' if state.has_target else 'without'} a target"
-        )
+        ), "start.2601")
     problems = validate_structure(view)
     if problems:
-        raise ValidationError(f"start precheck: {problems_text(problems)}", code="structure_invalid")
+        raise with_check(
+            ValidationError(f"start precheck: {problems_text(problems)}", code="structure_invalid"), "start.2607"
+        )
     standing = {relation.id: relation for relation in view.roadmap_relations}
     for removal in cancel.removals:
         if removal.id not in standing or standing[removal.id].to_record() != removal.to_record():
-            raise refuse(f"relation {removal.id} to remove, which the Project no longer holds as the cancel found it")
+            raise with_check(
+                refuse(f"relation {removal.id} to remove, which the Project no longer holds as the cancel found it"), "start.2611"
+            )
     validate_projection(
         projected_view(
             view,
@@ -2747,7 +2834,7 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
         return None
     refuse = _hold_refusal(mutation)
     if len(held) > 1:
-        raise refuse("more than one work_held event; START holds one Work and then stops")
+        raise with_check(refuse("more than one work_held event; START holds one Work and then stops"), "start.2750")
     if not all(
         isinstance(effect, dict)
         and isinstance(effect.get("stage"), str)
@@ -2755,7 +2842,7 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
         and isinstance(effect.get("payload"), dict)
         for effect in effects
     ):
-        raise refuse("effects that cannot be read")
+        raise with_check(refuse("effects that cannot be read"), "start.2758")
     stages = _recorded_stages(effects, refuse)
     by_stage = {name: [effect for effect in effects if effect["stage"] == name] for name in stages}
     (hold_effect,) = held
@@ -2764,14 +2851,18 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
 
     # the Work: one this START could have held, and the one it was invoked for when it runs one alone
     if not isinstance(subject, str) or not is_valid_id(subject, "work"):
-        raise refuse(f"a work_held event for {subject!r}, which is not a Work")
+        raise with_check(refuse(f"a work_held event for {subject!r}, which is not a Work"), "start.2767")
     if mode != "outer" and subject != work_id:
-        raise refuse(f"the hold of {subject}, where this single-work START runs {work_id} alone")
+        raise with_check(
+            refuse(f"the hold of {subject}, where this single-work START runs {work_id} alone"), "start.2769"
+        )
 
     # the stage: the lifecycle stage a hold of that Work records, holding exactly the events it records
     number = len({name for name in stages[:position] if name.startswith(f"{subject}:lifecycle:")})
     if stage != f"{subject}:lifecycle:{number}":
-        raise refuse(f"a hold stage named {stage!r}, where the hold of {subject} records it as its next lifecycle stage")
+        raise with_check(
+            refuse(f"a hold stage named {stage!r}, where the hold of {subject} records it as its next lifecycle stage"), "start.2774"
+        )
     lifecycle = by_stage[stage]
     events = [effect["payload"].get("record") for effect in lifecycle]
     if len(lifecycle) != len(_HOLD_EVENTS) or not all(
@@ -2781,23 +2872,29 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
         and all(isinstance(event[field], str) and event[field] for field in _EVENT_FIELDS)
         for effect, event in zip(lifecycle, events)
     ):
-        raise refuse(f"a hold stage {stage!r} holding something other than the lifecycle events a hold records")
+        raise with_check(
+            refuse(f"a hold stage {stage!r} holding something other than the lifecycle events a hold records"), "start.2784"
+        )
     if [(event["type"], event["entity"]) for event in events] != [(t, subject) for t in _HOLD_EVENTS]:
-        raise refuse(f"a hold stage {stage!r} holding other events than the hold of one Work records")
+        raise with_check(
+            refuse(f"a hold stage {stage!r} holding other events than the hold of one Work records"), "start.2786"
+        )
     if any(mutation.reserved(f"{stage}:event:{index}") != event["id"] for index, event in enumerate(events)):
-        raise refuse("hold events under IDs the hold did not reserve for them")
+        raise with_check(refuse("hold events under IDs the hold did not reserve for them"), "start.2788")
     if set(lifecycle[0]["payload"]) != {"record"} or set(lifecycle[-1]["payload"]) not in (
         {"record"},
         {"record", _HOLD_DECISION},
     ):
-        raise refuse("hold events carrying something other than the reason on the work_held event")
+        raise with_check(
+            refuse("hold events carrying something other than the reason on the work_held event"), "start.2793"
+        )
     reason: object = None
     held_display = decided_display(lifecycle[-1]["payload"], _HOLD_DECISION)
     if _HOLD_DECISION in lifecycle[-1]["payload"]:
         decision = lifecycle[-1]["payload"][_HOLD_DECISION]
         problem = _hold_decision_problem(decision)
         if problem is not None:
-            raise refuse(f"a hold decision with {problem}")
+            raise with_check(refuse(f"a hold decision with {problem}"), "start.2800")
         reason = decision["reason"]
 
     # around it: every decision before the hold finalized by a commit of its own, and after it only the commit
@@ -2808,13 +2905,17 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
     )
     undecided = [name for name in stages[finalized + 1:position] if _decides(by_stage[name])]
     if undecided:
-        raise refuse(f"the decisions {undecided} before the hold that no commit of their own finalizes")
+        raise with_check(
+            refuse(f"the decisions {undecided} before the hold that no commit of their own finalizes"), "start.2811"
+        )
     after = stages[position + 1:]
     committed = bool(after)
     if committed:
         commit_stage = f"commit:{len([name for name in stages[:position + 1] if name.startswith('commit:')])}"
         if after != [commit_stage]:
-            raise refuse(f"the stages {after} after the hold stage, where a hold records only its commit {commit_stage!r}")
+            raise with_check(
+                refuse(f"the stages {after} after the hold stage, where a hold records only its commit {commit_stage!r}"), "start.2817"
+            )
         work = ProjectView.load(mutation.store).works.get(subject)
         commit = by_stage[commit_stage][0]["payload"]
         paths = commit.get("paths")
@@ -2827,13 +2928,13 @@ def _hold_to_finish(mutation: Mutation, work_id: str, mode: str) -> _ProvenHold 
             or not all(isinstance(path, str) for path in paths)
             or not set(paths) <= set(_owned_paths([e for e in effects if e["kind"] in FILE_EFFECT_KINDS]))
         ):
-            raise refuse(f"a {commit_stage} stage other than the commit carrying the hold")
+            raise with_check(refuse(f"a {commit_stage} stage other than the commit carrying the hold"), "start.2830")
     elif _in_head_event_log(mutation.store, [event["id"] for event in events]):
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {mutation.id} recorded the hold of {subject}, but a commit it did not record already "
             "holds those events, so its own commit and push cannot be shown; it is left pending, exactly as it is: "
             "reconcile required"
-        )
+        ), "start.2832")
     return _ProvenHold(subject, reason, committed, held_display)
 
 
@@ -2999,7 +3100,7 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
         return ()
     refuse = _derivation_refusal(mutation)
     if not _reusable_derivations(note):
-        raise refuse("a form this START does not read back")
+        raise with_check(refuse("a form this START does not read back"), "start.3002")
     entries: list[dict[str, Any]] = note["derivations"]
     if not note["complete"] or not entries:
         return ()
@@ -3007,9 +3108,9 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
     for entry in entries:
         subjects.setdefault(entry["work_id"], []).append(entry)
     if mode != "outer" and set(subjects) != {work_id}:
-        raise refuse(
+        raise with_check(refuse(
             f"derivations of {sorted(subjects)}, where this single-work START runs {work_id} alone"
-        )
+        ), "start.3010")
     effects = mutation.effects
     if not all(
         isinstance(effect, dict)
@@ -3018,24 +3119,32 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
         and isinstance(effect.get("payload"), dict)
         for effect in effects
     ):
-        raise refuse("effects that cannot be read")
+        raise with_check(refuse("effects that cannot be read"), "start.3021")
     stages = _recorded_stages(effects, refuse)
     proven: dict[str, _ProvenDerivation] = {}
     for subject, mine in subjects.items():
         named = [entry["stage"] for entry in mine]
         if named != [f"{subject}:derive:{index}" for index in range(len(mine))]:
-            raise refuse(f"the derivations {named}, where a Work's are its derive stages in the order it decided them")
+            raise with_check(
+                refuse(f"the derivations {named}, where a Work's are its derive stages in the order it decided them"), "start.3027"
+            )
         recorded = [name for name in stages if name.startswith(f"{subject}:derive:")]
         if recorded != named[: len(recorded)] or len(named) - len(recorded) > 1:
-            raise refuse(f"the registration stages {recorded} recorded for the derivations {named}")
+            raise with_check(
+                refuse(f"the registration stages {recorded} recorded for the derivations {named}"), "start.3030"
+            )
         for index, entry in enumerate(mine):
             if entry["outcome"]["move"] and index != len(mine) - 1:
-                raise refuse("a derivation that removed the target and another after it, where a move ends the cycle")
+                raise with_check(
+                    refuse("a derivation that removed the target and another after it, where a move ends the cycle"), "start.3033"
+                )
             decided = _outcome_from_record(entry["outcome"])
             if entry["stage"] in recorded:
                 position = stages.index(entry["stage"])
                 if not any(_DECIDED_ON in effect for effect in effects if effect["stage"] == entry["stage"]):
-                    raise refuse(f"a registration {entry['stage']!r} recorded without the branch it was decided on")
+                    raise with_check(
+                        refuse(f"a registration {entry['stage']!r} recorded without the branch it was decided on"), "start.3038"
+                    )
                 if index + 1 < len(recorded):
                     between = stages[position + 1: stages.index(recorded[index + 1])]
                     carried = len(between) == 1 and between[0].startswith("commit:") and not any(
@@ -3050,10 +3159,13 @@ def _derivations_to_reuse(mutation: Mutation, work_id: str, mode: str) -> tuple[
                     if not carried and not (
                         not between and _registration_already_committed(mutation, subject, entry["stage"], decided)
                     ):
-                        raise refuse(
+                        # Two branches, two check IDs (RB11, ADM §A.2): Git stages between the derivations that are
+                        # not the single carrying commit read the record alone; no stage at all refuses because
+                        # HEAD and the Project do not show the registration committed.
+                        raise with_check(refuse(
                             f"the stages {between} between {entry['stage']!r} and the derivation after it, where a "
                             "derivation records only the commit that carries it"
-                        )
+                        ), "start.3053.between" if between else "start.3053.uncommitted")
             proven[entry["stage"]] = _ProvenDerivation(
                 subject, entry["stage"], decided, entry["moved_by"],
                 entry["stage"] in recorded, entry.get(DECIDED_DISPLAY),
@@ -3257,7 +3369,9 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
         and (event["type"], event["entity"]) == ("work_target_removed", last.work_id)
         and mutation.reserved(f"{lifecycle}:event:0") == event["id"]
     ):
-        raise refuse(f"a {lifecycle!r} stage other than the removal of the target the move records")
+        raise with_check(
+            refuse(f"a {lifecycle!r} stage other than the removal of the target the move records"), "start.3260"
+        )
     rest = after[1:]
     committed = bool(rest)
     if committed:
@@ -3268,23 +3382,23 @@ def _derive_move_to_finish(mutation: Mutation, derivations: tuple[_ProvenDerivat
         commit = [effect for effect in effects if effect["stage"] == commit_stage]
         paths = commit[0]["payload"].get("paths")
         if work is None or [effect["kind"] for effect in commit] not in (["git_commit"], ["git_commit", "git_push"]):
-            raise refuse(f"a {commit_stage} stage other than the commit carrying the move")
+            raise with_check(refuse(f"a {commit_stage} stage other than the commit carrying the move"), "start.3271")
         message = commit[0]["payload"].get("message")
         if not finalization_proven(_MOVE_FINALIZATIONS[last.moved_by], last.display, message):
-            raise _move_finalization_refusal(mutation, last, commit_stage, message)
+            raise with_check(_move_finalization_refusal(mutation, last, commit_stage, message), "start.3274")
         if (
             not isinstance(paths, list)
             or not paths
             or not all(isinstance(path, str) for path in paths)
             or not set(paths) <= set(_owned_paths([e for e in effects if e["kind"] in FILE_EFFECT_KINDS]))
         ):
-            raise refuse(f"a {commit_stage} stage other than the commit carrying the move")
+            raise with_check(refuse(f"a {commit_stage} stage other than the commit carrying the move"), "start.3281")
     elif _in_head_event_log(mutation.store, [event["id"]]):
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {mutation.id} recorded the move of {last.work_id}, but a commit it did not record "
             "already holds that event, so its own commit and push cannot be shown; it is left pending, exactly as "
             "it is: reconcile required"
-        )
+        ), "start.3283")
     return _ProvenMove(last.work_id, last.moved_by, committed, last.display)
 
 
@@ -3428,11 +3542,11 @@ def _recorded_registration(
     def reserved(key: str, kind: str) -> str:
         value = mutation.reserved(key)
         if not isinstance(value, str) or not is_valid_id(value, kind):
-            raise ReconcileRequired(
+            raise with_check(ReconcileRequired(
                 f"START mutation {mutation.id} holds the registration {stage!r} of a derivation it decided with no "
                 f"{kind} ID reserved under {key!r}; nothing is replayed and the record is left as it is: reconcile "
                 "required"
-            )
+            ), "start.3431")
         return value
 
     work_ids = {key: reserved(f"{stage}:work:{key}", "work") for key in specs}
@@ -3452,10 +3566,10 @@ def _recorded_registration(
         for index, spec in enumerate(relations)
     ]
     if not _registration_matches(recorded, specs, work_ids, resolved, related_ids, derivation_ids):
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {mutation.id} holds a {stage!r} stage other than the registration the derivation it "
             "decided makes; nothing is replayed and the record is left as it is: reconcile required"
-        )
+        ), "start.3455")
     return work_ids, resolved
 
 
@@ -3509,7 +3623,7 @@ def _require_work_review_not_closing(view: ProjectView, work: Entity, review: An
     if pending is not None:
         # RB5RR2-1: the slot is the kept record's own invocation (an outer record names the Work it was started for)
         named, mode = pending.invocation.get("work_id"), pending.invocation.get("mode")
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"START mutation {pending.id} (invocation: Work {named}, mode {mode}) keeps a review-v1 Work Review "
             f"operation pending, and {work.id} is now the last incomplete Work of reviewed Phase {work.phase_id}: its "
             "completion would close the Phase's current basis, whose phase_completion evidence the review-v1 Work "
@@ -3521,14 +3635,14 @@ def _require_work_review_not_closing(view: ProjectView, work: Entity, review: An
             "classifier proves it pending_reconcile_required, which that classifier does not prove for a START "
             "record: reconcile required",
             reason=CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE,
-        )
-    raise StopError(
+        ), "start.3512")
+    raise with_check(StopError(
         f"{work.id} is the last incomplete Work of reviewed Phase {work.phase_id}: its completion closes the Phase's "
         "current basis, whose phase_completion evidence the review-v1 Work Review terminal stage cannot record; it "
         "is completed by an ordinary START, which records that evidence with the completion. Nothing of it is run "
         "under review-v1 Work Review",
         code=CODE_WORK_REVIEW_CLOSES_REVIEWED_PHASE,
-    )
+    ), "start.3525")
 
 
 def _resumes_start(controller: MutationController, invocation: dict[str, Any]) -> bool:
@@ -3612,13 +3726,19 @@ def _phase_integration_gate(work: Entity, review: Any, phase_review: Any = None,
     if review is not None:
         # RB5J-1: never reviewed by an operation whose mutation is a review-v1 Work one (a single-work START has
         # already dropped the selector that does not apply; an outer one naming the integration was refused)
-        raise StopError(f"integration {work.id} is reviewed by Phase Integration Review alone, and this START runs "
-                        "review-v1 Work Review; it is not run under it and nothing of it is begun",
-                        code=CODE_SELECTORS_OUTER)
+        raise with_check(
+            StopError(f"integration {work.id} is reviewed by Phase Integration Review alone, and this START runs "
+                      "review-v1 Work Review; it is not run under it and nothing of it is begun",
+                      code=CODE_SELECTORS_OUTER),
+            "start.3615",
+        )
     if semantics is not None and semantics != SEMANTICS_REVIEWED:
-        raise StopError(f"integration {work.id} is a {work.phase_review_contract} integration and this START mutation "
-                        "runs legacy Phase integration semantics (it was begun without the semantics note); its Review "
-                        "is never run under them and the operation is never upgraded", code=CODE_PHASE_REVIEW_REQUIRED)
+        raise with_check(
+            StopError(f"integration {work.id} is a {work.phase_review_contract} integration and this START mutation "
+                      "runs legacy Phase integration semantics (it was begun without the semantics note); its Review "
+                      "is never run under them and the operation is never upgraded", code=CODE_PHASE_REVIEW_REQUIRED),
+            "start.3619",
+        )
     return True
 
 
@@ -3627,7 +3747,7 @@ def start(
     phase_review: object = None,
 ) -> StartResult:
     if mode not in MODES:
-        raise ValidationError(f"mode must be one of {MODES}: {mode!r}")
+        raise with_check(ValidationError(f"mode must be one of {MODES}: {mode!r}"), "start.3630")
     details: dict[str, Any] = {"work_id": work_id, "mode": mode}
     if phase_review is not None:
         # RB5 (§32.14): the Phase Integration Review selector is checked before the lock and writes nothing; it
@@ -3644,9 +3764,12 @@ def start(
         named = _named_work(store, work_id)
         if named is not None and not _work_review_applies(named, review, phase_review):
             if mode != "single-work":
-                raise StopError(f"integration {work_id} is reviewed by Phase Integration Review alone, and an outer "
-                                "START that also runs review-v1 Work Review cannot finish it by its ordinary commit "
-                                "and push; nothing was begun", code=CODE_SELECTORS_OUTER)
+                raise with_check(
+                    StopError(f"integration {work_id} is reviewed by Phase Integration Review alone, and an outer "
+                              "START that also runs review-v1 Work Review cannot finish it by its ordinary commit "
+                              "and push; nothing was begun", code=CODE_SELECTORS_OUTER),
+                    "start.3647",
+                )
             work_review_named = False
     if review is not None:
         # review-v1 (F1-D1, F3 §5.1 steps 1-2b): the selector and every entry refusal come before the
@@ -3683,12 +3806,25 @@ def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, 
     markers are never read as either contract, and a v1 record is never
     continued under P4 nor a P4 record under v1.
     """
-    slot = ("start", work_id, mode)
-    live = {"operation", "work_id", "mode"}
     try:
         pending = MutationController(store).list_pending()
     except ReconcileRequired:
         return  # an unreadable recovery area proves nothing here; it is reported where it always was, at open
+    _require_marker_compatible_in(pending, work_id, mode, review_contract=review_contract)
+
+
+def _require_marker_compatible_in(
+    pending: list[dict[str, Any]], work_id: str, mode: str, *, review_contract: str | None
+) -> None:
+    """:func:`_require_marker_compatible` over the pending records ``pending``, read only.
+
+    The one predicate START asks over the records it lists itself, and RB1's
+    read-only START classifier asks over the pending set status passes it
+    (which honours a recovery disposition's ``excluding``); nothing is listed
+    or written here.
+    """
+    slot = ("start", work_id, mode)
+    live = {"operation", "work_id", "mode"}
     for record in pending:
         invocation = record.get("invocation")
         if record.get("owner") != OWNER or not isinstance(invocation, dict):
@@ -3707,13 +3843,13 @@ def _require_marker_compatible(store: ProjectStore, work_id: str, mode: str, *, 
             else "a review-v1 Work invocation" if review_contract == work_invocation.REVIEW_CONTRACT
             else f"a P4 Work invocation ({review_contract})"
         )
-        raise ReconcileRequired(
+        raise with_check(ReconcileRequired(
             f"the unfinished START mutation {record.get('mutation_id')} carries "
             f"{'review markers ' + str(carried) if carried else 'no review markers'}, and this is "
             f"{described}; it is neither upgraded nor "
             "downgraded and is left untouched: reconcile required",
             reason="review_marker_mismatch",
-        )
+        ), "start.3710")
 
 
 def _start_locked(
@@ -3725,9 +3861,12 @@ def _start_locked(
         # RB5J-1 (§32.14), decided again on the Work read under the lock, before anything is written
         if not _work_review_applies(work, review, phase_review):
             if mode != "single-work":
-                raise StopError(f"integration {work_id} is reviewed by Phase Integration Review alone, and an outer "
-                                "START that also runs review-v1 Work Review cannot finish it by its ordinary commit "
-                                "and push; nothing was begun", code=CODE_SELECTORS_OUTER)
+                raise with_check(
+                    StopError(f"integration {work_id} is reviewed by Phase Integration Review alone, and an outer "
+                              "START that also runs review-v1 Work Review cannot finish it by its ordinary commit "
+                              "and push; nothing was begun", code=CODE_SELECTORS_OUTER),
+                    "start.3728",
+                )
             review = None
         elif not work_review_named:
             # the named Work is not (any longer) a marked integration: review= applies to it after all, and its
@@ -3784,10 +3923,10 @@ def _start_locked(
     # continues that Run (the Work Review Policy's error_disposition, F4 §11.16); legacy START is unchanged.
     with (start_review.abandon_unbegun_on_stop(mutation) if review is not None else abandon_on_stop(mutation)):
         if cancel is not None and mutation.id != cancel.mutation_id:
-            raise ReconcileRequired(
+            raise with_check(ReconcileRequired(
                 f"START resumed mutation {mutation.id}, not {cancel.mutation_id} whose cancel it had shown; both are "
                 "left as they are: reconcile required"
-            )
+            ), "start.3787")
         # A terminal lifecycle this mutation recorded without its finalization is
         # answered from the record before anything is replayed or chosen; so is a
         # hold, which is not terminal but is just as much a decision this START
@@ -3804,7 +3943,7 @@ def _start_locked(
         mutation.apply()  # resume: replay every recorded effect before continuing
         state = view.work_state(work_id)
         if state.terminal and not mutation.resumed:
-            raise SpecViolation(f"Work {work_id} is {state.state}")
+            raise with_check(SpecViolation(f"Work {work_id} is {state.state}"), "start.3807")
 
         session = _Session(store, mutation, destination, mode, executor, derivations, review=review, activation=activation,
                            phase_review=phase_review, semantics=semantics)
@@ -3867,7 +4006,9 @@ def _start_locked(
             result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, detail, gitcmd.head_commit(store.root))
             break
         if result.status == "moved" and nxt.id == result.work_id:
-            raise StopError(f"outer continuation makes no progress: {nxt.id} was re-selected right after branching", code="no_progress")
+            raise with_check(
+                StopError(f"outer continuation makes no progress: {nxt.id} was re-selected right after branching", code="no_progress"), "start.3870"
+            )
         unreviewable = session.unreviewable_integration(nxt)
         if unreviewable is not None:
             result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, unreviewable,
@@ -3901,11 +4042,13 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
     def precheck(view: ProjectView) -> None:
         work = view.works.get(work_id)
         if work is None:
-            raise ValidationError(f"Work unresolvable: {work_id}")
+            raise with_check(ValidationError(f"Work unresolvable: {work_id}"), "start.3904")
         if work.phase_id is not None:
-            raise SpecViolation("Phase Work plan exclusion is owned by Roadmap")
+            raise with_check(SpecViolation("Phase Work plan exclusion is owned by Roadmap"), "start.3906")
         if view.work_state(work_id).state != UNSTARTED:
-            raise SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}")
+            raise with_check(
+                SpecViolation(f"plan_excluded is only for unstarted Works; {work_id} is {view.work_state(work_id).state}"), "start.3908"
+            )
 
     # Resumed exactly as Roadmap's plan exclusion is (``roadmap._plan_exclude_locked``). The slot names this
     # operation, not START's own invocation: a START record of the same Work is never taken for one of these, and

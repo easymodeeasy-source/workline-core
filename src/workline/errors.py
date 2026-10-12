@@ -19,7 +19,22 @@ The hierarchy mirrors the stop contracts of ``rules/git``:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
+
+_Raised = TypeVar("_Raised", bound=BaseException)
+
+
+def with_check(exc: _Raised, check_id: str) -> _Raised:
+    """``exc``, already constructed, with the stable internal check ID of the call that raises it; nothing else changes.
+
+    The ID names one raising call at its raise site (``raise with_check(refuse(...), "<id>")``). It is an
+    unrendered attribute, ``check_id``: the message, ``code``, ``reason``, ``args`` and ``str(exc)`` stay exactly
+    what the constructor made, and no constructor or factory signature changes. Only RB1's read-only START
+    classifier reads it, to tell one raising call from another without ever reading the message text, ``code``
+    or ``reason`` (RB11, rev-11 BRIEF §41.3).
+    """
+    exc.check_id = check_id
+    return exc
 
 
 class WorklineError(Exception):
