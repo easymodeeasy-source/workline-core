@@ -273,6 +273,26 @@ class ReplayTests(ProbeCase):
         self.assertEqual(found.step, "S6.2")
 
 
+class EnvironmentalReplayTests(ProbeCase):
+    """T-B03, the replay half: an environmental replay ``reconcile`` is never the probe's reconcile; once the Human puts
+    the state back, START (and the probe) go on where they would."""
+
+    def test_an_applied_event_changed_by_someone_else_then_put_back(self) -> None:
+        self.question_wait_record()
+        log = self.store.root / EVENT_LOG
+        original = log.read_bytes()
+        started = self.event_effect(self.the_record(), "work_started")["payload"]["record"]
+        log.write_bytes(original.replace(started["at"].encode(), b"2001-01-01T00:00:00+00:00"))
+        found = self.assertUnknown(code="reconcile_required")
+        self.assertEqual(found.step, "S6.1")
+        refused = self.real_start()
+        self.assertIsInstance(refused, st.ReconcileRequired)
+        log.write_bytes(original)
+        self.assertEqual(self.assertResumable().step, "S8")
+        result = st.start(self.store, self.w1, "single-work", lambda ctx: st.QuestionWait("still?"))
+        self.assertEqual(result.status, "question_wait")
+
+
 class PushTests(ProbeCase):
     def setUp(self) -> None:
         super(ProbeCase, self).setUp()
