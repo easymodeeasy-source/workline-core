@@ -213,8 +213,13 @@ class ResumableTests(ProbeCase):
             rd.dispose_recovery(self.store.root, record["mutation_id"], REASON, confirmed=True)
         self.assertEqual(refused.exception.code, "recovery_disposition_target_ineligible")
         asked: list[str] = []
-        result = st.start(self.store, self.w1, "single-work", lambda ctx: asked.append(ctx.work.id) or st.QuestionWait("again"))
+        question = "which one, again? QW-5d2a"
+        result = st.start(self.store, self.w1, "single-work", lambda ctx: asked.append(ctx.work.id) or st.QuestionWait(question))
         self.assertEqual((asked, result.mutation_id), ([self.w1], record["mutation_id"]), "START resumes it and asks again")
+        # T-B30, the legacy run_work site (start.py:635-636): the question is never persisted (C-R7)
+        for path in self.store.root.rglob("*"):
+            if path.is_file() and ".git" not in path.relative_to(self.store.root).parts:
+                self.assertNotIn(question.encode("utf-8"), path.read_bytes(), path)
 
     def test_t_b46_a_failing_run_work_gate_after_a_clear_replay(self) -> None:
         cases = {

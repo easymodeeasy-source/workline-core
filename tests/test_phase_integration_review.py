@@ -880,6 +880,86 @@ class DeferredReviewTests(IntegrationRunCase):
         self.assertEqual(before[0], self.integration_runs(store, ids["integration"]))
         self.assertEqual([], MutationController(store).list_pending())
 
+    def test_rb11_integration_runs_and_the_start_records_holding_them_stay_fail_closed(self) -> None:
+        """RB11 (rev-11 TFI §B.3 / §41.5, OQ-RB11-06 unchanged; pins of unchanged behaviour):
+
+        * X-I: the START record holding an open Integration Run (it carries the reviewed semantics note) is
+          ``unknown_or_invalid`` for the START probe and is never disposed;
+        * T-B19: after runtime loss, its orphaned Integration Run is refused by ``dispose-recovery`` as
+          ``recovery_disposition_target_ineligible``, and nothing is written;
+        * T-B21: a Run at G4 HUMAN_WAIT, which its pending START still holds, is refused (recoverable): the START
+          record holding it is the other pending operation (``recovery_disposition_pending_operation``);
+        * T-B22: a Run final ``not_authorized`` at G4, its START record lost, is refused too. Today the kind gate
+          refuses every Integration Run before its state is asked (``recovery_disposition_target_ineligible``); the
+          rev-11 row's ``recovery_disposition_unnecessary`` is not what the base does, and RB11 changes no N4 gate,
+          so the actual refusal is pinned.
+        """
+        from helpers import cwd
+        from workline import recovery_disposition as rd, start_probe, status
+        from workline.mutation import inspect_records
+
+        reason = "the integration attempt will not be continued"
+
+        def refused(store, target: str, code: str) -> None:
+            head = git(store.root, "rev-parse", "HEAD")
+            with cwd(store.root), self.assertRaises(StopError) as raised:
+                rd.dispose_recovery(store.root, target, reason, confirmed=True)
+            self.assertEqual(code, getattr(raised.exception, "reason", None) or raised.exception.code, raised.exception)
+            self.assertEqual(head, git(store.root, "rev-parse", "HEAD"), "nothing committed")
+            self.assertFalse((store.root / ".workline" / "recovery" / "dispositions").is_dir(), "nothing written")
+
+        store, _, ids = self.marked_project("open-run")
+        with crash_at(sr, "_integration_launch"):
+            with self.assertRaises(Crash):
+                self.integrate(store, ids["integration"])
+        (pending,) = MutationController(store).list_pending()
+        self.assertEqual({"operation": "start", "work_id": ids["integration"], "mode": "single-work"},
+                         pending["invocation"], "a legacy key set, carrying the reviewed semantics note")
+        records = [item.record for item in inspect_records(store) if item.record is not None]
+        found = start_probe.inspect(store, pending, records)
+        self.assertEqual((found.classification, found.step), (start_probe.UNKNOWN_OR_INVALID, "S1.2"), found)
+        self.assertEqual(status.pending_classification(store, pending["mutation_id"])[0], status.UNKNOWN_OR_INVALID)
+        refused(store, pending["mutation_id"], "recovery_disposition_target_ineligible")
+        (run_id,) = self.integration_runs(store, ids["integration"])
+        self.runtime_gone(store)
+        git(store.root, "checkout", "--", ".workline/events/events.jsonl")
+        refused(store, run_id, "recovery_disposition_target_ineligible")  # T-B19
+
+        for name, claims, code in (("human-wait", (claim("human"),), "recovery_disposition_pending_operation"),
+                                   ("domain-repair", (claim("problem"),), "recovery_disposition_target_ineligible")):
+            with self.subTest(name):
+                store, _, ids = self.marked_project(name)
+                selector = phase_review(Discovery(*claims), adjudicator=Adjudicator())
+                with self.assertRaises(StopError):
+                    self.integrate(store, ids["integration"], selector, executor=answering_executor(st.Completed(), []))
+                (run_id,) = self.integration_runs(store, ids["integration"])
+                if name == "domain-repair":  # T-B22: the Run is final not_authorized; its START record lost
+                    self.runtime_gone(store)
+                    git(store.root, "checkout", "--", ".workline/events/events.jsonl")
+                refused(store, run_id, code)
+
+    def test_rb11_t_b30_a_question_at_the_repair_planning_site_is_asked_again_and_never_persisted(self) -> None:
+        """RB11 T-B30 (C-R7, OQ-RB11-07 unchanged), the start_review site (start_review.py:4980-4981): the executor's
+        question in the G4 repair planning context ends START with the record pending; the next START resumes the same
+        mutation and asks again; the question itself is never written anywhere. (The legacy run_work site,
+        start.py:635-636, is test_start_probe_flow's T-B04 / T-B30 row.)"""
+        question = "which of the two fixes do you want - QW-7c1e"
+        store, _, ids = self.marked_project("question")
+        selector = phase_review(Discovery(claim("problem")), adjudicator=Adjudicator())
+        log: list = []
+        first = self.integrate(store, ids["integration"], selector,
+                               executor=answering_executor(st.QuestionWait(question), log))
+        self.assertEqual(("question_wait", question), (first.status, first.detail))
+        (pending,) = MutationController(store).list_pending()
+        second = self.integrate(store, ids["integration"], selector,
+                                executor=answering_executor(st.QuestionWait(question), log))
+        self.assertEqual(("question_wait", first.mutation_id), (second.status, second.mutation_id))
+        self.assertEqual(2, len(log), "asked again, never answered from a record")
+        self.assertTrue(all(context is not None for _, context in log), "asked in the repair planning context")
+        for path in store.root.rglob("*"):
+            if path.is_file() and ".git" not in path.relative_to(store.root).parts:
+                self.assertNotIn(question.encode("utf-8"), path.read_bytes(), path)
+
     def test_g4_terminal_run_is_never_recovered_as_authorizable(self) -> None:
         """Ruling OQ-C, interruption / recovery: a G4-terminal Run resumed by its own START, or met by a fresh START
         after runtime loss, is never sealed, never named as set aside, never given a Receipt."""

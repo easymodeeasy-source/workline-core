@@ -606,5 +606,102 @@ class ValidationTests(DispositionCase):
         self.assertEqual(data["version"], 1)
 
 
+# --------------------------------------------------------------------------- RB11 RT-1a: START records (ADM §F re-scope)
+
+
+class StartTargetTests(DispositionCase):
+    """RB11 RT-1a (rev-11 TFI §B.2): N4 admits a START record only on the START probe's proof - a first refusal that is
+    an ALLOW class-R call - and only while it is the sole pending record; ``test_an_unknown_or_invalid_mutation_is_refused``
+    above stays the pin for every START record the probe does not prove (ADM §F, re-scoped)."""
+
+    def dead_end(self) -> str:
+        from start_probe_helpers import start_dead_end
+
+        self.store, target, self.ids = start_dead_end(self)
+        return target
+
+    def test_t_b10a_an_allow_first_refusal_start_record_alone_is_disposed(self) -> None:
+        target = self.dead_end()
+        before = self.runtime(target)
+        result = self.dispose(target)
+        self.assertEqual((result.status, result.target_id), ("disposed", target))
+        self.assertEqual(self.runtime(target), before, "the record's bytes stay as they were")
+        self.assertEqual(self.record_files(), [f"{target}.yaml"])
+        (entry,) = self.data()["pending"]["records"]
+        self.assertEqual((entry["mutation_id"], entry["classification"]), (target, status.DISPOSED_BY_HUMAN))
+        self.assertEqual(MutationController(self.store).list_pending(), [], "no owner resumes it")
+
+    def test_t_b12_leftover_effects_stop_the_next_start_until_the_human_commits_or_discards_them(self) -> None:
+        from helpers import completing_executor
+        from workline import start as st
+
+        for answer in ("discard", "commit"):
+            with self.subTest(answer):
+                target = self.dead_end() if answer == "discard" else None
+                if target is None:
+                    from start_probe_helpers import start_dead_end
+
+                    self.store, target, self.ids = start_dead_end(self, "proj-commit")
+                self.dispose(target)
+                w2 = self.ids["w2"]
+                with self.assertRaises(StopError) as stopped:
+                    st.start(self.store, w2, "single-work", completing_executor(self.store))
+                self.assertEqual(stopped.exception.code, "dirty_overlap", "the disposed record's applied effects")
+                if answer == "discard":
+                    git(self.store.root, "checkout", "--", ".")
+                    git(self.store.root, "clean", "-fdq", "--", ".workline/works")
+                else:
+                    git(self.store.root, "add", "--", ".workline")
+                    git(self.store.root, "commit", "-qm", "human: keep the cancelled attempt's effects", "--", ".workline")
+                result = st.start(self.store, w2, "single-work", completing_executor(self.store))
+                self.assertEqual(result.status, "completed")
+
+    def test_t_b13_twin_start_records_are_refused(self) -> None:
+        target = self.dead_end()
+        twin = "mut_01ARZ3NDEKTSV4RRFFQ69G5FAW"
+        source = self.store.mutations / f"{target}.yaml"
+        (self.store.mutations / f"{twin}.yaml").write_bytes(source.read_bytes().replace(target.encode(), twin.encode()))
+        reasons = {entry["reason"]["code"] for entry in self.data()["pending"]["records"]}
+        self.assertEqual(reasons, {"duplicate_pending_invocation"}, "T-B14b: never a START site reason")
+        self.assertRefused("recovery_disposition_pending_operation", self.dispose, target)
+
+    def test_t_b14_an_allow_dead_end_beside_another_pending_record_is_refused(self) -> None:
+        target = self.dead_end()
+        with project_operation(self.store, "bootstrap-backfill", {}):
+            other = MutationController(self.store).open(
+                "bootstrap-backfill", {"operation": "bootstrap-backfill", "project_root": str(self.store.root)},
+                WriteScope(files=(".claude/skills/workline/SKILL.md",))).id
+        self.assertEqual(status.pending_classification(self.store, target)[0], status.PENDING_RECONCILE)
+        found = self.assertRefused("recovery_disposition_pending_operation", self.dispose, target)
+        self.assertIn(other, found.message)
+
+    def test_t_b16_t_b18_a_review_v1_start_record_and_its_pending_generation_record(self) -> None:
+        """T-B18: a review-v1 (RB5RR-2-shaped) START record is unknown_or_invalid, N4 refuses it; T-B16 (F-37): with a
+        pending generation record of the same START both stay pending, the START record is refused for the other
+        record, and the generation record gets its fixed reason."""
+        from workline.review import work_invocation
+
+        self.store = self.new_project()
+        work = "w_01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        with project_operation(self.store, "start", {}):
+            target = MutationController(self.store).open(
+                "start", {"operation": "start", "work_id": work, "mode": "single-work", **work_invocation.markers()},
+                WriteScope(entities=(work,), files=LEDGERS)).id
+        self.assertEqual(status.pending_classification(self.store, target)[0], status.UNKNOWN_OR_INVALID)
+        self.assertRefused("recovery_disposition_target_ineligible", self.dispose, target)
+        with project_operation(self.store, "start", {}):
+            generation = MutationController(self.store).open(
+                "start", {"operation": "review-generation", "review_run_id": "rr_01ARZ3NDEKTSV4RRFFQ69G5FAX",
+                          "generation": 1, "planning_mutation_id": target, "review_kind": "work-review-v1"},
+                WriteScope(files=(".workline/review/runs/rr_01ARZ3NDEKTSV4RRFFQ69G5FAX.yaml",))).id
+        entries = {entry["mutation_id"]: entry for entry in self.data()["pending"]["records"]}
+        self.assertEqual(entries[generation]["classification"], status.UNKNOWN_OR_INVALID)
+        self.assertEqual(entries[generation]["reason"]["code"], "start_operation_not_probed_review_generation")
+        self.assertEqual(entries[target]["classification"], status.UNKNOWN_OR_INVALID)
+        self.assertRefused("recovery_disposition_pending_operation", self.dispose, target)
+        self.assertRefused("recovery_disposition_pending_operation", self.dispose, generation)
+        self.assertEqual({r["mutation_id"] for r in MutationController(self.store).list_pending()}, {target, generation})
+
+
 if __name__ == "__main__":
     unittest.main()

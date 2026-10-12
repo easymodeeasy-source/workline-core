@@ -112,6 +112,31 @@ class PendingStatusTests(StatusCase):
         self.assertEqual(entry["operation"], {"operation": "start", "work_id": work, "mode": "single-work"})
         self.assertEqual(entry["write_scope"], {"entities": [work], "files": sorted(LEDGERS)})
 
+    def test_start_owned_operations_the_start_probe_does_not_probe(self) -> None:
+        """RB11 RT-1a (ADM §F, the re-scope of the pin above): ``start`` now has an owner probe. A START record it
+        cannot prove keeps ``unknown_or_invalid`` / ``no_read_only_resume_probe`` (above: its Work would write its
+        lifecycle first); START-owned records of another operation keep ``unknown_or_invalid`` with a fixed reason -
+        ``review-generation`` and ``start-plan-exclude`` their own, any other value today's - and no record value
+        is echoed."""
+        self.store = self.new_project()
+        cases = {
+            "review-generation": "start_operation_not_probed_review_generation",
+            "start-plan-exclude": "start_operation_not_probed_plan_exclusion",
+            "x-unknown-op-91b": "no_read_only_resume_probe",
+        }
+        opened = {}
+        for index, operation in enumerate(cases):
+            entity = f"w_01ARZ3NDEKTSV4RRFFQ69G5FA{index}"
+            with project_operation(self.store, "start", {}):
+                opened[operation] = MutationController(self.store).open(
+                    "start", {"operation": operation, "work_id": entity}, WriteScope(entities=(entity,))).id
+        entries = {entry["mutation_id"]: entry for entry in self.data()["pending"]["records"]}
+        for operation, code in cases.items():
+            with self.subTest(operation=operation):
+                entry = entries[opened[operation]]
+                self.assertEqual((entry["classification"], entry["reason"]["code"]), (status.UNKNOWN_OR_INVALID, code))
+        self.assertNotIn("x-unknown-op-91b", entries[opened["x-unknown-op-91b"]]["reason"]["message"])
+
     def test_duplicate_records_of_one_invocation_are_reconcile(self) -> None:
         self.store = self.new_project()
         mutation_id = self.open_start(self.store, "w_01ARZ3NDEKTSV4RRFFQ69G5FAV")

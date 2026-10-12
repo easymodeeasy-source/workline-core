@@ -226,6 +226,7 @@ class ProbeCase(WorklineTestCase):
         """The probe for one pending START record: status's own entry point and the internal walk agree."""
         records = self.pending()
         target = mutation_id or self.the_record()["mutation_id"]
+        self.last_target = target
         (record,) = [r for r in records if r["mutation_id"] == target]
         with self.unchanged_tree():
             classification, reason = status.pending_classification(self.store, target)
@@ -272,6 +273,7 @@ class ProbeCase(WorklineTestCase):
         found = self.probe()
         self.assertEqual(found.classification, start_probe.UNKNOWN_OR_INVALID, found)
         self.assertEqual(found.code, code, found)
+        self.assertNotDisposable()
         if check is not None:
             self.assertEqual(found.check_id, check, found)
         if start_check is not None:
@@ -283,4 +285,55 @@ class ProbeCase(WorklineTestCase):
     def assertResumable(self) -> start_probe.StartProbe:
         found = self.probe()
         self.assertEqual(found.classification, start_probe.PENDING_RESUMABLE, found)
+        self.assertNotDisposable()
         return found
+
+    def assertNotDisposable(self, mutation_id: str | None = None) -> None:
+        """T-B15, must-not-widen: N4 refuses the START record just probed exactly as it refused every START record
+        before RB11 (``recovery_disposition_target_ineligible``) - or, with another record pending, for that
+        (``recovery_disposition_pending_operation``) - and writes nothing: no disposition, no commit, the record's
+        bytes unchanged."""
+        from workline import recovery_disposition as rd
+        from workline.errors import StopError
+
+        target = mutation_id or self.last_target
+        path = self.store.mutations / f"{target}.yaml"
+        before = (path.read_bytes(), git(self.store.root, "rev-parse", "HEAD"))
+        dispositions = self.store.root / ".workline" / "recovery" / "dispositions"
+        with self.assertRaises(StopError) as refused:
+            rd.dispose_recovery(self.store.root, target, "status does not prove this record a dead end", confirmed=True)
+        self.assertIn(refused.exception.code,
+                      ("recovery_disposition_target_ineligible", "recovery_disposition_pending_operation"),
+                      refused.exception)
+        self.assertEqual((path.read_bytes(), git(self.store.root, "rev-parse", "HEAD")), before)
+        self.assertFalse(dispositions.is_dir() and any(dispositions.iterdir()), "a disposition was written")
+
+
+def start_dead_end(case: WorklineTestCase, name: str = "proj"):
+    """A Project with one pending START record whose first refusal is an ALLOW call (2282).
+
+    W1 cancelled by a single-work START, stopped right after its commit stage
+    was recorded, the cancel's decision then gone from the record - a cancel
+    recorded without its decision, which START refuses from the record alone
+    (``pending_reconcile_required`` at ``start.2282``). Returns the store, the
+    record's mutation ID and the Work IDs.
+    """
+    store = case.new_project(name)
+    roadmap = case.simple_roadmap(store)
+    pa, rid = roadmap.phase_ids["a"], roadmap.roadmap_id
+    entry = case.simple_entry(store, pa, {"w1": "W1", "w2": "W2"})
+    w1, w2, i1 = entry.work_ids["w1"], entry.work_ids["w2"], entry.integration_id
+    (into,) = [r.id for r in ProjectView.load(store).roadmap_relations
+               if (r.type, r.from_id, r.to) == ("requires_completion", w1, i1)]
+    replan = Replan(remove_relation_ids=(into,), add_relations=(RelationSpec("requires_completion", "n1", i1),),
+                    new_works={"n1": WorkSpec("N1", "n1", phase_id=pa, roadmap_id=rid)})
+    with after_recording(r"^commit:\d+$"), case.assertRaises(Interrupted):
+        st.start(store, w1, "single-work", lambda ctx: st.Cancel(replan, "scope"))
+    (record,) = MutationController(store).list_pending()
+    for effect in record["effects"]:
+        if effect["kind"] == "append_event" and effect["payload"]["record"]["type"] == "work_cancelled":
+            effect["payload"].pop("cancel")
+    (store.mutations / f"{record['mutation_id']}.yaml").write_text(yamlish.dump(record), encoding="utf-8", newline="\n")
+    found = start_probe.inspect(store, record, [record])
+    case.assertEqual((found.classification, found.check_id), (start_probe.PENDING_RECONCILE, "start.2282"))
+    return store, record["mutation_id"], {"w1": w1, "w2": w2, "i1": i1, "pa": pa}

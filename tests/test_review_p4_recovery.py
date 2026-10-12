@@ -111,3 +111,36 @@ class WorkRuntimeCleanupTests(P4WorkCase):
         with self.assertRaises(ReconcileRequired) as raised:
             st.start(self.store, self.work_id, "single-work", executor, review=selector)
         self.assertEqual("review_recovery_incomplete", raised.exception.reason)
+
+    def test_rb11_t_b23_an_orphaned_p4_work_run_is_never_disposed(self) -> None:
+        """RB11 T-B23 (rev-11 TFI §B.3; Q-N4-A and OQ-RB11-06 unchanged): after runtime loss the P4 Work Run its START
+        held is refused by dispose-recovery, and nothing is written."""
+        import shutil
+
+        from helpers import cwd, git
+        from workline import recovery_disposition as rd
+        from workline.errors import StopError
+
+        executor = self.completing(write={"out.txt": b"broken\n"}, message="feat: out")
+        selector = work_review.WorkReviewP4((ByGeneration().binding(),), Adjudicator().binding(),
+                                            WorkRepairer({"out.txt": b"repaired\n"}).binding())
+        original = sr._finish_generation
+
+        def crash_after_g2(*args, **kwargs):
+            commit = original(*args, **kwargs)
+            if (args[1].invocation or {}).get("generation") == 2:
+                raise WorkCrash("after G2")
+            return commit
+
+        with mock.patch.object(sr, "_finish_generation", side_effect=crash_after_g2):
+            with self.assertRaises(WorkCrash):
+                st.start(self.store, self.work_id, "single-work", executor, review=selector)
+        shutil.rmtree(self.store.root / ".workline" / "runtime")
+        (run_id,) = ReviewStore(self.store).run_ids()
+        head = git(self.store.root, "rev-parse", "HEAD")
+        with cwd(self.store.root), self.assertRaises(StopError) as refused:
+            rd.dispose_recovery(self.store.root, run_id, "the P4 Work attempt will not be continued", confirmed=True)
+        self.assertEqual("recovery_disposition_target_ineligible",
+                         getattr(refused.exception, "reason", None) or refused.exception.code, refused.exception)
+        self.assertEqual(head, git(self.store.root, "rev-parse", "HEAD"))
+        self.assertFalse((self.store.root / ".workline" / "recovery" / "dispositions").is_dir())
