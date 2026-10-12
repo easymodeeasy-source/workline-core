@@ -16909,9 +16909,15 @@ Stage history (the stage text of 2026-10-10 read RESEARCH_PREPARED; it was repla
 2026-10-11  CONTRACT_PROPOSED    completed proposal delivered to the Control Plane (delivery recorded); one FORMAL_INDEPENDENT
                                  full-contract review (§39.4) passed, with eight LOW findings, each given a Control Plane disposition (§41)
             CONTRACT_FROZEN      Control Plane decision for RB11 alone, before this text was published
+2026-10-12  CONTRACT_FROZEN      Human decision on the single-account deployment; contract amendment SA-1 prepared and
+                                 reviewed (FORMAL_INDEPENDENT); corrected once at the Control Plane's direction
+                                 (revision 1); the corrected candidate reviewed (FORMAL_INDEPENDENT delta review)
+            CONTRACT_FROZEN      SA-1 revision 1 accepted by the Control Plane before this text was published (§41.28)
 ~~~
 
 The frozen contract is the reviewed contract: the integrated contract (manifest sha256 3e4d94a773dbdf40e7907d72b44b571a4ee1a09362ffdc6d2816d09d7e664562) with core v6e (sha256 0c0fd5f2c56ce001083d4146a6b9043f329428970dc499ce3c1d34ed64ef4606), applied with the Control Plane's dispositions of the formal review (RF-1..RF-8) and its Human acceptance timing decision (Q-1). §41 is its implementation brief and lists every component by sha256. The contract, its decision records, the review result (sha256 a88f3d6e9f7aadd2010ed8e658b0ba1ef0d9ed2b1827d0e4554c4e33ab2103b4) and the review evidence are recorded in the private execution archive. The adversarial review of the research is INTERNAL_ADVISORY (§39.4).
+
+Contract amendment SA-1 (single-account deployment trust boundary). On 2026-10-12 the Human decided, as final, that RB11 is deployed on one Windows PC under one existing Windows user account and one existing personal GitHub account, and accepted excluding from RB11's required guarantees resistance to deliberate privileged tampering by software or an operator already running with that account's full privileges. SA-1 applies that decision as a narrow forward amendment of the frozen contract. Its effective text is revision 1 (sha256 f625b66688b71e4d19190a65f9c5d47dba9d3cd1b506112c5136ceb9c01b4e64). The Control Plane directive that records the Human decision has sha256 27f7aeaeec7108f0a1a1a785c68c3113cfc6a802594ea918ffb6559e2900ab50, and the Control Plane directive that ordered revision 1 and recorded the Control Plane's dispositions has sha256 3ba2b30fd75ed73d2c33cacf444c405760d83e14befb4a15ae2ade5be4df9726. SA-1 was reviewed in a FORMAL_INDEPENDENT review, corrected once at the Control Plane's direction, reviewed again in a FORMAL_INDEPENDENT delta review and accepted by the Control Plane before this text was published; the review evidence is recorded in the private execution archive and is not identified by a hash here. SA-1 changes no earlier contract text. It is a binding, bounded qualification of the Control Plane rulings CP-1, CP-3 and CP-4, of the Control Plane decision point CP-8 (D2 hosting) and of the associated D1/D2 authority assumptions it lists; within those clauses its reading governs. It also constrains the storage, rollback-detection, anchor-recovery and inbox methods, fixes the D2 hosting target and sets the Human decision-entry requirement. Every other provision of the frozen contract keeps its authority except where SA-1 explicitly identifies a qualification. §41.28 restates SA-1, its identity classes and its precedence. SA-1 closes no proof obligation and authorizes no implementation.
 
 The freeze fixes the reviewed behavior. It closes no implementation, candidate, non-production or activation proof obligation; each stays NOT VERIFIED until its own gate (§41.0, §41.27). The freeze does not presume the Human's acceptance of the recorded operational constraints F-3, F-4 and OC-1..OC-5; that acceptance is required before G-ACT (§41). If a later Human answer changes normative contract meaning, an explicit, reviewed contract amendment precedes activation.
 
@@ -17258,13 +17264,18 @@ autonomous production landing by the new landing authority waits G-ACT
 
 Chronology. This section was prepared and independently reviewed as part of one exact freeze-amendment candidate before the freeze decision. It is published only when that candidate lands, after the Control Plane's freeze decision and a separate LANDING_AUTHORIZED for that candidate (§38.6). Neither preparing nor reviewing it froze the contract.
 
+Chronology of §41.28. §41.28 was added later by a contract amendment SA-1 documentation candidate. That candidate replaced an earlier formally reviewed candidate after one correction ordered by the Control Plane, was reviewed in a FORMAL_INDEPENDENT delta review, and is published only after the Control Plane accepted SA-1 and gave a separate LANDING_AUTHORIZED for it. Neither preparing nor reviewing it changed the contract.
+
 This section is the canonical implementation-control brief for §38 and the frozen RB11 contract. It does not replace them. Where wording conflicts, the frozen contract remains the semantic contract, under its own precedence:
 - Human decisions and Control Plane rulings come first.
+- Contract amendment SA-1 applies the Human decision and the Control Plane rulings of 2026-10-12; within the clauses it lists, it governs the earlier wording, including that of CP-1, CP-3, CP-4 and CP-8 (§41.28).
 - Core v6e is normative for the BL-074 lease, landing, observation ledger, retention refs and base refs.
 - The rev-11 components are normative only as register F classifies them.
 - Research evidence is never normative.
 
 Apart from the Control Plane's dispositions of the formal contract review that it carries, this section adds no transition, guard, state or proof obligation.
+
+Contract amendment SA-1 (§41.28) is carried in the same way. It is a binding, bounded qualification of the Control Plane rulings CP-1, CP-3 and CP-4, of the Control Plane decision point CP-8 and of the associated D1/D2 authority assumptions it lists. It adds no transition, guard or state. It replaces the operating-system isolation and credential-separation premises and checks it lists; constrains the storage, rollback-detection, anchor-recovery and inbox methods; fixes the D2 hosting target; sets the Human decision-entry requirement; and adds the checks SA-V1..SA-V10 and SR4-K1..SR4-K10 and the proof obligations PO-SA-CFG, SR4-IMP and SR4-CAND.
 
 It authorizes nothing by itself. Implementation starts only with IMPLEMENTATION_AUTHORIZED (§37.20), after the G-RB11-IMPL decisions (§41.0).
 
@@ -17306,6 +17317,13 @@ CP ruling RF      dispositions RF-1..RF-8 of the formal review and
 CP ruling Q       freeze-preparation decisions Q-1..Q-3                da6815b2fcfaf3beca4ec8d41e9ec4987dd8a48bb84de3b93d644d36e957c4aa
 formal review     result of the FORMAL_INDEPENDENT full-contract
                   review (PASS)                                        a88f3d6e9f7aadd2010ed8e658b0ba1ef0d9ed2b1827d0e4554c4e33ab2103b4
+amendment SA-1    contract amendment SA-1, revision 1: single-account
+                  deployment trust boundary (§41.28)                   f625b66688b71e4d19190a65f9c5d47dba9d3cd1b506112c5136ceb9c01b4e64
+directive SA-1    Control Plane directive recording the Human
+                  decision of 2026-10-12 (decision source of SA-1)     27f7aeaeec7108f0a1a1a785c68c3113cfc6a802594ea918ffb6559e2900ab50
+directive SA-1r1  Control Plane directive ordering revision 1, with
+                  its dispositions of configuration drift, joint
+                  restoration, anchor recovery and decision entry      3ba2b30fd75ed73d2c33cacf444c405760d83e14befb4a15ae2ade5be4df9726
 ~~~
 
 - **Status line of core v6e:** it keeps the words "not CONTRACT_FROZEN". The freeze state is shown by the Control Plane's decision, §38 and §37.20 (contract A §15, WD-1).
@@ -17340,6 +17358,8 @@ These decisions come from the Control Plane's freeze-preparation ruling. I-5 and
 | I-6 | Implementation scope and responsibility boundaries: the BL-071 / BL-072 parts, where the tools live (PO-38), PO-64 isolation and whether D3 is in scope, and the boundary with RB12 (CP-12) | PO-38, PO-64, B-3R | CP (Human) |
 | I-7 | N-1..N-13 are decided (contract A §14) and the 19 FRZ items are disposed (contract G.7). The implementation scope follows those dispositions (Writer addition) | — | CP |
 | I-8 | The separate IMPLEMENTATION_AUTHORIZED | — | CP / Human |
+
+Contract amendment SA-1 (§41.28) decides the D2 hosting target of I-4 and constrains I-1 (including the bounded anchor recovery SR-4), I-4 and I-6. The inbox durability method of I-4 and the other method decisions stay with the Control Plane.
 
 These decisions also carry three dispositions of the formal contract review:
 
@@ -17486,6 +17506,8 @@ L5 is mandatory and runs only inside the authority. Its goal is GitHub-side pre-
 - is BLOCKED for executors until B-1;
 - is BLOCKED for BL-074 acceptance until B-4.
 
+Under contract amendment SA-1, L1's premises B-2 and P12 are read as B-2-SA and P12-SA, and B-1 and B-4 as §41.28 states.
+
 ### 41.12 E-3 — launch registry and owner continuity
 
 - **Launch records.** A launch record (C-O1) is written at every launch of a writer, reviewer, focused run, Full or measurement.
@@ -17577,6 +17599,7 @@ External tools live where the PO-38 disposition puts them:
 - identified by exact identity (sha256; C-S3);
 - the D1 tools in the orchestrator store, and the landing authority in D2;
 - the concrete D2 hosting is decided at G-RB11-IMPL (CP-8).
+- under contract amendment SA-1, the D2 hosting target is fixed and the concrete deployment needs HA-12T and HA-12P (§41.28).
 
 The external tools are:
 - the landing-authority service (D2): registry, retention, isolated import, observation ledger, P7 section, base refs, reconciliation and R-CLEAR;
@@ -17616,6 +17639,8 @@ Two rows are extended by the review disposition. Both are G-RB11-CAND rows:
 
 The non-production GitHub rows are not candidate rows: T-G01..T-G33 and T-G35..T-G38, with T-G21b dropped. They run as G-GH-NONPROD after the HA-1 approvals.
 
+Under contract amendment SA-1, T-G27 is withdrawn, T-D69's expected outcome is re-scoped, and the candidate checks SA-V1..SA-V10 and SR4-K1..SR4-K10 are added (§41.28).
+
 ### 41.21 Fault-injection matrix
 
 The rev-11 TFI §E techniques TFI-F1..TFI-F35 that apply to Option B are used, plus the T-OB fault injection of contract D. They cover:
@@ -17640,6 +17665,8 @@ All of this runs in scratch Projects, scratch registries and scratch suite direc
 | BL-074 | Option B version (N7-A):<br>• **Acceptance.** The lease authority (core v6e §2-§3a) is accepted on exact tool identity: the T-OB rows, and the TFI §D rows classified KEEP or KEEP_RESCOPE.<br>• **Activation.** Activation and migration are done: G-ACT, with ACTIVATED after the N6-A quiescence.<br>• **Production wave.** S1-S11 are verified over at least one multi-lane production wave. That wave includes at least one P2 successor, as rev-11's "with stacked successors" required; depth 3 or more is allowed (T-OB-110; N7-A (1)).<br>• **Pre-rejection.** GitHub-side pre-rejection (enforcement level E-1) holds for every actor other than the owner:<br>&nbsp;&nbsp;– B-1 and B-2 are resolved;<br>&nbsp;&nbsp;– premises P1-P4, P6-P10, P12-P14, P15a, P16-P18 and P25 are proven in non-production. Premises P10 and P25 are read in the sense of register F §F.3: P10 is the correctness of the records that appear, and P25 is P25-det. P25-comp is not a closure condition (N7-A (2));<br>&nbsp;&nbsp;– P15b closes by its own path: GitHub documentation, or Control Plane acceptance under CP-3 / CP-10 (B-4).<br>• **Not claimed yet.** Exclusivity in D1 is not claimed until PO-64 (lane write isolation) is resolved. S4 authenticity is not claimed until B-3R is resolved.<br>• **CP-9** decides whether B-3 must be resolved.<br>• **No detection-only closure.** A qualified, detection-only guarantee does not close BL-074.<br>• **What G-ACT includes for BL-074 (N7-A (3)).**<br>&nbsp;&nbsp;– Each of these obligations is met at its register-G gate (classes as in G): PO-17, PO-B9, PO-43, PO-B4 (including base refs, BASE-RET, VD and the content check), PO-B5a, PO-B5c, PO-B7, premise P10, readback authenticity and App key custody.<br>&nbsp;&nbsp;– The Human's G-ACT judgment: acceptance of F-3 / F-4 / OC-1..OC-5. HP-1 / HP-2 are decided. That acceptance is not presumed at the contract freeze. If a later Human answer changes normative contract meaning, an explicit, reviewed contract amendment precedes activation (Control Plane, 2026-10-11, Q-1) |
 
 No BL leaves Completion scope. The BL-071 and BL-072 rows are the rev-11 rows with N-9 and N-3 applied. Whether BL-072 may close while H-4.1 items are carried is decided by the Control Plane at completion. That decision is part of N7-A; PO-34 itself is disposed.
+
+Under contract amendment SA-1, B-1, B-2, P12 and P13 in the BL-074 row are read as qualified in §41.28, and the unresolved joint store/anchor restoration case gates G-ACT. Nothing else in the row changes.
 
 ### 41.23 Regression order
 
@@ -17687,6 +17714,8 @@ an unverified premise turns out to be essential to safety
   the reference model would be committed, or its results presented as proof or test evidence
 (rev 10) the global cap would be exceeded or removed without a Human decision
 ~~~
+
+Under contract amendment SA-1, two of the reused items above are read as §41.28 states: "(rev 5) the registry would be writable from D1" and "(rev 5) an admin credential would be reachable from D1".
 
 Added by Option B. These list violations of core rules as stop conditions; they are not new rules:
 - **F1-F17.** The implementation would allow a transition that any of F1-F17 forbids. In particular F17:
@@ -17776,6 +17805,304 @@ RB11 is complete only when all of the following hold.
   - The exact candidate SHA, tree and diff are fixed for FORMAL_INDEPENDENT review.
   - The review passes, and a fresh post-Full audit is done.
 - **No early landing.** Nothing is pushed or landed before the Control Plane's authorization for that candidate.
+
+### 41.28 Contract amendment SA-1 — single-account deployment trust boundary
+
+Contract amendment SA-1 is part of the frozen RB11 contract (§38). Its effective text is revision 1. This subsection restates it in public-safe form. Where wording differs, SA-1 governs.
+
+**Identity of the sources.** (A) Published here, as complete sha256 values:
+
+~~~
+amendment SA-1, revision 1   normative forward amendment; governs the clauses it lists   f625b66688b71e4d19190a65f9c5d47dba9d3cd1b506112c5136ceb9c01b4e64
+decision directive           Control Plane directive recording the Human decision of
+                             2026-10-12 (decision source)                                 27f7aeaeec7108f0a1a1a785c68c3113cfc6a802594ea918ffb6559e2900ab50
+correction directive         Control Plane directive ordering revision 1, with its
+                             dispositions of the review findings, configuration drift,
+                             joint restoration, anchor recovery and decision entry       3ba2b30fd75ed73d2c33cacf444c405760d83e14befb4a15ae2ade5be4df9726
+~~~
+
+(B) Pinned privately. SA-1 holds a reference register with the complete sha256 of every private input it relies on, listed directly or through a pinned manifest or register. An authorized executor can retrieve each one from the private execution archive. The register covers:
+- the frozen contract components and the earlier registers;
+- the method packet;
+- the superseded first text of SA-1 and its first formal review.
+
+(C) Identified by private manifest only. The evidence of the delta review of revision 1 is recorded in the private execution archive under its package manifest. No hash of it is published here.
+
+**Human decision (2026-10-12, final):**
+- RB11 is deployed on one Windows PC, under one existing Windows user account and one existing personal GitHub account. Remote interaction is mainly through Chrome Remote Desktop.
+- There is no additional Windows account, no separate D2 machine, and no paid cloud or external server.
+- The Human accepts excluding from RB11's required guarantees any resistance to deliberate privileged tampering by software, or by an operator, already running with that account's full privileges.
+- The Human is not asked again to choose between multiple Windows accounts or computers. No other OS account is created, and no second human GitHub account is required.
+- The Human did **not** waive any of the following:
+  - HP-1 or HP-2;
+  - accidental data loss;
+  - ordinary concurrency faults;
+  - incomplete transactions;
+  - unknown GitHub outcomes;
+  - accidental GitHub configuration changes;
+  - silent loss of previously committed history.
+
+**Form.** SA-1 is a narrow forward amendment, not a new core version; there is no v6f.
+- These keep their text: core v6e, contract A-H, the rev-11 components, the earlier registers, and the earlier Human decisions and Control Plane rulings.
+- The earlier parts of this section keep their text too. This amendment only inserts into them: short pointers to this subsection, three identity rows, a chronology note, one precedence bullet and a paragraph on how SA-1 is carried.
+- SA-1 adds no transition, guard, state, authority reason, retry, Human outcome choice or exit.
+- SA-1 is a binding, bounded qualification of:
+  - the Control Plane rulings CP-1, CP-3 and CP-4;
+  - the Control Plane decision point CP-8 (D2 hosting);
+  - the associated D1/D2 authority assumptions it lists.
+- It also constrains the storage, rollback-detection, anchor-recovery and inbox methods. It fixes the D2 hosting target and the Human decision-entry requirement.
+
+**Configuration:**
+- **Shared account.** D1 and D2 run under the same Windows account. No RB11 guarantee may depend on that account lacking administrative privileges.
+  - D1 is the Execution Writer, the orchestrator, the launcher, the watchdog, lanes, RB11 operational tools, the request client and the mirror reader.
+  - D2 is one separate local authority process, the PLA. It has its own logical store (the registry), an anchor, a private Git clone, inbox processing, an outbox, a Human decision entry and a transaction interface.
+- **Separate responsibilities.** D1 and D2 remain distinct logical responsibilities, with separate source directories. They do not rest on separate Windows identities, or on operating-system isolation between users.
+- **Supported interfaces**, per actor:
+  - D1: the inbox drop area (through the request client), and reading the outbox and mirror;
+  - the Human: the decision entry, and the Human's own GitHub administration;
+  - the PLA: its own store, anchor, clone, inbox processing, outbox and GitHub calls.
+- **Chrome Remote Desktop** is the Human's way of controlling the existing session. It is not an RB11 authority interface.
+
+**Trust boundary:**
+- **Excluded (XT):** deliberate privileged bypass or intentional tampering by software or an operator already running with the account's full privileges.
+  - XT is any event that deliberately uses the account's capabilities outside the acting party's supported interface.
+  - A D1 actor that operates the Human decision entry, by any means, is outside D1's supported interface.
+  - Candidate code, tests and AI agent sessions running under the account are included when they act deliberately.
+  - XT is not broadened. Accidental events, including an accidental joint rollback or loss of both storage devices and accidental GitHub configuration changes, are never XT.
+- **In scope:** everything else. That includes:
+  - accidental corruption and data loss;
+  - concurrent operations and concurrency faults;
+  - stale or duplicate submissions;
+  - ordinary implementation bugs;
+  - unauthorized transitions through supported APIs;
+  - crash, interrupted and incomplete transactions, and incomplete persistence;
+  - missing or inconsistent evidence;
+  - unknown GitHub outcomes;
+  - unintended modification of authority records;
+  - accidental GitHub configuration changes;
+  - silent loss of committed history;
+  - duplicate writers;
+  - incorrect authority decisions;
+  - rollback and integrity failures.
+- **D1 inputs stay untrusted.** Every input that D1 submits through its supported interface is validated by the PLA exactly as before. B-3, B-3R and EXECUTOR_ASSERTED are unchanged.
+- **Undetected accidental classes.** Three classes are not detected by the mechanisms below, and are disclosed instead:
+  - a joint restoration or loss of the store and the anchor;
+  - pre-receipt loss of a submission, which the inbox method must prevent end to end;
+  - accidental modification of pending exchange-area or decision-entry items.
+- **Classification rule.** An event is XT only if it needs the deliberate use of the account's capabilities outside the acting party's supported interface. When that cannot be established, the event is treated as in scope.
+
+**Not claimed:**
+- that process separation provides operating-system privilege separation;
+- that the D2 store, anchor, clone, refs, decision-entry records, deployed PLA code or the GitHub App private key are unreadable or unmodifiable by code running under the account;
+- that agent-harness path denial is an operating-system privilege boundary (it is an operational control);
+- that D1 cannot reach the owner's GitHub credentials;
+- that the owner's existing GitHub credentials, or a successful configuration check, prove GitHub-side pre-rejection;
+- that the anchor is an independent trust boundary;
+- that Chrome Remote Desktop, the account or the host provide any RB11 guarantee;
+- that the deployment is safe in general. Each guarantee holds only as stated.
+
+**Logical D1/D2 boundary (P12-SA, replacing premise P12).** It is a tested application boundary, not an operating-system security boundary.
+
+*Terms:*
+- The **production D2 locations** are the D2 root and the anchor's directory.
+- The **exchange area** is the inbox drop area and the outbox and mirror. It lies outside the production D2 locations.
+- An **approved deployment step** is installing, upgrading or redeploying the PLA, or creating a store and an anchor. It is performed by the Human, or by a Human-approved procedure under HA-12T or HA-12P. It is not D1's normal operation.
+
+*Properties:*
+- (a) In normal operation, D1 uses only its supported interface. No D1 actor opens any file in the production D2 locations, not even to read it. No D1 configuration, environment or test fixture names such a location, and RB11 D1 tools refuse paths inside them.
+- (b) The PLA's source and the D1 tools' sources are separate. No D1 component imports or invokes the PLA's state-writing code. The PLA runs only as the lock-holding service process, from a deployed copy, never from a D1 working tree.
+- (c) The store, the anchor and the running configuration carry one deployment identity. On a mismatch, every operation refuses at entry and writes nothing. Tests never run against the production D2 locations.
+- (d) The PLA builds its own environment:
+  - pinned absolute executable paths;
+  - Git without the account's system or user configuration, hooks, credential helpers or includes;
+  - isolated Python;
+  - no proxy and no `.netrc`;
+  - no input taken from a D1 shell's environment.
+
+  The account's user-level configuration counts as D1-controlled configuration (P24, PO-65).
+- (e) The PLA verifies its deployed files and its deployed location against the deployment record when it starts, and refuses to start on a mismatch.
+- (f) An out-of-protocol change to the store, anchor, clone or refs is detected by the entry checks or by retention reconciliation, and fails closed. Pending exchange-area and decision-entry items are not detected this way.
+- (g) The production D2 locations and the exchange area lie outside every D1 workspace and repository, and outside any synchronization or backup tool that restores files automatically.
+- (h) No listener is reachable from the LAN or the Internet. A socket, if used, binds to loopback only.
+- (i) The decision entry is separate from the inbox, and only the Human enters decisions.
+  - A decision counts only if it is entered with a genuine Human-presence mechanism, one that D1 desktop or browser automation of the shared session cannot satisfy.
+  - An ordinary dialog button that an agent can click is not Human authorization.
+  - The Human chooses and approves the mechanism with HA-9. No particular device is mandatory.
+  - The mechanism must work in the Human's Chrome Remote Desktop workflow, or its limitation must be documented and accepted with HA-9. For example, a mechanism that needs a physical touch at the main PC does not work while the Human operates remotely.
+  - No D1 route creates a decision-entry record. A non-interactive invocation, or an attempt by D1 automation, fails validation. A decision arriving through the inbox is EXECUTOR_ASSERTED and not applied.
+  - No mechanism is PASS until it is verified (check SA-V8 at G-RB11-CAND; HA-9 at G-ACT).
+  - Authenticity against deliberate forgery of written decision records is claimed only if the approved mechanism has the PLA verify each decision cryptographically.
+- (j) The PLA is never a process owned by the watchdog or launcher.
+- (k) Every D1 AI agent session denies reading, writing and executing in the production D2 locations and the key path, through its harness permission rules. This is an operational control.
+
+These properties are verified at G-RB11-CAND by checks SA-V1..SA-V10, on a scratch D2 layout without real GitHub mutation authority. Specific checks are repeated at deployment: the D2 locations and their placement, the device identity of the anchor, no listener, SA-V1 and SA-V9 against the real D1 environment, and the agent-session deny rules.
+
+**GitHub authority, configuration drift and keys:**
+- **Unchanged:**
+  - PO-51 (a): GitHub-side pre-rejection of unapproved `main` updates. Local process policy never substitutes for it.
+  - The rulesets R1 and R2, with the PLA App as the sole R2 bypass and as the R1 check source. A GitHub App is an application identity, not a second human account.
+  - P7, the single authorized `updateRefs` submission, and no transparent retry.
+  - The Human approvals for the App, the keys (HA-3P keeps "non-exportable where supported"), the rulesets, the bypass policy, non-production tests and activation. RB11 never creates or changes any GitHub resource, setting, App, key or credential.
+- **Accidental `main` updates with the owner's credentials.** Software under the account can reach the owner's credentials by accident. A `main` update made with them is pre-rejected only if premises P1, P2 and P8 hold:
+  - P2 means that rulesets govern REST ref updates, the contents API, the merges API and web-UI commits.
+  - The premises are shown in non-production by T-G05, T-G06, T-G11..T-G14, T-G16 and T-G33, for each kind of owner credential present.
+  - The premises stay EVIDENCE_PENDING until G-GH-NONPROD. Otherwise B-1 stays BLOCKED for that path, and detection is not substituted.
+- **Configuration drift (Control Plane disposition of 2026-10-12).** In the approved single-account deployment, accidental mutation of a GitHub protection configuration is not claimed to be impossible. However:
+  - configuration integrity is positively checked at the required gates, including every landing admission;
+  - known or suspected drift blocks operation;
+  - inability to verify the required protection blocks the relevant GitHub operation;
+  - GitHub-side pre-rejection remains required under the configured policy;
+  - no local process rule substitutes for remote enforcement;
+  - a successful check is not proof that the configuration can never change;
+  - any race or other gap affecting the original protection guarantee stays an explicit proof obligation.
+
+  This narrow qualification does not weaken P7, the rulesets, the App bypass restrictions, the single-submission requirements, or BL-074's pre-rejection of `main` updates. B-1 and the applicable GitHub gates stay BLOCKED until the required evidence is obtained. No protection premise is PASS.
+- **App private key:**
+  - only the PLA uses it, and its location is configured only in D2;
+  - the supported D1 workflow never reads, handles, copies, prints or logs it;
+  - deliberate access by same-account software is not defended against;
+  - an exposure, including an accidental read into an agent transcript, is a key compromise, followed by rotation.
+- **Executor credentials (HA-6, HA-7 as qualified):**
+  - RB11 D1 components and tests never use an admin-capable GitHub credential, or a credential of another GitHub account. The exception is the non-production administrator tests: they are run by the Human, or by a Human-approved procedure, against the non-production repository only, and only after their approvals.
+  - From the credential-separation step of the activation order on, the environment configured for the executor, the lanes and the RB11 tools presents no such credential. That includes admin browser sessions reachable through desktop- or browser-automation tools. This is a Human-approved configuration, checked by V-1, V-2, V-3, V-6 and V-7.
+  - Until that step, the executor's environment may hold the owner's credential as today. The existing HD-2W procedure stays as it is until landings move to the PLA.
+
+**Storage, durability and rollback:**
+- **Method directions, retained subject to proof:**
+  - SQLite in WAL mode with `synchronous=FULL`;
+  - atomic conditional store transactions;
+  - an external durable anchor of the committed history;
+  - an operating-system single-instance lock plus one execution thread.
+
+  Scratch probes are not evidence for PO-43, PO-17 or PO-B9.
+- **PO-43's failure model.** Rollback detection is claimed only while at least one of the store and the anchor keeps every transaction whose anchor record was durable. Host-level failure, flush-ignoring devices and the joint restoration case below lie outside it. Being outside it does not exclude the joint restoration case from RB11's required guarantees.
+- **The anchor.** It is on a physical device different from the store's, established by a device-identity check recorded at deployment. It separates single-device and single-file failures. It is not a trust boundary, and it is not independent of host-level failure.
+- **Per-transaction anchoring.** Every committed store transaction is anchored before the next one commits, and before any external effect that depends on it. If an anchor write fails, or its outcome is unknown, nothing further commits and no effect is performed.
+- **Entry check.** Each operation compares store integrity, the history chain and the store head with the anchor. Any inconsistency is a stop: every operation refuses at entry, no external effect runs, and nothing is written (N-11 (3)).
+- **Bounded one-transaction anchor recovery (SR-4).** When the store is exactly one committed transaction ahead of the anchor, the authority is first in that stop. It is not unconditional automatic recovery.
+
+  A recovery step may re-anchor only if it positively establishes all of the following:
+  - the store history is intact and consistent;
+  - the previous anchored transaction matches the verified predecessor of the last commit;
+  - the extra transaction is complete and durable;
+  - no history rewrite or rollback is being inferred as a new commit. That is, positive evidence that the extra transaction's anchor record was never durable;
+  - no unknown external-effect attempt can be concealed;
+  - the transaction's record, payload and digest match the frozen rules;
+  - the re-anchoring is durable and independently verified before ordinary operation resumes;
+  - a crash during recovery never authorizes a GitHub submission;
+  - the recovery chooses no landing outcome, releases no undecided attempt and resends nothing;
+  - any failed check keeps the stop.
+
+  Limits on the recovery:
+  - **A one-record difference is not proof.** With a single anchor, a cleanly missing final anchor record cannot by itself be told apart from a record that was durable and lost after an external effect. That case is not automatically re-anchored unless the implementation adopts, and proves at G-RB11-CAND, a positive evidence form for it.
+  - **Fallback:** the stop, followed by Human-supervised reconciliation. That reconciliation chooses no outcome, releases nothing and resends nothing. It re-establishes the anchor only on positive evidence, or by a separate Control Plane / Human decision.
+  - **Not a general permission.** The recovery never clears another mismatch, rewrites evidence, or infers that a submission never occurred.
+  - **Proof obligations.** The recovery procedure is fixed at G-RB11-IMPL. Its crash and rollback-injection cases run at G-RB11-CAND.
+- **No automatic initialization or restore:**
+  - a missing store or anchor is a stop;
+  - nothing initializes either automatically;
+  - they are created only for the first deployment of a deployment identity; any later re-creation needs a separate Control Plane / Human decision;
+  - no RB11 tool restores either, and the anchor is never in the store's backup set;
+  - a Human restore is positive evidence only if it contains every transaction the anchor records, chained to the anchor head.
+- **Joint restoration or loss of the store and the anchor (SA-JOINT): unresolved.** The Control Plane has not accepted it as a waiver of HP-1, HP-2 or rollback protection.
+  - **What happens.** When the restoration leaves them at the same point, the store and the anchor agree with each other; when it leaves the store exactly one transaction ahead, the anchor-recovery stop applies, but the lost later transactions are not identified. Only a lost transaction that changed GitHub is partly caught: a lost landing is caught at the next landing admission, and a reverted lost update is caught only if the sensors report it. Reporting completeness is not assumed.
+  - **What can be lost or falsified:**
+    - a lost PREPARED(1) can lead recovery to record a false ABORTED for an attempt that may have applied;
+    - an attempt that was never sent or never applied can disappear, with its HP-1 and HP-2 protection;
+    - a lost landing leaves the recorded `main` history, so the landing guard against reusing it no longer excludes it;
+    - lease grants can be lost, so units can be granted again while the old lane still holds its work;
+    - after a joint loss, HP-1 and HP-2 still forbid presuming the outcome of any attempt.
+  - **Why the design cannot detect it.** The two-disk anchor cannot detect a joint restoration.
+  - **Who resolves it, and how.** Resolving it needs evidence (an independent rollback witness), verified mitigation, or an explicit new Human acceptance. Mitigation makes the event less likely but does not prevent it. The Control Plane and the Human own the decision. Meanwhile, the no-restore and placement rules above make the event less likely; they do not prevent it.
+  - **Gate and stop.** It gates the PO-43 residual decision at G-RB11-CAND and G-ACT. Until it is resolved, G-ACT is not granted, and no autonomous production landing may rely on a joint-rollback exclusion. SA-JOINT does not prevent preparation and scratch testing without real GitHub mutation authority.
+- **Loss of either storage device** stops the authority until a case-specific Control Plane / Human decision. It is for the Control Plane at G-RB11-CAND, within the PO-43 residual decision.
+- **Inbox durability (PO-B10).** The requirement is unchanged: a method that can lose a submission is not accepted. Without access-control protection, the inbox must be durable, with an end-to-end receipt. For example, the submitter keeps a submission until its receipt (sha256) appears in the outbox, and submits it again otherwise; the PLA treats a submission whose sha256 it has already received as a duplicate. That resubmission is request-level, not a landing retry. The PLA itself never drops a submission.
+
+**Gates and proof obligations as qualified:**
+- **B-1-SA.** Pre-rejection against the executor and lanes for every `main` update that does not go through the PLA, including accidental updates with the owner's credentials. It needs all of the following:
+  - HA-6 and HA-7 as qualified;
+  - V-1, V-2, V-3, V-6, V-7 and V-8;
+  - P1, P2 and P8 proven in non-production;
+  - P13 as qualified (no admin session reachable by D1 automation);
+  - P12-SA;
+  - the configuration-drift checks above.
+
+  The Control Plane's narrow acceptance of the drift qualification does not resolve B-1. BLOCKED.
+- **B-2-SA.** D2 as the separate local process above. Its target is fixed by the Human decision and SA-1. It needs HA-2P, HA-3P and HA-12P (an approved deployment step: a separate process under the account, its production D2 locations, an anchor on a verified different device, no listener) and P12-SA. BLOCKED. No RB11 registry becomes authority before it is resolved.
+- **B-3, B-3R and PO-64:** unchanged and BLOCKED.
+  - A separate operating-system principal for D3, and per-lane operating-system identities for PO-64, cannot be provided in this configuration.
+  - S4 authenticity and exclusivity in D1 are not claimed.
+- **B-4:** unchanged, with P12-SA, P13 as qualified, B-1-SA and B-2-SA. BLOCKED. A detection-only guarantee still does not close BL-074 (§41.22).
+- **SA-JOINT:** unresolved and not accepted, as stated above. It gates the PO-43 residual decision at G-RB11-CAND and G-ACT.
+- **Withdrawn and replaced, not waived:**
+  - HA-8's dedicated-account form is withdrawn. Its alternative, the Human's account with HA-6 and HA-7, applies as qualified.
+  - V-4, V-5 and T-G27 are withdrawn, and P12-SA and SA-V1..SA-V10 replace them.
+  - T-D69's expected outcome becomes: no supported D1 route writes, and an out-of-protocol write is detected and fails closed.
+- **Added candidate checks:** SA-V1..SA-V10 and the anchor-recovery cases SR4-K1..SR4-K10.
+- **I-4 (§41.0):** the D2 hosting target is fixed. The inbox method (PO-B10) stays a Control Plane method decision. The concrete deployment, including the anchor device, needs HA-12T and HA-12P.
+- **I-6 (§41.0):** unchanged, except that PO-64 and D3 cannot use operating-system isolation here, and that the PLA's sources are separate and it runs from a deployed copy.
+- **Stop conditions of §41.24, as read under SA-1:**
+  - "The registry would be writable from D1" reads: writable through D1's supported interface, or a D1 actor would open a file in the production D2 locations in normal operation. Approved deployment steps and case-specific Human recovery are not normal operation.
+  - "An admin credential would be reachable from D1" reads: an admin-capable credential, or one of another GitHub account, would be configured for, passed to, read, used or logged by an RB11 D1 component or test, apart from the Human-run non-production administrator tests; or, from the credential-separation step on, it would be presented by the executor's or lanes' configured environment.
+  - The rev-11 brief's wording "D1-controlled configuration, hooks or upload-pack would run under D2's account" reads: in the PLA's processes.
+  - Mere presence under the shared account is a disclosed residual, not a stop.
+
+**Retained unchanged:**
+- N-10, HP-1 and HP-2;
+- the single authorized `updateRefs` submission, TX-PREP and TX-SUB, PO-B7 (no transparent retry) and BLOCKED_UNDECIDED;
+- the durable record and transaction requirements;
+- PO-17 (operating-system lock and in-process exclusion);
+- PO-B9;
+- PO-43 within the stated failure model;
+- PO-B4 and full retention verification;
+- R-CLEAR;
+- PO-B10's durable inbox and no-loss requirement;
+- F1-F17;
+- S1-S11, with only their operating-system isolation premises qualified;
+- the positive-evidence rules and evidence reconciliation;
+- exact-candidate review and landing authority;
+- PO-51 (a), H-NEW-01..06, H-1..H-4, HD-2W, HD-RB11-DP5, HD-RB11-CP13 and HD-RB11-DP4-ALT2;
+- the Human acceptance of F-3, F-4 and OC-1..OC-5 before G-ACT;
+- the RB11-RB14 ownership boundaries.
+
+**Not authorized:**
+- automatic landing without review;
+- evidence-free success;
+- retries after unknown results;
+- direct D1 manipulation of authority state through the supported application protocol;
+- ruleset changes without separate approval;
+- credential exposure to the network;
+- implementation proofs treated as PASS;
+- relaxing unrelated frozen Human decisions;
+- non-production GitHub mutation tests before HA-1 and the HA-2T, HA-3T, HA-5T and HA-12T approvals.
+
+**Residuals (disclosed):**
+- any code under the account can read and write the production D2 locations;
+- the owner's credentials, and any other GitHub credential present under the account, stay there. Configuration drift is detected, not prevented, under the Control Plane's narrow acceptance;
+- candidate code, tests and agent sessions are not contained;
+- the joint loss or restoration of the store and the anchor is unresolved, not accepted, and gates G-ACT;
+- the anchor shares the host (for the Control Plane at G-RB11-CAND);
+- the remote-access and sign-in path is outside RB11, and RB11 provides no guarantee against its compromise;
+- written decision records and evidence channels are not authenticated against deliberate same-account forgery;
+- an agent session may read D2 content or the key by accident;
+- the loss of either storage device stops the authority until a case-specific decision (for the Control Plane at G-RB11-CAND);
+- without a proven evidence form, every one-ahead anchor case needs Human-supervised reconciliation.
+
+**Precedence and applicability.**
+- Within the clauses it lists, SA-1 governs the earlier wording of:
+  - core v6e and contract A-H;
+  - the rev-11 components and the earlier registers;
+  - CP-1, CP-3, CP-4 and CP-8;
+  - §38 and this section.
+- What each qualification keeps:
+  - CP-1 keeps one trusted atomic authority. Its "not writable by lanes" becomes "no supported write route, with detection and a fail-closed stop".
+  - CP-3 keeps detection, blocking of landing, checking at admission and the rule that the orchestrator does not retain administrator credentials. Its precondition is narrowed as described for configuration drift, and the orchestrator's configured environment presents no administrator credential from the credential-separation step on.
+  - CP-4 keeps the App and its keys separated from the lanes, logically.
+  - CP-8's hosting target is fixed.
+- SA-1 applies the Human decision and the Control Plane rulings of 2026-10-12. If SA-1 departs from either directive, the directive governs. If SA-1 appears to conflict with a Human decision or Control Plane ruling that it does not name, that decision or ruling governs. In both cases the issue goes to the Control Plane.
+- Every other provision of the frozen contract keeps its authority, except where SA-1 explicitly identifies a qualification. If such a clause turns out to rest on operating-system isolation and cannot be met in this configuration, the affected seam stops and is reported to the Control Plane.
+- SA-1 applies to RB11 implementation, verification, deployment and activation. It does not apply to RB12-RB14, to the Workline runtime's own semantics, or to HD-2W landings before landings move to the PLA.
+- SA-1 authorizes no implementation, no D2 service, no production storage, no credential, App or ruleset change, no G-ACT and no landing. Every proof obligation stays NOT VERIFIED.
 
 ## 42. RB12 implementation brief — reserved
 
