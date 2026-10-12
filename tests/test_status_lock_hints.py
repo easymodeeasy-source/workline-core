@@ -60,6 +60,18 @@ class LockHintTests(StatusCase):
         self.assertEqual((found["holder_hint"], found["holder_acquired_at"]), ("present", None))
         status.render_json(self.model())  # the model renders
 
+    def test_t_a24_operation_and_mutation_id_utf8_cannot_carry_are_left_out_too(self) -> None:
+        """RB11 repair RTR-8: the guard covers every holder field the hint shows, not only the one RT-2 added."""
+        self.store = self.new_project()
+        self.store.locks.mkdir(parents=True, exist_ok=True)
+        self.store.lock_holder.write_text(
+            '{"workline": "%s", "version": 1, "operation": "start\\ud800", "acquired_at": "2026-10-12T01:02:03+00:00", '
+            '"mutation_id": "mut_\\udfff"}' % oplock.HOLDER_MARKER, encoding="utf-8")
+        found = self.hint()
+        self.assertEqual((found["holder_hint"], found["holder_operation"], found["holder_mutation_id"],
+                          found["holder_acquired_at"]), ("present", None, None, "2026-10-12T01:02:03+00:00"))
+        status.render_human(self.model())  # the human rendering takes the model as it is
+
     def test_a_value_that_is_not_text_is_left_out_and_an_absent_holder_shows_nothing(self) -> None:
         self.store = self.new_project()
         self.assertEqual(self.hint()["holder_acquired_at"], None)

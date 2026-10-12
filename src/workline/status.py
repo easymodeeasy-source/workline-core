@@ -951,13 +951,13 @@ def _lock_hint(store: ProjectStore) -> dict[str, Any]:
         hint["holder_hint"] = "unreadable"
         return hint
     hint["holder_hint"] = "present"
-    if isinstance(holder.get("operation"), str):
+    # RB11 RT-2 (rev-11 BRIEF §41.6): every holder field is shown as the hint it is - it may be stale, it is never
+    # authority, ``state`` stays not_checked and nothing is written to holder.json - and a value UTF-8 cannot carry is
+    # left out (tests/test_operation_lock.py's pattern: a description that cannot be written is left out).
+    if isinstance(holder.get("operation"), str) and _utf8_encodable(holder["operation"]):
         hint["holder_operation"] = holder["operation"]
-    if isinstance(holder.get("mutation_id"), str):
+    if isinstance(holder.get("mutation_id"), str) and _utf8_encodable(holder["mutation_id"]):
         hint["holder_mutation_id"] = holder["mutation_id"]
-    # RB11 RT-2 (rev-11 BRIEF §41.6): one more field ProjectOperationBusy already reports, as the hint it is - it
-    # may be stale, it is never authority, ``state`` stays not_checked and nothing is written to holder.json. A
-    # value UTF-8 cannot carry is left out.
     acquired = holder.get("acquired_at")
     if isinstance(acquired, str) and _utf8_encodable(acquired):
         hint["holder_acquired_at"] = acquired
