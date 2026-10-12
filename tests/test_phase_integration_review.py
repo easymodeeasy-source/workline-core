@@ -889,10 +889,13 @@ class DeferredReviewTests(IntegrationRunCase):
           ``recovery_disposition_target_ineligible``, and nothing is written;
         * T-B21: a Run at G4 HUMAN_WAIT, which its pending START still holds, is refused (recoverable): the START
           record holding it is the other pending operation (``recovery_disposition_pending_operation``);
-        * T-B22: a Run final ``not_authorized`` at G4, its START record lost, is refused too. Today the kind gate
-          refuses every Integration Run before its state is asked (``recovery_disposition_target_ineligible``); the
-          rev-11 row's ``recovery_disposition_unnecessary`` is not what the base does, and RB11 changes no N4 gate,
-          so the actual refusal is pinned.
+        * a separate negative characterization of unchanged behaviour - not T-B22 (Sprint §41.29; T-B22 as clarified
+          is ``test_rb11_t_b22_a_consumed_integration_run_is_refused_as_unnecessary``): a Run final
+          ``not_authorized`` at G4, its START record lost, is refused as ``recovery_disposition_target_ineligible``
+          and nothing is written. The consumed, Receipt and supersession checks of the unchanged
+          ``_review_run_eligibility`` run first and pass over it (it holds no Receipt and no Consumption); the kind
+          outcome asked after them (``disposition_outcome``) is not one N4 supports for an Integration Run. RB11
+          changes no N4 gate.
         """
         from helpers import cwd
         from workline import recovery_disposition as rd, start_probe, status
@@ -900,13 +903,14 @@ class DeferredReviewTests(IntegrationRunCase):
 
         reason = "the integration attempt will not be continued"
 
-        def refused(store, target: str, code: str) -> None:
+        def refused(store, target: str, code: str) -> StopError:
             head = git(store.root, "rev-parse", "HEAD")
             with cwd(store.root), self.assertRaises(StopError) as raised:
                 rd.dispose_recovery(store.root, target, reason, confirmed=True)
             self.assertEqual(code, getattr(raised.exception, "reason", None) or raised.exception.code, raised.exception)
             self.assertEqual(head, git(store.root, "rev-parse", "HEAD"), "nothing committed")
             self.assertFalse((store.root / ".workline" / "recovery" / "dispositions").is_dir(), "nothing written")
+            return raised.exception
 
         store, _, ids = self.marked_project("open-run")
         with crash_at(sr, "_integration_launch"):
@@ -933,10 +937,52 @@ class DeferredReviewTests(IntegrationRunCase):
                 with self.assertRaises(StopError):
                     self.integrate(store, ids["integration"], selector, executor=answering_executor(st.Completed(), []))
                 (run_id,) = self.integration_runs(store, ids["integration"])
-                if name == "domain-repair":  # T-B22: the Run is final not_authorized; its START record lost
+                if name == "domain-repair":  # not T-B22 (Sprint §41.29): final not_authorized, its START record lost
                     self.runtime_gone(store)
                     git(store.root, "checkout", "--", ".workline/events/events.jsonl")
-                refused(store, run_id, code)
+                found = refused(store, run_id, code)
+                if name == "domain-repair":  # past the consumed / Receipt / supersession checks, at the kind outcome
+                    review = ReviewStore(store)
+                    self.assertIsNone(review.gate_chain(run_id).latest.receipt_id)
+                    self.assertEqual([], list(review.consumption_ids()))
+                    self.assertIn("is not one its owner's recovery supports", found.message)
+
+    def test_rb11_t_b22_a_consumed_integration_run_is_refused_as_unnecessary(self) -> None:
+        """RB11 T-B22 as clarified (Sprint §41.29): an Integration Run authorized and consumed on the normal Phase
+        Integration Review path is refused by ``dispose-recovery`` as ``recovery_disposition_unnecessary``. The
+        refusal is the consumed check of the unchanged ``_review_run_eligibility`` - its message names the
+        Consumption - which runs before the Receipt, supersession and kind-outcome checks. Nothing is disposed."""
+        from helpers import cwd
+        from workline import recovery_disposition as rd
+        from workline.review import recovery
+
+        store, _, ids = self.marked_project("consumed")
+        result = self.integrate(store, ids["integration"], phase_review(Discovery(), adjudicator=Adjudicator()))
+        self.assertEqual("completed", result.status)
+        chain = self.one_run(store, ids["integration"])
+        run_id, receipt_id = chain.review_run_id, str(chain.latest.receipt_id)
+        self.assertTrue(chain.latest.sealed, "authorized: G5 sealed with a Receipt")
+        review = ReviewStore(store)
+        consumed = sorted(found for found in review.consumption_ids()
+                          if review.read_consumption(found).receipt_id == receipt_id)
+        self.assertEqual(1, len(consumed), "the Receipt is consumed")
+
+        def state() -> tuple:
+            return (git(store.root, "rev-parse", "HEAD"), git(store.root, "for-each-ref"),
+                    git(store.root, "ls-files", "--stage"), git(store.root, "status", "--porcelain"),
+                    MutationController(store).list_pending())
+
+        before = state()
+        with mock.patch.object(recovery, "disposition_outcome", wraps=recovery.disposition_outcome) as outcome:
+            with cwd(store.root), self.assertRaises(StopError) as raised:
+                rd.dispose_recovery(store.root, run_id, "the integration attempt will not be continued",
+                                    confirmed=True)
+        self.assertEqual("recovery_disposition_unnecessary", raised.exception.code, raised.exception)
+        self.assertIn(f"Review Run {run_id} is consumed ({', '.join(consumed)})", raised.exception.message)
+        self.assertFalse(outcome.called, "refused at the consumed check, before the kind outcome is asked")
+        self.assertEqual(before, state(), "HEAD, refs, index, worktree and the pending set unchanged")
+        self.assertEqual([], before[-1])
+        self.assertFalse((store.root / ".workline" / "recovery" / "dispositions").exists(), "no disposition written")
 
     def test_rb11_t_b30_a_question_at_the_repair_planning_site_is_asked_again_and_never_persisted(self) -> None:
         """RB11 T-B30 (C-R7, OQ-RB11-07 unchanged), the start_review site (start_review.py:4980-4981): the executor's
