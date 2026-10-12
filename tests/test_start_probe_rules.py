@@ -58,11 +58,25 @@ class AdmissionRuleTests(unittest.TestCase):
             with self.subTest(type=type(exc).__name__):
                 self.assertEqual(self.decide("S3.4", exc).classification, start_probe.UNKNOWN_OR_INVALID)
 
-    def test_an_unknown_reason_names_the_check_and_code_but_echoes_no_message(self) -> None:
+    def test_an_unknown_reason_names_the_step_and_the_check_and_nothing_else(self) -> None:
+        """RB11 repair RTR-3: the reason is today's code; its message names the step and the check ID only."""
         secret = "PAYLOAD-from-the-record-31f"
-        found = self.decide("S3.4", with_check(ReconcileRequired(f"{secret}: reconcile required"), "start.2461"))
-        self.assertEqual((found.code, found.check_id), (start_probe.NO_PROBE, "start.2461"))
-        self.assertNotIn(secret, found.message)
+        for exc in (with_check(ReconcileRequired(f"{secret}: reconcile required"), "start.2461"),
+                    with_check(StopError(f"{secret}", code="dirty_overlap"), "start.916"),
+                    ValidationError(f"{secret}", code=f"{secret}-code")):
+            with self.subTest(exc=type(exc).__name__):
+                found = self.decide("S3.4", exc)
+                self.assertEqual((found.code, found.check_id), (start_probe.NO_PROBE, getattr(exc, "check_id", None)))
+                self.assertNotIn(secret, found.message)
+                self.assertNotIn(exc.code, found.message, "not even the refusal's own code")
+                self.assertIn("S3.4", found.message)
+
+    def test_the_s1_1_other_value_reason_is_todays_text_exactly(self) -> None:
+        """RB11 repair RTR-4: the base status.py message for an owner without a probe, word for word."""
+        found = start_probe.inspect(ProjectStore(Path(".")), {"owner": "start", "invocation": {"operation": "zz"}}, [])
+        self.assertEqual((found.code, found.message), (
+            "no_read_only_resume_probe",
+            "no read-only proof of how start would resume this record exists; status does not assume one"))
 
     def test_a_write_start_would_make_is_never_a_refusal(self) -> None:
         found = self.decide("S7.2", start_probe._ProbeWouldWrite("would write"))

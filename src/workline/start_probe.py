@@ -19,7 +19,9 @@ S3.x  the Work resolves; marker compatibility over the passed pending set; the r
 S4.x  the recovery-disposition barrier and the open checks over the passed pending set
 S5.x  the post-open readers, with START's guards: completion, hold only without a
       finishing completion, derivations only without either, move only on derivations
-S6.1  replay_probe, unchanged: anything but clear is unknown_or_invalid
+S6.1  replay_probe, unchanged: anything but clear is unknown_or_invalid (reason: the two replay codes the frozen
+      text names, push_classification_requires_network / work_commit_replay_not_inspectable, else
+      no_read_only_resume_probe)
 S6.2  the replay writes nothing: every recorded effect classifies applied (PO-52, method (b))
 S7.x  the post-replay dispatch: each finish path's local refusals, or run_work's gate list
 S8    everything evaluated and passed: pending_resumable (the narrowed claim)
@@ -69,11 +71,19 @@ PENDING_RESUMABLE = "pending_resumable"
 PENDING_RECONCILE = "pending_reconcile_required"
 UNKNOWN_OR_INVALID = "unknown_or_invalid"
 
-#: The reason codes of ``unknown_or_invalid`` (ADM §A.1 S1.1, S6.1, S6.2).
+#: The reason codes of ``unknown_or_invalid`` - the only ones (rev-11 BRIEF §41.3 "no other reason value"): today's
+#: ``no_read_only_resume_probe``, the two fixed START-operation reasons of ADM §A.1 S1.1, and the three the frozen text
+#: names for the replay steps - ``push_classification_requires_network`` (T-B45, §41.5) and
+#: ``work_commit_replay_not_inspectable`` (§41.5, T-B09) at S6.1, ``post_replay_not_read_only`` (ADM §A.1 S6.2, T-B48).
+#: Every other replay code, and every other refusal's code, is reported as ``no_read_only_resume_probe``.
 NO_PROBE = "no_read_only_resume_probe"
 NOT_PROBED_GENERATION = "start_operation_not_probed_review_generation"
 NOT_PROBED_PLAN_EXCLUSION = "start_operation_not_probed_plan_exclusion"
 POST_REPLAY_NOT_READ_ONLY = "post_replay_not_read_only"
+PUSH_NEEDS_NETWORK = "push_classification_requires_network"
+WORK_COMMIT_NOT_INSPECTABLE = "work_commit_replay_not_inspectable"
+#: The replay codes S6.1 reports as they are; any other code of an unproven or reconcile replay is NO_PROBE.
+_NAMED_REPLAY_CODES = frozenset({PUSH_NEEDS_NETWORK, WORK_COMMIT_NOT_INSPECTABLE})
 
 #: The START-owned operations other than ``start`` that get a fixed reason (PO-50; no record value is echoed).
 _OTHER_OPERATIONS = {"review-generation": NOT_PROBED_GENERATION, "start-plan-exclude": NOT_PROBED_PLAN_EXCLUSION}
@@ -184,7 +194,7 @@ def inspect(store: ProjectStore, record: dict[str, Any], pending: list[dict[str,
     except Exception as exc:  # a probe that cannot finish proves nothing
         return StartProbe(
             UNKNOWN_OR_INVALID, NO_PROBE,
-            f"START's read-only probe could not finish ({type(exc).__name__}); status does not assume a resume",
+            "START's read-only probe could not finish; status does not assume a resume",
             "probe",
         )
     return StartProbe(  # unreachable: every walk ends with _Ended
@@ -218,12 +228,12 @@ class _Walk:
             return _Ended(StartProbe(PENDING_RECONCILE, exc.reason or exc.code, str(exc), step, check))
         if isinstance(exc, _ProbeWouldWrite):
             return self.unknown(step, f"at {step} START would write before it could be shown to resume this record")
-        code = getattr(exc, "code", None) or type(exc).__name__
+        named = check if isinstance(check, str) else None
         return self.unknown(
             step,
-            f"START's first refusal of this record ({code}, at {step}, check {check or 'none'}) is not a refusal "
-            "that reads only the record itself, so status does not claim a reconcile or a resume",
-            check_id=check if isinstance(check, str) else None,
+            f"START's first refusal of this record (at {step}, check {named or 'none'}) is not a refusal that reads "
+            "only the record itself, so status does not claim a reconcile or a resume",
+            check_id=named,
         )
 
     def ask(self, step: str, predicate: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -246,8 +256,9 @@ class _Walk:
             if fixed is not None:
                 raise self.unknown("S1.1", "this START-owned operation has no read-only resume probe; status does "
                                            "not apply START's own predicates to it", fixed)
-            raise self.unknown("S1.1", "no read-only proof of how START would resume a record of this operation "
-                                       "exists; status does not assume one")
+            # today's reason and message, exactly as status gave them before this probe existed
+            raise self.unknown("S1.1", f"no read-only proof of how {record['owner']} would resume this record exists; "
+                                       "status does not assume one")
 
         # S1.2 stage 1a: exactly the legacy key set; a review-v1 record (stage 1b, PO-05 not shown) and any other
         # key set (X-M, X-P) are not probed, nor is a record carrying a Phase integration semantics note (X-I)
@@ -310,7 +321,11 @@ class _Walk:
         # S6.1 the replay, asked of the Mutation Controller unchanged
         replay = replay_probe(self.store, record)
         if replay.outcome != REPLAY_CLEAR:
-            raise self.unknown("S6.1", replay.message, replay.code)
+            if replay.code in _NAMED_REPLAY_CODES:
+                raise self.unknown("S6.1", f"replaying this record cannot be classified offline ({replay.code}); "
+                                           "status does not claim a reconcile or a resume", replay.code)
+            raise self.unknown("S6.1", "START's replay of this record is not shown clear read-only, so status does not "
+                                       "claim a reconcile or a resume")
         # S6.2 the replay writes nothing: every recorded effect classifies applied (PO-52, method (b))
         self.replay_writes_nothing(mutation)
 
@@ -371,7 +386,7 @@ class _Walk:
             try:
                 classification = _classify_recorded(controller, effects, position, self.record)
             except Exception as exc:
-                raise self.unknown("S6.2", f"a recorded effect cannot be classified here ({type(exc).__name__})",
+                raise self.unknown("S6.2", "a recorded effect cannot be classified read-only here",
                                    POST_REPLAY_NOT_READ_ONLY) from None
             if classification != MATCHING:
                 raise self.unknown("S6.2", "replaying this record would write to the Project before START goes on, "
@@ -498,6 +513,7 @@ class _Walk:
         self.ask("S7.2", start.reading_plan, self.store, view, work)
         self.ask("S7.2", gitops.ensure_separable_before_effects, mutation, [start._EVENT_LOG])
         self.ask("S7.2", gitops.narrow_preexisting_dirty, mutation, self.root)
+        self.ask("S7.2", session._protect_preexisting)  # reads the pre-existing paths once; refuses nothing
         self.ask("S7.2", mutation.extend_scope, entities=[work_id])
         # START writes _lifecycle next unless the Work is IN_PROGRESS with its target (start.py:601-606)
         if opening:

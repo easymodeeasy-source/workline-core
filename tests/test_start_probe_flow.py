@@ -283,8 +283,11 @@ class EnvironmentalReplayTests(ProbeCase):
         original = log.read_bytes()
         started = self.event_effect(self.the_record(), "work_started")["payload"]["record"]
         log.write_bytes(original.replace(started["at"].encode(), b"2001-01-01T00:00:00+00:00"))
-        found = self.assertUnknown(code="reconcile_required")
+        # RB11 repair RTR-3 (BRIEF §41.3 "no other reason value"): the replay's own code (reconcile_required) is not
+        # one the frozen text names, so the reason is today's no_read_only_resume_probe
+        found = self.assertUnknown(code=start_probe.NO_PROBE)
         self.assertEqual(found.step, "S6.1")
+        self.assertNotIn(started["id"], found.message, "no record data in the reason")
         refused = self.real_start()
         self.assertIsInstance(refused, st.ReconcileRequired)
         log.write_bytes(original)
