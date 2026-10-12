@@ -704,9 +704,23 @@ def _probe_push_destination_pin(
     return UNKNOWN_OR_INVALID, _reason(replay.code, replay.message)
 
 
+def _probe_start(store: ProjectStore, record: dict[str, Any], pending: list[dict[str, Any]]) -> tuple[str, dict[str, str]]:
+    """START's recovery, asked read-only (RB11 RT-1a): START's own control flow and predicates, in its order.
+
+    Status selects a probe by owner alone, so the probe's first step is its
+    domain: owner ``start`` with ``invocation.operation == "start"`` and the
+    exact legacy key set (:mod:`workline.start_probe`). It reads the pending set
+    passed here and writes nothing.
+    """
+    from . import start_probe
+
+    return start_probe.probe(store, record, pending)
+
+
 #: Owners whose recovery status can ask read-only, by the predicates that recovery itself evaluates.
 _OWNER_PROBES: dict[str, Callable[[ProjectStore, dict[str, Any], list[dict[str, Any]]], tuple[str, dict[str, str]]]] = {
     "push-destination-pin": _probe_push_destination_pin,
+    "start": _probe_start,
 }
 
 
@@ -922,7 +936,10 @@ def _isolated_list(reader: Callable[[], list[dict[str, Any]]]) -> list[dict[str,
 
 def _lock_hint(store: ProjectStore) -> dict[str, Any]:
     """The execution lock is never taken or tested here; ``holder.json`` is reported as the hint it is."""
-    hint: dict[str, Any] = {"state": "not_checked", "holder_hint": "absent", "holder_operation": None, "holder_mutation_id": None}
+    hint: dict[str, Any] = {
+        "state": "not_checked", "holder_hint": "absent", "holder_operation": None, "holder_mutation_id": None,
+        "holder_acquired_at": None,
+    }
     try:
         present = store.lock_holder.exists()
     except OSError:
@@ -938,7 +955,21 @@ def _lock_hint(store: ProjectStore) -> dict[str, Any]:
         hint["holder_operation"] = holder["operation"]
     if isinstance(holder.get("mutation_id"), str):
         hint["holder_mutation_id"] = holder["mutation_id"]
+    # RB11 RT-2 (rev-11 BRIEF §41.6): one more field ProjectOperationBusy already reports, as the hint it is - it
+    # may be stale, it is never authority, ``state`` stays not_checked and nothing is written to holder.json. A
+    # value UTF-8 cannot carry is left out.
+    acquired = holder.get("acquired_at")
+    if isinstance(acquired, str) and _utf8_encodable(acquired):
+        hint["holder_acquired_at"] = acquired
     return hint
+
+
+def _utf8_encodable(text: str) -> bool:
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------- lifecycle
