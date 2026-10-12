@@ -148,11 +148,43 @@ class OuterGuardTests(GateCase):
         self.assertEqual(found.step, "S7.1")
         self.assertIn("not followed", found.message)
 
-    def test_an_ambiguous_outer_selection(self) -> None:
+    def test_two_works_in_flight_stop_the_outer_selection(self) -> None:
+        """The selection itself refuses (multiple_targets), through START's own _next_or_ambiguous."""
         self.question_wait_record(mode="outer")
         append_events(self.store, ("work_started", self.w2), ("work_target_added", self.w2))
         found = self.assertUnknown()
         self.assertEqual(found.step, "S7.1", found)
+
+
+class AmbiguousOuterTests(GateCase):
+    """RTR-6: an ambiguous outer selection - START would stop there (a soft stop, the record closed), never run a Work."""
+
+    def setUp(self) -> None:
+        super(ProbeCase, self).setUp()
+        self.store = self.new_project()
+        roadmap = self.simple_roadmap(self.store)
+        self.rid, self.pa = roadmap.roadmap_id, roadmap.phase_ids["a"]
+        self.entry = self.simple_entry(self.store, self.pa, {"w1": "W1", "w2": "W2", "w3": "W3"})
+        self.w1, self.w2 = self.entry.work_ids["w1"], self.entry.work_ids["w2"]
+        self.i1 = self.entry.integration_id
+
+    def test_the_probe_does_not_follow_an_ambiguous_outer_selection(self) -> None:
+        from helpers import completing_executor
+        from start_probe_helpers import never
+        from workline.mutation import MutationController, WriteScope
+        from workline.oplock import project_operation
+
+        st.start(self.store, self.w1, "single-work", completing_executor(self.store))
+        # W1 is done; W2 and W3 are now equally planned, so START's outer continuation cannot choose (BL-014)
+        with project_operation(self.store, "start", {}):
+            MutationController(self.store).open(
+                "start", {"operation": "start", "work_id": self.w1, "mode": "outer"},
+                WriteScope(entities=(self.w1,), files=st.LEDGER_FILES))
+        found = self.assertUnknown()
+        self.assertEqual(found.step, "S7.1", found)
+        self.assertIn("would stop or finish", found.message)
+        result = st.start(self.store, self.w1, "outer", never)
+        self.assertEqual(result.status, "stopped", "START stops on the ambiguity and asks no executor")
 
 
 class ReplayReasonTests(GateCase):
