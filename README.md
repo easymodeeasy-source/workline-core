@@ -281,6 +281,13 @@ py -3 -I -B "<R>\run-workline.py" dispose-recovery . --target <mut_... | rr_...>
           abandoned / missing はSTOP）。Review Runは記録が揃い、consumed・set aside済みでなく、どのpending STARTも
           持たないことだけが再開不能の理由であるもの。current Receiptを持つRunはSTOP（無効化はSupersession）
 前提:     対象mutationのほかにpending mutationなし。処分中は他のoperationを始めない
+START:    START recordは、legacy invocation（operation start、keyは operation・work_id・mode だけ）で、Phase
+          integration semanticsのnoteを持たず、STARTの最初の拒否がそのrecord自身のbytesだけを読む呼び出しである
+          ものだけ（statusの pending_reconcile_required）。次はSTOP: pending_resumable のrecord、review-v1の
+          START record（予約・開始済みのWork Review Run、Work-modeのcommit stageを含む）、noteを持つrecord（Phase
+          Integration Runを持ちうる）、P4 Work contractのmarker・部分的または未知のmarker、START-ownedの
+          review-generation / start-plan-exclude record、最初の拒否がProject view・HEAD・作業ツリー・pending record
+          の集合を読むもの（RB5RR-2を含む）、replayが書くrecord、pushを記録したrecord
 再実行:   同じtarget・状態・理由は already_disposed（2回目のcommitなし）。違う理由・状態は reconcile required
 ```
 
