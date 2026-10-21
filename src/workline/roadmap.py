@@ -791,13 +791,46 @@ def _require_roadmap_text(plan: RoadmapPlan) -> None:
     input_validation.require_works_text(plan.phases, "phase", kind="phase")
 
 
+def _require_plan_shapes(plan: RoadmapPlan) -> None:
+    """Refuse, with a controlled ValidationError, a ``phase_entries`` or ``work_dependencies`` of the wrong shape.
+
+    They are read with ``.items()`` and attribute access further on; a value of another shape would otherwise end as an
+    accidental AttributeError or TypeError. Nothing has been opened or written when this is called.
+    """
+    entries = plan.phase_entries
+    if not isinstance(entries, dict):
+        raise ValidationError("phase_entries must be a mapping from a Phase key to its PhaseEntryDesign")
+    for key, design in entries.items():
+        if not isinstance(key, str):
+            raise ValidationError(f"phase_entries key {key!r} is not a Phase key (text)")
+        if not isinstance(design, PhaseEntryDesign):
+            raise ValidationError(f"phase_entries[{key!r}] is not a PhaseEntryDesign")
+    dependencies = plan.work_dependencies
+    if not isinstance(dependencies, (tuple, list)):
+        raise ValidationError("work_dependencies must be a sequence of WorkDependency")
+    for index, dep in enumerate(dependencies):
+        if not isinstance(dep, WorkDependency):
+            raise ValidationError(f"work_dependencies[{index}] is not a WorkDependency")
+        for name in ("from_phase", "from_work", "to_phase", "to_work"):
+            if not isinstance(getattr(dep, name), str):
+                raise ValidationError(f"work_dependencies[{index}].{name} is not a key (text)")
+
+
 def _require_phase_entries(plan: RoadmapPlan) -> None:
     """Refuse, before anything is opened, a ``phase_entries`` the Roadmap could not register as decided."""
+    _require_plan_shapes(plan)
     for key, design in plan.phase_entries.items():
         if key not in plan.phases:
             raise ValidationError(f"phase_entries names {key!r}, which is not one of this Roadmap's Phases")
         input_validation.require_phase_entry_design(design)
         input_validation.require_phase_entry_text(design)
+        if design.entry is not None:
+            # A Roadmap-time design carries no entry choice: the Work to start is read from planned_next when the Phase
+            # is entered, so an explicit entry would be accepted here and then dropped. It is refused instead.
+            raise ValidationError(
+                f"Phase {key}: a Roadmap-time design does not take an explicit entry ({design.entry!r}); say which Work "
+                "comes first with planned_next, which the Phase entry reads"
+            )
         if not design.works:
             raise ValidationError(f"Phase {key}: registered Works need at least one normal Work")
         for work_key in design.works:
@@ -818,6 +851,7 @@ def entry_order(plan: RoadmapPlan) -> list[str]:
         # A plan that registers no Works and declares no Work dependency is the legacy plan: its Phase relations are
         # checked by the Phase registration exactly as before, never earlier and never with another code.
         return []
+    _require_plan_shapes(plan)
     keys = list(plan.phases)
     after: dict[str, set[str]] = {key: set() for key in keys}
     for relation in plan.relations:
@@ -1193,8 +1227,8 @@ def independent_candidates(store: ProjectStore, roadmap_id: str) -> IndependentC
     works: dict[str, tuple[str, ...]] = {}
     blocked: dict[str, tuple[str, ...]] = {}
     for phase in view.active_phases(roadmap_id):
-        if view.phase_state(phase.id) in (COMPLETE, HELD, CANCELLED, PLAN_EXCLUDED):
-            continue
+        if view.phase_state(phase.id) in (COMPLETE, HELD, CANCELLED, PLAN_EXCLUDED) or phase.id in phases:
+            continue  # the Phases that are startable now are listed once, in ``phases``; this loop is the other Phases
         unsatisfied = view.unsatisfied_dependencies(phase.id)
         if unsatisfied:
             blocked[phase.id] = tuple(f"{r.from_id} ({label})" for r, label in unsatisfied)
@@ -1450,8 +1484,15 @@ def _enter_registered_phase(store: ProjectStore, phase_id: str) -> PhaseEntryRes
         raise ValidationError(
             f"Phase {phase_id} holds no Work that Roadmap-time registration wrote: its entry needs a design"
         )
-    normal = {w.display: w.id for w in works if w.work_kind not in ("phase_integration_check", "human_confirmation")}
-    confirmations = [w for w in works if w.work_kind == "human_confirmation"]
+    # What the design route returns, over the same Works: the effective current-plan set (a cancelled or plan-excluded
+    # Work is not part of it), keyed by the plan key the Work was registered under.
+    current = view.effective_works(phase_id)
+    normal = {
+        (w.roadmap_registration or {}).get("key") or w.display: w.id
+        for w in current
+        if w.work_kind not in ("phase_integration_check", "human_confirmation")
+    }
+    confirmations = [w for w in current if w.work_kind == "human_confirmation"]
     entry = _entry_the_plan_points_to(view, view.startable_works(phase_id))
     return PhaseEntryResult(
         phase_id, normal, integrations[0].id, confirmations[0].id if confirmations else None, entry, False, None,
@@ -1522,7 +1563,8 @@ def _enter_phase_locked(
             # own maintenance (``rules/ai-decision``).
             raise StopError(
                 f"Phase {phase_id} is already expanded, so a new entry design is not accepted; "
-                "enter it without a design if the Roadmap registered its Works, or change it through Roadmap maintenance",
+                "read the current structure instead, and change it through Roadmap maintenance "
+                "(a Phase whose Works the Roadmap registered is entered without a design)",
                 code="phase_already_expanded",
             )
     if not design.works:

@@ -107,7 +107,7 @@ class RegisteredWorksTests(WorklineTestCase):
         self.assertIn(result.phase_ids["a"], found.phases)
         self.assertNotIn(result.phase_ids["b"], found.phases)
         self.assertIn(result.phase_ids["b"], found.blocked)
-        self.assertIn(result.phase_ids["c"], found.works)
+        self.assertNotIn(result.phase_ids["c"], found.works, "a startable Phase is listed once, in phases (AM-K: other Phases)")
         # and its registered Work really starts
         st.start(self.store, result.work_ids["c"]["c1"], "single-work", completing_executor(self.store))
         self.assertEqual(
@@ -169,8 +169,12 @@ class RegisteredWorksTests(WorklineTestCase):
         self.assertEqual(ProjectView.load(self.store).roadmaps, {})
 
     def test_planning_review_with_registered_works_is_not_silently_skipped(self) -> None:
-        with self.assertRaises(ValidationError):
-            rm.create_roadmap(self.store, plan(), review=object())
+        # RB11INT-EVID-3: the entry gate is stepped over so that the refusal under test is the one that is reached
+        with mock.patch("workline.roadmap_review.require_entry_gate"):
+            with self.assertRaises(ValidationError) as raised:
+                rm.create_roadmap(self.store, plan(), review=object())
+        self.assertIn("not yet available with a Planning Review", str(raised.exception))
+        self.assertEqual(ProjectView.load(self.store).roadmaps, {})
 
 
 class RegistrationProvenanceTests(WorklineTestCase):
@@ -281,8 +285,10 @@ class RegistrationProvenanceTests(WorklineTestCase):
         import inspect
 
         self.assertNotIn("register_only", inspect.signature(rm.enter_phase).parameters)
-        with self.assertRaises(ValidationError):
-            rm.create_roadmap(self.store, plan(), review=object())
+        with mock.patch("workline.roadmap_review.require_entry_gate"):
+            with self.assertRaises(ValidationError) as raised:
+                rm.create_roadmap(self.store, plan(), review=object())
+        self.assertIn("not yet available with a Planning Review", str(raised.exception))
 
     def test_a_roadmap_without_phase_entries_writes_no_provenance_marker(self) -> None:
         legacy = self.simple_roadmap(self.store, {"a": ("Phase A", "A が成立する")})

@@ -21,7 +21,7 @@ BASE = "41d27c0048f3cfc19e2c9b3ebcf90f005c097b16"
 ALLOWED = {
     "roadmap.py": {
         "<module>", "_open", "RoadmapPlan", "WorkDependency", "RegisteredRoadmapResult", "entry_order", "with_work_dependencies",
-        "_require_phase_entries", "_planned_entry_paths", "create_roadmap", "_create_roadmap", "_register_roadmap",
+        "_require_phase_entries", "_require_plan_shapes", "_planned_entry_paths", "create_roadmap", "_create_roadmap", "_register_roadmap",
         "_register_phase_expansion", "roadmap_request_identity", "enter_phase", "_enter_registered_phase", "_enter_phase_locked",
         "independent_candidates", "IndependentCandidates", "__all__",
     },
