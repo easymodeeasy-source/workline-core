@@ -73,6 +73,8 @@ mode=outerなら同一Phase内の次startable Workを再計算
 return時にlock解放
 ```
 
+dependency確認（上のStart flowの `dependency確認`）は、Workの `requires_completion` に加え、Roadmap作成時に登録された（登録印のある）未開始のWorkについては、所属Phaseが待つ先行条件も同じ述語で見る。この確認はWorkを開始する時だけ行い、開始済みのWorkのcompletionでは所属Phaseの先行条件を新たに見ない（後から先行条件が加わっても、すでに開始したWorkの完了は拒否されない）。START、probe、statusは同じ述語を読む。
+
 `rules/git` のProject contextに従い、START（resumeを含む）は対象Projectのcontextから実行する。invocation Project contextが対象Projectと一致しなければ、lockを取得する前に `foreign_project_mutation` でSTOPし、何も書かない。
 
 STARTにはCLIが無い。`rules/git` のWorkline implementationに従い、対象Projectの中でisolated Python processを開始し、同じprocessで `<R>/run-workline.py` の `activate()` を実行してからSTARTのPython APIをimportする（R = configured Workline root）。executorもそのprocessの中で動く。Project contextの照合の後、実行中のimplementationがconfigured rootのものでなければ、lockを取得する前に `workline_implementation_mismatch` / `workline_implementation_unverified` でSTOPし、何も書かない。PYTHONPATHの手組みや別のimplementationへfallbackしない。
@@ -316,7 +318,7 @@ Phase completeはeventではなく生成する。
 - must_updateを満たす
 - applicable conditional_must_updateを満たす
 - 必要tests / verification PASS
-- unresolved required dependencyなし（Roadmap作成時に登録された未開始のWorkでは、所属Phaseの先行条件も含む。開始済みのWorkのcompletionでは新たに見ない）
+- unresolved required dependencyなし
 - 他のstarted（in_progress / held）non-terminal Workが現在読む必要のあるtargetを、deletion resultとして消していない
 - canonical refs valid
 - 新たなstructural human_confirmation要否を評価済み

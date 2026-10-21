@@ -26,16 +26,16 @@ from workline.validate import validate_structure
 #: adds ``phase_integration.completion_reasons`` - entity / event / relation truth only - once every legacy check
 #: holds, through a function-local import. state.py stays free of Review.
 STATE_PY_BASELINE_SHA256 = "0b2a42bed8c301e889d4663f40fea3da71a377cae71d07a09209e84e05f0f479"
-#: Re-pinned for the ONE further authorized change (Roadmap-time Work registration, D2-2: ``unsatisfied_dependencies`` also
-#: reads the ``requires_completion`` a Work's own Phase waits on - only for a Work that carries the Roadmap-time registration
-#: provenance marker, RB11R-1 - and ``phase_completion`` keeps its old reading through ``include_phase=False``). CP accepted the change; Human contract approval of D2-2 is PENDING - if the Human does not
-#: approve D2-2, the two hunks are reverted and this pin returns to ``STATE_PY_BASELINE_SHA256``. The baseline pin above
-#: stays as the record of production main 41d27c00, and ``STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS`` records what the
-#: two allowed definitions were. Every other definition of state.py must stay byte-identical to the baseline
-#: (``STATE_PY_DEFINITION_DIGESTS``), so the re-pin cannot hide any other change. state.py stays free of Review.
-#: Re-pinned again for Sprint 41.31 AM-H2 (integrated candidate): the inheritance of the Phase prerequisite also requires the Work to be
-#: ``unstarted``, in the one predicate ``ProjectView.unsatisfied_dependencies`` (START, the probe, status and the startable listings read it).
-#: The values below are MEASURED from the final state.py, never predicted; only that definition's digest changed.
+#: Re-pinned for Sprint 41.31, Table P pin P1 (units AM-H1 and AM-H2): two definitions of state.py differ from the baseline.
+#: ``ProjectView.unsatisfied_dependencies`` also reads the ``requires_completion`` a Work's own Phase waits on - only for a Work
+#: that carries the Roadmap-time registration provenance marker (AM-H1) and, as AM-H2 requires, only while that Work is
+#: ``unstarted`` - in the one predicate that START, the probe, status and the startable listings read.
+#: ``ProjectView.phase_completion`` keeps its old reading through ``include_phase=False``. The Human's wording approval of
+#: Sprint 41.31 is pending (this pin is not that approval): if the section is not approved, the two hunks are reverted and
+#: this pin returns to ``STATE_PY_BASELINE_SHA256``. The baseline pin above stays as the record of production main 41d27c00,
+#: and ``STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS`` records what the two allowed definitions were. Every other definition
+#: of state.py must stay byte-identical to the baseline (``STATE_PY_DEFINITION_DIGESTS``), so the re-pin cannot hide any other
+#: change. state.py stays free of Review. The values are MEASURED from the final state.py, never predicted.
 STATE_PY_D2_SHA256 = "8c40213743f19583b6b8995be89feecb136bcf546f97f78b060ea532daab66b5"
 STATE_PY_ALLOWED_CHANGES = frozenset({"ProjectView.phase_completion", "ProjectView.unsatisfied_dependencies"})
 STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS = {

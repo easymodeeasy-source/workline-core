@@ -186,15 +186,15 @@ STARTの同一Phase内継続:
 
 ## Roadmap作成時のWork登録
 
-Roadmap planは `phase_entries`（Phase key → Phase entry design）を持てる。渡した場合、Roadmap作成は、Roadmap・Phaseと同じmutationで、そのPhaseの通常Work・integration Work・（あれば）human_confirmation Workを登録する。登録したWorkは出所の印 `roadmap_registration {roadmap_id, phase_id, key}` を持つ。印を書けるのはこの経路だけで、直接のCREATE・replan・派生などで `registration_key` を渡しても書き込み前に拒否する。`phase_entries` を持たないplanは従来どおりで、Work・印を作らず、戻り値も従来のまま。以下は書き込み・lockより前に拒否する: planのPhaseでないkey、通常Workのないdesign、予約key（`integration` / `confirmation`）、design検証の失敗、Planning Reviewとの併用。
+Roadmap planは `phase_entries`（Phase key → Phase entry design）を持てる。渡した場合、Roadmap作成は、Roadmap・Phaseと同じmutationで、そのPhaseの通常Work・integration Work・（あれば）human_confirmation Workを登録する。登録したWorkは出所の印 `roadmap_registration {roadmap_id, phase_id, key}` を持つ。印を書けるのはこの経路だけで、直接のCREATE・replan・派生などで `registration_key` を渡しても書き込み前に拒否する。`phase_entries` を持たないplanは従来どおりで、Work・印を作らず、戻り値も従来のまま。以下は書き込み・lockより前に拒否する: planのPhaseでないkey、通常Workのないdesign、予約key（`integration` / `confirmation`）、design検証の失敗、明示 `entry` を持つdesign（Roadmap作成時のdesignはentryを選ばない。最初に着手するWorkは `planned_next` で示し、Phase entryがそれを読む。受理して黙って捨てることはしない）、形の違う `phase_entries` / `work_dependencies`（`phase_entries` はPhase key → `PhaseEntryDesign` のmapping、`work_dependencies` は `WorkDependency` の列。偶発的な `AttributeError` / `TypeError` ではなく `ValidationError`）、Planning Reviewとの併用。
 
 `work_dependencies` は `(from_phase, from_work, to_phase, to_work)` の列で、`to_work` は `from_work` のcompleted後でなければ開始できない（`requires_completion`）。`phase_entries` が無い場合はどの経路でも拒否する。Phase間の関係とWork依存を合わせたグラフに循環があれば拒否する（登録順はこのグラフの依存順）。
 
-`independent_candidates(store, roadmap_id)` はread-onlyで、今startableなPhase、complete / held / cancelled / plan_excludedでないPhaseのうち先行条件のないものについてはstartableなWork、先行条件のあるものについてはその先行条件と状態を返す。認可・mutation・lifecycleの許可は何も増やさず、`planned_next` を阻害要因として出さない。
+`independent_candidates(store, roadmap_id)` はread-onlyで、今startableなPhase（この一覧にだけ載る）、それ以外のcomplete / held / cancelled / plan_excludedでないPhaseのうち先行条件のないものについてはstartableなWork、先行条件のあるものについてはその先行条件と状態を返す。認可・mutation・lifecycleの許可は何も増やさず、`planned_next` を阻害要因として出さない。
 
 ## Phase entry
 
-既定ではWorkはPhaseへ実際に入る時だけ展開する。上の「Roadmap作成時のWork登録」でWorkが登録済みのPhaseは、`enter_phase(store, phase_id)`（designなし）で入る。これはPhaseのlifecycleと依存を通常のentryと同じに検査し、何も再登録せず、STARTが引き継ぐ構造を返す（`expanded` はfalse）。Planning Reviewとの併用、登録印のあるWorkを持たないPhase、unresolvable / complete / held / cancelled / plan_excluded、Roadmapがactiveでない、先行条件が未充足、未完了のPhase entryがある場合は拒否する。
+既定ではWorkはPhaseへ実際に入る時だけ展開する。上の「Roadmap作成時のWork登録」でWorkが登録済みのPhaseは、`enter_phase(store, phase_id)`（designなし）で入る。これはPhaseのlifecycleと依存を通常のentryと同じに検査し、何も再登録せず、STARTが引き継ぐ構造を返す（`expanded` はfalse。`work_ids` は現在のplanのeffective Work（cancelled / plan_excludedを除く）を、登録時のplan keyで返す）。Planning Reviewとの併用、登録印のあるWorkを持たないPhase、unresolvable / complete / held / cancelled / plan_excluded、Roadmapがactiveでない、先行条件が未充足、未完了のPhase entryがある場合は拒否する。
 
 既にWorkが展開されたPhaseへ、新しいentry designを渡してPhase entryを再実行しない（design無しのentryはこの拒否の対象外）。展開済みPhaseにはdesignが登録する対象がなく、渡されたdesignを黙って無視すれば、呼び出し側が別の計画が登録されたと誤認し得る。Phase entryはこれを `phase_already_expanded` でSTOPし、design無視・既存entryへの差し替え・通常成功としての返却・ID発行・mutation開始・canonical state変更・commitのいずれも行わない。展開済みPhaseの現在構造はread-onlyで読み、計画の正式変更はRoadmapのRelated maintenance等から行う（`rules/ai-decision`）。なお、Roadmapがactiveでない場合、Phaseがcomplete / held / cancelled / plan_excludedの場合、Phaseのdependencyが未充足の場合は、従来どおりそれぞれの理由でSTOPし、`phase_already_expanded` より優先する。どの経路でもcanonical stateは変更しない。
 
