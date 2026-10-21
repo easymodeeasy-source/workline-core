@@ -814,6 +814,10 @@ def entry_order(plan: RoadmapPlan) -> list[str]:
     reference to a Phase or Work the plan does not register, a dependency inside one Phase (that is
     ``PhaseEntryDesign.requires_completion``) and a Phase-level cycle are refused.
     """
+    if not plan.phase_entries and not plan.work_dependencies:
+        # A plan that registers no Works and declares no Work dependency is the legacy plan: its Phase relations are
+        # checked by the Phase registration exactly as before, never earlier and never with another code.
+        return []
     keys = list(plan.phases)
     after: dict[str, set[str]] = {key: set() for key in keys}
     for relation in plan.relations:

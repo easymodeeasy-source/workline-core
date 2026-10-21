@@ -39,6 +39,20 @@ class CycleTests(WorklineTestCase):
         self.assertEqual(ProjectView.load(self.store).roadmaps, {})
         self.assertEqual([], list(self.store.mutations.glob("*.yaml")) if self.store.mutations.is_dir() else [])
 
+    def test_a_phase_relation_cycle_of_a_plan_that_registers_works_is_refused_before_writing(self) -> None:
+        cyclic = plan((("requires_completion", "a", "b"), ("requires_completion", "b", "a")))
+        with self.assertRaises(ValidationError) as raised:
+            rm.create_roadmap(self.store, cyclic)
+        self.assertIn("cycle", str(raised.exception))
+        self.assertEqual(ProjectView.load(self.store).roadmaps, {})
+
+    def test_a_legacy_plan_with_a_phase_relation_cycle_keeps_the_refusal_it_always_had(self) -> None:
+        legacy = plan((("requires_completion", "a", "b"), ("requires_completion", "b", "a")), entries={})
+        with self.assertRaises(Exception) as raised:
+            rm.create_roadmap(self.store, legacy)
+        self.assertEqual("postcheck_failed", getattr(raised.exception, "code", None), raised.exception)
+        self.assertEqual(ProjectView.load(self.store).roadmaps, {})
+
     def test_the_acyclic_control_is_accepted_and_registers_in_dependency_order(self) -> None:
         acyclic = dataclasses.replace(
             plan((("requires_completion", "a", "b"),)), work_dependencies=(rm.WorkDependency("a", "a1", "b", "b1"),)
