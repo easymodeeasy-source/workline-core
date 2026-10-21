@@ -23,7 +23,9 @@ A shortage is classified, never folded into a requirement question:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from . import gitcmd
@@ -109,15 +111,32 @@ def _allowed(check: Any, argv: tuple[str, ...]) -> bool:
         return False
 
 
+def checked_out(root: Any, path: str) -> bool:
+    """Whether the submodule at ``path`` is itself checked out: the repository found there is its own, not the Project's.
+
+    ``git -C <path> rev-parse HEAD`` is no proof: an uninitialized or deinitialized gitlink leaves an empty directory,
+    and Git then finds the superproject above it and answers with the superproject's HEAD. The top level of the
+    repository found at ``path`` must be ``path`` itself.
+    """
+    target = Path(str(root)) / path
+    try:
+        top = gitcmd.toplevel(target)
+    except GitError:
+        return False
+    if top is None:
+        return False
+    try:
+        expected = target.resolve()
+    except OSError:
+        return False
+    return os.path.normcase(str(top)) == os.path.normcase(str(expected))
+
+
 def findings_for(root: Any, actor: str, check: Any, paths: Iterable[str] | None = None) -> list[AccessFinding]:
     """The access shortages of one actor's ``check`` over the Project's submodules (nothing to check without any)."""
     found: list[AccessFinding] = []
     for path in sorted(submodule_paths(root) if paths is None else paths):
-        try:
-            present = gitcmd.run_git(root, "-C", path, "rev-parse", "HEAD", check=False).ok
-        except GitError:
-            present = False
-        if not present:
+        if not checked_out(root, path):
             found.append(AccessFinding(actor, TARGET_MISSING, path, ("git", "-C", path, "rev-parse", "HEAD")))
             continue
         for argv in read_commands(path):
@@ -129,17 +148,25 @@ def findings_for(root: Any, actor: str, check: Any, paths: Iterable[str] | None 
     return found
 
 
-def _bindings(*selectors: Any) -> list[Any]:
-    found: list[Any] = []
+def _bindings(*selectors: Any) -> list[tuple[Any, str]]:
+    """The ``(actor, label)`` of every Review actor the selectors name: P4 bindings and the review-v1 reviewer."""
+    found: list[tuple[Any, str]] = []
     for selector in selectors:
         if selector is None:
             continue
+        bindings: list[Any] = []
         for name in ("discovery", "holdout_discovery"):
-            found.extend(getattr(selector, name, ()) or ())
+            bindings.extend(getattr(selector, name, ()) or ())
         for name in ("adjudicator", "repair"):
             binding = getattr(selector, name, None)
             if binding is not None:
-                found.append(binding)
+                bindings.append(binding)
+        for binding in bindings:
+            found.append((getattr(binding, "actor", None), f"{binding.identity} {binding.version}"))
+        reviewer = getattr(selector, "reviewer", None)
+        if reviewer is not None:
+            label = f"{getattr(selector, 'reviewer_identity', 'reviewer')} {getattr(selector, 'reviewer_version', '')}"
+            found.append((reviewer, label.strip()))
     return found
 
 
@@ -152,15 +179,14 @@ def require_reviewer_access(root: Any, *selectors: Any) -> None:
     seen: set[int] = set()
     problems: list[AccessFinding] = []
     paths: list[str] | None = None
-    for binding in _bindings(*selectors):
-        actor = getattr(binding, "actor", None)
+    for actor, label in _bindings(*selectors):
         check = getattr(actor, READ_ACCESS_ATTR, None)
         if not callable(check) or id(actor) in seen:
             continue
         seen.add(id(actor))
         if paths is None:
             paths = submodule_paths(root)
-        problems += findings_for(root, f"{binding.identity} {binding.version}", check, paths)
+        problems += findings_for(root, label, check, paths)
     if problems:
         raise StopError(
             "a Review actor cannot be relied on to read this Project, and the Review is not started (nothing is "

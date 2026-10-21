@@ -151,3 +151,138 @@ class ReviewerAccessStartTests(SubmoduleProjectCase):
     def test_an_actor_that_exposes_no_allowance_is_not_checked(self) -> None:
         result, record = self.complete(self.executor, review=work_p4(Discovery()))
         self.assertEqual(1, len(self.runs()))
+
+
+class SubmoduleNotCheckedOutTests(SubmoduleProjectCase):
+    """RB11INT-H1-1: an uninitialized or deinitialized gitlink leaves an empty directory inside the superproject.
+
+    ``git -C solver rev-parse HEAD`` then succeeds with the SUPERPROJECT's HEAD, so it cannot be the proof that the
+    submodule is checked out; the repository found at the path must be the path itself.
+    """
+
+    def deinit(self) -> None:
+        git(self.root, "submodule", "deinit", "-f", "solver")
+
+    def test_the_superproject_answers_for_an_empty_submodule_directory_which_is_the_trap(self) -> None:
+        self.deinit()
+        self.assertTrue((self.root / "solver").is_dir(), "the directory remains")
+        self.assertEqual([], list((self.root / "solver").iterdir()), "and it is empty")
+        answer = subprocess.run(["git", "-C", str(self.root), "-C", "solver", "rev-parse", "HEAD"],
+                                capture_output=True, text=True)
+        self.assertEqual(0, answer.returncode, "the old proof of presence succeeds ...")
+        self.assertEqual(self.head(), answer.stdout.strip(), "... with the superproject's own HEAD")
+
+    def test_a_deinitialized_submodule_is_target_missing_and_a_checked_out_one_is_clean(self) -> None:
+        self.assertEqual([], ra.findings_for(self.root, "reviewer 1", read_only_allowance))
+        self.assertTrue(ra.checked_out(self.root, "solver"))
+        self.deinit()
+        self.assertFalse(ra.checked_out(self.root, "solver"))
+        found = ra.findings_for(self.root, "reviewer 1", read_only_allowance)
+        self.assertEqual([(ra.TARGET_MISSING, "solver")], [(item.classification, item.target) for item in found])
+
+    def test_negative_controls_a_plain_subdirectory_a_missing_path_and_a_file_are_not_checked_out(self) -> None:
+        (self.root / "plain").mkdir()
+        (self.root / "plain" / "a.txt").write_text("a\n", encoding="utf-8")
+        (self.root / "file.txt").write_text("f\n", encoding="utf-8")
+        for path in ("plain", "does-not-exist", "file.txt", "../outside"):
+            self.assertFalse(ra.checked_out(self.root, path), path)
+
+    def test_an_unreadable_list_stays_unknown_and_is_never_turned_into_a_missing_target(self) -> None:
+        from unittest import mock
+
+        failed = mock.Mock(ok=False, stdout="")
+        with mock.patch.object(ra.gitcmd, "run_git", return_value=failed):
+            with self.assertRaises(StopError) as raised:
+                ra.require_reviewer_access(self.root, work_p4(AccessActor(read_only_allowance)))
+        self.assertIn(ra.UNKNOWN, str(raised.exception))
+        self.assertNotIn(ra.TARGET_MISSING, str(raised.exception))
+
+    def test_start_with_a_deinitialized_submodule_stops_before_anything_is_begun(self) -> None:
+        self.deinit()
+        head = self.head()
+        actor = AccessActor(read_only_allowance)
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, self.work_id, "single-work", self.executor, review=work_p4(actor))
+        self.assertEqual(ra.CODE_REVIEWER_ACCESS, raised.exception.code, raised.exception)
+        self.assertIn(ra.TARGET_MISSING, str(raised.exception))
+        self.assertEqual(head, self.head())
+        self.assertEqual([], self.pending())
+        self.assertEqual([], self.runs())
+        self.assertEqual([], actor.tasks)
+
+    def test_nested_submodules_are_not_in_scope_only_the_gitlinks_of_the_project_index_are_read(self) -> None:
+        """A gitlink inside a submodule is the submodule's own index, which the Project's ``ls-files -s`` never lists."""
+        self.assertEqual(["solver"], ra.submodule_paths(self.root))
+
+
+from test_work_review_runtime import TERMINAL_UNAVAILABLE, Reviewer, ReviewCase  # noqa: E402
+
+
+class AccessReviewer(Reviewer):
+    """A review-v1 reviewer that declares its allowance."""
+
+    def __init__(self, allowance: Any) -> None:
+        super().__init__()
+        self.read_access = allowance
+
+
+class WorkReviewV1ReviewerAccessTests(ReviewCase):
+    """RB11INT-H1-2: the review-v1 reviewer binding is held to the same read-access pre-check as the P4 actors."""
+
+    def prepare(self) -> None:
+        upstream = self.root.parent / (self.root.name + "-solver-upstream")
+        upstream.mkdir()
+        git(upstream, "init", "-q")
+        (upstream / "solver.txt").write_text("solver\n", encoding="utf-8")
+        git(upstream, "add", "solver.txt")
+        git(upstream, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "solver")
+        git(self.root, "submodule", "add", "-q", str(upstream), "solver")
+        git(self.root, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-q", "-m", "chore: add solver")
+
+    def head(self) -> str:
+        return subprocess.run(["git", "-C", str(self.root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    def test_a_v1_reviewer_whose_allowance_lacks_the_forms_is_refused_before_any_effect(self) -> None:
+        head = self.head()
+        weak = AccessReviewer(no_dash_c_allowance)
+        stop = self.run_start(self.completing(write={"out.txt": b"out\n"}), self.review(weak),
+                              expect=ra.CODE_REVIEWER_ACCESS)
+        self.assertIn(ra.PERMISSION_DENIED, str(stop))
+        self.assertEqual(head, self.head(), "nothing was committed")
+        self.assertEqual([], self.pending(), "no mutation was begun")
+        self.assertEqual([], weak.tasks, "the reviewer was never launched")
+
+    def test_a_v1_reviewer_that_would_write_is_refused(self) -> None:
+        weak = AccessReviewer(writing_allowance)
+        stop = self.run_start(self.completing(write={"out.txt": b"out\n"}), self.review(weak),
+                              expect=ra.CODE_REVIEWER_ACCESS)
+        self.assertIn(ra.WRITE_PERMITTED, str(stop))
+        self.assertEqual([], weak.tasks)
+
+    def test_a_v1_reviewer_with_a_sufficient_allowance_runs_the_review(self) -> None:
+        good = AccessReviewer(read_only_allowance)
+        self.run_start(self.completing(write={"out.txt": b"out\n"}), self.review(good), expect=TERMINAL_UNAVAILABLE)
+        self.assertEqual(1, len(good.tasks), "the Review ran")
+
+    def test_a_v1_reviewer_that_declares_no_allowance_is_not_checked(self) -> None:
+        plain = Reviewer()
+        self.run_start(self.completing(write={"out.txt": b"out\n"}), self.review(plain), expect=TERMINAL_UNAVAILABLE)
+        self.assertEqual(1, len(plain.tasks))
+
+    def test_a_v1_reviewer_with_an_unreadable_submodule_list_stops_as_unknown(self) -> None:
+        from unittest import mock
+
+        reviewer = AccessReviewer(read_only_allowance)
+        real = ra.gitcmd.run_git
+
+        def unreadable_list(root, *args, **kwargs):
+            if args[:1] == ("ls-files",):
+                return mock.Mock(ok=False, stdout="")
+            return real(root, *args, **kwargs)
+
+        with mock.patch.object(ra.gitcmd, "run_git", side_effect=unreadable_list):
+            stop = self.run_start(self.completing(write={"out.txt": b"out\n"}), self.review(reviewer),
+                                  expect=ra.CODE_REVIEWER_ACCESS)
+        self.assertIn(ra.UNKNOWN, str(stop))
+        self.assertEqual([], reviewer.tasks)
