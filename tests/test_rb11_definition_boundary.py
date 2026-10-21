@@ -154,6 +154,20 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 now = (REPO / "src" / "workline" / name).read_bytes().decode("utf-8").replace("\r\n", "\n")
                 self.assertEqual(module_text_outside_definitions(base), module_text_outside_definitions(now), name)
 
+    def test_the_test_surface_is_exactly_the_files_the_sprint_enumerates(self) -> None:
+        """RB11INT-GEN-3: a changed or added test file outside the list under "Pins and verification obligations" fails."""
+        import re
+
+        sprint = (REPO / "WORKLINE_COMPLETION_SPRINT.md").read_text(encoding="utf-8")
+        start = sprint.index("Test files (the whole test surface that this subsection adds to")
+        listed = set(re.findall(r"`(tests/test_[a-z0-9_]+\.py)`", sprint[start:sprint.index("\n", start)]))
+        self.assertTrue(listed, "the Sprint enumerates the test files")
+        changed = set(_git("diff", "--name-only", BASE, "--", "tests").decode().split())
+        changed |= set(_git("ls-files", "--others", "--exclude-standard", "--", "tests").decode().split())
+        changed = {name for name in changed if name.endswith(".py")}
+        self.assertEqual(set(), changed - listed, "test files changed outside the enumerated surface")
+        self.assertEqual(set(), listed - changed, "an enumerated test file that does not change is a stale entry")
+
     def test_the_guard_notices_a_change_outside_the_tables(self) -> None:
         text = (REPO / "src" / "workline" / "start.py").read_bytes().decode("utf-8").replace("\r\n", "\n")
         self.assertNotEqual(definition_digests(text), definition_digests(text + "\n\ndef extra() -> None:\n    pass\n"))
