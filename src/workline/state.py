@@ -270,16 +270,34 @@ class ProjectView:
             return self.roadmap_lifecycle(entity_id)
         return "unresolvable"
 
-    def unsatisfied_dependencies(self, entity_id: str) -> list[tuple[Relation, str]]:
+    def unsatisfied_dependencies(self, entity_id: str, *, include_phase: bool = True) -> list[tuple[Relation, str]]:
         """Incoming ``requires_completion`` whose predecessor is not completed.
 
         A cancelled / plan_excluded predecessor never satisfies the dependency.
+
+        For a Work this also reads the ``requires_completion`` its own Phase is
+        waiting on (``include_phase``), but only for a Work that Roadmap-time
+        registration wrote with its provenance marker and only while that Work is
+        ``unstarted``: such a Work is registered ahead of its Phase's entry and
+        must not start before the Phase's predecessors are complete, and once it
+        has started a predecessor added later never refuses its completion or the
+        resume of its START. Every reader (START, the START probe, status, the
+        startable listings) gets this through this one predicate. Every other
+        Work - one of a Phase entered the ordinary way, a legacy Work, a Work of
+        unknown provenance - is read exactly as it always was; ownership is never
+        inferred from ``phase_id``.
         """
         result: list[tuple[Relation, str]] = []
         for relation in self.relations_to(entity_id, "requires_completion"):
             label = self.entity_state_label(relation.from_id)
             if label not in (COMPLETED, COMPLETE):
                 result.append((relation, label))
+        work = self.works.get(entity_id) if include_phase else None
+        if (
+            work is not None and work.roadmap_registration is not None and work.phase_id in self.phases
+            and self.work_state(work.id).state == UNSTARTED
+        ):
+            result.extend(self.unsatisfied_dependencies(work.phase_id))
         return result
 
     def dependencies_satisfied(self, entity_id: str) -> bool:
@@ -303,7 +321,7 @@ class ProjectView:
         if self.unfinished_integrations(phase_id):
             reasons.append("unfinished integration remains")
         for work in effective:
-            for relation, label in self.unsatisfied_dependencies(work.id):
+            for relation, label in self.unsatisfied_dependencies(work.id, include_phase=False):
                 if label in EXCLUDED_STATES:
                     reasons.append(f"{relation.id}: predecessor {relation.from_id} is {label} (replan required)")
         if not reasons:

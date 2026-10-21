@@ -3896,10 +3896,14 @@ def _integration_exit_wait(session: "_Session", waiting_run_id: str, chain: Any,
                                   history_contract=history.HISTORY_CONTRACT)
     _integration_require_evidence(session, waiting_run_id, chain, work_id)
     if _integration_bind_decision(session, waiting_run_id, chain) is None:
+        try:
+            held = ". It holds " + p4.wait_breakdown_text(ReviewStore(session.store).read_adjudication(waiting_run_id))
+        except Exception:
+            held = ""  # explanatory text only (AM-C1): without it the STOP is raised exactly as before
         raise p4.stop(p4.CODE_HUMAN_WAIT,
                       f"Integration Review Run {waiting_run_id} of {work_id} waits on a Human requirement decision at "
                       "generation 4; it stays the same canonical Run, nothing guesses the decision, and no other Run "
-                      "of the integration begins beside it (R8)")
+                      "of the integration begins beside it (R8)" + held)
     return ({"review_run_id": waiting_run_id, "reason": p4.SET_ASIDE_HUMAN_DECISION},)
 
 
@@ -4550,7 +4554,7 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
         raise p4.stop(p4.CODE_ADJUDICATION_INVALID,
                       f"the Phase Integration adjudicator returned {type(returned).__name__}, not an "
                       "IntegrationAdjudicationReturn (the P4 adjudication and its one Phase outcome); nothing is settled")
-    normalized = p4.normalize_adjudication(returned.adjudication, descriptor, reports, None)
+    normalized = p4.normalize_adjudication(returned.adjudication, descriptor, reports, None, ground_not_applicable=True)
     try:
         outcome = returned.phase_outcome if type(returned.phase_outcome) is ri.PhaseOutcome \
             else ri.PhaseOutcome.from_record(returned.phase_outcome)
@@ -6190,9 +6194,13 @@ def _p4_human_wait(session: "_Session", run: WorkRun, chain: Any) -> None:
                                   history_contract=_p4_history(session.store, chain))
     _p4_require_evidence(session, run.review_run_id, chain)
     if _p4_bind_decision(session, run.review_run_id, chain) is None:
+        try:
+            held = ". It holds " + p4.wait_breakdown_text(ReviewStore(session.store).read_adjudication(run.review_run_id))
+        except Exception:
+            held = ""  # explanatory text only (AM-C1): without it the STOP is raised exactly as before
         raise p4.stop(p4.CODE_HUMAN_WAIT,
                       f"Work Review Run {run.review_run_id} waits on a Human requirement decision at generation 4; "
-                      "no repair guesses it, and this START stays pending until an invocation carries the decision")
+                      "no repair guesses it, and this START stays pending until an invocation carries the decision" + held)
     # bound durably above, before the successor's reservation (P4-R7 invariant 4)
     successor = session.mutation.reserve_id(gate.review_successor_run_key(run.review_run_id), "review_run")
     _p4_reserve(session.mutation, successor, run.work_id, _p4_bindings(session), predecessor=run.review_run_id)

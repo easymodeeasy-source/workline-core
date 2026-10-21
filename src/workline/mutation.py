@@ -861,6 +861,37 @@ def abandon_on_stop(mutation: Mutation):
         raise
 
 
+@contextmanager
+def abandon_new_on_stop(mutation: Mutation):
+    """Abandon ``mutation`` on a ``detached_head`` STOP only when THIS call began it and it recorded no effect.
+
+    The guard for an owner's entry window, between :meth:`MutationController.open`
+    and the first thing that can be decided (Git readiness, the snapshot of the
+    changes that were already there). The only STOP it acts on is ``detached_head``
+    (``gitops.ensure_git_ready``); every other StopError - a ``reconcile required``
+    included - leaves the record exactly as it was. A mutation the call just began
+    holds nothing - no effect, no reserved ID, no note - so closing it on that STOP
+    loses nothing and keeps a refused request from holding its write scope against
+    every other request until it is retried. A mutation the call only RESUMED
+    (``mutation.resumed``), one that holds an effect, and one whose state cannot be
+    established are never closed here: a resumed record may hold what an earlier
+    call reserved or began - a frozen Candidate, a Review Run that only this record
+    can resume. If closing the record fails, it stays pending and the original
+    ``detached_head`` STOP is the one reported. A process death is no
+    ``StopError`` and leaves the record as it always did: the same request resumes
+    it. The covered operations are chosen by the caller (Sprint 41.31, AM-A).
+    """
+    try:
+        yield mutation
+    except StopError as stop:
+        if stop.code == "detached_head" and not mutation.resumed and mutation.status == "pending" and not mutation.effects:
+            try:
+                mutation.abandon()
+            except Exception:
+                pass  # the record stays pending; the original STOP is what is reported
+        raise
+
+
 # --------------------------------------------------------------------------- the branch a decision is made on
 
 _UNBOUND = object()
@@ -2544,8 +2575,14 @@ class MutationController:
         for other in others:
             other_scope = WriteScope.from_record(other["write_scope"])
             if other_scope.overlaps(planned) or not other_scope.entities and not other_scope.files:
+                shared = sorted((set(other_scope.entities) & set(planned.entities))
+                                | (set(other_scope.files) & set(planned.files)))
                 raise ReconcileRequired(
                     f"pending mutation {other['mutation_id']} (owner {other['owner']}) overlaps the planned write scope: reconcile required"
+                    f" (overlap: {', '.join(shared) if shared else 'its scope is unbounded'}). This guard protects that"
+                    " mutation's uncommitted state and is working as designed: resume or finish that pending operation"
+                    " (a START waiting on a Human decision continues once the decision is supplied); never edit"
+                    " .workline/runtime by hand"
                 )
         if matches:
             mutation = Mutation(self, matches[0], resumed=True)

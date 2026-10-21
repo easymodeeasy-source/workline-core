@@ -34,6 +34,7 @@ from .mutation import (
     WriteScope,
     _DECIDED_ON,
     _decides,
+    abandon_new_on_stop,
     abandon_on_stop,
     declare_own_content,
     effect_path,
@@ -3898,6 +3899,12 @@ def _start_locked(
     destination = gitops.ensure_push_destination(store)
     # review-v1: activation is verified under the lock, before any intent record exists (F1 §6.4).
     activation = start_review.require_activation(store) if review is not None else None
+    if review is not None or phase_review is not None:
+        # field-feedback item 6: a checkable Review actor that cannot read this Project (or is not read-only) is refused here,
+        # before the mutation exists, so it never surfaces later as a Human wait on a requirement nobody questioned.
+        from . import reviewer_access
+
+        reviewer_access.require_reviewer_access(store.root, review, phase_review)
     if review is not None:
         # review-v1, F4 §11.12: every matching Work Review Run that no pending START of this Work holds is classified,
         # still before the mutation is opened, so a refusal reserves, records and writes nothing and runs no executor.
@@ -4074,8 +4081,9 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
 
     input_validation.require_durable({**slot, "request": request}, "the plan exclusion request")
     mutation = controller.open(OWNER, {**slot, "request": request}, WriteScope(entities=(work_id,), files=LEDGER_FILES))
-    gitops.ensure_git_ready(store.root)
-    gitops.record_preexisting_dirty(mutation, store.root)
+    with abandon_new_on_stop(mutation):  # the entry window: a record THIS call began holds the ledgers for nothing
+        gitops.ensure_git_ready(store.root)
+        gitops.record_preexisting_dirty(mutation, store.root)
     mutation.apply()
     if resumed is not None:
         work_ids, removals, additions = resumed.work_ids, resumed.removals, resumed.additions

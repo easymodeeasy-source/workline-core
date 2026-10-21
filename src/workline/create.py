@@ -16,7 +16,7 @@ Direct Work Operation context that owns postcheck / commit / push.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import json
 from typing import Any, Sequence
 
@@ -98,7 +98,17 @@ class WorkSpec:
     confirmation_target: str | list[str] | None = None
     related: tuple[RelatedSpec, ...] = ()
     derivation_detail: str | None = None
+    #: Roadmap-time registration only (``RoadmapPlan.phase_entries``): the plan key this Work is registered under.
+    #: ``None`` - the default - registers exactly the Work it always registered, with no provenance marker.
+    #: Keyword-only, so the positional form of the existing fields is unchanged. Only Roadmap-time registration
+    #: can set it: every other path that carries it is refused by ``_validate_spec`` (the capability below).
+    registration_key: str | None = field(default=None, kw_only=True)
+    #: Stays the last field (the frozen shape pinned by ``WorkSpecShapeTests``).
     phase_review_contract: str | None = None
+
+    #: The capability only Roadmap-time registration holds (``roadmap._register_phase_expansion`` attaches it to the
+    #: specs it builds). It is an attribute of the class, not a field: it is not part of the frozen shape.
+    ROADMAP_TIME = object()
 
     @property
     def standalone(self) -> bool:
@@ -209,6 +219,13 @@ def _validate_spec(spec: WorkSpec, key: str, view: ProjectView) -> None:
         raise ValidationError(f"work {key}: unknown work_kind {spec.work_kind}")
     if spec.confirmation_target is not None and spec.work_kind != "human_confirmation":
         raise ValidationError(f"work {key}: confirmation_target is only for human_confirmation Works")
+    if spec.registration_key is not None:
+        # Provenance marker: only Roadmap-time registration may write it (Sprint 41.31, AM-H1); direct CREATE, a replan
+        # and every other path that carries a registration_key are refused before anything is written.
+        if getattr(spec, "_roadmap_time", None) is not WorkSpec.ROADMAP_TIME:
+            raise ValidationError(f"work {key}: registration_key is only for Roadmap-time registration")
+        if not isinstance(spec.registration_key, str) or not spec.registration_key.strip() or spec.phase_id is None:
+            raise ValidationError(f"work {key}: registration_key needs a non-empty key and a Phase")
     if spec.phase_review_contract is not None:
         # §32.2: exact supported value only, and only on an integration Work; CREATE persists the caller's decision.
         if spec.work_kind != "phase_integration_check":
@@ -367,6 +384,10 @@ def _registration_effects(
             meta["origin"] = {"type": "standalone"}
         if spec.work_kind is not None:
             meta["work_kind"] = spec.work_kind
+        if spec.registration_key is not None and spec.phase_id is not None:
+            meta["roadmap_registration"] = {
+                "roadmap_id": spec.roadmap_id, "phase_id": spec.phase_id, "key": spec.registration_key,
+            }
         if spec.phase_review_contract is not None:
             meta[PHASE_REVIEW_CONTRACT_KEY] = spec.phase_review_contract
         if spec.confirmation_target is not None:

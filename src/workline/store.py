@@ -165,6 +165,27 @@ class Entity:
         return str(value) if value else None
 
     @property
+    def roadmap_registration(self) -> dict[str, str] | None:
+        """The Roadmap-time registration provenance this Work was written with, or ``None`` for any other Work.
+
+        Present only on a Work that Roadmap-time registration (``RoadmapPlan.phase_entries``) created: the
+        Roadmap, the Phase and the plan key it was registered under. It is read as written and never inferred -
+        a missing, malformed, or inconsistent marker (another Roadmap or Phase than the Work's own ``origin``)
+        reads as ``None``, so a Work of unknown provenance is never taken for a Roadmap-time registration.
+        """
+        value = self.meta.get("roadmap_registration")
+        origin = self.meta.get("origin")
+        if not isinstance(value, dict) or not isinstance(origin, dict) or set(value) != {"roadmap_id", "phase_id", "key"}:
+            return None
+        if not all(isinstance(item, str) and item for item in value.values()):
+            return None
+        if origin.get("type") != "roadmap" or origin.get("roadmap_id") != value["roadmap_id"]:
+            return None
+        if value["phase_id"] != origin.get("phase_id") or value["phase_id"] != self.phase_id:
+            return None
+        return {"roadmap_id": value["roadmap_id"], "phase_id": value["phase_id"], "key": value["key"]}
+
+    @property
     def phase_review_contract(self) -> Any:
         """The stored ``phase_review_contract`` frontmatter value, raw, or ``None`` when the key is absent (§32.2).
 

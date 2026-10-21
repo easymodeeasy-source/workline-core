@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 from pathlib import Path
 import unittest
@@ -25,7 +26,89 @@ from workline.validate import validate_structure
 #: adds ``phase_integration.completion_reasons`` - entity / event / relation truth only - once every legacy check
 #: holds, through a function-local import. state.py stays free of Review.
 STATE_PY_BASELINE_SHA256 = "0b2a42bed8c301e889d4663f40fea3da71a377cae71d07a09209e84e05f0f479"
+#: Re-pinned for the ONE further authorized change (Roadmap-time Work registration, D2-2: ``unsatisfied_dependencies`` also
+#: reads the ``requires_completion`` a Work's own Phase waits on - only for a Work that carries the Roadmap-time registration
+#: provenance marker, RB11R-1 - and ``phase_completion`` keeps its old reading through ``include_phase=False``). CP accepted the change; Human contract approval of D2-2 is PENDING - if the Human does not
+#: approve D2-2, the two hunks are reverted and this pin returns to ``STATE_PY_BASELINE_SHA256``. The baseline pin above
+#: stays as the record of production main 41d27c00, and ``STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS`` records what the
+#: two allowed definitions were. Every other definition of state.py must stay byte-identical to the baseline
+#: (``STATE_PY_DEFINITION_DIGESTS``), so the re-pin cannot hide any other change. state.py stays free of Review.
+#: Re-pinned again for Sprint 41.31 AM-H2 (integrated candidate): the inheritance of the Phase prerequisite also requires the Work to be
+#: ``unstarted``, in the one predicate ``ProjectView.unsatisfied_dependencies`` (START, the probe, status and the startable listings read it).
+#: The values below are MEASURED from the final state.py, never predicted; only that definition's digest changed.
+STATE_PY_D2_SHA256 = "8c40213743f19583b6b8995be89feecb136bcf546f97f78b060ea532daab66b5"
+STATE_PY_ALLOWED_CHANGES = frozenset({"ProjectView.phase_completion", "ProjectView.unsatisfied_dependencies"})
+STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS = {
+    "ProjectView.phase_completion": "a3e4bd1f67b71dc0bd99bb01c294994326b944ee41fa58816dded18f8632f943",
+    "ProjectView.unsatisfied_dependencies": "d15aa2b29602edb09b8d878a2dd87d35734c89f504b6ffc2c78ed4c1a15bfa11",
+}
+STATE_PY_DEFINITION_DIGESTS = {
+    "<module>": "a9025bf41aeae88615b93a36d04cb004da7c2b39add86ab5b33e80b618ae8e76",
+    "PhaseCompletion": "b967cea056af5d8f61ef896df2d64a0f1a62d6721697adb5ad73fb18b6441808",
+    "ProjectView": "869d7d8f589071b8562061ee434d47bae2dd57b4528f8636b4d20f42b6067db4",
+    "ProjectView.active_phases": "bc43ab010bbc5d634186405b6643504d891ba183c91f2c03e166a5552c60787b",
+    "ProjectView.all_active_phases_complete": "c8f760267be34186f63dcdd6ceef56c41fb91891a8890d63d6bc9ccc7112c971",
+    "ProjectView.choose_startable": "712c85c6b02faa62d7678e4d0feb3e869cd07f133c1e11948be1b347110a553c",
+    "ProjectView.dependencies_satisfied": "5a039059ac6503d2c65f56974aa5c97c872c2aef77d33cac70d256cc0a9c6886",
+    "ProjectView.effective_works": "a05d087f8f38060e634c801ddb737898a2c059d1e2eb085efb3e94a14dfc04cc",
+    "ProjectView.entity_state_label": "55bcea68a310eee2d33f30adc0a9536818c7dd858aae1537b0218ec904c65d14",
+    "ProjectView.events_for": "1160595552cc4d8ec604f23aa767e4c0b25b7df4fba98a02362427961967f36f",
+    "ProjectView.integrations": "33d5f80222ac2bec9bd0b610cf963fc6d507a58bdee4e33a1fa23b7d3a573d29",
+    "ProjectView.load": "6704a655447310c38e12085f9b56e4cf823c9b8078f2c112410499cc8dbdae16",
+    "ProjectView.phase_completion": "a36a74fbdb1a9f7866070ceea46087862afd53385b4a3a0c226b4a9dbd31d0bc",
+    "ProjectView.phase_lifecycle": "f1dfd1c20e6403a24c684b4db2530c199e92d03b5ae00f895b84b85690077692",
+    "ProjectView.phase_state": "7aa5d763dd4776120dfe7748804cdc132e19ca8c09a40c71788fd56cc0471d2f",
+    "ProjectView.phase_works": "a1b74ad4df6f152843437ded2a20fa621adee138005776776f7969dd6afec7c3",
+    "ProjectView.planned_next_preference": "a88714082081bfa5f77da5a8036665102d23b5f9f162f238f10c2e3fff8e23a4",
+    "ProjectView.related_from": "8681f2771b8a24f283d7fb3c220d93631198c3785724a002a98800f3ee4372b2",
+    "ProjectView.relations_from": "7e3edec106db20b77756a729826b7c8bed737c41e530d57e657eb5e104c811bb",
+    "ProjectView.relations_to": "97b169f7128c6ae61968484d3cca8b7025bd15cd36c581e770f74f067d324e70",
+    "ProjectView.roadmap_lifecycle": "530211d37c37535568a53ded91364523b9e769ef8a622f3fb1b9dc56f8fea04f",
+    "ProjectView.roadmap_phases": "82e23e06c5be43ab3a423a6718770a39e4919a03df27ad1cb77baeac80971073",
+    "ProjectView.startable_phases": "5bba63e0ab30cb4c14436841e975454e1d601357cde6f8b3ccb95875e2e2ffe0",
+    "ProjectView.startable_works": "ea484408cf3ba3a6b7d87715c86c09e917f6f3fc7b89714a04c36af69c06fcca",
+    "ProjectView.unfinished_integrations": "5e9cf4c73e05859999298d0067ef21d9fcec4469aca9ff02f4ca647d7a5dbeae",
+    "ProjectView.unsatisfied_dependencies": "4f7505f70a4ab47dd3a7e0f84a422c70f0c2556a5fc49d88601f26eea9e95312",
+    "ProjectView.with_effects": "d3ec65b3da744d5fbec2d99807b02e5d8a3020be45f6a5c18b0dd239ac735217",
+    "ProjectView.work_entered_execution": "45f02f5c7110f3250e704770b5aaa7a4ee8fd4dcd277fce1f64fa84713256d57",
+    "ProjectView.work_state": "505bae335fd0c9996bfa9f251a6192ad9193d1116eb9a4c581144b787acf8256",
+    "WorkState": "1ca04467a2c94ed8c1d9ab9d208934d81f25d6cfd9d8e941d1be13484b11106d",
+    "WorkState.excluded": "b95d77c1a2c503dd22691571fbf553f4b14f1e660c37bba678f85b42b9a0b068",
+    "WorkState.terminal": "693ea5461ed3b6ed9a6f425fe4305e881cf9847fe7f55fce4c3164dc9a164e25",
+    "derive_phase_lifecycle": "20f1ed3f15a753c46c4440b2890cb0000586e7df368bca10b28aea871137b36e",
+    "derive_roadmap_lifecycle": "dd94073f8132206bcae933c08d7992437f6453de0f3e544ceb56f2c50e665c2f",
+    "derive_work_state": "0d9c411328d048d897a51cd5f6f7f0f493f81bdd6dffbeac22293fba7876a992",
+}
 EVENT_LOG = ".workline/events/events.jsonl"
+
+
+def definition_digests(source: str) -> dict[str, str]:
+    """SHA-256 of every definition's own source lines (nested definitions excluded) plus the module residue.
+
+    A container (class, or a function with nested definitions) is hashed without its nested definitions, so a change
+    inside a method changes only that method's digest.
+    """
+    tree = ast.parse(source)
+    lines = source.split("\n")
+    defs = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+    def span(node: ast.AST) -> tuple[int, int]:
+        first = node.decorator_list[0].lineno if getattr(node, "decorator_list", None) else node.lineno
+        return first - 1, node.end_lineno
+
+    digests: dict[str, str] = {}
+
+    def scope(name: str, body: list, first: int, last: int) -> None:
+        owned = set(range(first, last))
+        for node in body:
+            if isinstance(node, defs):
+                start, end = span(node)
+                owned -= set(range(start, end))
+                scope(f"{name}.{node.name}" if name != "<module>" else node.name, node.body, start, end)
+        digests[name] = hashlib.sha256("\n".join(lines[i] for i in sorted(owned)).encode("utf-8")).hexdigest()
+
+    scope("<module>", tree.body, 0, len(lines))
+    return digests
 
 
 def lifecycle_facts(view: ProjectView) -> dict:
@@ -96,10 +179,44 @@ class TamperedRecordTests(PlanningTestCase):
 
 
 class StatePyTests(unittest.TestCase):
-    def test_state_py_is_byte_identical_to_the_baseline(self) -> None:
-        data = Path(state.__file__).read_bytes().replace(b"\r\n", b"\n")
-        self.assertEqual(STATE_PY_BASELINE_SHA256, hashlib.sha256(data).hexdigest())
+    def _source(self) -> str:
+        return Path(state.__file__).read_bytes().decode("utf-8").replace("\r\n", "\n")
+
+    def test_state_py_is_the_pinned_d2_form_and_free_of_review(self) -> None:
+        data = self._source().encode("utf-8")
+        self.assertEqual(STATE_PY_D2_SHA256, hashlib.sha256(data).hexdigest())
         self.assertNotIn(b"review", data.lower())
+
+    def test_every_definition_but_the_two_allowed_is_byte_identical_to_the_baseline(self) -> None:
+        digests = definition_digests(self._source())
+        self.assertEqual(STATE_PY_DEFINITION_DIGESTS, digests)
+        # the allowed definitions are exactly the ones that differ from the baseline record
+        self.assertEqual(STATE_PY_ALLOWED_CHANGES, set(STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS))
+        for name in STATE_PY_ALLOWED_CHANGES:
+            self.assertNotEqual(STATE_PY_BASELINE_OF_THE_ALLOWED_DEFINITIONS[name], digests[name], name)
+        for name, digest in digests.items():
+            if name not in STATE_PY_ALLOWED_CHANGES:
+                self.assertEqual(STATE_PY_DEFINITION_DIGESTS[name], digest, name)
+
+    @staticmethod
+    def _with_a_new_first_line(source: str, header: str) -> str:
+        head, sep, rest = source.partition(header)
+        body_start = rest.index(":\n") + 2
+        return head + sep + rest[:body_start] + "        _ = 0\n" + rest[body_start:]
+
+    def test_a_change_to_any_other_definition_fails_the_guard(self) -> None:
+        source = self._source()
+        # negative controls on in-memory copies: one new line in a definition that is NOT allowed to change ...
+        for header in ("def dependencies_satisfied", "def roadmap_lifecycle"):
+            self.assertIn(header, source)
+            changed = self._with_a_new_first_line(source, header)
+            self.assertNotEqual(STATE_PY_DEFINITION_DIGESTS, definition_digests(changed), header)
+        # ... a change to an allowed definition is caught as well, because its new form is pinned too ...
+        changed = self._with_a_new_first_line(source, "def unsatisfied_dependencies")
+        self.assertNotEqual(STATE_PY_DEFINITION_DIGESTS, definition_digests(changed))
+        # ... a module-level line and a new definition are changes too
+        self.assertNotEqual(STATE_PY_DEFINITION_DIGESTS, definition_digests("# changed\n" + source))
+        self.assertNotEqual(STATE_PY_DEFINITION_DIGESTS, definition_digests(source + "\n\ndef extra() -> None:\n    pass\n"))
 
 
 class P3InactiveTests(PlanningTestCase):

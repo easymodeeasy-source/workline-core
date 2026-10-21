@@ -198,8 +198,13 @@ def register_phases(
     *,
     future_plan_change: bool = False,
     before_record: Callable[[list[Effect]], None] | None = None,
+    works_may_follow: bool = False,
 ) -> PhaseRegistrationResult:
     """Register one Phase stage in ``mutation``; no Git.
+
+    ``works_may_follow`` is for a Roadmap creation that registers its Phases' Works in the same mutation: when
+    such a creation is resumed, this stage is replayed after those Works exist, and that is not a Phase CREATE
+    that produced them.
 
     ``before_record`` is called with the stage's effects right before a stage
     not recorded yet is recorded, after every refusal of the registration: an
@@ -234,7 +239,7 @@ def register_phases(
             raise ValidationError(f"postcheck: Phase {phase_id} invalid", code="postcheck_failed")
         if "state" in entity.meta or "origin" in entity.meta:
             raise ValidationError(f"postcheck: Phase {phase_id} carries state / origin", code="postcheck_failed")
-        if after.events_for(phase_id) or after.phase_works(phase_id):
+        if after.events_for(phase_id) or (after.phase_works(phase_id) and not works_may_follow):
             raise ValidationError(f"postcheck: Phase CREATE produced Works or events for {phase_id}", code="postcheck_failed")
     registered = {r.id: r for r in after.roadmap_relations}
     for relation in resolved:

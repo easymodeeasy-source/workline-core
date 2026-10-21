@@ -37,6 +37,7 @@ from .mutation import (
     Mutation,
     MutationController,
     WriteScope,
+    abandon_new_on_stop,
     abandon_on_stop,
     pending_for_slot,
     require_same_request,
@@ -157,6 +158,21 @@ def _ledgers(operation: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------- payloads
 
 @dataclass(frozen=True)
+class WorkDependency:
+    """``requires_completion`` between Works of two different Phases of one Roadmap plan, by plan keys.
+
+    The Work ``to_work`` of Phase ``to_phase`` cannot start before the Work ``from_work`` of Phase ``from_phase``
+    is completed. The keys are the ``RoadmapPlan.phases`` / ``phase_entries`` keys; they become Work IDs when the
+    Phase holding ``from_work`` is registered.
+    """
+
+    from_phase: str
+    from_work: str
+    to_phase: str
+    to_work: str
+
+
+@dataclass(frozen=True)
 class RoadmapPlan:
     name: str
     background: str
@@ -165,6 +181,10 @@ class RoadmapPlan:
     relations: tuple[PhaseRelationSpec, ...] = ()
     scope: str | None = None
     out_of_scope: str | None = None
+    #: Phase key -> the Works registered with the Roadmap (WL-YGO-08). A Phase absent here is expanded at its entry, as before.
+    phase_entries: "dict[str, PhaseEntryDesign]" = field(default_factory=dict)
+    #: Cross-Phase Work dependencies between the Works of ``phase_entries``.
+    work_dependencies: tuple[WorkDependency, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -174,6 +194,18 @@ class RoadmapResult:
     mutation_id: str
     head: str | None
     resumed: bool
+
+
+@dataclass(frozen=True)
+class RegisteredRoadmapResult(RoadmapResult):
+    """What ``create_roadmap`` returns for a plan with ``phase_entries`` (Roadmap-time Work registration).
+
+    A creation without ``phase_entries`` returns a plain ``RoadmapResult``, so its shape and serialization are
+    exactly the legacy ones.
+    """
+
+    #: Phase key -> (Work key -> Work ID) of the Works registered with the Roadmap.
+    work_ids: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -241,6 +273,7 @@ def _open(
     entities: list[str] = (),
     *,
     refuse_recorded: Callable[[Mutation], None] | None = None,
+    ledgers: tuple[str, ...] | None = None,
 ) -> tuple[Mutation, gitops.PushDestination | None]:
     """Open (or resume) the operation's mutation with a verified push destination.
 
@@ -259,9 +292,19 @@ def _open(
     destination = gitops.ensure_push_destination(store)
     controller = MutationController(store)
     invocation = {"operation": operation, **identity}
-    mutation = controller.open(OWNER, invocation, WriteScope(entities=tuple(entities), files=_ledgers(operation)))
-    gitops.ensure_git_ready(store.root)
-    gitops.record_preexisting_dirty(mutation, store.root)
+    mutation = controller.open(OWNER, invocation, WriteScope(entities=tuple(entities), files=_ledgers(operation) if ledgers is None else ledgers))
+    # The entry window (Sprint 41.31, AM-A): a ``detached_head`` STOP here closes the record THIS call began, and
+    # never one it only resumed - for the covered operations only. Every other operation opened here (Phase entry,
+    # Phase addition, plan exclusions, Roadmap achievement, Related maintenance) behaves as before.
+    if operation in (
+        "roadmap-create", "phase-hold", "phase-resume", "phase-cancel", "roadmap-hold", "roadmap-resume", "roadmap-cancel",
+    ):
+        with abandon_new_on_stop(mutation):
+            gitops.ensure_git_ready(store.root)
+            gitops.record_preexisting_dirty(mutation, store.root)
+    else:
+        gitops.ensure_git_ready(store.root)
+        gitops.record_preexisting_dirty(mutation, store.root)
     if refuse_recorded is not None and mutation.resumed:
         refuse_recorded(mutation)
     mutation.apply()
@@ -384,7 +427,7 @@ def roadmap_request_identity(plan: RoadmapPlan) -> dict[str, Any]:
     another leaves a Roadmap that is partly one plan and partly another. The
     plan therefore travels in the invocation, durable before any ID is reserved.
     """
-    return {
+    identity = {
         "version": ROADMAP_REQUEST_VERSION,
         "name": plan.name,
         "background": plan.background.strip(),
@@ -394,6 +437,18 @@ def roadmap_request_identity(plan: RoadmapPlan) -> dict[str, Any]:
         "phases": _phase_records(plan.phases),
         "relations": _phase_relation_records(plan.relations),
     }
+    if plan.phase_entries:
+        # Only a plan that registers Works with the Roadmap carries them: a plan without any is recorded
+        # byte for byte as before.
+        identity["phase_entries"] = [
+            {"phase": key, "design": design_identity(design)} for key, design in plan.phase_entries.items()
+        ]
+    if plan.work_dependencies:
+        identity["work_dependencies"] = [
+            {"from_phase": d.from_phase, "from_work": d.from_work, "to_phase": d.to_phase, "to_work": d.to_work}
+            for d in plan.work_dependencies
+        ]
+    return identity
 
 
 def phase_addition_request_identity(
@@ -674,10 +729,18 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan, *, review: Any = None
     else:
         # Before the execution lock, whose holder description names the Roadmap (RB10 N3(b)).
         input_validation.require_roadmap_plan(plan)
+        _require_phase_entries(plan)
     if not plan.name.strip() or not plan.background.strip() or not plan.desired_state.strip():
         raise ValidationError("Roadmap needs name, background and desired state")
     if not plan.phases:
         raise ValidationError("a new Roadmap registers all of its Phases; none were decided")
+    if review is not None and (plan.phase_entries or plan.work_dependencies):
+        # Planning Review of a Roadmap that registers Works is not part of this candidate: refusing is the safe
+        # side, since registering unreviewed Works under a reviewed Roadmap would hide the gap.
+        raise ValidationError(
+            "a Roadmap that registers its Works at creation (phase_entries, work_dependencies) is not yet available "
+            "with a Planning Review"
+        )
     with project_operation(store, "roadmap-create", _lock_details({"name": plan.name}, review)):
         _stop_on_structure(store, "precheck")
         request = roadmap_request_identity(plan)
@@ -690,7 +753,17 @@ def create_roadmap(store: ProjectStore, plan: RoadmapPlan, *, review: Any = None
             return roadmap_review.create_roadmap_reviewed(store, plan, request, review, pending)
         invocation = {"name": plan.name, "request": request}
         _require_new_request_input(invocation, pending, lambda: _require_roadmap_text(plan))
-        mutation, destination = _open(store, "roadmap-create", invocation, refuse_recorded=refuse_invalid_phase_writes)
+        if plan.phase_entries:
+            def refuse_recorded(m: Mutation) -> None:
+                refuse_invalid_phase_writes(m)
+                refuse_invalid_work_writes(m)
+
+            mutation, destination = _open(
+                store, "roadmap-create", invocation, refuse_recorded=refuse_recorded,
+                ledgers=(ROADMAP_RELATIONS, RELATED_RELATIONS),
+            )
+        else:
+            mutation, destination = _open(store, "roadmap-create", invocation, refuse_recorded=refuse_invalid_phase_writes)
         with abandon_on_stop(mutation):
             return _create_roadmap(store, mutation, destination, plan)
 
@@ -718,17 +791,131 @@ def _require_roadmap_text(plan: RoadmapPlan) -> None:
     input_validation.require_works_text(plan.phases, "phase", kind="phase")
 
 
+def _require_phase_entries(plan: RoadmapPlan) -> None:
+    """Refuse, before anything is opened, a ``phase_entries`` the Roadmap could not register as decided."""
+    for key, design in plan.phase_entries.items():
+        if key not in plan.phases:
+            raise ValidationError(f"phase_entries names {key!r}, which is not one of this Roadmap's Phases")
+        input_validation.require_phase_entry_design(design)
+        input_validation.require_phase_entry_text(design)
+        if not design.works:
+            raise ValidationError(f"Phase {key}: registered Works need at least one normal Work")
+        for work_key in design.works:
+            if work_key in ("integration", "confirmation"):
+                raise ValidationError(f"Phase {key}: reserved Work key: {work_key}")
+    entry_order(plan)
+
+
+def entry_order(plan: RoadmapPlan) -> list[str]:
+    """The order a plan's Phase entries are registered in, after checking its cross-Phase Work dependencies.
+
+    A dependency's predecessor Work must exist (with its Work ID) when the Phase holding the dependent Work is
+    registered, so a Phase is registered after every Phase it depends on; otherwise the declared order stands. A
+    reference to a Phase or Work the plan does not register, a dependency inside one Phase (that is
+    ``PhaseEntryDesign.requires_completion``) and a Phase-level cycle are refused.
+    """
+    keys = list(plan.phases)
+    after: dict[str, set[str]] = {key: set() for key in keys}
+    for relation in plan.relations:
+        # A Phase-level ``requires_completion`` from X to Y makes Y depend on X (endpoints are plan keys or Phase IDs).
+        if relation.type == "requires_completion" and relation.from_ref in after and relation.to_ref in after:
+            after[relation.to_ref].add(relation.from_ref)
+    for dep in plan.work_dependencies:
+        for phase_key, work_key, role in ((dep.from_phase, dep.from_work, "from"), (dep.to_phase, dep.to_work, "to")):
+            design = plan.phase_entries.get(phase_key)
+            if design is None or work_key not in design.works:
+                raise ValidationError(f"work dependency {role} {phase_key}/{work_key}: no such registered Work")
+        if dep.from_phase == dep.to_phase:
+            raise ValidationError(
+                f"work dependency inside Phase {dep.from_phase}: declare it in that Phase's requires_completion"
+            )
+        after[dep.to_phase].add(dep.from_phase)
+    order: list[str] = []
+    while len(order) < len(keys):
+        ready = [key for key in keys if key not in order and after[key] <= set(order)]
+        if not ready:
+            raise ValidationError(
+                "the Phase relations and the cross-Phase Work dependencies together form a cycle between Phases: "
+                + ", ".join(key for key in keys if key not in order)
+            )
+        order.append(ready[0])
+    return [key for key in order if key in plan.phase_entries]
+
+
+def with_work_dependencies(
+    plan: RoadmapPlan, phase_key: str, registered: dict[str, dict[str, str]]
+) -> PhaseEntryDesign:
+    """The Phase design with its cross-Phase dependencies resolved to the Work IDs of the Phases registered before it.
+
+    ``registered`` maps a Phase key to its Work key -> Work ID. The resolved ``requires_completion`` pairs
+    name an already registered Work as the predecessor, which is what a Phase entry design means by an ID that is
+    not one of its own keys.
+    """
+    design = plan.phase_entries[phase_key]
+    extra = tuple(
+        (registered[dep.from_phase][dep.from_work], dep.to_work)
+        for dep in plan.work_dependencies
+        if dep.to_phase == phase_key
+    )
+    return replace(design, requires_completion=tuple(design.requires_completion) + extra) if extra else design
+
+
+def _planned_entry_paths(mutation: Mutation, plan: RoadmapPlan, order: list[str]) -> list[str]:
+    """Every path the Works of ``plan.phase_entries`` write, known (IDs reserved) before the first effect is recorded."""
+    paths: list[str] = []
+    for index, key in enumerate(order):
+        design = plan.phase_entries[key]
+        stages = phase_entry_stages(design, "phase", "roadmap")
+        extra = sum(1 for dep in plan.work_dependencies if dep.to_phase == key)
+        suffix = f"@{index}"
+        paths += planned_registration_paths(
+            mutation, "works" + suffix, stages.normal_specs, relation_count=len(stages.normal_relations) + extra
+        )
+        paths += planned_registration_paths(
+            mutation, "integration" + suffix, {"integration": stages.integration_spec},
+            relation_count=len(stages.normal_specs),
+        )
+        if stages.confirmation_spec is not None:
+            paths += planned_registration_paths(
+                mutation, "confirmation" + suffix, {"confirmation": stages.confirmation_spec}, relation_count=1
+            )
+    return paths
+
+
 def _create_roadmap(
     store: ProjectStore, mutation: Mutation, destination: gitops.PushDestination | None, plan: RoadmapPlan
 ) -> RoadmapResult:
+    order = entry_order(plan)
+
+    def before_first_effect(paths: list[str]) -> None:
+        # Every path the Roadmap, its Phases and its Works write, checked against what was dirty before the
+        # operation, before the first effect is recorded.
+        gitops.ensure_separable_before_effects(mutation, paths + _planned_entry_paths(mutation, plan, order))
+
     roadmap_id, phases = _register_roadmap(
         store, mutation, roadmap_stages(plan),
-        before_first_effect=lambda paths: gitops.ensure_separable_before_effects(mutation, paths),
+        before_first_effect=before_first_effect,
+        works_may_follow=bool(plan.phase_entries),
     )
+    registered: dict[str, dict[str, str]] = {}
+    paths: list[str] = []
+    for index, key in enumerate(order):
+        design = with_work_dependencies(plan, key, registered)
+        phase_id = phases.phase_ids[key]
+        mutation.extend_scope(entities=[phase_id])
+        normal, _, _, entry_paths = _register_phase_expansion(
+            store, mutation, phase_entry_stages(design, phase_id, roadmap_id), stage_suffix=f"@{index}",
+            roadmap_time=True,
+        )
+        registered[key] = dict(normal.work_ids)
+        paths += entry_paths
     head = _finalize(
-        mutation, destination, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}"
+        mutation, destination, f"chore(workline): create roadmap {ProjectView.load(store).roadmaps[roadmap_id].display}",
+        paths,
     )
-    return RoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed)
+    if not plan.phase_entries:
+        return RoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed)
+    return RegisteredRoadmapResult(roadmap_id, phases.phase_ids, mutation.id, head, mutation.resumed, registered)
 
 
 def _register_roadmap(
@@ -738,6 +925,7 @@ def _register_roadmap(
     *,
     before_stage: Callable[[str], None] | None = None,
     before_first_effect: Callable[[list[str]], None] | None = None,
+    works_may_follow: bool = False,
 ):
     """Register the Roadmap and its Phases in ``mutation``, from ``stages``; no Git.
 
@@ -778,7 +966,9 @@ def _register_roadmap(
 
     if before_stage is not None and not mutation.has_stage("phases"):
         before_stage("phases")
-    phases = register_phases(mutation, "phases", roadmap_id, stages.phases, list(stages.relations))
+    phases = register_phases(
+        mutation, "phases", roadmap_id, stages.phases, list(stages.relations), works_may_follow=works_may_follow
+    )
     return roadmap_id, phases
 
 
@@ -975,6 +1165,42 @@ def diagnose_no_candidate(store: ProjectStore, roadmap_id: str) -> str:
     return "; ".join(reasons) or "no startable Phase"
 
 
+@dataclass(frozen=True)
+class IndependentCandidates:
+    """What can proceed now in a Roadmap while some Phase is stopped (WL-YGO-07).
+
+    ``phases``: startable Phases (their ``requires_completion`` predecessors are complete), narrowed as
+    :func:`select_phase` narrows them. ``works``: Phase ID -> startable Works of Phases whose Works are already
+    registered and whose Phase may be worked on. ``blocked``: Phase ID -> the predecessors it still requires, each
+    with its state: the only things that keep a Phase from starting. ``planned_next`` is a recommended order and
+    never appears here as a blocker.
+    """
+
+    phases: tuple[str, ...]
+    works: dict[str, tuple[str, ...]]
+    blocked: dict[str, tuple[str, ...]]
+
+
+def independent_candidates(store: ProjectStore, roadmap_id: str) -> IndependentCandidates:
+    """Read-only: the Phases and registered Works that are startable now, and what holds the others back."""
+    view = _stop_on_structure(store, "precheck")
+    _require_active_roadmap(view, roadmap_id)
+    phases = [phase.id for phase in progression_ready_phases(store, view, roadmap_id)[0]]
+    works: dict[str, tuple[str, ...]] = {}
+    blocked: dict[str, tuple[str, ...]] = {}
+    for phase in view.active_phases(roadmap_id):
+        if view.phase_state(phase.id) in (COMPLETE, HELD, CANCELLED, PLAN_EXCLUDED):
+            continue
+        unsatisfied = view.unsatisfied_dependencies(phase.id)
+        if unsatisfied:
+            blocked[phase.id] = tuple(f"{r.from_id} ({label})" for r, label in unsatisfied)
+            continue
+        startable = view.startable_works(phase.id)
+        if startable:
+            works[phase.id] = tuple(w.id for w in startable)
+    return IndependentCandidates(tuple(phases), works, blocked)
+
+
 # --------------------------------------------------------------------------- Phase entry
 
 # The shape of the Phase-entry design as the mutation records it. Bumped only
@@ -1141,13 +1367,30 @@ def _recorded_registration(mutation: Mutation, stage: str, keys: list[str]) -> R
     return RegistrationResult(work_ids, {}, tuple(paths))
 
 
-def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign, *, review: Any = None) -> PhaseEntryResult:
+def enter_phase(
+    store: ProjectStore, phase_id: str, design: PhaseEntryDesign | None = None, *, review: Any = None,
+) -> PhaseEntryResult:
     """Expand a Phase into its Works (Phase entry).
+
+    ``design=None`` is the entry of a Phase whose Works were already registered
+    with its Roadmap (``RoadmapPlan.phase_entries``): nothing is registered
+    again. The Phase's lifecycle and dependencies are checked, the registered
+    structure is read, and what START takes over is returned (``expanded`` is
+    ``False``). A design for a Phase that already holds Works is still refused.
 
     ``review=None`` is the legacy path, unchanged. ``review=PlanningReview(...)``
     opts this one invocation into the review-v1 PhaseEntryDesign Review gate
     (``skills/roadmap``) and returns a ``ReviewedPlanningResult``.
     """
+    if design is None:
+        input_validation.require_text(phase_id, "the Phase ID")
+        if review is not None:
+            raise ValidationError(
+                "a Phase entry without a design is not available with a Planning Review: the Works were registered "
+                "with the Roadmap, not reviewed here"
+            )
+        with project_operation(store, "phase-entry", {"phase_id": phase_id}):
+            return _enter_registered_phase(store, phase_id)
     if review is not None:
         from . import roadmap_review
 
@@ -1158,6 +1401,58 @@ def enter_phase(store: ProjectStore, phase_id: str, design: PhaseEntryDesign, *,
         input_validation.require_phase_entry_design(design)
     with project_operation(store, "phase-entry", _lock_details({"phase_id": phase_id}, review)):
         return _enter_phase_locked(store, phase_id, design, review)
+
+
+def _enter_registered_phase(store: ProjectStore, phase_id: str) -> PhaseEntryResult:
+    """Phase entry for a Phase whose Works the Roadmap registered: check, register nothing, hand over to START.
+
+    Registration is decided once, with the Roadmap's Planning Review; entry
+    only decides that this Phase may be worked on now. Registered is not
+    startable: the Phase's lifecycle and ``requires_completion`` are checked
+    as a design-carrying entry checks them, and the Works are read back.
+    """
+    view = _stop_on_structure(store, "precheck")
+    phase = view.phases.get(phase_id)
+    if phase is None:
+        raise ValidationError(f"Phase unresolvable: {phase_id}")
+    roadmap_id = phase.roadmap_id or ""
+    _require_roadmap_resolves(view, roadmap_id)
+    _require_active_roadmap(view, roadmap_id)
+    state = view.phase_state(phase_id)
+    if state == COMPLETE:
+        raise SpecViolation(f"Phase {phase_id} is already complete")
+    if state in (HELD, CANCELLED, PLAN_EXCLUDED):
+        raise SpecViolation(f"Phase {phase_id} is {state}")
+    _require_settled_lifecycle(store, (roadmap_id, phase_id), f"Phase entry of {phase_id}")
+    unsatisfied = view.unsatisfied_dependencies(phase_id)
+    if unsatisfied:
+        raise StopError(
+            f"Phase {phase_id} is blocked by " + ", ".join(f"{r.from_id} ({label})" for r, label in unsatisfied),
+            code="phase_blocked",
+        )
+    if _pending_phase_entry(store, phase_id):
+        raise ReconcileRequired(
+            f"Phase {phase_id} has an unfinished Phase entry; it is continued only with the design it recorded"
+        )
+    works = view.phase_works(phase_id)
+    if not works:
+        raise ValidationError(
+            f"Phase {phase_id} has no registered Works: its entry needs a design (or register Works with the Roadmap)"
+        )
+    integrations = view.integrations(phase_id)
+    if not integrations:
+        raise StopError(f"Phase {phase_id} has no phase_integration_check Work", code="phase_structure")
+    if not any(w.roadmap_registration is not None for w in works):
+        raise ValidationError(
+            f"Phase {phase_id} holds no Work that Roadmap-time registration wrote: its entry needs a design"
+        )
+    normal = {w.display: w.id for w in works if w.work_kind not in ("phase_integration_check", "human_confirmation")}
+    confirmations = [w for w in works if w.work_kind == "human_confirmation"]
+    entry = _entry_the_plan_points_to(view, view.startable_works(phase_id))
+    return PhaseEntryResult(
+        phase_id, normal, integrations[0].id, confirmations[0].id if confirmations else None, entry, False, None,
+        gitcmd.head_commit(store.root),
+    )
 
 
 def _enter_phase_locked(
@@ -1223,7 +1518,7 @@ def _enter_phase_locked(
             # own maintenance (``rules/ai-decision``).
             raise StopError(
                 f"Phase {phase_id} is already expanded, so a new entry design is not accepted; "
-                "read the current structure instead, and change it through Roadmap maintenance",
+                "enter it without a design if the Roadmap registered its Works, or change it through Roadmap maintenance",
                 code="phase_already_expanded",
             )
     if not design.works:
@@ -1409,6 +1704,8 @@ def _register_phase_expansion(
     *,
     before_stage: Callable[[str], None] | None = None,
     before_first_effect: Callable[[list[str]], None] | None = None,
+    stage_suffix: str = "",
+    roadmap_time: bool = False,
 ) -> tuple[RegistrationResult, str, str | None, list[str]]:
     """Register a Phase expansion's three stages in ``mutation``, from ``stages``, and check its structure; no Git.
 
@@ -1430,6 +1727,20 @@ def _register_phase_expansion(
     normal_relations = list(stages.normal_relations)
     integration_spec = stages.integration_spec
     confirmation_spec = stages.confirmation_spec
+    def stamp(spec: WorkSpec) -> WorkSpec:
+        # Only Roadmap-time registration holds the capability that lets a Work specification carry a registration_key
+        # (``create._validate_spec`` refuses it on every other path): a spec rebuilt with ``replace`` loses it, so it is
+        # stamped again right before it is handed to the registration core.
+        object.__setattr__(spec, "_roadmap_time", WorkSpec.ROADMAP_TIME)
+        return spec
+
+    if roadmap_time:
+        # Roadmap-time registration (``RoadmapPlan.phase_entries``) writes each Work with the plan key it is registered
+        # under, so ownership is read back from the Work itself and never inferred (RB11R-1, RB11R-10).
+        normal_specs = {key: stamp(replace(spec, registration_key=key)) for key, spec in normal_specs.items()}
+        integration_spec = stamp(replace(integration_spec, registration_key="integration"))
+        if confirmation_spec is not None:
+            confirmation_spec = stamp(replace(confirmation_spec, registration_key="confirmation"))
 
     # The expansion registers in stages, and the registration core refuses each
     # stage before that stage writes - but by then an earlier stage may already
@@ -1445,6 +1756,7 @@ def _register_phase_expansion(
     stage_specs = [("works", normal_specs), ("integration", {"integration": integration_spec})]
     if confirmation_spec is not None:
         stage_specs.append(("confirmation", {"confirmation": confirmation_spec}))
+    stage_specs = [(stage + stage_suffix, specs) for stage, specs in stage_specs]
     for stage, specs in stage_specs:
         if not mutation.has_stage(stage):
             validate_work_specs(specs, view)
@@ -1453,7 +1765,11 @@ def _register_phase_expansion(
         # Every stage not recorded yet, with the paths it writes under the IDs reserved for it now, stage by
         # stage in the order the stages reserve them: the normal Works' stage takes the relations the design
         # decided, the integration's one per normal Work, the confirmation's one (RB10 N2).
-        relations_of = {"works": len(normal_relations), "integration": len(normal_specs), "confirmation": 1}
+        relations_of = {
+            "works" + stage_suffix: len(normal_relations),
+            "integration" + stage_suffix: len(normal_specs),
+            "confirmation" + stage_suffix: 1,
+        }
         owned: set[str] = set()
         for stage, specs in stage_specs:
             if not mutation.has_stage(stage):
@@ -1461,10 +1777,13 @@ def _register_phase_expansion(
         before_first_effect(sorted(owned))
 
     def registered(stage: str, specs: dict[str, WorkSpec], relations: list[RelationSpec]) -> RegistrationResult:
+        stage += stage_suffix
         if mutation.has_stage(stage):
             return _recorded_registration(mutation, stage, list(specs))
         if before_stage is not None:
             before_stage(stage)
+        if roadmap_time:
+            specs = {key: stamp(spec) for key, spec in specs.items()}
         return register_works(mutation, stage, specs, relations)
 
     normal = registered("works", normal_specs, normal_relations)
@@ -2259,9 +2578,10 @@ def handoff(store: ProjectStore, phase_id: str, executor, entry_work_id: str | N
 
 
 __all__ = [
-    "RoadmapPlan", "RoadmapResult", "WorkDesign", "PhaseEntryDesign", "PhaseEntryResult", "OperationResult",
+    "RoadmapPlan", "RoadmapResult", "RegisteredRoadmapResult", "WorkDesign", "PhaseEntryDesign", "PhaseEntryResult", "OperationResult",
     "PhaseAdditionResult", "AchievementResult", "Replan", "create_roadmap", "add_phases", "startable_phases",
-    "select_phase", "diagnose_no_candidate",
+    "select_phase", "diagnose_no_candidate", "independent_candidates", "IndependentCandidates",
+    "WorkDependency",
     "enter_phase", "hold_phase", "resume_phase", "cancel_phase", "hold_roadmap", "resume_roadmap", "cancel_roadmap",
     "plan_exclude_phase", "plan_exclude_work", "evaluate_achievement", "handoff",
 ]

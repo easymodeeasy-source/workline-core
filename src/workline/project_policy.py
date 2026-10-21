@@ -46,7 +46,9 @@ from typing import Any, Iterator
 from . import gitcmd, gitops
 from .committed_view import CommittedReadError
 from .errors import ReconcileRequired, StopError, ValidationError
-from .mutation import Effect, Mutation, MutationController, WriteScope, abandon_on_stop, bind_policy_recovery
+from .mutation import (
+    Effect, Mutation, MutationController, WriteScope, abandon_new_on_stop, abandon_on_stop, bind_policy_recovery,
+)
 from .oplock import project_operation
 from .review import checkout, gate, history, p4, policy, records, serialize
 from .review import recovery as review_recovery
@@ -178,8 +180,11 @@ def change_project_policy(store: ProjectStore, request: policy.PolicyChangeReque
         checkout.require_namespace_readable(store)
         destination = gitops.ensure_push_destination(store)
         mutation = MutationController(store).open(OWNER, invocation, WriteScope(files=(review_paths.POLICY_PROFILE_REL,)))
-        gitops.ensure_git_ready(store.root)
-        gitops.record_preexisting_dirty(mutation, store.root)
+        # The entry window: a STOP here (a detached HEAD) closes the owner THIS call began - it holds the Profile scope
+        # for nothing - and never one it only resumed (it may hold a frozen Candidate or a begun Run: T-B31).
+        with abandon_new_on_stop(mutation):
+            gitops.ensure_git_ready(store.root)
+            gitops.record_preexisting_dirty(mutation, store.root)
         if mutation.effects:
             mutation.apply()
         op = _Op(store, record, digest, review)
@@ -1551,8 +1556,9 @@ def record_policy_evaluation(store: ProjectStore, request: policy.PolicyEvaluati
         checkout.require_namespace_readable(store)
         destination = gitops.ensure_push_destination(store)
         mutation = MutationController(store).open(OWNER, invocation, WriteScope(files=(review_paths.POLICY_PROFILE_REL,)))
-        gitops.ensure_git_ready(store.root)
-        gitops.record_preexisting_dirty(mutation, store.root)
+        with abandon_new_on_stop(mutation):  # the entry window, as in :func:`change_project_policy`
+            gitops.ensure_git_ready(store.root)
+            gitops.record_preexisting_dirty(mutation, store.root)
         if mutation.effects:
             mutation.apply()
         evaluation_key = f"{POLICY_EVALUATION_KEY}:{digest}"

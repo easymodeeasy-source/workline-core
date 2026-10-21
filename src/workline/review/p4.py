@@ -1593,8 +1593,15 @@ def normalize_adjudication(
     descriptor: Mapping[str, Any],
     reports: Sequence[tuple[str, str, Mapping[str, Any]]],
     prior: PriorCycle | None,
+    *,
+    ground_not_applicable: bool = False,
 ) -> Normalized:
     """Validate an adjudicator's return against the bound reports, and normalize it deterministically.
+
+    ``ground_not_applicable`` (field-feedback item 4, Phase Integration only): a surface the discovery left uninspected is
+    excluded as ``not_applicable`` only on Evidence - at least one Evidence ID, each one the reporting discovery
+    task itself declared - so an exclusion is never the adjudicator's bare word. Default off: every other
+    caller is byte for byte what it was.
 
     ``reports`` is ``[(task_id, result_digest, canonical report record)]`` in
     the order G3 bound them. Every refusal of §27.11 is a STOP that settles
@@ -1622,7 +1629,9 @@ def normalize_adjudication(
         raise _adjudication_invalid("dispositions and coverage_gaps are tuples")
     claims: dict[tuple[str, int], tuple[str, Mapping[str, Any]]] = {}
     not_inspected: set[tuple[str, str]] = set()
+    declared_evidence: dict[str, set[str]] = {}
     for task_id, result_digest, report in reports:
+        declared_evidence[task_id] = {str(item) for item in (report.get("coverage") or {}).get("evidence_ids") or []}
         for index, claim in enumerate(report.get("claims") or []):
             claims[(task_id, index)] = (result_digest, claim)
         for surface in (report.get("coverage") or {}).get("not_inspected") or []:
@@ -1731,6 +1740,14 @@ def normalize_adjudication(
             raise _adjudication_invalid(f"coverage gap resolution {gap.resolution!r} is not one of {P4_GAP_RESOLUTIONS}")
         if not isinstance(gap.evidence_ids, tuple) or (gap.resolution == GAP_COVERED and not gap.evidence_ids):
             raise _adjudication_invalid(f"coverage gap {gap.surface!r} is resolved covered without valid Evidence")
+        if ground_not_applicable and gap.resolution == GAP_NOT_APPLICABLE:
+            ungrounded = [item for item in gap.evidence_ids if item not in declared_evidence.get(gap.task_id, set())]
+            if not gap.evidence_ids or ungrounded:
+                raise _adjudication_invalid(
+                    f"coverage gap {gap.surface!r} is excluded as not_applicable without grounds: it cites "
+                    + ("no Evidence" if not gap.evidence_ids else f"Evidence {ungrounded} its discovery never declared")
+                    + "; an integration surface is excluded on the discovery's own Evidence, or resolved otherwise"
+                )
         key = (gap.task_id, gap.surface)
         if key in gap_keys:
             raise _adjudication_invalid(f"coverage gap {gap.surface!r} of {gap.task_id} is resolved twice")
@@ -1875,6 +1892,35 @@ def obligations(normalized: Normalized) -> dict[str, Any]:
         "coverage_unresolved": sum(1 for gap in normalized.gaps if gap["resolution"] in (GAP_HUMAN, GAP_TARGETED_CHECK)),
         "strategy_change_required": normalized.strategy_change_required,
     }
+
+
+def wait_breakdown(adjudication: Any) -> dict[str, int]:
+    """field-feedback item 1: what a G4 HUMAN_WAIT adjudication actually holds, split by who can resolve each part.
+
+    ``requirement_decisions``  HUMAN claims and HUMAN-resolved coverage gaps: only a Human decides these;
+    ``targeted_checks``        coverage gaps resolved ``targeted_check_required``: a read/evidence shortage to be
+                               closed by a check (access, evidence), not a question about the requirement - they
+                               still hold the wait (P4 counts them HUMAN), but they are named for what they are;
+    ``blocking_findings``      blocking Problems, repairable by an ordinary fix without a Human.
+
+    Read-only over the stored adjudication: it changes no outcome and no obligation.
+    """
+    entries = getattr(adjudication, "entries", ()) or ()
+    gaps = getattr(adjudication, "coverage_gaps", ()) or ()
+    obligations = getattr(adjudication, "obligations", {}) or {}
+    return {
+        "requirement_decisions": sum(1 for entry in entries if entry["outcome"] == OUTCOME_HUMAN)
+        + sum(1 for gap in gaps if gap["resolution"] == GAP_HUMAN),
+        "targeted_checks": sum(1 for gap in gaps if gap["resolution"] == GAP_TARGETED_CHECK),
+        "blocking_findings": int(obligations.get("problem_high", 0)) + int(obligations.get("problem_mid", 0)),
+    }
+
+
+def wait_breakdown_text(adjudication: Any) -> str:
+    found = wait_breakdown(adjudication)
+    return (f"requirement decisions for a Human: {found['requirement_decisions']}; targeted checks (access or "
+            f"evidence to close, not a requirement question): {found['targeted_checks']}; blocking technical "
+            f"findings (an ordinary fix, no Human): {found['blocking_findings']}")
 
 
 def derive_outcome(normalized: Normalized) -> str:
