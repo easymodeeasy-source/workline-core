@@ -17005,7 +17005,7 @@ Before the freeze, RB11 needs a decision-applied design, a surface map, a failur
 
 ### 38.4 Runtime / external boundary
 
-- Workline runtime: keeps one writer per working tree (H-NEW-01). RB11 runtime changes are limited to the bounded improvements of ruling 4, such as the staged START probe of ruling 1. No Workline Project gains a mandatory dependency on the orchestrator or the Control Plane (§40.2).
+- Workline runtime: keeps one writer per working tree (H-NEW-01). RB11 runtime changes are limited to the bounded improvements of ruling 4, such as the staged START probe of ruling 1, and by the bounded changes that §41.31 lists. No Workline Project gains a mandatory dependency on the orchestrator or the Control Plane (§40.2).
 - External orchestration: the writer lease, liveness / stall / saturation monitoring, launch and owner handles, and the watchdog. They belong to externally orchestrated execution; no Workline Project has a mandatory dependency on them (§40.2).
 - Human: decides every destructive or case-specific recovery action in the concrete Project, and answers re-asked questions.
 - Control Plane: freezes the RB11 contract, rules on any admission widening, and authorizes each landing for one exact candidate.
@@ -17273,7 +17273,7 @@ This section is the canonical implementation-control brief for §38 and the froz
 - The rev-11 components are normative only as register F classifies them.
 - Research evidence is never normative.
 
-Apart from the Control Plane's dispositions of the formal contract review that it carries, this section adds no transition, guard, state or proof obligation.
+Apart from the Control Plane's dispositions of the formal contract review that it carries, this section adds no transition, guard, state or proof obligation. Contract amendment AM (§41.31) is carried in the same way as SA-1: it is a bounded amendment that names its decision sources and adds only the transitions, guards and obligations it states in the units it names.
 
 Contract amendment SA-1 (§41.28) is carried in the same way. It is a binding, bounded qualification of the Control Plane rulings CP-1, CP-3 and CP-4, of the Control Plane decision point CP-8 and of the associated D1/D2 authority assumptions it lists. It adds no transition, guard or state. It replaces the operating-system isolation and credential-separation premises and checks it lists; constrains the storage, rollback-detection, anchor-recovery and inbox methods; fixes the D2 hosting target; sets the Human decision-entry requirement; and adds the checks SA-V1..SA-V10 and SR4-K1..SR4-K10 and the proof obligations PO-SA-CFG, SR4-IMP and SR4-CAND.
 
@@ -17592,7 +17592,7 @@ The checklist keeps:
 
 ### 41.18 Expected implementation surfaces
 
-Runtime: the runtime list of rev-11 BRIEF §41.18, unchanged (contract B.1).
+Runtime: the runtime list of rev-11 BRIEF §41.18, unchanged (contract B.1), except as extended by tables J1 and J2 of §41.31.
 
 External tools live where the PO-38 disposition puts them:
 - not in the product repository (workline-core);
@@ -17692,7 +17692,7 @@ a watchdog stop would leave a live descendant, rely on an inferred in-process ph
   or not go through the handle used for verification
 any tool step would delete, reset, revert, discard or force anything
 a lease holder or launch owner cannot be proved
-an existing pin must change beyond ADM §F
+an existing pin must change beyond ADM §F and the pin table P of §41.31
 FORMAL_INDEPENDENT review is unavailable at a review gate
 a finding requires reopening a Control Plane HIGH ruling or Q-N4-A
 an unverified premise turns out to be essential to safety
@@ -18193,6 +18193,191 @@ This clause makes no other change to revision 3.
 **What stays prohibited.** Every force option, force-with-lease, `+refspec`, inherited or D1-controlled hooks, configured hooks (`hook.*`), any other or second hook (also a copy of the hook at another path or a temporary hook directory), and any other use of a hook. The Human's no-force rule is unchanged.
 
 **What the hook is and is not.** Two checks stand in sequence: the hook checks the remote value advertised for the push invocation before anything is sent, and the receiving server compares the command's old value with the ref's actual value at update time. Neither is atomic, and smart HTTP is more than one request. A clean hook directory alone does not show that no other hook can run; configured hooks are inspected as stated above. The hook is a client-side check and is not a substitute for GitHub's own enforcement or rulesets. GitHub's behaviour for the old value, and that GitHub's advertisement contains the staging refs, are **not verified** (an authorized G-GH-NONPROD test is needed); no proof obligation, gate or Human approval changes. An idempotent observation of an existing same-X staging ref is not a second landing submission and authorizes none. All evidence for this clause is local (the tested Git for Windows installation, synthetic repositories and synthetic credentials); it verifies no GitHub behaviour and promotes no proof obligation, gate or approval, and the deployment of the clone-root policy remains a Human-gated step.
+
+### 41.31 Contract amendment AM - bounded changes to RB11 frozen rules (Control Plane; decision date: PENDING; integrated candidate text derived from DRAFT r5, prepared 2026-10-21; the Human has not approved this wording)
+
+A forward Control Plane amendment of the frozen RB11 rules, made after the formal independent review of the RB11 candidate ff741083d1b68d3cef42d268f9ac2ac56e254429 stopped on findings that its frozen rules cannot admit, and revised after the formal independent review of its own first text (candidate 9d82ae8f85dc75832b10a5905ae2b77312fe3327, verdict REPAIR_REQUIRED) and after the Human decision of 2026-10-21 that deliverable patterns are not adopted in RB11. RB11 stays CONTRACT_FROZEN; core v6e, contract A-H, SA-1 REV1 and the rev-11 components keep their text except in the clauses listed in "Earlier clauses amended" below. This subsection grants no implementation, review, landing or activation authority: every implementation of a unit is a separate candidate and is subject to §39.2, §39.4, §41.27 and CP-A4. It takes effect only when it is part of the landed Sprint text, and it must not be landed while any identity below, or the decision date in the heading, reads PENDING.
+
+**Decision sources.** Each unit rests on a Human feature-direction decision and on Control Plane rulings. These are recorded by identity, not by quotation; an original is never paraphrased here as if it were verbatim.
+
+~~~
+Human feature-direction decisions   H-A H-B H-D H-E H-F H-H1 H-H2 H-I H-J H-K H-J2 H-X10 H-X11 = YES
+                                    H-G = B (explicit relation metadata) is SUPERSEDED by the Human decision of 2026-10-21 that AM-G is not adopted in RB11
+                                    decision-directive record, sha256: PENDING (to be supplied by the Control Plane)
+CP F2 rulings                       CP-F2-1 .. CP-F2-6
+                                    decision-directive record, sha256: PENDING (to be supplied by the Control Plane)
+CP final scope rulings              rulings 1 .. 10 of the Final Scope Closure
+                                    decision-directive record, sha256: PENDING (to be supplied by the Control Plane)
+Human decision removing AM-G        consolidated Human/CP directive of 2026-10-21 (H-R2 Repair Integration)
+                                    decision-directive record, sha256: PENDING (to be supplied by the Control Plane)
+Human approval of this wording      NOT GIVEN (HB C14: publishing a canonical document that adds a product capability needs the Human)
+~~~
+
+A Human feature-direction decision approves a function, not this wording. The Control Plane rulings fix scope, not wording.
+
+**Approved unit.** A unit of this subsection is approved only when all three hold: (1) its Human feature-direction decision is identified above; (2) the Control Plane has adopted it into RB11 and recorded its §37.20 classification (next paragraph); (3) the Human has approved the unit's wording, and that approval is named in the LANDING_AUTHORIZED for the exact candidate that lands it. Approval is per unit and landing is per exact candidate. A unit that is not approved when the candidate is authorized is removed from the candidate before landing; it is never landed as inactive text.
+
+**Classification under §37.20.** §37.20 allows a residual into an RB11-RB13 contract only when the Control Plane explicitly adopts it, and requires each residual to be classified individually as existing frozen scope, genuine design input, optional LOW follow-up, separate future development, or pre-RB9 correctness hardening. Proposed classification (the Control Plane records the final one):
+
+~~~
+AM-A  entry-window abandon                  existing frozen scope, to the extent of BL-072 durable ownership continuity / orphan prevention
+                                            (a pending owner record stranded by a STOP); the admission change is a bounded exception below
+AM-B  grounded not_applicable               genuine design input
+AM-C  message wording (C1-C3)                genuine design input (message text; no behaviour)
+AM-D  Roadmap-time Work registration        genuine design input
+AM-E  cross-Phase Work dependencies         genuine design input
+AM-F  entry of a registered Phase           genuine design input
+AM-H1 registration provenance marker        genuine design input
+AM-H2 Phase prerequisite gate               genuine design input
+AM-I  reviewer read-access pre-check        genuine design input
+AM-K  read-only candidate listing           genuine design input
+AM-J  finite exceptions                     not a feature; the bound on the units above
+~~~
+
+No unit regroups BL-071, BL-072 and BL-074. No unit is classified as separate future development. AM-G (deliverable patterns) and the former AM-C4 (a label restoration that only the pattern work made necessary) are not part of this subsection.
+
+**Earlier clauses amended (exactly these).** Within each unit's stated scope and nowhere else, this subsection governs the earlier wording of:
+1. DC C-S1(1) and §38.4, first bullet ("RB11 runtime changes are limited to the bounded improvements of ruling 4"): extended by the runtime changes of the units AM-A to AM-K, and by nothing else;
+2. §41.18: "Runtime: the runtime list of rev-11 BRIEF §41.18, unchanged" is extended by tables J1 and J2 and by the test surface of the section "Pins and verification"; the BRIEF §41.18 "Must not change" statements for `roadmap.py` apply to `roadmap.py` outside table J1, and the other statements are unchanged; the restricted entries of the BRIEF for `mutation.py`, `start.py` and `start_review.py` are extended by their rows of table J2;
+3. DC C-R9 and ADM §E(1) (T-B15, "every input refused at a4ed8d4 stays refused with the same code"): the exceptions of table T;
+4. ADM §F, the pin "ReconcileRequired message / code / reason / str(exc)": for the added message text of AM-C2 only;
+5. §41.24, "an existing pin must change beyond ADM §F": the pin changes of table P are within ADM §F as amended here, and no other pin change is.
+The §41 introduction, §41.18, §41.24 and §38.4 each carry a pointer to this subsection.
+
+**Table T - input admission under C-R9 / T-B15.** "Unchanged" means refused or accepted with the same result and code as at the base 41d27c00. Anything not named is unchanged.
+
+~~~
+unit   newly ACCEPTED input                                         newly REFUSED input / changed code                       authorized by
+AM-A   a request that was refused "reconcile required" only         none                                                     H-A, CP-F2-1/2
+       because of an entry-window record that AM-A abandons
+AM-B   none                                                         a Phase Integration adjudication that resolves a gap     H-B
+                                                                    not_applicable without grounds (adjudication-invalid)
+AM-C   none                                                         none (message text and one label only)                   CP scoped clarification (no behaviour)
+AM-D   a Roadmap plan carrying phase_entries (not constructible     phase_entries / work_dependencies on a reviewed route    H-D
+       at the base)
+AM-E   a Roadmap plan carrying work_dependencies                    work_dependencies without phase_entries; a dependency    H-E
+                                                                    cycle (see AM-E)
+AM-F   enter_phase(store, phase_id) without a design for a          the same call for any Phase that does not qualify        H-F
+       Phase whose Works Roadmap-time registration registered
+AM-H1  the keyword registration_key on a Work specification         registration_key on any path other than Roadmap-time     H-H1
+       supplied by Roadmap-time registration only                   registration
+AM-H2  none                                                         START of a marked, unstarted Work while a prerequisite  H-H2
+                                                                    of its Phase is unsatisfied (dependency_unsatisfied)
+AM-I   none                                                         a START whose Review actor declares read_access and has H-I, H-X10
+                                                                    an access shortage or an unreadable submodule list: the
+                                                                    code is review_reviewer_access_insufficient, also where
+                                                                    the base refused with another code or admitted the START
+AM-K   the new read-only operation independent_candidates          none                                                     H-K
+~~~
+
+**Pins and verification (GEN-3).** The following exact-byte and structural pins exist at production main. Each may change only as stated, in the same candidate as the unit that causes it. No pin is changed by this subsection.
+
+~~~
+P1  state.py whole-file sha256 STATE_PY_BASELINE_SHA256 (tests/test_review_planning_lifecycle.py, StatePyTests)
+    invalidated by AM-H2 (ProjectView.unsatisfied_dependencies, ProjectView.phase_completion).
+    Update rule: re-pin once, to the sha256 of the final state.py of the candidate, with the pin's comment naming AM-H2.
+    The same test's assertion that state.py contains no "review" text, and tests/test_phase_integration_boundaries.py
+    (state.py has no module-level phase_integration import and exactly one function-local one) must hold unchanged.
+P2  WorkSpec positional shape (tests/test_phase_integration_marker.py, WorkSpecShapeTests): unchanged; registration_key is keyword-only.
+P3  MARKER_OWNERS scan of phase_review_contract= / marked_integration_spec / start_integration_review (same file): unchanged.
+P4  MutationController.open source ("open persists only through begin": no "_save(" in open;
+    tests/test_mutation_initial_notes.py): unchanged by the AM-C2 text.
+P5  (INTENT_VERSION, EFFECT_KINDS) and CLOSED_RECORD_FIELDS pins (tests/test_cancel_decision_resume.py, test_decision_branch_binding.py): unchanged.
+P6  tests/p2_legacy_baseline.json golden (test_review_planning_applicability): unchanged; legacy Roadmap, Phase-entry and START paths stay byte-identical.
+P7  ReconcileRequired message pins (ADM §F "keep"): code and reason unchanged; an assertion on the full message text is updated to assert the unchanged
+    leading text and the added tail (AM-C2).
+P8  HUMAN_WAIT message pins (AM-C1) and phase_already_expanded message pins (AM-C3): codes unchanged; an exact-text assertion, if any, is updated the same way.
+P9  Skill digests: tests/test_status_validation_git_authority.py computes them at run time; there is no fixed pin. registry.md is unchanged.
+P10 The Sprint blob identity changes with this subsection; every record that cites the Sprint blob cites the new one.
+~~~
+
+Each pin change is accompanied by a targeted regression that fails without the change, and the final tree is validated by the exact-tree Full of §39.2. A pin not listed here that must change is a §41.24 stop: the work stops and returns to the Control Plane.
+
+**AM-A - Entry-window abandon of effect-free owner records (a normative change to input admission and to record lifecycle; a bounded exception to DC C-R9).**
+- *Window.* The entry window of an owner operation begins when its mutation record is opened under the operation lock and ends when the Git-readiness check (`ensure_git_ready`) and the recording of the pre-existing-changes snapshot (`record_preexisting_dirty`) have returned, before any effect, ID reservation or planned-path check of the operation.
+- *Covered STOP.* Only the STOP with the code `detached_head`, raised by the Git-readiness check in the entry window. No other STOP is covered and none is added.
+- *Covered operations (exactly these).* (P1) project-policy change and project-policy evaluation. (P2) START standalone plan exclusion. (P3) `roadmap-create` (including the reviewed route, which opens through the same Roadmap `_open`), `phase-hold`, `phase-resume`, `phase-cancel`, `roadmap-hold`, `roadmap-resume` and `roadmap-cancel`. Every other operation - in particular `roadmap-add-phases`, `phase-entry`, `phase-plan-exclude`, `work-plan-exclude`, `roadmap-achievement` and `work-related-maintenance` - is not covered and behaves as at the base. Adding an operation needs its own amendment with real-flow evidence for that operation.
+- *Rule.* If the covered STOP is raised in the entry window of a covered operation, the operation abandons its record before re-raising the StopError if, and only if, all hold: the record was opened by this call (it was not resumed); its status is pending; and it holds no recorded effect. If any of these cannot be established, including when the state of the record is unknown, the record is not abandoned, and a record of unknown state is never discarded automatically. If writing the abandonment fails, the record stays pending and the original `detached_head` StopError is the one reported.
+- *Protected records, never abandoned by this rule:* a resumed record; a record that holds any effect; a record whose operation has passed the entry window (including a saved Candidate that awaits its first generation); a record left by a process death.
+- *Effect on admission.* A request whose write scope overlaps the scope of an abandoned record is no longer refused with "reconcile required" on account of that record; a repeat of the abandoned request opens a new record. The abandoned request itself stays refused with the unchanged StopError code. Every request that overlaps a protected record, and every request refused for any other reason, stays refused.
+- *Unresolved constraint (recorded, not resolved).* A process death in the entry window leaves a pending record for every covered owner, and the same request resumes it. This amendment adds no recovery disposition, no read-only resume probe and no abandonment of a resumed or empty-looking record for such a record.
+- *BL-077.* This unit changes no BL-077 behaviour; the START plan-exclusion definition it touches is serialized with BL-077 (contract B.5).
+- *Out of scope.* The window between a saved Candidate and its first generation is unchanged.
+
+**AM-B - Grounded `not_applicable` at Phase Integration.** In the Phase Integration adjudication, a coverage gap is resolved `not_applicable` only with at least one Evidence ID, each such ID being an ID that the discovery task that reported the gap declared in its own report (`coverage.evidence_ids`). An Evidence ID that is absent, that the reporting task did not declare, or that belongs to another task's declaration does not ground the resolution. An adjudication that resolves a gap `not_applicable` without such grounds is invalid; it stops with the adjudication-invalid code and nothing is settled. The association is by task; no per-surface association is introduced and the report schema does not change. The rule applies to the Phase Integration adjudication only.
+
+**AM-C - Scoped clarifications (C1-C3).** The following gain explanatory text after their unchanged leading text; their codes, exit classes and record shapes are unchanged and no message becomes part of the contract: (C1) the HUMAN_WAIT messages of the Work Review and the Phase Integration G4 waits (counts of requirement decisions for a Human, targeted checks and blocking technical findings); if the breakdown cannot be computed, the STOP is raised exactly as before without it; (C2) the "reconcile required" message of an overlapping pending mutation (the overlap and the guard's purpose); it must not recommend a recovery route that the contract does not provide for the owner of that record; it is the only exception to the ADM §F message pin; (C3) the `phase_already_expanded` message (guidance that names the entry without a design).
+
+**AM-D - Roadmap-time Work registration (`phase_entries`).** A Roadmap plan may carry `phase_entries`, a mapping from a Phase key of the plan to a Phase entry design. When `phase_entries` is present and no Planning Review is requested, Roadmap creation registers, in the same mutation as the Roadmap and its Phases and in the order fixed by AM-E, for each such Phase the Works its design describes, the Phase's integration Work and its optional confirmation Work. Each Work it registers carries the provenance marker of AM-H1. Registration of Works does not start them. A plan without `phase_entries` is recorded and executed exactly as before and returns the unchanged five-field Roadmap result; a plan with `phase_entries` returns a result derived from it that adds the Work IDs by Phase key and Work key. Refused, before any lock is taken or anything is written: a `phase_entries` key that is not a Phase of the plan; a design without at least one normal Work; a design that uses the reserved Work keys `integration` or `confirmation`; a design that fails the Phase entry design validation; a Roadmap plan that requests a Planning Review and carries `phase_entries` or `work_dependencies`. Pre-existing uncommitted changes that overlap any path the registration plans to write stop the creation before its first effect.
+
+**AM-E - Cross-Phase Work dependencies (`work_dependencies`).** `work_dependencies` of a Roadmap plan is a sequence of `(from_phase, from_work, to_phase, to_work)` that name Works registered by `phase_entries` of the same plan. Each says that `to_work` of `to_phase` cannot start before `from_work` of `from_phase` is completed, and creates a `requires_completion` relation of that direction. Phase P *depends on* Phase Q when the plan has a Phase-level `requires_completion` relation from Q to P, or when some work dependency has `from_phase` Q and `to_phase` P. A Phase is registered after every Phase it depends on. Refused: a dependency that names a Phase or Work the plan does not register; a dependency whose two Works belong to the same Phase; a cycle in the depends-on relation as just defined, that is, over the Phase-level relations and the work dependencies together; and `work_dependencies` without `phase_entries`, on every route, whether or not a Planning Review is requested. `work_dependencies` is recorded in the request identity only when it is present.
+
+**AM-F - Entry of a registered Phase.** `enter_phase(store, phase_id)` without a design is the entry of a Phase whose Works Roadmap-time registration registered. It checks the Phase's lifecycle and dependencies exactly as an entry that carries a design checks them, registers nothing, persists nothing, and returns what START takes over (`expanded` is false). It is refused when the Phase is unresolvable, complete, held, cancelled or plan-excluded; when the Roadmap is not active; when a Phase prerequisite is unsatisfied; when an unfinished Phase entry exists; when the Phase holds no Works or no integration Work; when a Planning Review is requested; and when no Work of the Phase carries a valid AM-H1 marker. A design offered for a Phase that already holds Works is still refused with `phase_already_expanded`.
+
+**AM-G - Deliverable patterns: not adopted (record).** On 2026-10-21 the Human decided that AM-G is not adopted in RB11, superseding the earlier direction H-G = B. Every required deliverable of a Work is declared as an explicit individual repository-relative path, on every route (direct CREATE, Roadmap-originated registration, Phase-entry designs, START derivations, replans, Related maintenance) and in completion validation; no route interprets a target differently. A `must_update` or `conditional_must_update` target is one exact path, whatever characters it contains: a target that contains `*`, `?` or `[`, and a target that begins with the text `glob:`, are literal paths with no pattern meaning. Existing required-deliverable validation, completion rules, messages, stored records and safety protections are those of production main, unchanged. No new deliverable schema or relation field is introduced. The path-pattern handling that the RB11 candidate ff741083 contains (a `glob:` prefix, the module `deliverables.py`, and its calls) is not part of RB11 and is removed by the implementation candidate. The pattern matching that the existing `conditional_must_update` conditions already use to decide whether a condition applies is a different, existing feature and is unchanged.
+
+**AM-H1 - Registration provenance marker.** A Work written by Roadmap-time registration carries the provenance marker `roadmap_registration {roadmap_id, phase_id, key}`. The marker is read only as written: a marker that is missing, malformed, has other keys, or disagrees with the Work's own origin reads as no marker, and a Work of unknown provenance is never taken for a Roadmap-time registration. Ownership of registered Works is never inferred from counts, display order or Phase membership. Only Roadmap-time registration writes the marker: the capability that lets a Work specification carry a `registration_key` is attached only by Roadmap-time registration. The Work specification field that supplies it (`registration_key`) is keyword-only; the positional form of the existing fields is unchanged and `phase_review_contract` stays the last positional field; a Work specification with `registration_key` set on any other path (direct CREATE, replan, START derivation, integration fix Work, reviewed registration) is refused before anything is written.
+
+**AM-H2 - Phase prerequisite gate before the start of a registered Work.** For a Work that carries a valid AM-H1 marker, the unsatisfied `requires_completion` of its own Phase also holds the Work while its formal state is `unstarted`. The rule lives in one place, the dependency predicate `ProjectView.unsatisfied_dependencies`; START, the START probe, status and the startable listings all read it through that predicate, and no other definition applies it. The rule uses the existing formal Work states `unstarted`, `in_progress` and `completed` of `state.py` and introduces no state or constant. A marked Work that is `in_progress` or `completed` is not held by a prerequisite added later: its completion, the resume of its START and its normal authorization and completion conditions are unchanged. A pending START whose Work is still `unstarted` is subject to the gate when it is resumed. Every other Work, including every Work of a Phase entered the ordinary way and every Work of unknown provenance, is read exactly as before.
+
+**AM-I - Reviewer read-access pre-check.** A Review actor may declare a read-access capability by exposing a callable `read_access(argv) -> bool`, its own allowance, which is asked and never executed. When a START carries a Review selector whose actor declares it, START checks, under the lock and before any mutation is opened, for every gitlink (mode 160000) of the Project's index: (a) that the actor allows each read form of the list R (below); (b) that it allows no state-changing form of the list W (below); (c) that the submodule is checked out. List R, for the submodule at path P: `git -C P rev-parse HEAD`; `git -C P log -1 --format=%H`; `git -C P ls-tree -r --name-only HEAD`; `git ls-tree HEAD P`; `git submodule status`. List W: `git -C P commit --allow-empty -m x`; `git -C P checkout --detach`; `git -C P push`; `git -C P reset --hard`; `git submodule update --init P`.
+- *Answers.* A form is allowed only when the actor's answer is exactly `true`; any other answer, including no answer or an error, means the actor does not allow it. A form of R that the actor does not allow is `permission_denied`; a form of W that the actor allows is `write_permitted`; a submodule that is not checked out is `target_missing`.
+- *Unknown.* If the list of gitlinks cannot be read, the status is `unknown`; `unknown` is never treated as available and stops START like the other shortages.
+- A shortage of either kind stops START with `review_reviewer_access_insufficient` before anything is begun, reserved or written; it is an actor access shortage and never a requirement question for a Human. An actor that exposes no `read_access` is not checked and nothing changes for it.
+
+**AM-K - Read-only candidate listing.** The Roadmap operation `independent_candidates(store, roadmap_id)` is read-only. It reads the Project's state, takes no mutation, records no event, writes no file, and decides nothing. It requires the Roadmap to be active and refuses as the existing structure and active-Roadmap checks refuse. It returns: the Phases that are startable now, narrowed as the Phase selection narrows them; for every other Phase of the Roadmap that is not complete, held, cancelled or plan-excluded, either the unsatisfied `requires_completion` predecessors that hold it, each with its state, or, when none holds it, its startable Works (a Phase "may be worked on" exactly when it is such a Phase with no unsatisfied predecessor). It grants no authorization: appearing in its result does not make a Phase or a Work startable beyond the ordinary START admission, a recommended order (`planned_next`) never appears in it as a blocker, and it changes no lifecycle permission, mutation scope or refusal.
+
+**Canonical alignment.** The canonical Skills describe the behaviour of the code at the base and are not changed by this subsection; they govern the runtime behaviour until the implementation candidate of the unit lands. Each implementation candidate changes the Skill passages of its units in the same candidate. The passages are: roadmap Skill (the sentence that Roadmap creation does not expand Works, the entry-window sentence for the covered operations, the Startable Phase conditions, new sections for `work_dependencies` and `independent_candidates`); start Skill (the dependency check at START and the STOP list for `review_reviewer_access_insufficient`); review Skill (one item in the Phase Integration Review section, after the Phase outcome item, for AM-B). `registry.md` is not changed: no registration, routing or required-ID declaration changes. The create Skill and phase-create are not changed.
+
+**Pins and verification obligations (future).** Each implementation candidate carries: a real-flow test and a negative control for each unit, per covered operation for AM-A and per refusing path for AM-H1; the pin changes of table P and nothing else; a definition-level digest guard for tables J1 and J2; and the final validation of §39.2. Digests are taken per definition over its source text; a class is guarded by its header and class-level statements, each method being its own definition; module-level text is guarded as a whole, with only the named import changes of tables J1 and J2 allowed.
+
+**AM-J - Bounded exceptions to the frozen no-change surface.** The statement that `roadmap.py` must not change (rev-11 BRIEF §41.18, contract B.1) does not apply to the definitions of `roadmap.py` enumerated in table J1 and to nothing else in that file. The expected implementation surface of §41.18 is extended by the files and definitions enumerated in table J2, each only for the unit named beside it. In every listed file, every other definition and all module-level text stay byte-identical to production main except the named import changes. A required change in a definition that is not listed is a stop that returns to the Control Plane. No other prohibition is removed.
+
+Table J1 - `roadmap.py`.
+
+~~~
+definition                                         unit            permitted change
+_open                                              AM-A, AM-D      abandon for the covered operations only, selected by operation name; ledger scope argument
+RoadmapPlan, WorkDependency                        AM-D, AM-E      the two fields (default empty); the declaration type
+RegisteredRoadmapResult                            AM-D            result with the Work IDs
+entry_order, with_work_dependencies                AM-E            order and cycle check over the depends-on relation; dependency resolution
+_require_phase_entries, _planned_entry_paths       AM-D, AM-E      pre-checks; planned paths for the dirty-overlap protection
+create_roadmap, _create_roadmap, _register_roadmap AM-D, AM-E      phase_entries route; refusal on the reviewed route
+_register_phase_expansion                          AM-D, AM-H1     marker for Roadmap-time registration only; attaches the capability to the specs it hands to the registration core
+roadmap_request_identity                           AM-D, AM-E      new keys only when present
+enter_phase, _enter_registered_phase               AM-F            the design=None branch
+_enter_phase_locked                                AM-C3           guidance text
+independent_candidates, IndependentCandidates      AM-K            read-only listing
+__all__                                            the above       export of the added names
+module-level import                                AM-A            one import of abandon_new_on_stop
+~~~
+
+Table J2 - other files.
+
+~~~
+file                    definition                                                   unit              permitted change
+mutation.py             abandon_new_on_stop (new)                                    AM-A              abandon only on detached_head; a failed abandon re-raises the original STOP
+mutation.py             MutationController.open                                      AM-C2             overlap message text only
+project_policy.py       change_project_policy, record_policy_evaluation              AM-A              apply the entry-window abandon
+project_policy.py       module-level import                                          AM-A              `abandon_new_on_stop` added to the existing mutation import
+start.py                _plan_exclude_standalone_locked                              AM-A              apply the entry-window abandon
+start.py                module-level import                                          AM-A              `abandon_new_on_stop` added to the existing mutation import
+start.py                _start_locked                                                AM-I              reviewer-access check under the lock, before any mutation
+start_review.py         _integration_adjudicate                                      AM-B              grounded not_applicable
+start_review.py         _integration_exit_wait, _p4_human_wait                       AM-C1             text
+review/p4.py            normalize_adjudication, wait_breakdown, wait_breakdown_text  AM-B, AM-C1       option default off; breakdown text
+state.py                ProjectView.unsatisfied_dependencies                         AM-H2             inheritance for marked, unstarted Works only
+state.py                ProjectView.phase_completion                                 AM-H2             reads as before (passes include_phase=False)
+store.py                Entity.roadmap_registration (new)                            AM-H1             strict reading of the marker
+create.py               WorkSpec                                                     AM-H1             registration_key, keyword-only; the class attribute ROADMAP_TIME (the capability of Roadmap-time registration)
+create.py               module-level import                                          AM-H1             `field` added to the dataclasses import (keyword-only registration_key)
+create.py               _validate_spec                                               AM-H1             refuse registration_key on every path except Roadmap-time registration
+create.py               _registration_effects                                        AM-H1             marker (Roadmap-time only)
+reviewer_access.py      whole file (new)                                             AM-I              pre-check; unknown on an unreadable list
+phase_create.py         register_phases                                              AM-D              post-check of a resumed Roadmap creation
+~~~
+
+Approval of this subsection permits only the changes that the units above require. It does not permit any other definition of the listed files to change.
 
 ## 42. RB12 implementation brief — reserved
 

@@ -69,7 +69,7 @@ state、Phase一覧、progress、current target、next Work、詳細実装、gen
 
 ## New Roadmap
 
-新Roadmap作成時にRoadmap全体を意味のある中間到達点でPhase分割し、全Phaseを登録する。ただしWorkは展開しない。
+新Roadmap作成時にRoadmap全体を意味のある中間到達点でPhase分割し、全Phaseを登録する。既定ではWorkは展開しない。plan に `phase_entries` を渡した時に限り、そのPhaseのWorkを同じmutationで登録する（登録は開始ではない。「Roadmap作成時のWork登録」）。
 
 Phase:
 
@@ -129,6 +129,8 @@ cancelled / plan_excluded前提はrequires_completionを満たさない。depend
 - incoming `requires_completion` predecessorが全てcompleted
 - refs / membership / structure valid
 
+Roadmap作成時に登録されたWork（登録印あり）は、未開始（unstarted）の間だけ、所属Phaseのincoming `requires_completion` が全てcompletedになるまで開始できず、startableにも数えない。開始済みWorkの完了・STARTのresumeは、後から足された先行条件で拒否しない。判定は `ProjectView.unsatisfied_dependencies` の1述語で、START・probe・status・startable一覧は同じ結果になる。登録印のないWork（通常のPhase entryで展開したWork、出所不明のWork）はこれまでどおりである。
+
 候補0件:
 
 - active Phaseが全てcompleteならRoadmap achievement check
@@ -182,11 +184,19 @@ STARTの同一Phase内継続:
 
 中断した展開のresumeはこの判定の対象にしない。`skills/roadmap` のPhase entryが定めるとおり最後まで進め、entry Workが一意に決まらない場合はentryなしとして返す。実行時のentry指定はhandoffが求める。
 
+## Roadmap作成時のWork登録
+
+Roadmap planは `phase_entries`（Phase key → Phase entry design）を持てる。渡した場合、Roadmap作成は、Roadmap・Phaseと同じmutationで、そのPhaseの通常Work・integration Work・（あれば）human_confirmation Workを登録する。登録したWorkは出所の印 `roadmap_registration {roadmap_id, phase_id, key}` を持つ。印を書けるのはこの経路だけで、直接のCREATE・replan・派生などで `registration_key` を渡しても書き込み前に拒否する。`phase_entries` を持たないplanは従来どおりで、Work・印を作らず、戻り値も従来のまま。以下は書き込み・lockより前に拒否する: planのPhaseでないkey、通常Workのないdesign、予約key（`integration` / `confirmation`）、design検証の失敗、Planning Reviewとの併用。
+
+`work_dependencies` は `(from_phase, from_work, to_phase, to_work)` の列で、`to_work` は `from_work` のcompleted後でなければ開始できない（`requires_completion`）。`phase_entries` が無い場合はどの経路でも拒否する。Phase間の関係とWork依存を合わせたグラフに循環があれば拒否する（登録順はこのグラフの依存順）。
+
+`independent_candidates(store, roadmap_id)` はread-onlyで、今startableなPhase、complete / held / cancelled / plan_excludedでないPhaseのうち先行条件のないものについてはstartableなWork、先行条件のあるものについてはその先行条件と状態を返す。認可・mutation・lifecycleの許可は何も増やさず、`planned_next` を阻害要因として出さない。
+
 ## Phase entry
 
-WorkはPhaseへ実際に入る時だけ展開する。
+既定ではWorkはPhaseへ実際に入る時だけ展開する。上の「Roadmap作成時のWork登録」でWorkが登録済みのPhaseは、`enter_phase(store, phase_id)`（designなし）で入る。これはPhaseのlifecycleと依存を通常のentryと同じに検査し、何も再登録せず、STARTが引き継ぐ構造を返す（`expanded` はfalse）。Planning Reviewとの併用、登録印のあるWorkを持たないPhase、unresolvable / complete / held / cancelled / plan_excluded、Roadmapがactiveでない、先行条件が未充足、未完了のPhase entryがある場合は拒否する。
 
-既にWorkが展開されたPhaseへ、新しいentry designを渡してPhase entryを再実行しない。展開済みPhaseにはdesignが登録する対象がなく、渡されたdesignを黙って無視すれば、呼び出し側が別の計画が登録されたと誤認し得る。Phase entryはこれを `phase_already_expanded` でSTOPし、design無視・既存entryへの差し替え・通常成功としての返却・ID発行・mutation開始・canonical state変更・commitのいずれも行わない。展開済みPhaseの現在構造はread-onlyで読み、計画の正式変更はRoadmapのRelated maintenance等から行う（`rules/ai-decision`）。なお、Roadmapがactiveでない場合、Phaseがcomplete / held / cancelled / plan_excludedの場合、Phaseのdependencyが未充足の場合は、従来どおりそれぞれの理由でSTOPし、`phase_already_expanded` より優先する。どの経路でもcanonical stateは変更しない。
+既にWorkが展開されたPhaseへ、新しいentry designを渡してPhase entryを再実行しない（design無しのentryはこの拒否の対象外）。展開済みPhaseにはdesignが登録する対象がなく、渡されたdesignを黙って無視すれば、呼び出し側が別の計画が登録されたと誤認し得る。Phase entryはこれを `phase_already_expanded` でSTOPし、design無視・既存entryへの差し替え・通常成功としての返却・ID発行・mutation開始・canonical state変更・commitのいずれも行わない。展開済みPhaseの現在構造はread-onlyで読み、計画の正式変更はRoadmapのRelated maintenance等から行う（`rules/ai-decision`）。なお、Roadmapがactiveでない場合、Phaseがcomplete / held / cancelled / plan_excludedの場合、Phaseのdependencyが未充足の場合は、従来どおりそれぞれの理由でSTOPし、`phase_already_expanded` より優先する。どの経路でもcanonical stateは変更しない。
 
 ただしこのPhase自身のPhase entryが中断してpending mutationが残っている状態は、呼び出し側の再実行ではなくrecovery stateであり、`phase_already_expanded` として扱わない。中断した展開は同じmutationで前へ進めて完了させる。
 
@@ -195,6 +205,8 @@ Phase entryは、最初のID予約より前に、展開対象のdesignをmutatio
 再実行のdesignが記録済みdesignと一致する場合だけ、そのpending mutationをresumeする。既に記録済みのstageはcaller specから決め直さず、記録済みeffectをclassify / applyし、そのstageのIDと結果は記録済みreserved ID / effectから再構成する。未記録のstageだけを、同一性が確認されたcaller designから決める。記録済みのdesignと一致しない再実行は `reconcile_required` とし、既存のpending mutationを別のdesignで継続しない。前半は記録済みdesign、後半は再実行designという混在を作らない。
 
 designを記録していない旧実装のpending phase-entry recordは自動resumeしない。どの中断位置でも `reconcile_required` とし、pending record・effects・reserved IDs・statusをそのまま保持する。rollback・abandon・削除・新しいmutationへの差し替えは行わない。診断にはmutation id、Phase id、legacy phase-entry pendingであること、自動resumeにはdesign記録が不足していることを含める。
+
+entry window（mutationを開いた直後のGit readiness確認と開始前の変更のsnapshot）で `detached_head` によりSTOPした時、今回の呼び出しが新しく開き、pendingでeffectを持たないmutationをabandonする対象は、`roadmap-create`（reviewed経路を含む）と、Phase・Roadmapのhold / resume / cancelだけである（Sprint §41.31 AM-A）。Phase entry・Phase追加・plan exclusion・Roadmap achievement・Related maintenanceには適用しない（この段落の後の規則のとおり）。resumeしたmutation・effectを持つmutation・状態が不明なmutation・process死で残ったmutationは閉じない。
 
 中断した展開のmutationは、resume中のSTOPでabandonしない。今回の実行が新しく開いたPhase entryがeffect記録前にSTOPした場合にabandonする既存の動作は変えない。この規則はlegacy Phase entryのものである。review-v1 Phase entryのplanning mutationは、最初のgeneration mutationを開始するまでは、開始したものでもresumeしたものでも、どのSTOPでもabandonする（Review-v1 planning）。
 
