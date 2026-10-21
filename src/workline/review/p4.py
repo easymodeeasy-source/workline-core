@@ -1918,6 +1918,13 @@ def wait_breakdown(adjudication: Any) -> dict[str, int]:
 
 def wait_breakdown_text(adjudication: Any) -> str:
     found = wait_breakdown(adjudication)
+    if not any(found.values()):
+        # Nothing this adjudication counts holds the wait (an Integration wait can rest on a ground the adjudication
+        # does not count, such as a required change of the Phase's desired state, which routes to a Human): saying
+        # "requirement decisions for a Human: 0" would read as no Human being needed.
+        return ("no requirement decision, targeted check or blocking finding is counted in the adjudication, and the "
+                "wait still needs a Human: it rests on another ground recorded with the Run (for example a required "
+                "change of the Phase's desired state)")
     return (f"requirement decisions for a Human: {found['requirement_decisions']}; targeted checks (access or "
             f"evidence to close, not a requirement question): {found['targeted_checks']}; blocking technical "
             f"findings (an ordinary fix, no Human): {found['blocking_findings']}")

@@ -2580,9 +2580,14 @@ class MutationController:
                 raise ReconcileRequired(
                     f"pending mutation {other['mutation_id']} (owner {other['owner']}) overlaps the planned write scope: reconcile required"
                     f" (overlap: {', '.join(shared) if shared else 'its scope is unbounded'}). This guard protects that"
-                    " mutation's uncommitted state and is working as designed: resume or finish that pending operation"
-                    " (a START waiting on a Human decision continues once the decision is supplied); never edit"
-                    " .workline/runtime by hand"
+                    " mutation's uncommitted state and is working as designed: that pending operation is continued or"
+                    " closed by the route the contract provides for its owner"
+                    + (
+                        " (a START waiting on a Human decision continues once the decision is supplied)"
+                        if other["owner"] == "start"
+                        else ""
+                    )
+                    + "; never edit .workline/runtime by hand"
                 )
         if matches:
             mutation = Mutation(self, matches[0], resumed=True)

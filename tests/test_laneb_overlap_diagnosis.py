@@ -30,11 +30,23 @@ class OverlapDiagnosisTests(WorklineTestCase):
         self.assertIn("overlaps the planned write scope: reconcile required", message, "the refusal is unchanged")
         for shared in SCOPE.entities + SCOPE.files:
             self.assertIn(shared, message)
-        for way in ("working as designed", "Human decision", ".workline/runtime"):
+        for way in ("working as designed", "route the contract provides for its owner", ".workline/runtime"):
             self.assertIn(way, message)
+        # RB11INT-C-1: no owner is told to "resume" what the contract does not let it resume, and the START hint is
+        # given only when the record that holds the scope is a START
+        self.assertNotIn("resume or finish", message)
+        self.assertNotIn("Human decision", message)
         # AM-C2: the text never recommends a recovery route the contract does not provide for the owner of that record
         # (the dispose-recovery gate admits no owner of this kind), so it names none.
         self.assertNotIn("dispose-recovery", message)
+
+    def test_a_pending_start_names_the_decision_that_continues_it_and_no_other_owner_does(self) -> None:
+        self.controller.open("start", {"operation": "start", "work_id": "w_x"}, SCOPE)
+        with self.assertRaises(ReconcileRequired) as raised:
+            self.controller.open("roadmap", {"operation": "phase-entry", "phase_id": "p_x"}, SCOPE)
+        message = raised.exception.message
+        self.assertIn("a START waiting on a Human decision continues once the decision is supplied", message)
+        self.assertIn("overlaps the planned write scope: reconcile required", message)
 
     def test_an_unbounded_pending_scope_is_named_as_such(self) -> None:
         self.controller.open("roadmap", {"operation": "x"}, WriteScope())
