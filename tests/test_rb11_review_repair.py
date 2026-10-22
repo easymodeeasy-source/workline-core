@@ -14,6 +14,7 @@ The other findings have their own tests in ``test_laneb_reviewer_access`` (H1-1,
 from __future__ import annotations
 
 import dataclasses
+import unittest
 from typing import Any
 from unittest import mock
 
@@ -221,3 +222,55 @@ class AbandonPersistenceFailureTests(RepairCase):
         self.assertEqual((pending["mutation_id"], "plan_excluded"), (result.mutation_id, result.status))
         self.assertEqual([], MutationController(self.store).list_pending())
         self.assertEqual([], validate_project(self.store))
+
+
+class ZeroCountWaitIsUnreachableTests(unittest.TestCase):
+    """RB11-GPT-D1 / C-2: a P4 HUMAN_WAIT always has at least one counted requirement decision or targeted check.
+
+    ``derive_outcome`` returns HUMAN_WAIT exactly when ``obligations()["human"]`` is positive, and that number is
+    ``_human_count`` = HUMAN claims + HUMAN gaps + targeted-check gaps, which is precisely what ``wait_breakdown`` reports
+    as ``requirement_decisions + targeted_checks``. So under valid inputs the all-zero branch of ``wait_breakdown_text`` is
+    not reachable; it stays as defensive text, and this test states the identity over every small combination.
+    """
+
+    def combos(self):
+        import itertools
+
+        from workline.review import p4, records
+
+        outcomes = records.P4_OUTCOMES
+        resolutions = records.P4_GAP_RESOLUTIONS
+        for n_entries in range(3):
+            for n_gaps in range(3):
+                for entry_set in itertools.product(outcomes, repeat=n_entries):
+                    for gap_set in itertools.product(resolutions, repeat=n_gaps):
+                        yield p4, [{"outcome": o} for o in entry_set], [{"resolution": r} for r in gap_set]
+
+    def test_a_human_wait_always_counts_a_requirement_decision_or_a_targeted_check(self) -> None:
+        import types
+
+        checked = waits = 0
+        for p4, entries, gaps in self.combos():
+            normalized = types.SimpleNamespace(drafts=(), entries=tuple(entries), gaps=tuple(gaps), strategy_change_required=False)
+            outcome = p4.derive_outcome(normalized)
+            stored = types.SimpleNamespace(entries=entries, coverage_gaps=gaps, obligations={})
+            found = p4.wait_breakdown(stored)
+            human = p4.obligations(normalized)["human"]
+            self.assertEqual(human, found["requirement_decisions"] + found["targeted_checks"], (entries, gaps))
+            if outcome == p4.HUMAN_WAIT:
+                waits += 1
+                self.assertGreaterEqual(found["requirement_decisions"] + found["targeted_checks"], 1, (entries, gaps))
+                self.assertTrue(p4.wait_breakdown_text(stored).startswith("requirement decisions for a Human:"))
+            checked += 1
+        self.assertGreater(waits, 0)
+        self.assertGreater(checked, 100)
+
+    def test_the_defensive_text_keeps_the_stop_and_says_a_human_is_still_needed(self) -> None:
+        import types
+
+        from workline.review import p4
+
+        empty = types.SimpleNamespace(entries=[], coverage_gaps=[], obligations={})
+        text = p4.wait_breakdown_text(empty)
+        self.assertIn("still needs a Human", text)
+        self.assertNotIn("requirement decisions for a Human: 0", text)

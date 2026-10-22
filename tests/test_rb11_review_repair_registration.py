@@ -36,7 +36,9 @@ is NOT in the table and must stay as at the base):
     AM-K  A  the new read-only operation independent_candidates ......... TableTSweep.test_am_k_*
     AM-K  U  it changes nothing on disk and refuses an inactive Roadmap as the existing checks do
 
-Things that cannot be driven end to end here are marked ``NOT_VERIFIED`` (skipped with the reason, listed in the report).
+The review-v1 reviewer row of AM-I is driven in ``test_laneb_reviewer_access.WorkReviewV1ReviewerAccessTests``; the two former
+NOT_VERIFIED paths of AM-H1 (the Review-derived integration fix Works, a completed Planning Review) are the classes
+``IntegrationRepairFixWorkFlowTests`` and ``ReviewedRegistrationFlowTests`` at the end of this module (RB11-GPT-D1).
 """
 
 from __future__ import annotations
@@ -231,14 +233,6 @@ class RegistrationKeyRefusalTests(WorklineTestCase):
             self.assertIsNotNone(view.works[work_id].roadmap_registration)
         self.assertEqual(validate_project(self.store), [])
 
-    @unittest.skip(
-        "NOT_VERIFIED: the Review-derived integration fix Works (start_review._integration_fix_works, a real P4 "
-        "Phase Integration Review with a repair plan) are not driven end to end here; they are built from DerivedWork "
-        "like the HumanNG ones tested above, which has no registration_key field"
-    )
-    def test_d_review_derived_integration_fix_works(self) -> None:
-        """AM-H1 (d) via a real Phase Integration Review repair plan. NOT_VERIFIED, RB11INT-EVID-1."""
-
     # (e) the reviewed registration route ------------------------------------------------------------------------
     def test_e_the_reviewed_route_refuses_phase_entries_and_writes_nothing(self) -> None:
         """AM-H1 (e) / AM-D: a Roadmap that registers Works cannot take the reviewed route, so no reviewed route
@@ -267,13 +261,6 @@ class RegistrationKeyRefusalTests(WorklineTestCase):
         self.assertEqual(before, project_state(self.store))
         # the same call without review is the accepted AM-F entry
         self.assertFalse(rm.enter_phase(self.store, result.phase_ids["a"]).expanded)
-
-    @unittest.skip(
-        "NOT_VERIFIED: a full reviewed Planning Review run (roadmap_review / WorkDesign registration with a real "
-        "PlanningReview and Reviewer) is not driven here; only its refusals and the absence of a key field are"
-    )
-    def test_e_a_complete_reviewed_registration(self) -> None:
-        """AM-H1 (e) through a real Planning Review. NOT_VERIFIED, RB11INT-EVID-1."""
 
     # only Roadmap-time registration writes the marker -----------------------------------------------------------
     def test_only_roadmap_time_registration_writes_the_marker(self) -> None:
@@ -723,12 +710,144 @@ class TableTReviewerAccessRows(laneb.SubmoduleProjectCase):
         with mock.patch.object(ra.gitcmd, "run_git", side_effect=unreadable):
             self.assert_untouched_refusal(laneb.work_p4(actor), ra.UNKNOWN)
 
-    @unittest.skip(
-        "NOT_VERIFIED: the review-v1 WorkReview reviewer (selector.reviewer with reviewer_identity) is covered by "
-        "reviewer_access._bindings only; no review-v1 reviewer fixture is driven through st.start here"
-    )
-    def test_am_i_row_the_review_v1_reviewer_is_checked(self) -> None:
-        """Table T AM-I (R) for the review-v1 reviewer. NOT_VERIFIED, RB11INT-EVID-1."""
+
+# ===================================================================================== RB11-GPT-D1: the two former NOT_VERIFIED paths
+
+from planning_helpers import PlanningTestCase  # noqa: E402
+from planning_helpers import Reviewer as PlanningReviewer  # noqa: E402
+from rb5_run_helpers import Discovery as IntegrationDiscovery  # noqa: E402
+from rb5_run_helpers import IntegrationRunCase, claim, phase_review, repairing_executor  # noqa: E402
+
+
+def marker_in_the_files(store, work_id: str) -> bool:
+    return "roadmap_registration" in (store.root / ".workline" / "works" / f"{work_id}.md").read_text(encoding="utf-8")
+
+
+class ReviewedRegistrationFlowTests(PlanningTestCase):
+    """AM-H1 (e), RB11-GPT-D1 path B: a COMPLETED Planning Review registers Works through the reviewed route.
+
+    Real entry points only: ``rm.create_roadmap(review=...)`` and ``rm.enter_phase(design, review=...)`` with a scripted
+    Planning Review actor that completes. The reviewed route builds its Works from ``WorkDesign`` (no registration_key
+    field) and never passes the Roadmap-time capability, so nothing it registers carries the marker.
+    """
+
+    def test_a_completed_planning_review_registers_works_that_carry_no_marker(self) -> None:
+        store = self.planning_project()
+        reviewer = PlanningReviewer()
+        roadmap = self.reviewed_roadmap(store, reviewer)
+        phase = roadmap.registration.phase_ids["a"]
+        entered = self.reviewed_entry(store, phase, reviewer)
+        self.assertGreaterEqual(len(reviewer.tasks), 2, "a Review ran for the Roadmap and for the Phase entry")
+        view = ProjectView.load(store)
+        registered = view.phase_works(phase)
+        self.assertGreaterEqual(len(registered), 3, f"the design's Works, the integration and the confirmation ({entered.status})")
+        for work in registered:
+            self.assertIsNone(work.roadmap_registration, work.id)
+            self.assertNotIn("roadmap_registration", work.meta, work.id)
+            self.assertFalse(marker_in_the_files(store, work.id), work.id)
+        self.assertEqual([], validate_project(store))
+
+    def test_the_design_less_entry_refuses_a_phase_the_reviewed_route_registered(self) -> None:
+        """Negative control: AM-F recognises only Roadmap-time registered Works, so reviewed Works never take that path."""
+        store = self.planning_project()
+        reviewer = PlanningReviewer()
+        roadmap = self.reviewed_roadmap(store, reviewer)
+        phase = roadmap.registration.phase_ids["a"]
+        self.reviewed_entry(store, phase, reviewer)
+        before = project_state(store)
+        with self.assertRaises(ValidationError) as raised:
+            rm.enter_phase(store, phase)
+        self.assertIn("Roadmap-time registration", str(raised.exception))
+        self.assertEqual(before, project_state(store))
+
+    def test_a_roadmap_that_registers_works_cannot_take_the_reviewed_route_and_the_reviewer_is_never_asked(self) -> None:
+        store = self.planning_project()
+        reviewer = PlanningReviewer()
+        before = project_state(store)
+        with self.assertRaises(ValidationError) as raised:
+            rm.create_roadmap(store, plan(), review=reviewer.review())  # the real entry gate passes: a real Planning Review
+        self.assertIn("not yet available with a Planning Review", str(raised.exception))
+        self.assertEqual([], reviewer.tasks)
+        self.assertEqual(before, project_state(store))
+        self.assertEqual({}, ProjectView.load(store).roadmaps)
+
+    def test_one_project_holds_both_routes_and_only_roadmap_time_works_carry_the_marker(self) -> None:
+        store = self.planning_project()
+        reviewer = PlanningReviewer()
+        roadmap = self.reviewed_roadmap(store, reviewer)
+        self.reviewed_entry(store, roadmap.registration.phase_ids["a"], reviewer)
+        timed = rm.create_roadmap(store, plan())
+        carrying = {work_id for work_id, found in markers(store).items() if found is not None}
+        view = ProjectView.load(store)
+        timed_works = {w.id for w in view.works.values() if w.phase_id in set(timed.phase_ids.values())}
+        self.assertEqual(timed_works, carrying, "exactly the Roadmap-time registered Works carry the marker")
+        self.assertEqual([], validate_project(store))
+
+
+class IntegrationRepairFixWorkFlowTests(IntegrationRunCase):
+    """AM-H1 (d), RB11-GPT-D1 path A: the fix Works of a REAL P4 Phase Integration repair plan (DOMAIN_REPAIR_REQUIRED).
+
+    Driven through ``st.start(..., phase_review=...)`` on a reviewed (marked) Phase with a scripted discovery that reports
+    one blocking problem, then the executor's ``IntegrationRepairPlan`` (``repairing_executor``) registered through START's
+    derivation. The fix Work is built from ``DerivedWork`` (no registration_key field) and carries no marker.
+    """
+
+    class Once(IntegrationDiscovery):
+        def __call__(self, task):
+            found = super().__call__(task)
+            self.claims = ()
+            return found
+
+    def test_the_fix_work_of_a_real_repair_plan_carries_no_marker(self) -> None:
+        store, phase_id, ids = self.marked_project()
+        result = self.integrate(store, ids["integration"], phase_review(self.Once(claim("problem"))), mode="outer",
+                                executor=repairing_executor(store))
+        self.assertEqual("phase_complete", result.status)
+        view = ProjectView.load(store)
+        (fix,) = [w for w in view.effective_works(phase_id) if w.name == "Fix the integrated report"]
+        self.assertIn(fix.id, result.completed_work_ids, "the repair plan's fix Work was registered and run")
+        self.assertIsNone(fix.roadmap_registration)
+        self.assertNotIn("roadmap_registration", fix.meta)
+        self.assertFalse(marker_in_the_files(store, fix.id))
+        self.assertEqual({None}, {w.roadmap_registration for w in view.phase_works(phase_id)})
+        self.assertEqual([], view.unsatisfied_dependencies(fix.id), "AM-H2 does not hold an unmarked fix Work")
+        self.assertEqual([], validate_project(store))
+
+    def test_a_repair_plan_cannot_carry_a_registration_key(self) -> None:
+        """Negative control: the repair plan's Works are ``DerivedWork``; the field does not exist, so it cannot be passed."""
+        self.assertNotIn("registration_key", {f.name for f in dataclasses.fields(st.DerivedWork)})
+        with self.assertRaises(TypeError):
+            st.DerivedWork("Fix", "fixed", registration_key="k")  # type: ignore[call-arg]
+
+    def test_a_roadmap_time_registered_phase_has_no_reviewed_integration_for_a_repair_plan_to_enter(self) -> None:
+        """Unreachability of 'a repair-plan fix Work joining a Phase of Roadmap-time registered Works', from the entry:
+        a Roadmap-time registered integration Work is not a marked (review-v1) integration, so START ignores the Phase
+        Review selector for it: no Review Run is begun, the executor is never given an integration repair context, and
+        no fix Work can be registered; a Planning Review cannot be combined with ``phase_entries`` to make the
+        integration a marked one (AM-D refusal, tested in ReviewedRegistrationFlowTests). Executable negative control,
+        not a successful flow."""
+        from workline.review.store import ReviewStore
+
+        store = self.planning_project()
+        timed = rm.create_roadmap(store, plan())
+        phase = timed.phase_ids["a"]
+        entry = rm.enter_phase(store, phase)
+        view = ProjectView.load(store)
+        (integration,) = [w for w in view.phase_works(phase) if w.work_kind == "phase_integration_check"]
+        self.assertIsNotNone(integration.roadmap_registration)
+        self.assertIsNone(integration.phase_review_contract, "a Roadmap-time integration is not a marked integration")
+        st.start(store, entry.entry_work_id, "single-work", completing_executor(store))
+        works_before = set(ProjectView.load(store).works)
+        seen: list = []
+        # the discovery would report a blocking problem on a marked integration; here nothing consults it
+        discovery = self.Once(claim("problem"))
+        self.integrate(store, integration.id, phase_review(discovery), executor=repairing_executor(store, seen))
+        self.assertEqual([], list(ReviewStore(store).run_ids()), "no Phase Integration Review Run was begun")
+        self.assertEqual([], discovery.tasks if hasattr(discovery, "tasks") else [], "the discovery actor was never launched")
+        self.assertEqual({None}, {context for _work, context in seen}, "no integration repair context was ever given")
+        self.assertEqual(works_before, set(ProjectView.load(store).works), "no fix Work was registered")
+        self.assertEqual("completed", ProjectView.load(store).work_state(integration.id).state)
+        self.assertEqual([], validate_project(store))
 
 
 if __name__ == "__main__":  # pragma: no cover
