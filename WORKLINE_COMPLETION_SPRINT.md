@@ -17050,6 +17050,20 @@ not CONTRACT_PROPOSED; not CONTRACT_FROZEN; no implementation or landing authori
 
 The Control Plane's policy rulings (§39.2) are applied to the research. The contract waits until the RB11 contract establishes the interfaces of §39.3. The research, including an empirical report on early-review reuse, and its INTERNAL_ADVISORY adversarial review are recorded in the private execution archive.
 
+Stage note (2026-10-26). The stage block and the paragraph above record the state of 2026-10-10 and are not rewritten. The current stage, as of 2026-10-26:
+
+~~~
+RB11  LANDED_AND_CLOSED_OUT  production main 108babb7f5f776dce384c6dabbc449271223cf39, tree 09aca47af869475ca0ba71c0272869a9219ef0ee
+RB12  CONTRACT_FROZEN        Control Plane decision of 2026-10-26, for RB12 alone
+      IMPLEMENTATION_AUTHORIZED not granted; LANDING_AUTHORIZED not granted
+~~~
+
+- Basis: the Control Plane's RB12 contract freeze decision of 2026-10-26. The freeze identity, by sha256, and the status of the pre-freeze review are recorded in §42.
+- Frozen identity: 02_RB12_CONTRACT_PROPOSAL_rev3.md, sha256 5bea9a9e5d5a63f6ba00b5bd6e1c2936ec09f3666ce8688dc8bed8c7bbc5dd80; 03_IMPLEMENTATION_PLAN_rev3.md, sha256 8c6ef28bac4646d6930ab762820df7b6409835f093c6a057785f6e6c57753842; 08_SECTION42_AMENDMENT_DRAFT_rev3a.md, sha256 feea6ff54d7e7346face3c02eda4da767be13f98b7bc97f2069056394a84488a.
+- WAIT_RB11_INTERFACE is no longer a waiting condition: the RB11 contract established the interfaces of §39.3 and RB11 has landed.
+- The canonical reflection of this note and of §42 is carried by one separate candidate. That candidate needs its own FORMAL_INDEPENDENT review (§39.4), its final validation (§39.2) and an exact LANDING_AUTHORIZED. This note grants none of them.
+- This note is a management record of the stage after the freeze. It changes no ruling of §39.2, no content of §39.3-§39.6, no acceptance condition and no review requirement. The historical statements of §37.20 are not changed.
+
 ### 39.1 Purpose and scope
 
 - BL-073 — candidate maturity and validation eligibility: expensive validation is spent only on candidates mature enough for it;
@@ -18414,9 +18428,34 @@ phase_create.py         register_phases                                         
 
 Approval of this subsection permits only the changes that the units above require. It does not permit any other definition of the listed files to change.
 
-## 42. RB12 implementation brief — reserved
+## 42. RB12 implementation brief — freeze identity and references
 
-Reserved. No RB12 implementation brief exists. It is added by a separate canonical change only after RB12 is CONTRACT_FROZEN (§39.6). Until then this section authorizes nothing.
+Stage: CONTRACT_FROZEN for RB12 alone (Control Plane decision of 2026-10-26). IMPLEMENTATION_AUTHORIZED not granted; LANDING_AUTHORIZED not granted.
+
+This section is a management record, not a duplicate of the contract. It authorizes nothing by itself.
+
+1. Freeze identity
+   - The Control Plane decision that froze RB12: the decision of 2026-10-26 (message cmsg_01TMNFaE3GijDgqrfHKWyLtNLVvoKtCjEUqWB5kUYFLiCs, author D, 2026-10-26T08:40:32Z), stored-body sha256 5ccb3e4f60e53e402911f1847c9f40d01fdb2c2689a3853149df5f0e2054602f. The hash is of the stored copy of the message body; its equality with the original is not independently verified.
+   - The reviewed contract identity: the frozen documents of item 2, by sha256. Reference base: production main 108babb7f5f776dce384c6dabbc449271223cf39, tree 09aca47af869475ca0ba71c0272869a9219ef0ee.
+   - The pre-freeze independent full-contract review accepted by the Control Plane under Sprint §39.4: review record identity, exact reviewed document hashes, independence evidence, and Control Plane dispositions. This is not a tool-recorded FORMAL_INDEPENDENT review under RB12 §9.
+     - Review record identity: none stored. The review was carried out in a separate GPT chat and was carried by the Human to the Control Plane. The review report file, the source session identifier and any mechanical independence proof were not stored or obtained.
+     - Verdict and dispositions: the review verdict was REPAIR_REQUIRED, with R12-CR-01 (HIGH) and R12-CR-02 (LOW). The Control Plane adopted both (2026-10-26T08:12:32Z) and, after the repair of the section 42 draft (item 2), accepted the difference, closed both findings as CLOSED_AFTER_REPAIR and froze the contract. The REPAIR_REQUIRED verdict is not rewritten as a pass.
+     - Exact reviewed document hashes: the package submitted for the review is identified by the sha256 of its archive, d5d1eadd81ed06c2028465ff71f67754d8da14be0f71f170713a4f1067c81055. That the reviewer received exactly this archive, or verified its hash, is not recorded.
+
+2. Canonical references (the only place the contract text lives)
+   - Contract: 02_RB12_CONTRACT_PROPOSAL_rev3.md, sha256 5bea9a9e5d5a63f6ba00b5bd6e1c2936ec09f3666ce8688dc8bed8c7bbc5dd80.
+   - Implementation units (U0-U8, inputs, responsibilities, acceptance, focused tests, order): 03_IMPLEMENTATION_PLAN_rev3.md, sha256 8c6ef28bac4646d6930ab762820df7b6409835f093c6a057785f6e6c57753842.
+   - This section's source text: 08_SECTION42_AMENDMENT_DRAFT_rev3a.md, sha256 feea6ff54d7e7346face3c02eda4da767be13f98b7bc97f2069056394a84488a (rev3a repaired R12-CR-01 and R12-CR-02 in the draft; the contract and the plan are unchanged from the reviewed revision).
+   - These documents are held in the private execution archive, not in this repository. The RB12 tool repository and its canonical documents (docs/CONTRACT.md, docs/OPERATIONS.md, docs/IMPLEMENTATION_UNITS.md) do not exist yet; until they exist, the documents above, by sha256, are the contract's identity.
+
+3. Single-source rule
+   - The canonical documents above are the sole authority for the RB12 contract and its implementation units.
+   - This section, §39 and any private preparation material are rationale or identity records. They are not an alternative source of the contract, and a conflict is resolved in favor of the canonical documents only as frozen; a change to the contract is a reviewed contract amendment, never an edit of this section.
+   - A change to a canonical document after the freeze, including its move into the RB12 tool repository, needs its own Control Plane decision (and Human approval where an existing Human decision or authority boundary is affected) and a new identity record here.
+   - Nothing in this section imports the tool source, private operational records or secrets into this repository.
+
+4. Not changed by this section
+   - §39.2 rulings, §39.3-§39.6, §37.20, the Workline runtime, registry.md and the canonical Skills.
 
 ## 43. RB13 implementation brief — reserved
 
