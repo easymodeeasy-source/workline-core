@@ -17525,7 +17525,7 @@ Under contract amendment SA-1, L1's premises B-2 and P12 are read as B-2-SA and 
 
 ### 41.12 E-3 — launch registry and owner continuity
 
-- **Launch records.** A launch record (C-O1) is written at every launch of a writer, reviewer, focused run, Full or measurement.
+- **Launch records.** A launch record (C-O1) is written at every launch of a writer, reviewer, focused run, Full or measurement. The optional fields of contract amendment CO1-B2 (§41.32) may be added to it.
 - **Holder liveness.**
   - Positive evidence of holder liveness (rev-11 DC §5.4) is used for launches and for the watchdog.
   - It is not used for lease ownership (N3-A): the core lease has no holder-liveness attribute.
@@ -18427,6 +18427,50 @@ phase_create.py         register_phases                                         
 ~~~
 
 Approval of this subsection permits only the changes that the units above require. It does not permit any other definition of the listed files to change.
+
+### 41.32 Contract amendment CO1-B2 — optional launch-record fields and the reviewer supervisor (Control Plane acceptance: PENDING; Human approval: initial proof only)
+
+A forward amendment of the frozen RB11 launch-record rule C-O1 (§41.12). It adds optional launch-record fields and one producer responsibility so that the RB12 reviewer-independence proof (RB12 contract §9, item 2: the reviewer's parent-process lineage) can be read from the launch record. It adds no transition, guard, state, authority reason, retry, Human outcome choice or exit. The text of this subsection confers no authority by itself.
+
+**Status of this text.** Proposed. It takes effect only when it is part of the landed Sprint text, and it must not be landed while the Control Plane acceptance or any identity below reads PENDING. Landing (LANDING_AUTHORIZED, per exact candidate), the independent review of this candidate and its exact-tree Full (§39.2) are not given.
+
+**Scope of the Human approval that exists.** On 2026-10-27 the Human approved, as one bounded set, an initial proof of one real formal reviewer under RB12 B2. That set includes the content of C-O1-a and C-O1-b below and a limited reading of A1 items 4 and 4-a. The approval is limited to that one proof. It is not an approval of general operation, of a production switch of the RB11 tools, of a distribution other than the one named below, of TOOL_ACCEPTED, of Landing or of Full. Extending C-O1-a, C-O1-b or the A1 reading beyond the initial proof needs its own Human approval, recorded before this subsection takes effect for general use.
+
+**Identity of the sources** (published as complete values):
+
+~~~
+Human approval (initial proof only)   message cmsg_01TMNFaE3GijDgqrfHKWyLtN9vdifJUvshBcmVuWLZs1zu, author D, 2026-10-27T07:28:23Z
+                                      saved verbatim record, sha256 0aeda813547873023f34fa46274d750eea0236ec79e57cb5376074f275ac9bcc
+                                      (the hash is of the stored copy; its equality with the original message is not independently verified)
+Approved distribution (initial proof) rb11-tools commit 650d2b2e4fd5d67f03b2792ee9a22942493e6c20
+                                      tree   52e0165ccf98ae39d946e1daf724f6b73242b80c
+                                      manifest sha256 7f20f75e75bcf4202b5838d38151500ee70daab5fbb097a0836770adeca2b412 (252 tracked files)
+Producer ops/ancestry.py              sha256 f33a8ccec9528bf095c39cefdf9abf6daa316088d11cdce5c285b80f00d19ecc
+Supervisor ops/reviewer_supervisor.py sha256 60739d53d951c45bdeaa8dc7360d0529250b3df99f98b20e37f44b6f9c102b78
+Host record ops/host_record.py        sha256 81fccce3a74196108f5a17055e0d52244c168f351d0285feadf662122aeeca58
+Control Plane acceptance of CO1-B2    PENDING
+~~~
+
+**C-O1-a - optional fields (additive).** A launch record may carry these fields, and no others by this amendment:
+- `ancestry` (schema `rb11-ancestry/1`, kind `process_ancestry_observed`, phase `pre_resume`): the launched process's parent chain, observed through process handles before the launched process runs.
+- `launcher_role`, `supervisor`, `supervisor_start`: the role of the launcher and, for a launch started by the reviewer supervisor, the supervisor's identity and its own start ancestry.
+- `host_ancestry` on a task dispatch record (phase `host_dispatch`): the ancestry of the process that dispatched the task.
+
+Each field is optional and a dict. A field cannot replace or shadow a core field of the launch record. A launch record without these fields is valid and is read exactly as before. A reader that does not know these fields ignores them; their presence changes no result of any C-O1 reader, and the readers of §41.12 keep their rules.
+
+**C-O1-b - producer responsibility.** For a launch started with the evidence hook:
+1. The launcher observes the evidence while the launched process is suspended and publishes it in the launch record before the process is resumed. If the observation fails, the launch does not happen and the launched process never runs.
+2. A formal reviewer is started only by the reviewer supervisor. The supervisor is started by the Human from the Human's own shell, records its own start ancestry, and checks its distribution (the `ops/` tree, the loaded modules and bytecode) before each launch.
+3. The supervisor (with the ancestry and host-record modules) is a producer of launch-record evidence. Whether a producer's evidence is trusted for a purpose is decided by the consumer (RB12 contract §9), not by the producer.
+4. The identities of the supervisor, the producer build and the reviewer's session are bound to the same launch.
+
+**A1 items 4 and 4-a - limited reading.** An `rb11-launch-end/2` record whose Job Object was observed empty on two consecutive readings, and which passes the checks of the RB11 reader, is evidence of ENDED_POSITIVE for the launch. A process started through a broker outside the Job is not shown by this evidence; that limit is known and is not removed here. This reading is part of the initial-proof approval only (see the scope above).
+
+**What this subsection does not change.** §41.12 and the other §41 text keep their meaning except for the pointer named below. RB11's own readers are not changed by this amendment. Equivalence of RB12's reading of launch and end records with RB11's own reader was checked privately against the distribution above (differential check on real records and single-field mutations); that evidence is recorded in the private execution archive and is not identified by a hash here. Facts outside that check stay UNKNOWN: the content of the plain-text sidecars `launch.txt` and the result file (RB11 does not bind them by hash), old-format suite counts, and processes outside the Job.
+
+**Earlier clause amended (exactly this).** §41.12, first bullet ("Launch records"): the bullet is read together with the optional fields of C-O1-a. No other clause is amended.
+
+**Not given by this subsection:** CONTRACT_FROZEN or IMPLEMENTATION_AUTHORIZED for anything, LANDING_AUTHORIZED, activation of the distribution for general operation, TOOL_ACCEPTED of RB12, any Full, and any change to RB11 production code or the RB11 tools `main`.
 
 ## 42. RB12 implementation brief — freeze identity and references
 
