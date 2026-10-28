@@ -18428,7 +18428,7 @@ phase_create.py         register_phases                                         
 
 Approval of this subsection permits only the changes that the units above require. It does not permit any other definition of the listed files to change.
 
-### 41.32 Contract amendment CO1-B2 — optional launch-record fields and the reviewer supervisor (Control Plane acceptance: PENDING; Human approval: initial proof only)
+### 41.32 Contract amendment CO1-B2 — optional launch-record fields and the reviewer supervisor (Control Plane acceptance: recorded; Human approval: initial proof only)
 
 A forward amendment of the frozen RB11 launch-record rule C-O1 (§41.12). It adds optional launch-record fields and one producer responsibility so that the RB12 reviewer-independence proof (RB12 contract §9, item 2: the reviewer's parent-process lineage) can be read from the launch record. It adds no transition, guard, state, authority reason, retry, Human outcome choice or exit. The text of this subsection confers no authority by itself.
 
@@ -18448,7 +18448,7 @@ Approved distribution (initial proof) rb11-tools commit 650d2b2e4fd5d67f03b2792e
 Producer ops/ancestry.py              sha256 f33a8ccec9528bf095c39cefdf9abf6daa316088d11cdce5c285b80f00d19ecc
 Supervisor ops/reviewer_supervisor.py sha256 60739d53d951c45bdeaa8dc7360d0529250b3df99f98b20e37f44b6f9c102b78
 Host record ops/host_record.py        sha256 81fccce3a74196108f5a17055e0d52244c168f351d0285feadf662122aeeca58
-Control Plane acceptance of CO1-B2    PENDING
+Control Plane acceptance of CO1-B2    ACCEPTED_INITIAL_PROOF_SCOPE (C-O1-a, C-O1-b and the limited reading of A1 items 4 and 4-a, for the initial proof only; not an extension to general operation; the reviewer's report text and session identity were not stored); message cmsg_01TMNFaE3GijDgqrfHKWyLtNDVJKu2RfZELR9zCcq43AB7, 2026-10-28T09:02:54Z, stored-body hash not obtained
 ~~~
 
 **C-O1-a - optional fields (additive).** A launch record may carry these fields, and no others by this amendment:
