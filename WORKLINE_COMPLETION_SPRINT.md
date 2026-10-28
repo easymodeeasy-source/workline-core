@@ -18456,7 +18456,7 @@ Control Plane acceptance of CO1-B2    ACCEPTED_INITIAL_PROOF_SCOPE (C-O1-a, C-O1
 - `launcher_role`, `supervisor`, `supervisor_start`: the role of the launcher and, for a launch started by the reviewer supervisor, the supervisor's identity and its own start ancestry.
 - `host_ancestry` on a task dispatch record (phase `host_dispatch`): the ancestry of the process that dispatched the task.
 
-Each field is optional and a dict. A field cannot replace or shadow a core field of the launch record. A launch record without these fields is valid and is read exactly as before. A reader that does not know these fields ignores them; their presence changes no result of any C-O1 reader, and the readers of §41.12 keep their rules.
+Each field is optional. `ancestry`, `supervisor`, `supervisor_start` and `host_ancestry` are dicts; `launcher_role` is a string (for a reviewer started by the reviewer supervisor its value is `reviewer_supervisor`). A field cannot replace or shadow a core field of the launch record. A launch record without these fields is valid and is read exactly as before. A reader that does not know these fields ignores them; their presence changes no result of any C-O1 reader, and the readers of §41.12 keep their rules.
 
 **C-O1-b - producer responsibility.** For a launch started with the evidence hook:
 1. The launcher observes the evidence while the launched process is suspended and publishes it in the launch record before the process is resumed. If the observation fails, the launch does not happen and the launched process never runs.
