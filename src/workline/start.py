@@ -185,7 +185,13 @@ class HumanNG:
     relations: tuple[RelationSpec, ...] = ()
 
 
-Outcome = Completed | QuestionWait | Hold | Cancel | Derive | HumanNG
+@dataclass(frozen=True)
+class Detach:
+    """Parallel START only (:mod:`workline.parallel`): commit what this cycle recorded and end the operation
+    with the Work running, so its executor can work outside the Project execution lock."""
+
+
+Outcome = Completed | QuestionWait | Hold | Cancel | Derive | HumanNG | Detach
 
 
 @dataclass
@@ -204,6 +210,10 @@ class ExecutionContext:
     #: (``review.integration.IntegrationRepairContext``) when START asks its executor to plan the integration's
     #: domain repair - answered only by an IntegrationRepairPlan, a question or a hold. None everywhere else.
     integration_repair: Any = None
+    #: Parallel START only: the Work's own workspace (a worktree, or the Project folder for an in-place run) and
+    #: the run that owns it. None on every ordinary START, whose executor works in ``store.root`` as before.
+    workspace: Path | None = None
+    run_id: str | None = None
 
 
 Executor = Callable[[ExecutionContext], Outcome]
@@ -554,6 +564,10 @@ class _Session:
 
     # single Work cycle -------------------------------------------------------
     def run_work(self, work_id: str) -> StartResult:
+        from .parallel import require_run_free
+
+        # a Work a parallel run holds is run by that run alone (no double start, no outer continuation into it)
+        require_run_free(self.store, work_id)
         view = _structure_or_stop(self.store, "start precheck")
         work = view.works.get(work_id)
         if work is None:
@@ -660,6 +674,10 @@ class _Session:
             self._keep_protected_read_targets(view, work_id, protected)
             if isinstance(outcome, Completed):
                 return self._complete(view, work, outcome)
+            if isinstance(outcome, Detach):
+                self._commit("commit", f"chore(workline): start {work.display}", [])
+                return StartResult("running", work_id, self.mutation.id, phase_id=work.phase_id,
+                                   head=gitcmd.head_commit(self.store.root))
             if isinstance(outcome, QuestionWait):
                 return StartResult("question_wait", work_id, self.mutation.id, phase_id=work.phase_id, detail=outcome.question)
             if isinstance(outcome, Hold):
@@ -3745,10 +3763,20 @@ def _phase_integration_gate(work: Entity, review: Any, phase_review: Any = None,
 
 def start(
     store: ProjectStore, work_id: str, mode: str, executor: Executor, *, review: object = None,
-    phase_review: object = None,
+    phase_review: object = None, parallel: bool = False, workspace: object = None,
 ) -> StartResult:
     if mode not in MODES:
         raise with_check(ValidationError(f"mode must be one of {MODES}: {mode!r}"), "start.3630")
+    if parallel:
+        # Parallel START (:mod:`workline.parallel`): the named Work alone, legacy Work semantics; its executor runs
+        # outside the Project execution lock in the Work's own workspace. ``workspace`` is a parallel.WorkspaceSpec.
+        if mode != "single-work" or review is not None or phase_review is not None:
+            raise with_check(ValidationError(
+                "a parallel START runs one named Work (mode single-work) without a Review selector",
+                code="parallel_start_shape"), "start.parallel")
+        from . import parallel as par
+
+        return par.run(store, work_id, executor, workspace)
     details: dict[str, Any] = {"work_id": work_id, "mode": mode}
     if phase_review is not None:
         # RB5 (§32.14): the Phase Integration Review selector is checked before the lock and writes nothing; it
