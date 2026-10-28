@@ -41,6 +41,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import threading
 import time
 from typing import Any, Callable, Iterator
 
@@ -54,6 +55,8 @@ from .store import ProjectStore
 RUN_MARKER = "workline-parallel-run"
 RUN_VERSION = 1
 RUNS_DIR = ".workline/runtime/runs"
+#: which Workline mutation made which Project commit, noted while a parallel run holds a Work (:func:`note_commit`)
+JOURNAL_DIR = ".workline/runtime/commit-journal"
 SAVED_REF_PREFIX = "refs/workline/runs/"
 PARKED_REF_PREFIX = "refs/workline/parked/"
 BRANCH_PREFIX = "workline/run/"
@@ -94,7 +97,11 @@ _LIVE = {CLAIMING, CREATING, RUNNING, RETURNED, EXECUTED}
 # owner liveness -------------------------------------------------------------
 ALIVE, DEAD, UNKNOWN = "alive", "dead", "unknown"
 
-_tokens: dict[tuple[str, str], str] = {}
+#: (Project, Work) -> (run_id, thread) of the claim / finish being made by that thread
+_tokens: dict[tuple[str, str], tuple[str, int]] = {}
+#: (Project, Work) -> the one invocation of this process that holds it: {"nonce", "thread"}
+_active: dict[tuple[str, str], dict[str, Any]] = {}
+_guard = threading.Lock()
 _owner_cache: dict[str, Any] = {}
 
 
@@ -104,11 +111,83 @@ def _key(store: ProjectStore, work_id: str) -> tuple[str, str]:
 
 @contextmanager
 def _token(store: ProjectStore, work_id: str, run_id: str) -> Iterator[None]:
-    _tokens[_key(store, work_id)] = run_id
+    key = _key(store, work_id)
+    with _guard:
+        _tokens[key] = (run_id, threading.get_ident())
     try:
         yield
     finally:
-        _tokens.pop(_key(store, work_id), None)
+        with _guard:
+            _tokens.pop(key, None)
+
+
+def _token_here(store: ProjectStore, work_id: str) -> str | None:
+    """The run whose claim / finish this thread is making for ``work_id``; None in every other thread."""
+    with _guard:
+        held = _tokens.get(_key(store, work_id))
+    return held[0] if held is not None and held[1] == threading.get_ident() else None
+
+
+@contextmanager
+def _invocation(store: ProjectStore, work_id: str, *, join: bool = False) -> Iterator[str]:
+    """One parallel START (or release) of ``work_id`` by this process: the identity its run record is owned by.
+
+    The owner is the invocation, not the process: two threads, or a run entered again from inside its own executor,
+    are two invocations, and a second one of a Work while the first lasts is refused here, before anything is read
+    or written. ``join``: a release the holding invocation makes itself (same thread) continues under it. When the
+    invocation ends, its record says so (``owner.ended_at``), so the next START - of this process or another - does
+    not wait for the process to exit.
+    """
+    key = _key(store, work_id)
+    thread = threading.get_ident()
+    with _guard:
+        held = _active.get(key)
+        joined = held is not None and join and held["thread"] == thread
+        if held is not None and not joined:
+            where = ("entered again from inside its own run (the same thread)" if held["thread"] == thread
+                     else "being run by another thread of this process")
+            raise StopError(f"Work {work_id} is already {where} (invocation {held['nonce']}); nothing was begun",
+                            code="work_run_active")
+        if held is None:
+            held = {"nonce": new_ulid(), "thread": thread}
+            _active[key] = held
+    try:
+        yield held["nonce"]
+    finally:
+        if not joined:
+            try:
+                _end_turn(store, work_id, held["nonce"])
+            finally:
+                with _guard:
+                    _active.pop(key, None)
+
+
+def _current(store: ProjectStore, work_id: str) -> str | None:
+    """The invocation this thread is running for ``work_id``, if any."""
+    with _guard:
+        held = _active.get(_key(store, work_id))
+    return held["nonce"] if held is not None and held["thread"] == threading.get_ident() else None
+
+
+def _invocation_live(nonce: object) -> bool:
+    with _guard:
+        return bool(nonce) and any(held["nonce"] == nonce for held in _active.values())
+
+
+def _end_turn(store: ProjectStore, work_id: str, nonce: str) -> None:
+    """The invocation ``nonce`` has ended: its record (still its own) says so. Never raised past the caller's own
+    outcome - a record that cannot say it keeps its owner, who then counts as alive while its process lives."""
+    if not run_path(store, work_id).is_file():
+        return  # nothing was written for it: nothing to say
+    try:
+        with _record_lock(store, work_id):
+            on_disk = read_run(store, work_id)
+            owner = (on_disk or {}).get("owner") or {}
+            if on_disk is not None and owner.get("nonce") == nonce and not owner.get("ended_at"):
+                owner["ended_at"] = _now()
+                _write(store, on_disk)
+    except (StopError, OSError):
+        pass
 
 
 # --------------------------------------------------------------------------- run records
@@ -278,18 +357,26 @@ def pid_alive(pid: object) -> bool:
 
 
 def _me() -> dict[str, Any]:
+    """This process: pid, host, creation time and a nonce of its own (an owner adds its invocation's nonce)."""
     if _owner_cache.get("pid") != os.getpid():
         _owner_cache.clear()
         _owner_cache.update(pid=os.getpid(), host=socket.gethostname(), started=_process_started(os.getpid()),
-                            nonce=new_ulid())
+                            process=new_ulid())
     return dict(_owner_cache)
 
 
 def owner_state(record: dict[str, Any]) -> str:
-    """The run's owner: ``alive``, ``dead`` or ``unknown``. Another host's owner cannot be checked from here."""
+    """The run's owner: ``alive``, ``dead`` or ``unknown``. Another host's owner cannot be checked from here.
+
+    The owner is one invocation (:func:`_invocation`). One that recorded its own end is gone; one of this process is
+    alive exactly while that invocation lasts (another thread's, or this thread's); one of another process on this
+    host is as alive as that process.
+    """
     owner = record.get("owner") or {"pid": record.get("pid"), "host": record.get("host")}
-    if (owner.get("nonce") and owner.get("nonce") == _me()["nonce"]):
-        return ALIVE
+    if owner.get("ended_at"):
+        return DEAD  # the invocation itself recorded that it ended
+    if owner.get("process") and owner["process"] == _me()["process"]:
+        return ALIVE if _invocation_live(owner.get("nonce")) else DEAD
     if record.get("owner_cleared", {}).get("nonce") == owner.get("nonce") and owner.get("nonce"):
         return DEAD  # a Human confirmed this owner is gone (declare_owner_gone)
     if owner.get("host") != socket.gethostname():
@@ -297,13 +384,20 @@ def owner_state(record: dict[str, Any]) -> str:
     return pid_state(owner.get("pid"), owner.get("started"))
 
 
-def _owned_by_me(record: dict[str, Any]) -> bool:
-    return bool(record.get("owner", {}).get("nonce")) and record["owner"]["nonce"] == _me()["nonce"]
+def _owned_by_me(store: ProjectStore, record: dict[str, Any]) -> bool:
+    """Whether ``record`` is owned by the invocation this thread is running for its Work - not merely this process."""
+    nonce = _current(store, record.get("work_id", ""))
+    owner = record.get("owner") or {}
+    return bool(nonce) and owner.get("nonce") == nonce and not owner.get("ended_at")
 
 
-def _become_owner(record: dict[str, Any]) -> None:
+def _become_owner(store: ProjectStore, record: dict[str, Any]) -> None:
+    nonce = _current(store, record["work_id"])
+    if nonce is None:
+        raise StopError(f"no invocation of this thread runs {record['work_id']}; the run is not taken",
+                        code="run_owner_changed")
     me = _me()
-    record["owner"] = me
+    record["owner"] = {**me, "nonce": nonce}
     record["pid"], record["host"] = me["pid"], me["host"]
 
 
@@ -312,12 +406,13 @@ def require_run_free(store: ProjectStore, work_id: str) -> None:
 
     START asks this before it runs any Work, so neither an ordinary START, an
     outer continuation nor a second parallel START runs a Work another run
-    holds (a double start).
+    holds (a double start). The claim / finish is recognized by its thread, so
+    another thread of the same process is never taken for it.
     """
     record = read_run(store, work_id)
     if record is None or record.get("state") not in _HOLDING:
         return
-    if _tokens.get(_key(store, work_id)) == record.get("run_id"):
+    if _token_here(store, work_id) == record.get("run_id"):
         return
     waiting = f"; it waits for a Human: {record.get('question')}" if record.get("state") == QUESTION_WAIT else ""
     raise StopError(
@@ -330,11 +425,11 @@ def require_run_free(store: ProjectStore, work_id: str) -> None:
 def detach_allowed(store: ProjectStore, work_id: str) -> bool:
     """Whether ``start.Detach`` may end this START: only inside the claim or finish of the parallel run that owns
     ``work_id``, made by its owner. Anywhere else a returned Detach is an unknown outcome."""
-    run_id = _tokens.get(_key(store, work_id))
+    run_id = _token_here(store, work_id)
     if run_id is None:
         return False
     record = read_run(store, work_id)
-    return (record is not None and record.get("run_id") == run_id and _owned_by_me(record)
+    return (record is not None and record.get("run_id") == run_id and _owned_by_me(store, record)
             and record.get("state") in (CLAIMING, RUNNING, EXECUTED))
 
 
@@ -373,7 +468,8 @@ class WorkspaceSpec:
 
     ``kind`` "worktree" (default) makes a git worktree of ``repo`` (the Project
     itself when None) on a Work branch; "in_place" runs in the Project folder,
-    for a Work that only reads and records. ``regenerable`` are glob patterns
+    which every Work shares, so only for a Work that reads: it returns no
+    result paths and writes nothing there. ``regenerable`` are glob patterns
     (relative to the worktree) of ignored outputs the release may delete.
     """
 
@@ -429,8 +525,10 @@ def _must(repo: Path, *args: str) -> str:
 def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec,
                       start_at: str | None = None, base: str | None = None) -> None:
     if spec.kind == "in_place":
+        # read-only: an in-place run shares the Project folder with every other Work, so it returns no result paths
+        # (:func:`_execute`) and the finish refuses it when the folder changed under it (:func:`_project_written`)
         record["workspace"] = {"kind": "in_place", "path": str(store.root), "repo": str(store.root),
-                               "base_commit": gitcmd.head_commit(store.root)}
+                               "base_commit": gitcmd.head_commit(store.root), "folder": _folder_state(store)}
         return
     if spec.kind != "worktree":
         raise ValidationError(f"workspace kind must be worktree or in_place: {spec.kind!r}", code="run_workspace_kind")
@@ -468,27 +566,130 @@ def _prepare(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec) -
     _save(store, record)
 
 
+def _z(output: str) -> list[str]:
+    """Git's NUL-separated output, as it names the paths (spaces, non-ASCII and quotes kept exactly)."""
+    return [p for p in output.split("\0") if p]
+
+
 def _project_pointer(store: ProjectStore, gitlink: str) -> str | None:
     """The commit the Project's HEAD names for ``gitlink`` - only for a mode-160000 entry, else None."""
-    entry = _git(store.root, "ls-tree", "HEAD", "--", gitlink).stdout.split()
-    if len(entry) < 4 or entry[0] != "160000" or entry[1] != "commit" or entry[3] != gitlink:
-        return None
-    return entry[2]
+    for entry in _z(_git(store.root, "ls-tree", "-z", "HEAD", "--", gitlink).stdout):
+        meta, _, name = entry.partition("\t")
+        fields = meta.split(" ")
+        if name == gitlink and len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit":
+            return fields[2]
+    return None
 
 
 def _staged(store: ProjectStore) -> list[str]:
-    return sorted(p for p in _git(store.root, "diff", "--cached", "--name-only", "-z").stdout.split("\0") if p)
+    return sorted(_z(_git(store.root, "diff", "--cached", "--name-only", "-z").stdout))
+
+
+def _index_state(store: ProjectStore) -> dict[str, str]:
+    """What the Project's index holds against HEAD, entry by entry: path -> ``<modes> <objects> <status>``."""
+    items = _z(_git(store.root, "diff", "--cached", "--raw", "-z", "--no-renames", "--full-index").stdout)
+    return {items[i + 1]: items[i] for i in range(0, len(items) - 1, 2)}
+
+
+def _folder_state(store: ProjectStore) -> dict[str, str]:
+    """What the Project folder holds apart from HEAD (runtime aside): path -> its exact content identity."""
+    out = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", ".",
+               ":(exclude).workline/runtime").stdout
+    return {entry[3:]: _identity(store.root / entry[3:]) or "absent" for entry in _z(out) if len(entry) > 3}
+
+
+def _journal(store: ProjectStore, commit: str) -> dict[str, Any] | None:
+    try:
+        noted = json.loads((store.root / JOURNAL_DIR / f"{commit}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return noted if isinstance(noted, dict) and noted.get("commit") == commit else None
+
+
+def note_commit(store: ProjectStore, commit: str, mutation_id: str, paths: list[str], parent: str | None) -> None:
+    """The Mutation Controller, right after it made ``commit``: which mutation made it, from which parent, for which
+    paths - noted (runtime, never canonical) only while a parallel run holds a Work of the Project, so a Project
+    without one is unchanged. A parallel finish proves with it that every commit since its claim is a Workline
+    mutation's own (:func:`_unproven_commits`)."""
+    if not _runs_dir(store).is_dir():
+        return
+    try:
+        holding = any(r.get("state") in _HOLDING for r in list_runs(store))
+    except StopError:
+        holding = True  # a record that cannot be read may hold a Work: noting costs nothing
+    if not holding:
+        return
+    store.tmp.mkdir(parents=True, exist_ok=True)
+    durable_write_text(store.root / JOURNAL_DIR / f"{commit}.json",
+                       json.dumps({"commit": commit, "mutation_id": mutation_id, "parent": parent,
+                                   "paths": sorted(paths), "at": _now(), "pid": os.getpid()}, sort_keys=True) + "\n",
+                       tmp_dir=store.tmp)
+
+
+def _within(path: str, declared: list[str]) -> bool:
+    return any(path == d or path.startswith(d.rstrip("/") + "/") for d in declared)
+
+
+def _unproven_commits(store: ProjectStore, record: dict[str, Any]) -> list[str]:
+    """Commits on the Project's branch since the claim that no Workline mutation is shown to have made.
+
+    Each one must be noted by the Mutation Controller (:func:`note_commit`) with exactly its parent, and change only
+    paths that mutation's commit names; the claim's commit must still be in HEAD's history, on the same branch. A
+    clean ``git status`` proves none of this: an executor that committed leaves the folder clean. Commits a Human
+    accepted for this run (:func:`accept_project_writes`) are not asked again.
+    """
+    claim = record.get("claim") or {}
+    since = claim.get("head")
+    if not since:
+        return []
+    found = []
+    branch = gitcmd.current_branch_ref(store.root)
+    if claim.get("branch") and branch != claim["branch"]:
+        found.append(f"branch:{branch} (the claim was made on {claim['branch']})")
+    head = gitcmd.head_commit(store.root)
+    if head is None or _git(store.root, "merge-base", "--is-ancestor", since, head).returncode != 0:
+        return found + [f"history:{since[:12]} (the claim's commit) is no longer in HEAD's history"]
+    accepted = set((record.get("accepted_writes") or {}).get("commits", []))
+    for commit in _git(store.root, "rev-list", "--reverse", f"{since}..{head}").stdout.split():
+        if commit in accepted:
+            continue
+        noted = _journal(store, commit)
+        parents = gitcmd.commit_parents(store.root, commit)
+        if noted is None:
+            found.append(f"commit:{commit} (no Workline mutation is noted as its maker)")
+        elif parents != [noted.get("parent")]:
+            found.append(f"commit:{commit} (its parents {parents} are not mutation {noted.get('mutation_id')}'s "
+                         f"{noted.get('parent')})")
+        else:
+            changed = _z(_git(store.root, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", commit).stdout)
+            outside = [p for p in changed if not _within(p, noted.get("paths") or [])]
+            if outside:
+                found.append(f"commit:{commit} (changes {', '.join(outside[:5])}, which mutation "
+                             f"{noted.get('mutation_id')} did not commit)")
+    return found
 
 
 def _project_written(store: ProjectStore, record: dict[str, Any]) -> list[str]:
-    """What a lock-free executor may never have changed in the Project: uncommitted canonical ``.workline/`` files
-    (runtime aside) and entries staged in the Project's index since the claim. Read under the finish's lock, before
-    anything is written; whatever it finds stops the finish (a reconcile, not a guess)."""
-    status = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".workline",
-                  ":(exclude).workline/runtime").stdout
-    canonical = sorted({entry[3:] for entry in status.split("\0") if len(entry) > 3})
-    staged = sorted(set(_staged(store)) - set(record.get("claim", {}).get("staged", [])))
-    return canonical + [f"staged:{p}" for p in staged]
+    """What a lock-free executor may never have changed in the Project, read under the finish's lock before anything
+    is written: uncommitted canonical ``.workline/`` files (runtime aside), the index against what it held at the
+    claim, commits since the claim no Workline mutation made (:func:`_unproven_commits`), and - for a read-only
+    in-place run - the Project folder against what it held at the claim. Whatever it finds stops the finish (a
+    reconcile, not a guess)."""
+    status = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--",
+                  ".workline", ":(exclude).workline/runtime").stdout
+    canonical = sorted({entry[3:] for entry in _z(status) if len(entry) > 3})
+    claim = record.get("claim", {})
+    if "index" in claim:
+        now = _index_state(store)
+        index = sorted(p for p in set(now) | set(claim["index"]) if now.get(p) != claim["index"].get(p))
+    else:
+        index = sorted(set(_staged(store)) - set(claim.get("staged", [])))
+    found = canonical + [f"index:{p}" for p in index] + _unproven_commits(store, record)
+    ws = record.get("workspace") or {}
+    if ws.get("kind") == "in_place" and "folder" in ws:
+        now = _folder_state(store)
+        found += [f"folder:{p}" for p in sorted(set(now) | set(ws["folder"])) if now.get(p) != ws["folder"].get(p)]
+    return found
 
 
 def workspace_path(record: dict[str, Any]) -> Path:
@@ -508,6 +709,50 @@ def _file_blob(repo: Path, rel: str, path: Path) -> str | None:
     return _must(repo, "hash-object", "--path", rel, "--", str(path))
 
 
+def _identity(path: Path) -> str | None:
+    """The exact content identity of ``path`` as it is now: a file's bytes, a link's target, or every file below a
+    directory with its own identity (``.git`` aside); None when nothing is there."""
+    if path.is_symlink():
+        return "link:" + os.readlink(path)
+    if path.is_file():
+        digest = hashlib.sha256()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                digest.update(block)
+        return "file:" + digest.hexdigest()
+    if path.is_dir():
+        digest = hashlib.sha256()
+        for inner in sorted(p for p in path.rglob("*") if not p.is_dir() or p.is_symlink()):
+            rel = inner.relative_to(path).as_posix()
+            if rel.split("/")[0] != ".git":
+                digest.update(f"{rel}\0{_identity(inner)}\n".encode("utf-8"))
+        return "tree:" + digest.hexdigest()
+    return "other" if os.path.lexists(path) else None
+
+
+def _returned_identity(root: Path, paths: list[str]) -> dict[str, str | None]:
+    return {p: _identity(root / p) for p in paths}
+
+
+def _unproven_result(record: dict[str, Any], root: Path) -> list[str]:
+    """How what ``root`` holds now differs from what the executor returned (its recorded content identity): a result
+    changed, replaced or missing, or a deletion undone. Presence alone never proves a result."""
+    outcome = record.get("outcome") or {}
+    recorded = outcome.get("identity")
+    if not isinstance(recorded, dict):
+        return ["no content identity was recorded when the executor returned"]
+    problems = []
+    for p in outcome.get("result_paths", []):
+        now = _identity(root / p)
+        if now is None:
+            problems.append(f"{p} is missing")
+        elif recorded.get(p) != now:
+            problems.append(f"{p} is not what the executor returned ({str(recorded.get(p))[:20]} -> {now[:20]})")
+    problems += [f"{p} was to be deleted but exists" for p in outcome.get("deleted_paths", [])
+                 if os.path.lexists(root / p)]
+    return problems
+
+
 def _check_result_paths(paths: list[str]) -> None:
     for p in paths:
         parts = Path(p).parts
@@ -522,7 +767,7 @@ def _commit_in_workspace(record: dict[str, Any], paths: list[str], deleted: list
         _must(ws, "add", "--", *paths)
     for p in deleted:
         _must(ws, "rm", "--quiet", "--cached", "--ignore-unmatch", "--", p)
-    staged = _git(ws, "diff", "--cached", "--name-only").stdout.split()
+    staged = _z(_git(ws, "diff", "--cached", "--name-only", "-z").stdout)
     if not staged:
         return _must(ws, "rev-parse", "HEAD")
     _must(ws, "commit", "--quiet", "-m", message)
@@ -558,35 +803,10 @@ def _copy_results(store: ProjectStore, record: dict[str, Any], paths: list[str],
             target.unlink()
 
 
-def _set_aside(store: ProjectStore, record: dict[str, Any], paths: list[str], deleted: list[str]) -> Path:
-    stash = _runs_dir(store) / record["run_id"] / "results"
-    head = gitcmd.head_commit(store.root)
-    for p in paths:
-        target = stash / p
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes((store.root / p).read_bytes())
-    for p in paths + deleted:
-        before = gitcmd.run_git_bytes(store.root, "show", f"{head}:{p}")
-        if before.returncode == 0:
-            (store.root / p).write_bytes(before.stdout)
-        elif (store.root / p).exists():
-            (store.root / p).unlink()
-    return stash
-
-
-def _put_back(store: ProjectStore, stash: Path, paths: list[str], deleted: list[str]) -> None:
-    for p in paths:
-        (store.root / p).parent.mkdir(parents=True, exist_ok=True)
-        (store.root / p).write_bytes((stash / p).read_bytes())
-    for p in deleted:
-        if (store.root / p).exists():
-            (store.root / p).unlink()
-
-
 # --------------------------------------------------------------------------- release
 
 def _ignored_and_dirty(ws: Path) -> tuple[list[str], list[str]]:
-    out = _git(ws, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "-z").stdout
+    out = _git(ws, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "--no-renames", "-z").stdout
     dirty, ignored = [], []
     for entry in (e for e in out.split("\0") if e):
         code, path = entry[:2], entry[3:]
@@ -601,6 +821,11 @@ def release(store: ProjectStore, work_id: str) -> dict[str, Any]:
     as ``cleanup_failed`` with what blocked it and returned, not raised: it
     belongs to this run alone.
     """
+    with _invocation(store, work_id, join=True):
+        return _release(store, work_id)
+
+
+def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
     record = read_run(store, work_id)
     if record is None:
         raise StopError(f"no parallel run for {work_id}", code="run_missing")
@@ -609,7 +834,7 @@ def release(store: ProjectStore, work_id: str) -> dict[str, Any]:
     if record["state"] not in (RELEASING, CLEANUP_FAILED, PARKED):
         raise StopError(f"run {record['run_id']} is {record['state']}; only a finished run is released",
                         code="run_not_finished")
-    if not _owned_by_me(record):
+    if not _owned_by_me(store, record):
         # a release is resumed by whoever comes next; one still being made (releasing) only once its owner is gone -
         # a cleanup_failed / parked run's owner has ended its turn
         state = owner_state(record) if record["state"] == RELEASING else DEAD
@@ -617,7 +842,7 @@ def release(store: ProjectStore, work_id: str) -> dict[str, Any]:
             raise StopError(f"run {record['run_id']} of {work_id} is being released by its owner "
                             f"(pid {record.get('pid')}, {state}); nothing was done",
                             code="work_run_active" if state == ALIVE else "run_owner_unknown")
-        _become_owner(record)
+        _become_owner(store, record)
         _save(store, record, take=True)
     ws = record.get("workspace") or {}
     if ws.get("kind") != "worktree":
@@ -721,6 +946,14 @@ def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None 
     if mode != "single-work" or any(selector is not None for selector in selectors):
         raise ValidationError("a parallel START runs one named Work (mode single-work) without a Review selector",
                               code="parallel_start_shape")
+    # one invocation per Work in this process: another thread's START of the Work, or one made from inside its own
+    # executor, is refused before anything is read or written (the run record is owned by this invocation)
+    with _invocation(store, work_id):
+        return _run(store, work_id, executor, spec, lock_wait)
+
+
+def _run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None, lock_wait: float):
+    from . import start as st
 
     spec = spec or WorkspaceSpec()
     details = {"work_id": work_id, "mode": "single-work", "parallel": True}
@@ -756,7 +989,7 @@ def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None 
             # the finish stopped: what the run recorded (its result, the integration stages) stays; the next
             # parallel START of the Work continues the finish from there
             latest = read_run(store, work_id) or record
-            if latest.get("run_id") == record.get("run_id") and _owned_by_me(latest):
+            if latest.get("run_id") == record.get("run_id") and _owned_by_me(store, latest):
                 latest["finish_error"] = f"{type(exc).__name__}: {exc}"[:1000]
                 if latest.get("next_actor") != "human":
                     latest["next_actor"] = "start"
@@ -802,7 +1035,7 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
         record = None  # a finished run: a new START of the Work (if it is still startable) is a new run
     if record is not None:
         state = record["state"]
-        if state in _LIVE and not _owned_by_me(record):
+        if state in _LIVE and not _owned_by_me(store, record):
             owner = owner_state(record)
             if owner == ALIVE:
                 raise StopError(f"Work {work_id} is already running in parallel run {record['run_id']} "
@@ -821,8 +1054,8 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
                                 "parallel.acknowledge_interrupted", code="run_interrupted")
         if state == RETURNED:
             # the executor returned (its owner gone, or this process stopped after it): finished from the record
-            if not _owned_by_me(record):
-                _become_owner(record)
+            if not _owned_by_me(store, record):
+                _become_owner(store, record)
                 _save(store, record, take=True)
             _recover_returned(store, record)  # EXECUTED, or a STOP when the result cannot be proven
             state = record["state"]
@@ -840,8 +1073,8 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
             raise StopError(f"run {record['run_id']} of {work_id} is parked on a conflict "
                             f"({', '.join(record.get('conflicts', []))}); integrate it first", code="run_conflict_parked")
     if record is not None:
-        if not _owned_by_me(record):
-            _become_owner(record)
+        if not _owned_by_me(store, record):
+            _become_owner(store, record)
             _save(store, record, take=True)
         recorded = (record.get("workspace") or {}).get("integrate")
         if recorded and spec.integrate is not None and spec.integrate.gitlink == recorded["gitlink"] \
@@ -868,25 +1101,29 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
                             "nothing was begun", code="run_gitlink_missing")
         record = {"workline": RUN_MARKER, "version": RUN_VERSION, "run_id": f"run_{new_ulid()}",
                   "work_id": work_id, "created_at": _now()}
-        _become_owner(record)
+        _become_owner(store, record)
         if resume_parked is not None:
             record["resumed_from"] = {"run_id": resume_parked["run_id"], "ref": resume_parked["refs"]["parked"]}
         previous = read_run(store, work_id)
         if previous is not None:
             record["previous_runs"] = previous.get("previous_runs", []) + [
                 {k: previous.get(k) for k in ("run_id", "state", "result_commit", "refs", "integration")}]
+        before = _claim_trace(store, work_id)
         _set(store, record, CLAIMING, take=True)  # before the claim: a claim interrupted after its commit is still found
         try:
             with _token(store, work_id, record["run_id"]):
                 claimed = st._start_locked(store, work_id, "single-work", lambda ctx: st.Detach())
-        except BaseException:
-            _forget(store, record, previous)
+        except BaseException as exc:
+            # forgotten only when the claim provably wrote nothing: its commit may have been made (and its push
+            # refused), and a Work left in progress always keeps the run record that holds it
+            _keep_or_forget(store, record, previous, before, f"{type(exc).__name__}: {exc}")
             raise
         if claimed.status != "running":
-            _forget(store, record, previous)
+            _keep_or_forget(store, record, previous, before, f"the claim ended {claimed.status}: {claimed.detail}")
             return claimed
         _set(store, record, CREATING, claim={"mutation_id": claimed.mutation_id, "head": claimed.head,
-                                             "staged": _staged(store)})
+                                             "branch": gitcmd.current_branch_ref(store.root),
+                                             "staged": _staged(store), "index": _index_state(store)})
         with _token(store, work_id, record["run_id"]):
             if resume_parked is not None:
                 old = resume_parked["workspace"]
@@ -931,14 +1168,21 @@ def _execute(store: ProjectStore, record: dict[str, Any], executor):
         deleted = [p.replace("\\", "/") for p in outcome.deleted_paths]
         try:
             _check_result_paths(paths + deleted)
+            if record["workspace"]["kind"] == "in_place" and (paths or deleted):
+                # the Project folder is every Work's: a Work that writes results gets a workspace of its own
+                raise ValidationError(f"an in-place parallel Work is read-only, and returned results "
+                                      f"({', '.join((paths + deleted)[:5])}); run it in a worktree workspace",
+                                      code="parallel_in_place_read_only")
         except ValidationError as exc:
             _set(store, record, FAILED, error=f"{type(exc).__name__}: {exc}", next_actor="start")
             raise
-        # what the executor returned is recorded before anything else is done with it: an interruption from here on
-        # is resumed from the record, never by running the executor again
+        # what the executor returned is recorded before anything else is done with it - with the exact content
+        # identity of each result: an interruption from here on is resumed from the record, never by running the
+        # executor again, and only while the workspace still holds exactly that
         _set(store, record, RETURNED, result_commit=None,
              outcome={"kind": "completed", "result_paths": paths, "deleted_paths": deleted, "message": outcome.message,
-                      "commit_message": (outcome.message or f"work({work.display}): result").strip()})
+                      "commit_message": (outcome.message or f"work({work.display}): result").strip(),
+                      "identity": _returned_identity(workspace_path(record), paths)})
         _commit_returned(store, record)
     return outcome
 
@@ -960,7 +1204,8 @@ def _commit_returned(store: ProjectStore, record: dict[str, Any]) -> None:
 
 def _recover_returned(store: ProjectStore, record: dict[str, Any]) -> None:
     """A run whose owner died after its executor returned: resumed from the record when the workspace still holds
-    exactly what was returned, else OUTCOME_UNKNOWN (STOP) - the executor is never run again for it."""
+    exactly what was returned - each result's content identity as recorded, each deletion still absent - else
+    OUTCOME_UNKNOWN (STOP). The executor is never run again for it."""
     outcome = record.get("outcome") or {}
     ws = record.get("workspace") or {}
     root = Path(ws.get("path", "")) if ws.get("kind") == "worktree" else store.root
@@ -970,8 +1215,7 @@ def _recover_returned(store: ProjectStore, record: dict[str, Any]) -> None:
     elif not root.is_dir():
         problems.append(f"the workspace {root} is gone")
     else:
-        problems += [f"{p} is missing" for p in outcome.get("result_paths", []) if not (root / p).exists()]
-        problems += [f"{p} was to be deleted but exists" for p in outcome.get("deleted_paths", []) if (root / p).exists()]
+        problems += _unproven_result(record, root)
     if problems:
         _set(store, record, OUTCOME_UNKNOWN, next_actor="human", unknown=problems)
         raise StopError(f"run {record['run_id']} of {record['work_id']}: its executor returned, but the result cannot be "
@@ -1021,7 +1265,7 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
 
     work_id = record["work_id"]
     with _token(store, work_id, record["run_id"]):
-        if not _owned_by_me(read_run(store, work_id) or {}):
+        if not _owned_by_me(store, read_run(store, work_id) or {"work_id": work_id}):
             raise StopError(f"run {record['run_id']} of {work_id} is no longer owned by this process; its finish is "
                             "not made here", code="run_owner_changed")
         touched = _project_written(store, record)
@@ -1029,9 +1273,9 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
             # the executor ran without the lock: it may write its own workspace, never the Project's canonical files
             # or its index. Nothing is finished; the Project needs a reconcile, not a guess
             _set(store, record, record["state"], next_actor="human", project_written=touched)
-            raise StopError("the Project's canonical files or Git index changed outside any Workline operation while "
-                            f"this run worked ({', '.join(touched[:8])}); nothing is finished: reconcile required",
-                            code="run_project_written")
+            raise StopError("the Project's canonical files, Git index, history or folder changed in ways no Workline "
+                            f"operation is shown to have made while this run worked ({', '.join(touched[:8])}); "
+                            "nothing is finished: reconcile required", code="run_project_written")
         ws = record["workspace"]
         drift = _base_drift(store, record)  # what the Project changed since the base, before this finish commits
         result_paths = list(record.get("outcome", {}).get("result_paths") or [])
@@ -1066,23 +1310,15 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                     return st.Detach()
                 _move_checkout(store, record)
                 return completed
-        elif isinstance(outcome, st.Completed) and ws["kind"] == "in_place":
-            # in place: the executor wrote straight into the Project folder. Its results are set aside and the paths
-            # put back to HEAD under this lock, so the ordinary completion sees them written by its own cycle
-            paths = list(record["outcome"]["result_paths"])
-            deleted = list(record["outcome"]["deleted_paths"])
-            stash = _set_aside(store, record, paths, deleted)
-            completed = outcome
-
-            def finishing(ctx):
-                calls["n"] += 1
-                if calls["n"] > 1:
-                    return st.Detach()
-                _put_back(store, stash, paths, deleted)
-                return completed
         elif isinstance(outcome, st.Completed) and ws["kind"] == "worktree" and ws.get("project_repo"):
             paths = list(record["outcome"]["result_paths"])
             deleted = list(record["outcome"]["deleted_paths"])
+            changed = _unproven_result(record, workspace_path(record))
+            if changed:
+                # what is copied into the Project is exactly what the executor returned, or nothing
+                _set(store, record, OUTCOME_UNKNOWN, next_actor="human", unknown=changed)
+                raise StopError(f"run {record['run_id']} of {work_id}: the workspace no longer holds what the executor "
+                                f"returned ({'; '.join(changed)}); nothing was integrated", code="run_outcome_unknown")
             conflicts = _conflicts(store, record, paths, deleted)
             if conflicts:
                 parked = PARKED_REF_PREFIX + record["run_id"]
@@ -1169,6 +1405,80 @@ def _with_drift_trailer(store: ProjectStore, work_id: str, message: str | None, 
             f"Workline-Integration: mechanical; not verified together with the drift ({assessment['eligibility']})\n")
 
 
+def _work_events(store: ProjectStore, work_id: str) -> int:
+    """How many events the Project folder's event log holds for ``work_id`` (committed or not)."""
+    count = 0
+    for log in sorted((store.root / ".workline" / "events").glob("*.jsonl")):
+        for line in log.read_text(encoding="utf-8").splitlines():
+            try:
+                count += json.loads(line).get("entity") == work_id
+            except (ValueError, AttributeError):
+                count += 1  # a line that cannot be read is counted as a change, never as nothing
+    return count
+
+
+def _pending_mutations(store: ProjectStore) -> list[str]:
+    from .mutation import MutationController
+
+    try:
+        return sorted(str(r.get("mutation_id")) for r in MutationController(store).list_pending())
+    except (StopError, OSError) as exc:
+        return [f"unreadable ({exc})"]  # never read as "nothing pending"
+
+
+def _claim_trace(store: ProjectStore, work_id: str) -> dict[str, Any]:
+    """What a claim can leave behind, read before it and after it fails: HEAD, the pending mutations (a START left to
+    resume, e.g. its push refused), the Work's lifecycle events."""
+    return {"head": gitcmd.head_commit(store.root), "events": _work_events(store, work_id),
+            "mutations": _pending_mutations(store)}
+
+
+def _keep_or_forget(store: ProjectStore, record: dict[str, Any], previous: dict[str, Any] | None,
+                    before: dict[str, Any], why: str) -> None:
+    """A claim that did not leave the Work running: its CLAIMING record is forgotten only when HEAD, the pending
+    mutations and the Work's lifecycle are exactly as before it. Anything else - a commit made and its push refused, a
+    START mutation left pending, a lifecycle event recorded - keeps the record (CLAIMING), so the Work is never in
+    progress without the run that holds it, and the next parallel START of the Work claims it again (the START
+    mutation resumes; nothing is recorded twice)."""
+    after = _claim_trace(store, record["work_id"])
+    left = []
+    if after["head"] != before["head"]:
+        left.append(f"HEAD moved from {str(before['head'])[:12]} to {str(after['head'])[:12]}")
+    if set(after["mutations"]) - set(before["mutations"]):
+        left.append(f"pending mutation(s) {', '.join(sorted(set(after['mutations']) - set(before['mutations'])))}")
+    if after["events"] != before["events"]:
+        left.append(f"{after['events'] - before['events']} lifecycle event(s) of {record['work_id']}")
+    if not left:
+        _forget(store, record, previous)
+        return
+    record["claim_error"] = {"error": why[:1000], "left": left, "at": _now()}
+    record["next_actor"] = "start"
+    _save(store, record)
+
+
+def accept_project_writes(store: ProjectStore, work_id: str, commits: list[str], note: str) -> dict[str, Any]:
+    """A Human (or the CP) accepts, by exact ID, commits a parallel finish stopped on as made by no Workline mutation
+    (``run_project_written``), after checking them: the run's next finish does not ask about those commits again.
+    Only commits the finish currently finds unproven can be accepted; nothing else of the check is relaxed."""
+    if not isinstance(note, str) or not note.strip():
+        raise ValidationError("accepting writes needs a note saying who checked them and how", code="run_accept_note")
+    with _short_lock(store, {"work_id": work_id, "parallel": True, "accept_writes": True}, 30.0):
+        record = read_run(store, work_id)
+        if record is None or record.get("state") not in _HOLDING:
+            raise StopError(f"no parallel run holds {work_id}", code="run_missing")
+        unproven = {item.split(" ", 1)[0][len("commit:"):] for item in _unproven_commits(store, record)
+                    if item.startswith("commit:")}
+        asked = list(dict.fromkeys(commits))
+        if not asked or any(c not in unproven for c in asked):
+            raise StopError(f"only commits the finish finds unproven can be accepted: {sorted(unproven) or 'none'}",
+                            code="run_accept_unknown_commit")
+        accepted = record.setdefault("accepted_writes", {"commits": [], "notes": []})
+        accepted["commits"] = sorted(set(accepted["commits"]) | set(asked))
+        accepted["notes"].append({"commits": asked, "note": note, "at": _now()})
+        _set(store, record, record["state"], take=True)
+        return record
+
+
 def _forget(store: ProjectStore, record: dict[str, Any], previous: dict[str, Any] | None) -> None:
     """Undo the CLAIMING record of a claim that wrote nothing (refused or not running): the previous record returns."""
     if previous is not None:
@@ -1192,8 +1502,9 @@ def _base_drift(store: ProjectStore, record: dict[str, Any]) -> list[str]:
     base = ws["base_commit"] if ws.get("project_repo") or ws["kind"] == "in_place" else record.get("claim", {}).get("head")
     if not base:
         return []
-    out = _git(store.root, "diff", "--name-only", base, "HEAD", "--", ".", ":(exclude).workline").stdout
-    return sorted(set(out.split()) - set(record.get("outcome", {}).get("result_paths", [])))
+    out = _git(store.root, "diff", "--name-only", "-z", "--no-renames", base, "HEAD", "--", ".",
+               ":(exclude).workline").stdout
+    return sorted(set(_z(out)) - set(record.get("outcome", {}).get("result_paths", [])))
 
 
 def _remote_tip(repo: Path, remote: str, ref: str) -> str | None:
@@ -1236,10 +1547,9 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
     def ancestor(a: str, b: str) -> bool:
         return _git(repo, "merge-base", "--is-ancestor", a, b).returncode == 0
 
-    entry = _git(store.root, "ls-tree", "HEAD", "--", gitlink).stdout.split()
-    if len(entry) < 4 or entry[0] != "160000" or entry[1] != "commit" or entry[3] != gitlink:
+    pointer = _project_pointer(store, gitlink)
+    if pointer is None:
         return refuse(f"{gitlink} is not a gitlink (a mode 160000 entry) at the Project's HEAD")
-    pointer = entry[2]
     checkout = store.root / gitlink
     if not ancestor(pointer, result):
         return refuse(f"the result {result[:12]} does not descend from the Project's pointer {pointer[:12]}")
@@ -1365,9 +1675,9 @@ def reopen(store: ProjectStore, work_id: str) -> dict[str, Any]:
         return record
 
 
-__all__ = ["IntegrateSpec", "LOCK_RETRY_SECONDS", "WorkspaceSpec", "acknowledge_interrupted", "declare_owner_gone",
-           "detach_allowed", "list_runs", "owner_state", "pid_alive", "pid_state", "read_run", "release", "reopen",
-           "require_run_free", "run", "run_path", "status_projection", "use_deps"]
+__all__ = ["IntegrateSpec", "LOCK_RETRY_SECONDS", "WorkspaceSpec", "accept_project_writes", "acknowledge_interrupted",
+           "declare_owner_gone", "detach_allowed", "list_runs", "note_commit", "owner_state", "pid_alive", "pid_state",
+           "read_run", "release", "reopen", "require_run_free", "run", "run_path", "status_projection", "use_deps"]
 
 
 def status_projection(store: ProjectStore) -> list[dict[str, Any]]:

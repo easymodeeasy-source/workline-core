@@ -294,22 +294,22 @@ class ParallelStartTests(WorklineTestCase):
         self.assertEqual(git(self.store.root, "show", f"{record['wip_commit']}:a.txt").replace("\r\n", "\n"), "wip\n")
         self.assertFalse(Path(record["workspace"]["path"]).exists())
 
-    # in place (a reading / recording Work) ------------------------------------
+    # in place (a reading Work: read-only since the r3 review, P-04) -------------
     def test_in_place_work_runs_beside_a_worktree_work(self) -> None:
         a, b = self.standalone("A", "B")
         child_a = self.spawn("A", a, writes={"a.txt": "A\n"}, block=True)
         self.wait_signal("entered-A-1.json")
+        seen = []
 
-        def record_only(ctx):
+        def read_only(ctx):
             self.assertEqual(Path(ctx.workspace), self.store.root)
-            (self.store.root / "notes.md").write_text("measured\n", encoding="utf-8")
-            return st.Completed(("notes.md",))
+            seen.append(sorted(p.name for p in (self.store.root / ".workline" / "works").glob("*.md")))
+            return st.Completed()
 
-        done = st.start(self.store, b, "single-work", record_only, parallel=True,
+        done = st.start(self.store, b, "single-work", read_only, parallel=True,
                         workspace=par.WorkspaceSpec(kind="in_place"))
         self.assertEqual(done.status, "completed")
-        self.assertIn("notes.md", git(self.store.root, "show", "--name-only", "--format=", "HEAD~1") +
-                      git(self.store.root, "show", "--name-only", "--format=", "HEAD"))
+        self.assertEqual(len(seen[0]), 2)
         self.assertEqual(par.read_run(self.store, b)["state"], par.RELEASED)
         self.release("A")
         self.assertEqual(self.result(child_a)["status"], "completed")

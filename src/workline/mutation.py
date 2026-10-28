@@ -605,7 +605,10 @@ class Mutation:
             if _is_work_commit(record):
                 # The object-driven primitive decides its own resume from this record alone (F3 §7.1.3):
                 # never "nothing left to commit", never the branch tip.
-                outcomes.append((int(record["seq"]), _replay_work_commit(self, effects, position, record)))
+                replayed = _replay_work_commit(self, effects, position, record)
+                if replayed == UNAPPLIED:
+                    _note_commit(self, record, record.get(_MADE_COMMIT), record["payload"].get("base_head"))
+                outcomes.append((int(record["seq"]), replayed))
                 continue
             classification = _classify_recorded(self.controller, effects, position, self.record)
             if classification == MISMATCH:
@@ -1627,7 +1630,23 @@ def _make_commit(mutation: Mutation, record: dict[str, Any]) -> bool:
         record.pop(_MADE_COMMIT, None)
     else:
         record[_MADE_COMMIT] = made
+        _note_commit(mutation, record, made, before)
     return record.get(_MADE_COMMIT, _NO_MADE_COMMIT) != noted
+
+
+def _note_commit(mutation: Mutation, record: dict[str, Any], made: object, parent: object) -> None:
+    """Tell a parallel run which mutation made ``made`` (:func:`workline.parallel.note_commit`: written only while a
+    parallel run holds a Work). The commit is made either way: a note that cannot be written leaves the commit
+    unproven to a parallel finish, which then stops for a Human instead of guessing."""
+    if not isinstance(made, str) or not _COMMIT_ID.fullmatch(made):
+        return
+    from .parallel import note_commit
+
+    try:
+        note_commit(mutation.store, made, mutation.id, list(record["payload"].get("paths") or []),
+                    parent if isinstance(parent, str) else None)
+    except (OSError, StopError, ValueError):
+        pass
 
 
 def _commit_just_made(repo: Path, before: str | None) -> str | None:

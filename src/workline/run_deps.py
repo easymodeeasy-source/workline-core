@@ -13,21 +13,32 @@ only when its recursive manifest equals the manifest the caller expects, is
 never rewritten, and is not removed while any run uses it. Nothing here
 fetches or builds: making a tree is the caller's (e.g. the Solver's own fetch
 script in a scratch folder), adopting it is this module's.
+
+Adopt, acquire, release and remove of one key each run under that key's own OS
+lock (``<store>/<key>.lock``), so a use being registered and a removal never
+interleave: a removal either finishes before the use is checked (the use then
+finds no entry) or sees the use and refuses.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import stat
-from typing import Any
+import time
+from typing import Any, Iterator
 
 from .errors import StopError
+from .ids import new_ulid
+from .oplock import release_exclusive_lock, try_exclusive_lock
 
 ENTRY = "ENTRY.json"
+#: how long one adopt / acquire / release / remove waits for another one of the same key (each try non-blocking)
+LOCK_SECONDS = 120.0
 
 
 def key_of(identity: dict[str, Any]) -> str:
@@ -46,6 +57,26 @@ def _entry(store_dir: Path, identity: dict[str, Any]) -> Path:
     return Path(store_dir) / key_of(identity)
 
 
+@contextmanager
+def _locked(store_dir: Path, key: str) -> Iterator[None]:
+    """The key's own OS lock (beside the entry, never inside it, so a removal does not take it away)."""
+    store_dir = Path(store_dir)
+    store_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(store_dir / f"{key}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    try:
+        deadline = time.monotonic() + LOCK_SECONDS
+        while not try_exclusive_lock(fd):
+            if time.monotonic() >= deadline:
+                raise StopError(f"deps entry {key[:12]} stayed locked for {LOCK_SECONDS:.0f} s", code="deps_busy")
+            time.sleep(0.05)
+        try:
+            yield
+        finally:
+            release_exclusive_lock(fd)
+    finally:
+        os.close(fd)
+
+
 def _read_only(tree: Path) -> None:
     for p in tree.rglob("*"):
         if p.is_file():
@@ -59,6 +90,12 @@ def adopt(store_dir: Path, identity: dict[str, Any], source: Path, expected_mani
     STOPs when the source's manifest is not ``expected_manifest``, or when an
     entry for the key already holds a different tree.
     """
+    with _locked(store_dir, key_of(identity)):
+        return _adopt(store_dir, identity, source, expected_manifest, exclude)
+
+
+def _adopt(store_dir: Path, identity: dict[str, Any], source: Path, expected_manifest: str,
+           exclude: tuple[str, ...]) -> Path:
     entry = _entry(store_dir, identity)
     tree = entry / "tree"
     if (entry / ENTRY).is_file():
@@ -88,24 +125,29 @@ def adopt(store_dir: Path, identity: dict[str, Any], source: Path, expected_mani
 
 
 def acquire(store_dir: Path, identity: dict[str, Any], run_id: str, exclude: tuple[str, ...] = ()) -> Path:
-    """The read-only tree of ``identity`` for ``run_id``, its use recorded; STOPs when there is none or it changed."""
-    entry = _entry(store_dir, identity)
-    if not (entry / ENTRY).is_file():
-        raise StopError(f"no deps entry for identity {key_of(identity)[:12]}; make and adopt it first",
-                        code="deps_missing")
-    held = json.loads((entry / ENTRY).read_text(encoding="utf-8"))
-    exclude = tuple(held.get("exclude", exclude))
-    if manifest(entry / "tree", exclude)[0] != held["manifest"]:
-        raise StopError(f"deps entry {entry.name} no longer holds its manifest", code="deps_entry_mismatch")
-    (entry / "users").mkdir(exist_ok=True)
-    (entry / "users" / run_id).write_text(str(os.getpid()), encoding="utf-8")
-    return entry / "tree"
+    """The read-only tree of ``identity`` for ``run_id``, its use recorded; STOPs when there is none or it changed.
+
+    The check and the use's record are one step under the key's lock: a removal cannot come between them.
+    """
+    with _locked(store_dir, key_of(identity)):
+        entry = _entry(store_dir, identity)
+        if not (entry / ENTRY).is_file():
+            raise StopError(f"no deps entry for identity {key_of(identity)[:12]}; make and adopt it first",
+                            code="deps_missing")
+        held = json.loads((entry / ENTRY).read_text(encoding="utf-8"))
+        exclude = tuple(held.get("exclude", exclude))
+        if manifest(entry / "tree", exclude)[0] != held["manifest"]:
+            raise StopError(f"deps entry {entry.name} no longer holds its manifest", code="deps_entry_mismatch")
+        (entry / "users").mkdir(exist_ok=True)
+        (entry / "users" / run_id).write_text(str(os.getpid()), encoding="utf-8")
+        return entry / "tree"
 
 
 def release_user(store_dir: Path, key: str, run_id: str) -> None:
-    marker = Path(store_dir) / key / "users" / run_id
-    if marker.exists():
-        marker.unlink()
+    with _locked(store_dir, key):
+        marker = Path(store_dir) / key / "users" / run_id
+        if marker.exists():
+            marker.unlink()
 
 
 def users(store_dir: Path, key: str) -> list[str]:
@@ -114,11 +156,21 @@ def users(store_dir: Path, key: str) -> list[str]:
 
 
 def remove(store_dir: Path, key: str) -> None:
-    """Delete an entry; refused while any run uses it."""
-    held = users(store_dir, key)
-    if held:
-        raise StopError(f"deps entry {key[:12]} is used by {', '.join(held)}; not removed", code="deps_in_use")
-    shutil.rmtree(Path(store_dir) / key, onerror=_writable_retry)
+    """Delete an entry; refused while any run uses it.
+
+    Under the key's lock the entry is first moved aside (one rename), so no adopt or acquire ever sees it half
+    deleted; a deletion that cannot finish leaves only the moved-aside folder.
+    """
+    with _locked(store_dir, key):
+        held = users(store_dir, key)
+        if held:
+            raise StopError(f"deps entry {key[:12]} is used by {', '.join(held)}; not removed", code="deps_in_use")
+        entry = Path(store_dir) / key
+        if not entry.exists():
+            return
+        gone = entry.with_name(f"{key}.removing-{new_ulid()}")
+        os.replace(entry, gone)
+        shutil.rmtree(gone, onerror=_writable_retry)
 
 
 def _writable_retry(function, path, _exc_info):
