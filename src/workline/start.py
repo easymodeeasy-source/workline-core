@@ -3770,13 +3770,9 @@ def start(
     if parallel:
         # Parallel START (:mod:`workline.parallel`): the named Work alone, legacy Work semantics; its executor runs
         # outside the Project execution lock in the Work's own workspace. ``workspace`` is a parallel.WorkspaceSpec.
-        if mode != "single-work" or review is not None or phase_review is not None:
-            raise with_check(ValidationError(
-                "a parallel START runs one named Work (mode single-work) without a Review selector",
-                code="parallel_start_shape"), "start.parallel")
         from . import parallel as par
 
-        return par.run(store, work_id, executor, workspace)
+        return par.run(store, work_id, executor, workspace, mode=mode, selectors=(review, phase_review))
     details: dict[str, Any] = {"work_id": work_id, "mode": mode}
     if phase_review is not None:
         # RB5 (§32.14): the Phase Integration Review selector is checked before the lock and writes nothing; it

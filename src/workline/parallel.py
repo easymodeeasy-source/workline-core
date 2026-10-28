@@ -451,9 +451,14 @@ def release(store: ProjectStore, work_id: str) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- the parallel START
 
-def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None = None, *, lock_wait: float = 120.0):
+def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None = None, *, mode: str = "single-work",
+        selectors: tuple = (None, None), lock_wait: float = 120.0):
     """One parallel START of ``work_id`` (see the module docstring); returns a ``start.StartResult``."""
     from . import start as st
+
+    if mode != "single-work" or any(selector is not None for selector in selectors):
+        raise ValidationError("a parallel START runs one named Work (mode single-work) without a Review selector",
+                              code="parallel_start_shape")
 
     spec = spec or WorkspaceSpec()
     details = {"work_id": work_id, "mode": "single-work", "parallel": True}
