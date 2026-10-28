@@ -160,6 +160,7 @@ _OWN_CONTENT = "own_content"
 _BYTES = "sha256:"
 _LINK = "link:"
 _ABSENT = "absent"
+_GITLINK = "gitlink:"
 #: What :func:`declare_own_content` records for a path it could not read, so that no later state matches it.
 _UNREADABLE = "unreadable"
 
@@ -217,6 +218,10 @@ def _content_digest(path: Path) -> str | None:
             return _LINK + hashlib.sha256(os.readlink(path).encode("utf-8", "surrogatepass")).hexdigest()
         if not path.exists():
             return _ABSENT
+        if path.is_dir() and (path / ".git").exists():
+            # a gitlink (a submodule / nested repository checkout): what Git would carry is the commit it has out
+            head = gitcmd.head_commit(path)
+            return None if head is None else _GITLINK + head
         return _BYTES + hashlib.sha256(path.read_bytes()).hexdigest()
     except (OSError, ValueError):
         return None

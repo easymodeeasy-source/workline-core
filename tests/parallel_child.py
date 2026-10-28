@@ -54,6 +54,14 @@ def main() -> None:
             os._exit(17)  # the executor's process dies: no cleanup of any kind runs
         return st.Completed(tuple(spec.get("writes", {})), spec.get("message"))
 
+    if spec.get("crash_after_copy"):
+        copy = par._copy_results
+
+        def copy_then_die(*args):
+            copy(*args)
+            os._exit(19)  # dies inside the finish: results copied into the Project, nothing committed
+
+        par._copy_results = copy_then_die
     workspace = par.WorkspaceSpec(root=Path(spec["workspace_root"]), regenerable=tuple(spec.get("regenerable", ())))
     try:
         result = st.start(store, spec["work_id"], "single-work", executor, parallel=True, workspace=workspace)

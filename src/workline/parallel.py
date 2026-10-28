@@ -59,6 +59,7 @@ PARKED_REF_PREFIX = "refs/workline/parked/"
 BRANCH_PREFIX = "workline/run/"
 
 # run states ---------------------------------------------------------------
+CLAIMING = "claiming"          # recorded before the claim is made: a claim interrupted at any point is found
 CREATING = "creating"          # claim committed, workspace being made
 RUNNING = "running"            # executor running (owner pid)
 QUESTION_WAIT = "question_wait"
@@ -71,7 +72,9 @@ CLEANUP_FAILED = "cleanup_failed"
 RELEASED = "released"
 
 #: states in which the run owns its Work: no other START of that Work may run it
-_HOLDING = {CREATING, RUNNING, QUESTION_WAIT, EXECUTED, FAILED, CONFLICT}
+_HOLDING = {CLAIMING, CREATING, RUNNING, QUESTION_WAIT, EXECUTED, FAILED, CONFLICT}
+#: states a live owner process is working in: a second START of the Work is refused while it lives
+_LIVE = {CLAIMING, CREATING, RUNNING, EXECUTED}
 #: states a later parallel START of the same Work picks up again
 _RESUMABLE = {CREATING, RUNNING, QUESTION_WAIT, FAILED}
 
@@ -228,6 +231,34 @@ class WorkspaceSpec:
     repo: Path | None = None
     root: Path | None = None
     regenerable: tuple[str, ...] = ()
+    #: the Work branch's name prefix (the YGO Solver fork's commit guard accepts only ``feature/...``)
+    branch_prefix: str = BRANCH_PREFIX
+    #: another repository's result is integrated by the finish (see :class:`IntegrateSpec`); None parks it
+    integrate: "IntegrateSpec | None" = None
+    #: the read-only deps store (:mod:`workline.run_deps`) runs of this kind take their trees from
+    deps_store: Path | None = None
+
+
+@dataclass(frozen=True)
+class IntegrateSpec:
+    """How the finish integrates a result commit of another repository (a Solver fork) the Project holds as a gitlink.
+
+    In order, each step recorded before the next, and none begun before every check passed:
+    1. the result must descend from the Project's gitlink (at HEAD) and from ``target_branch`` of the repository;
+    2. the repository's ``target_branch`` is fast-forwarded to it (never forced) - and, with ``push_remote``, the
+       Work branch and then ``target_branch`` are pushed there, fast-forward only, before the Project commits a
+       pointer to the commit (so the Project never publishes a pointer its remote cannot resolve);
+    3. the gitlink checkout is moved to it (only when clean and detached or on ``target_branch``), and the Work's
+       completion commits the gitlink ``gitlink`` in the Project.
+    A failure after step 2 leaves the repository ahead of the Project's pointer, which the record names and the next
+    parallel START of the Work continues from.
+    """
+
+    gitlink: str
+    target_branch: str = "main"
+    push_remote: str | None = None
+    #: the environment the push runs with (e.g. the fork guard's FORK_INTEGRATE_VERIFIED=<sha>), ``{sha}`` filled in
+    push_env: tuple[tuple[str, str], ...] = ()
 
 
 def _git(repo: Path, *args: str) -> gitcmd.GitResult:
@@ -241,7 +272,8 @@ def _must(repo: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec) -> None:
+def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec,
+                      start_at: str | None = None, base: str | None = None) -> None:
     if spec.kind == "in_place":
         record["workspace"] = {"kind": "in_place", "path": str(store.root), "repo": str(store.root),
                                "base_commit": gitcmd.head_commit(store.root)}
@@ -251,14 +283,18 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
     repo = Path(spec.repo or store.root).resolve()
     base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
     path = (base_root / record["run_id"]).resolve()
-    branch = f"{BRANCH_PREFIX}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
-    base = _must(repo, "rev-parse", "HEAD")
+    branch = f"{spec.branch_prefix}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
+    base = base or _must(repo, "rev-parse", "HEAD")
     record["workspace"] = {"kind": "worktree", "repo": str(repo), "path": str(path), "branch": branch,
                            "base_commit": base, "project_repo": os.path.normcase(str(repo)) == os.path.normcase(str(store.root.resolve())),
-                           "regenerable": list(spec.regenerable)}
+                           "regenerable": list(spec.regenerable),
+                           "integrate": None if spec.integrate is None else {
+                               "gitlink": spec.integrate.gitlink, "target_branch": spec.integrate.target_branch,
+                               "push_remote": spec.integrate.push_remote, "push_env": [list(e) for e in spec.integrate.push_env]},
+                           "deps_store": None if spec.deps_store is None else str(spec.deps_store)}
     _save(store, record)  # where it will be, before it exists: an interrupted creation is found and cleaned
     base_root.mkdir(parents=True, exist_ok=True)
-    _must(repo, "worktree", "add", "-b", branch, str(path), base)
+    _must(repo, "worktree", "add", "-b", branch, str(path), start_at or base)
 
 
 def workspace_path(record: dict[str, Any]) -> Path:
@@ -272,11 +308,10 @@ def _blob(repo: Path, commit: str, path: str) -> str | None:
     return result.stdout.strip() if result.ok else None
 
 
-def _file_blob(path: Path) -> str | None:
+def _file_blob(repo: Path, rel: str, path: Path) -> str | None:
     if not path.is_file():
         return None
-    data = path.read_bytes()
-    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+    return _must(repo, "hash-object", "--path", rel, "--", str(path))
 
 
 def _check_result_paths(paths: list[str]) -> None:
@@ -296,7 +331,7 @@ def _commit_in_workspace(record: dict[str, Any], paths: list[str], deleted: list
     staged = _git(ws, "diff", "--cached", "--name-only").stdout.split()
     if not staged:
         return _must(ws, "rev-parse", "HEAD")
-    _must(ws, "commit", "--quiet", "--no-verify", "-m", message)
+    _must(ws, "commit", "--quiet", "-m", message)
     return _must(ws, "rev-parse", "HEAD")
 
 
@@ -309,10 +344,10 @@ def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], de
     for p in sorted(set(paths) | set(deleted)):
         before = _blob(store.root, base, p)
         now = _blob(store.root, head, p)
-        mine = None if p in deleted else _file_blob(workspace_path(record) / p)
+        mine = None if p in deleted else _file_blob(store.root, p, workspace_path(record) / p)
         if now != before and mine != now:
             found.append(p)
-        elif gitcmd.changed_against_head(store.root, [p]):
+        elif gitcmd.changed_against_head(store.root, [p]) and _file_blob(store.root, p, store.root / p) != mine:
             found.append(p)  # someone's uncommitted change in the Project folder
     return found
 
@@ -395,6 +430,15 @@ def release(store: ProjectStore, work_id: str) -> dict[str, Any]:
     try:
         blocked = []
         removed: list[str] = []
+        integrated_now = record.get("integration", {}).get("state") == "integrated"
+        if path.exists() and not integrated_now:
+            # what a held / cancelled / stopped run leaves uncommitted is its work in progress: kept as a commit
+            # on the Work branch (and so on the parked ref below), never discarded with the worktree
+            _git(path, "add", "-A")
+            if _git(path, "diff", "--cached", "--quiet").returncode != 0:
+                _must(path, "commit", "--quiet", "-m", f"workline: work in progress of {record['work_id']} "
+                                                        f"(run {record['run_id']}, parked)")
+                record["wip_commit"] = _must(path, "rev-parse", "HEAD")
         if path.exists():
             dirty, ignored = _ignored_and_dirty(path)
             if dirty:
@@ -438,10 +482,12 @@ def release(store: ProjectStore, work_id: str) -> dict[str, Any]:
                      cleanup={"state": "directory_left", "blocked": [f"{path} still exists (in use?)"]}, next_actor="human")
                 return record
         _git(repo, "worktree", "prune")
+        _drop_deps_users(record)
         if tip and (integrated or tip == ws["base_commit"]):
             _must(repo, "branch", "-D", ws["branch"])  # its commit stays on the saved ref
         final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
-        _set(store, record, final, cleanup={"state": "released", "removed": removed},
+        _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
+                                            "removed_top": sorted({r.split("/")[0] for r in removed})},
              next_actor=None if final == RELEASED else "integration")
         return record
     except (StopError, OSError) as exc:
@@ -471,10 +517,16 @@ def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None 
         if record is not None and record["state"] in (RELEASING, CLEANUP_FAILED):
             release(store, work_id)
             record = read_run(store, work_id)
+        resume_parked = None
+        if record is not None and record["state"] == PARKED and record.get("integration", {}).get("state") == "held" \
+                and record.get("refs", {}).get("parked"):
+            resume_parked = record  # a held run's kept work is where the resumed Work continues
         if record is not None and record["state"] in (RELEASED, PARKED):
             record = None  # a finished run: a new START of the Work (if it is still startable) is a new run
+        if record is not None and record["state"] == CLAIMING and not _owner_alive(record):
+            record = None  # its claim was interrupted: the claim below is made again (the START mutation resumes)
         if record is not None:
-            if record["state"] in (RUNNING, CREATING) and _owner_alive(record):
+            if record["state"] in _LIVE and _owner_alive(record):
                 raise StopError(f"Work {work_id} is already running in parallel run {record['run_id']} "
                                 f"(pid {record.get('pid')}); nothing was begun", code="work_run_active")
             if record["state"] == CONFLICT:
@@ -486,12 +538,29 @@ def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None 
         else:
             record = {"workline": RUN_MARKER, "version": RUN_VERSION, "run_id": f"run_{new_ulid()}",
                       "work_id": work_id, "created_at": _now(), "host": socket.gethostname(), "pid": os.getpid()}
-            with _token(store, work_id, record["run_id"]):
-                claimed = st._start_locked(store, work_id, "single-work", lambda ctx: st.Detach())
+            if resume_parked is not None:
+                record["resumed_from"] = {"run_id": resume_parked["run_id"], "ref": resume_parked["refs"]["parked"]}
+            previous = read_run(store, work_id)
+            if previous is not None:
+                record["previous_runs"] = previous.get("previous_runs", []) + [
+                    {k: previous.get(k) for k in ("run_id", "state", "result_commit", "refs", "integration")}]
+            _set(store, record, CLAIMING)  # before the claim: a claim interrupted after its commit is still found
+            try:
+                with _token(store, work_id, record["run_id"]):
+                    claimed = st._start_locked(store, work_id, "single-work", lambda ctx: st.Detach())
+            except BaseException:
+                _forget(store, record, previous)
+                raise
             if claimed.status != "running":
+                _forget(store, record, previous)
                 return claimed
             _set(store, record, CREATING, claim={"mutation_id": claimed.mutation_id, "head": claimed.head})
-            _create_workspace(store, record, spec)
+            if resume_parked is not None:
+                old = resume_parked["workspace"]
+                kept = _must(Path(old["repo"]), "rev-parse", resume_parked["refs"]["parked"])
+                _create_workspace(store, record, spec, start_at=kept, base=old["base_commit"])
+            else:
+                _create_workspace(store, record, spec)
         if record["state"] == EXECUTED:
             _set(store, record, EXECUTED, pid=os.getpid(), host=socket.gethostname())
         else:
@@ -513,8 +582,17 @@ def run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None 
 
         # 3. finish (locked) ---------------------------------------------------
         t2 = time.perf_counter()
-        with _short_lock(store, details, lock_wait):
-            result = _finish(store, record, outcome)
+        try:
+            with _short_lock(store, details, lock_wait):
+                result = _finish(store, record, outcome)
+        except BaseException as exc:
+            # the finish stopped: what the run recorded (its result, the integration stages) stays; the next
+            # parallel START of the Work continues the finish from there
+            latest = read_run(store, work_id) or record
+            latest["finish_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+            latest["next_actor"] = "start"
+            _save(store, latest)
+            raise
         timings["finish_s"] = time.perf_counter() - t2
         if result.status != "running":
             break
@@ -558,6 +636,7 @@ def _execute(store: ProjectStore, record: dict[str, Any], executor):
         raise
     finally:
         os.chdir(here)
+    record["deps"] = (read_run(store, record["work_id"]) or {}).get("deps", record.get("deps", []))
     if isinstance(outcome, st.Completed):
         paths = [p.replace("\\", "/") for p in outcome.result_paths]
         deleted = [p.replace("\\", "/") for p in outcome.deleted_paths]
@@ -578,15 +657,29 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
     with _token(store, work_id, record["run_id"]):
         ws = record["workspace"]
         if isinstance(outcome, st.Completed) and ws["kind"] == "worktree" and not ws.get("project_repo"):
-            # another repository (a Solver worktree, approach S): its result is the commit on the Work branch. The
-            # Work completes in the Project with that commit named; the commit itself waits, on its saved and parked
-            # refs, for the integration into that repository's own branch - Workline does not merge it.
-            note = (f"run {record['run_id']}: result commit {record['result_commit']} on {ws['branch']} "
-                    f"in {Path(ws['repo']).name} (integration pending)")
-            message = ((outcome.message or "").strip() + "\n\n" + note).strip()
-            outcome = st.Completed((), message)
-            record["integration_pending"] = {"repo": ws["repo"], "branch": ws["branch"], "commit": record["result_commit"]}
-        if isinstance(outcome, st.Completed) and ws["kind"] == "in_place":
+            # another repository (a Solver worktree, approach S): its result is the commit on the Work branch
+            if not ws.get("integrate"):
+                # no integration declared: the Work completes and the commit waits on its saved and parked refs
+                outcome = st.Completed((), outcome.message)
+                record["integration_pending"] = {"repo": ws["repo"], "branch": ws["branch"],
+                                                 "commit": record["result_commit"]}
+            else:
+                refused = _integrate_repository(store, record)
+                if refused is not None:
+                    return refused
+                pointer = st.Completed((ws["integrate"]["gitlink"],), outcome.message)
+                calls = {"n": 0}
+
+                def finishing(ctx):
+                    calls["n"] += 1
+                    if calls["n"] > 1:
+                        return st.Detach()
+                    _move_checkout(store, record)
+                    return pointer
+        if isinstance(outcome, st.Completed) and ws["kind"] == "worktree" and ws.get("integrate") \
+                and not ws.get("project_repo"):
+            pass  # finishing is set above
+        elif isinstance(outcome, st.Completed) and ws["kind"] == "in_place":
             # in place: the executor wrote straight into the Project folder. Its results are set aside and the paths
             # put back to HEAD under this lock, so the ordinary completion sees them written by its own cycle
             paths = list(record["outcome"]["result_paths"])
@@ -627,6 +720,7 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                 calls["n"] += 1
                 return outcome if calls["n"] == 1 else st.Detach()
 
+        drift = _base_drift(store, record)  # what the Project changed since the base, before this finish commits
         _set(store, record, record["state"], finishing_at=_now())
         result = st._start_locked(store, work_id, "single-work", finishing)
         if result.status == "running":
@@ -637,16 +731,163 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                                                         "work_commit": gitcmd.head_commit(store.root)},
                  next_actor="integration")
         elif result.status == "completed":
-            _set(store, record, RELEASING, integration={"state": "integrated",
+            _set(store, record, RELEASING, integration={**record.get("integration", {}), "state": "integrated",
                                                         "target": gitcmd.current_branch_ref(store.root),
                                                         "commit": gitcmd.head_commit(store.root),
-                                                        "finish_mutation_id": result.mutation_id},
+                                                        "finish_mutation_id": result.mutation_id,
+                                                        "base_drift": drift},
                  next_actor="workline")
         else:
             # held, cancelled, moved, stopped: the Work's own outcome ends this run; what the workspace holds is
             # kept on a parked ref by the release when it is not integrated
-            _set(store, record, RELEASING, integration={"state": result.status}, next_actor="workline")
+            _set(store, record, RELEASING, integration={**record.get("integration", {}), "state": result.status},
+                 next_actor="workline")
         return result
 
 
-__all__ = ["WorkspaceSpec", "list_runs", "pid_alive", "read_run", "release", "require_run_free", "run", "run_path"]
+def _forget(store: ProjectStore, record: dict[str, Any], previous: dict[str, Any] | None) -> None:
+    """Undo the CLAIMING record of a claim that wrote nothing (refused or not running): the previous record returns."""
+    if previous is not None:
+        _save(store, previous)
+    else:
+        run_path(store, record["work_id"]).unlink(missing_ok=True)
+
+
+def _base_drift(store: ProjectStore, record: dict[str, Any]) -> list[str]:
+    """Paths the Project changed between the run's base and its integration (``.workline`` aside).
+
+    The finish refuses only a path both changed; a change elsewhere - a header, a
+    configuration, a caller - can still interact with the Work's result in ways a
+    path comparison cannot see. These paths are what the integrated combination
+    was never run against, recorded so a Review or a re-run can look at them.
+    """
+    ws = record["workspace"]
+    base = ws["base_commit"] if ws.get("project_repo") or ws["kind"] == "in_place" else record.get("claim", {}).get("head")
+    if not base:
+        return []
+    out = _git(store.root, "diff", "--name-only", base, "HEAD", "--", ".", ":(exclude).workline").stdout
+    return sorted(set(out.split()) - set(record.get("outcome", {}).get("result_paths", [])))
+
+
+def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
+    """Steps 1-3 of :class:`IntegrateSpec` up to the Project commit; a StartResult when refused, else None."""
+    from . import start as st
+
+    ws = record["workspace"]
+    spec = ws["integrate"]
+    repo, result, target = Path(ws["repo"]), record["result_commit"], spec["target_branch"]
+    gitlink = spec["gitlink"]
+    done = record.setdefault("integration", {}).setdefault("stages", {})
+
+    def refuse(why: str):
+        parked = PARKED_REF_PREFIX + record["run_id"]
+        _must(repo, "update-ref", parked, result)
+        _set(store, record, CONFLICT, conflicts=[why], refs={**record.get("refs", {}), "parked": parked},
+             next_actor="human", integration={**record["integration"], "state": "conflict"})
+        return st.StartResult("conflict", record["work_id"], record["claim"]["mutation_id"],
+                              detail=f"{why}; the result is kept on {parked}", code="run_conflict")
+
+    def ancestor(a: str, b: str) -> bool:
+        return _git(repo, "merge-base", "--is-ancestor", a, b).returncode == 0
+
+    pointer = _blob(store.root, "HEAD", gitlink)
+    checkout = store.root / gitlink
+    if pointer is None:
+        return refuse(f"{gitlink} is not a gitlink at the Project's HEAD")
+    if not ancestor(pointer, result):
+        return refuse(f"the result {result[:12]} does not descend from the Project's pointer {pointer[:12]}")
+    old = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{target}").stdout.strip()
+    if not old and spec.get("push_remote"):
+        # no local branch yet (a fresh clone): the remote's branch, as last fetched, is where it stands
+        old = _git(repo, "rev-parse", "--verify", "--quiet",
+                   f"refs/remotes/{spec['push_remote']}/{target}").stdout.strip()
+    if not old:
+        return refuse(f"{target} is not known in {repo.name} (neither a local nor a remote-tracking branch)")
+    if not done.get("repository") and not ancestor(old, result):
+        return refuse(f"{target} ({old[:12]}) has moved where the result does not follow")
+    on = _git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip()
+    if on and on != f"refs/heads/{target}":
+        return refuse(f"the checkout {gitlink} is on {on}, not detached or on {target}; it is not moved under it")
+    if _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        return refuse(f"the checkout {gitlink} has uncommitted changes")
+    if gitcmd.changed_against_head(store.root, [p for p in _git(store.root, "ls-files", "--", ".gitmodules").stdout.split()]):
+        return refuse(".gitmodules has uncommitted changes")
+    if not done.get("repository"):
+        # 2. the repository's own branch, fast-forward only; then the remote, before the Project names the commit.
+        # A branch the gitlink checkout has out moves with that checkout, inside the completion (step 3).
+        if on != f"refs/heads/{target}":
+            _must(repo, "update-ref", f"refs/heads/{target}", result,
+                  *(([old]) if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{target}").ok else ["0" * 40]))
+        done["repository"] = {"branch": target, "from": old, "to": result, "at": _now(),
+                              "with_checkout": on == f"refs/heads/{target}"}
+        _set(store, record, record["state"], integration=record["integration"])
+    if spec.get("push_remote") and not done.get("pushed"):
+        env = dict(os.environ, **{k: v.format(sha=result) for k, v in spec.get("push_env", [])})
+        for ref in (ws["branch"], target):
+            pushed = gitcmd.run_git(repo, "push", spec["push_remote"], f"{result}:refs/heads/{ref}", check=False, env=env)
+            if not pushed.ok:
+                _set(store, record, EXECUTED, next_actor="human",
+                     integration={**record["integration"], "state": "repository_ahead",
+                                  "push_error": pushed.stderr.strip()[-400:]})
+                raise StopError(f"push of {ref} to {spec['push_remote']} failed; {target} is integrated locally and the "
+                                f"Project's pointer is not moved: {pushed.stderr.strip()[-200:]}", code="run_push_failed")
+        done["pushed"] = {"remote": spec["push_remote"], "refs": [ws["branch"], target], "at": _now()}
+        _set(store, record, record["state"], integration=record["integration"])
+    _set(store, record, record["state"], integration={**record["integration"], "state": "repository_integrated"})
+    return None
+
+
+def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
+    """Step 3 of :class:`IntegrateSpec`, run as the completion's own write: the gitlink checkout takes the result."""
+    ws = record["workspace"]
+    checkout, result = store.root / ws["integrate"]["gitlink"], record["result_commit"]
+    if _must(checkout, "rev-parse", "HEAD") != result:
+        if _git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip():
+            _must(checkout, "merge", "--ff-only", "--quiet", result)
+        else:
+            _must(checkout, "checkout", "--quiet", "--detach", result)
+    record["integration"]["stages"]["checkout"] = {"path": ws["integrate"]["gitlink"], "head": result, "at": _now()}
+    _save(store, record)
+
+
+def use_deps(ctx, identity: dict[str, Any], exclude: tuple[str, ...] = ()) -> Path:
+    """For an executor: the read-only deps tree of ``identity`` from its run's deps store, recorded on the run."""
+    from . import run_deps
+
+    record = read_run(ctx.store, ctx.work.id)
+    store_dir = (record.get("workspace") or {}).get("deps_store")
+    if not store_dir:
+        raise StopError("this run's WorkspaceSpec names no deps_store", code="deps_store_missing")
+    tree = run_deps.acquire(Path(store_dir), identity, record["run_id"], exclude)
+    record.setdefault("deps", []).append({"store": store_dir, "key": run_deps.key_of(identity), "identity": identity})
+    _save(ctx.store, record)
+    return tree
+
+
+def _drop_deps_users(record: dict[str, Any]) -> None:
+    from . import run_deps
+
+    for used in record.get("deps", []):
+        run_deps.release_user(Path(used["store"]), used["key"], record["run_id"])
+
+
+def reopen(store: ProjectStore, work_id: str) -> dict[str, Any]:
+    """A conflict-parked run is reopened, explicitly: its workspace is kept and its base becomes the Project's HEAD, so
+    the next parallel START runs the executor there again to reconcile, and the finish checks against that base."""
+    with _short_lock(store, {"work_id": work_id, "parallel": True, "reopen": True}, 30.0):
+        record = read_run(store, work_id)
+        if record is None or record["state"] != CONFLICT:
+            raise StopError(f"no conflict-parked run of {work_id} to reopen", code="run_not_conflicted")
+        ws = record["workspace"]
+        record.setdefault("reopened", []).append({"old_base": ws["base_commit"], "conflicts": record.get("conflicts")})
+        if ws.get("project_repo"):
+            ws["base_commit"] = gitcmd.head_commit(store.root)
+        record.pop("integration", None)
+        _set(store, record, QUESTION_WAIT, question=f"reconcile {', '.join(record.get('conflicts') or [])} with the "
+                                                    "Project's current state in this workspace", next_actor="start",
+             outcome={})
+        return record
+
+
+__all__ = ["IntegrateSpec", "WorkspaceSpec", "list_runs", "pid_alive", "read_run", "release", "reopen",
+           "require_run_free", "run", "run_path", "use_deps"]
