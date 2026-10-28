@@ -956,8 +956,34 @@ def _run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None
     from . import start as st
 
     spec = spec or WorkspaceSpec()
-    details = {"work_id": work_id, "mode": "single-work", "parallel": True}
     timings: dict[str, float] = {}
+    try:
+        return _run_timed(store, work_id, executor, spec, lock_wait, timings)
+    finally:
+        _keep_timings(store, work_id, timings)
+
+
+def _keep_timings(store: ProjectStore, work_id: str, timings: dict[str, float]) -> None:
+    """F-06: this invocation's timings (lock waits and stage times, kept apart) on its run, whatever the way out."""
+    if not timings:
+        return
+    try:
+        latest = read_run(store, work_id)
+        if latest is None or not _owned_by_me(store, latest):
+            return
+        kept = {k: round(v, 3) for k, v in timings.items()}
+        latest["timings"] = kept
+        latest.setdefault("timings_history", []).append({"at": _now(), "state": latest.get("state"), **kept})
+        _save(store, latest)
+    except StopError:
+        pass  # a record another owner holds now, or none: nothing of it is overwritten
+
+
+def _run_timed(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec, lock_wait: float,
+               timings: dict[str, float]):
+    from . import start as st
+
+    details = {"work_id": work_id, "mode": "single-work", "parallel": True}
 
     # 1. claim ------------------------------------------------------------
     t0 = time.perf_counter()
@@ -1011,9 +1037,6 @@ def _run(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec | None
                                         result.detail, f"cleanup {released['state']}: {released.get('cleanup')}") if x),
                                     result.head, code="run_cleanup_incomplete")
     timings["release_s"] = time.perf_counter() - t3
-    final = read_run(store, work_id)
-    final["timings"] = timings
-    _save(store, final)
     return result
 
 
@@ -1568,6 +1591,8 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
     if _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         return refuse(f"the checkout {gitlink} has uncommitted changes")
     at = _git(checkout, "rev-parse", "HEAD").stdout.strip()
+    # F-02: the identity the decision below rests on; the move re-checks exactly this, under nothing else
+    record["integration"]["checkout_seen"] = {"symbolic": on or None, "head": at, "at": _now()}
     if at not in (pointer, result):
         # a checkout holding a commit the Project does not name is someone's state: nothing is written under it
         return refuse(f"the checkout {gitlink} has {at[:12]} out, which the Project does not name ({pointer[:12]}); "
@@ -1624,15 +1649,48 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
 
 
 def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
-    """The completion's own write: the gitlink checkout takes the result (after the remote was reached)."""
+    """The completion's own write: the gitlink checkout takes the result (after the remote was reached).
+
+    F-02: the checkout is re-read here and must still be exactly what the integration check saw (``checkout_seen``:
+    the branch HEAD names - only the target branch or none - and the commit). No branch is ever moved through "the
+    branch that happens to be checked out now": the target branch is updated by its full name with compare-and-swap
+    on the commit seen, a detached HEAD by compare-and-swap without dereferencing, and the working tree follows by a
+    two-tree ``read-tree -m -u`` (which refuses local changes it would overwrite). Any difference STOPs with nothing
+    moved; the run stays ``executed`` and the next parallel START checks again from the start.
+    """
     ws = record["workspace"]
-    checkout, result = store.root / ws["integrate"]["gitlink"], record["result_commit"]
-    if _must(checkout, "rev-parse", "HEAD") != result:
-        if _git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip():
-            _must(checkout, "merge", "--ff-only", "--quiet", result)
-        else:
-            _must(checkout, "checkout", "--quiet", "--detach", result)
-    record["integration"]["stages"]["checkout"] = {"path": ws["integrate"]["gitlink"], "head": result, "at": _now()}
+    spec = ws["integrate"]
+    checkout, result, target = store.root / spec["gitlink"], record["result_commit"], spec["target_branch"]
+    seen = record["integration"].get("checkout_seen") or {}
+    now_symbolic = _git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip() or None
+    now_head = _must(checkout, "rev-parse", "HEAD")
+    if now_head == result and now_symbolic == seen.get("symbolic"):
+        record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now()}
+        _save(store, record)
+        return
+    if (now_symbolic, now_head) != (seen.get("symbolic"), seen.get("head")) \
+            or now_symbolic not in (None, f"refs/heads/{target}"):
+        record["integration"]["checkout_changed"] = {"seen": seen, "now": {"symbolic": now_symbolic, "head": now_head},
+                                                     "at": _now()}
+        _save(store, record)
+        raise StopError(f"the checkout {spec['gitlink']} changed after the integration check (it was "
+                        f"{seen.get('symbolic') or 'detached'} at {str(seen.get('head'))[:12]}, it is "
+                        f"{now_symbolic or 'detached'} at {now_head[:12]}); nothing is moved under it",
+                        code="run_checkout_changed")
+    if _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        raise StopError(f"the checkout {spec['gitlink']} has uncommitted changes; nothing is moved under it",
+                        code="run_checkout_changed")
+    if now_symbolic is not None:
+        _must(checkout, "update-ref", f"refs/heads/{target}", result, now_head)
+    else:
+        _must(checkout, "update-ref", "--no-deref", "HEAD", result, now_head)
+    _must(checkout, "read-tree", "-m", "-u", now_head, result)
+    after = (_git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip() or None, _must(checkout, "rev-parse", "HEAD"))
+    if after != (now_symbolic, result):
+        raise StopError(f"the checkout {spec['gitlink']} is {after[0] or 'detached'} at {after[1][:12]} after the move, "
+                        f"not {now_symbolic or 'detached'} at {result[:12]}", code="run_checkout_changed")
+    record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now(),
+                                                   "branch": now_symbolic}
     _save(store, record)
 
 
