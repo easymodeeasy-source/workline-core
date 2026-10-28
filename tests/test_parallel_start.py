@@ -250,12 +250,22 @@ class ParallelStartTests(WorklineTestCase):
         (ws / "build").mkdir()
         (ws / "build" / "out.bin").write_bytes(b"\0" * 10)
 
+        ran = []
+
         def finish(ctx):
+            ran.append(ctx.attempt)
             (ctx.workspace / "a.txt").write_text("whole\n", encoding="utf-8")
             return st.Completed(("a.txt", ".gitignore"))
 
+        # R5: the owner died inside its executor - not run again until someone accepts that
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, a, "single-work", finish, parallel=True, workspace=par.WorkspaceSpec(root=self.ws_root))
+        self.assertEqual(raised.exception.code, "run_interrupted")
+        self.assertEqual((ran, par.read_run(self.store, a)["state"]), ([], par.INTERRUPTED))
+        par.acknowledge_interrupted(self.store, a, "test: the executor only writes its own worktree")
         done = st.start(self.store, a, "single-work", finish, parallel=True,
                         workspace=par.WorkspaceSpec(root=self.ws_root))
+        self.assertEqual(ran, [2])  # run again knowingly, as its second attempt
         self.assertEqual((done.status, done.code), ("completed", "run_cleanup_incomplete"))
         record = par.read_run(self.store, a)
         self.assertEqual(record["state"], par.CLEANUP_FAILED)

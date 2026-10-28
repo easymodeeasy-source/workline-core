@@ -62,9 +62,26 @@ def main() -> None:
             os._exit(19)  # dies inside the finish: results copied into the Project, nothing committed
 
         par._copy_results = copy_then_die
+    if spec.get("crash_after_claim"):
+        set_state = par._set
+
+        def die_before_creating(store_, record, state, **fields):
+            if state == par.CREATING:
+                os._exit(23)  # the claim committed the Work's start; the run record still says claiming
+            return set_state(store_, record, state, **fields)
+
+        par._set = die_before_creating
+    if spec.get("crash_after_return"):
+        def die_after_return(*args):
+            os._exit(29)  # the executor returned and its result is recorded; nothing of it is committed yet
+
+        par._commit_returned = die_after_return
     workspace = par.WorkspaceSpec(root=Path(spec["workspace_root"]), regenerable=tuple(spec.get("regenerable", ())))
     try:
-        result = st.start(store, spec["work_id"], "single-work", executor, parallel=True, workspace=workspace)
+        if "lock_wait" in spec:
+            result = par.run(store, spec["work_id"], executor, workspace, lock_wait=float(spec["lock_wait"]))
+        else:
+            result = st.start(store, spec["work_id"], "single-work", executor, parallel=True, workspace=workspace)
         out = {"status": result.status, "work_id": result.work_id, "detail": result.detail, "code": result.code}
     except StopError as exc:
         out = {"status": "stop", "code": exc.code, "detail": str(exc)}

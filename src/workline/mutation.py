@@ -66,7 +66,7 @@ import os
 from pathlib import Path
 import re
 import stat
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 from . import gitcmd, oplock, pushurl, yamlish
 from .context import pre_project_authorized, same_directory
@@ -218,13 +218,44 @@ def _content_digest(path: Path) -> str | None:
             return _LINK + hashlib.sha256(os.readlink(path).encode("utf-8", "surrogatepass")).hexdigest()
         if not path.exists():
             return _ABSENT
-        if path.is_dir() and (path / ".git").exists():
-            # a gitlink (a submodule / nested repository checkout): what Git would carry is the commit it has out
-            head = gitcmd.head_commit(path)
-            return None if head is None else _GITLINK + head
+        if path.is_dir():
+            return _gitlink_digest(path)
         return _BYTES + hashlib.sha256(path.read_bytes()).hexdigest()
     except (OSError, ValueError):
         return None
+
+
+#: Parallel START only (``workline.parallel``): the gitlink a parallel finish integrates, while that finish runs -
+#: normalised checkout path -> (Project root, path in the Project, the commit it is to carry). Nothing else is
+#: ever read as a gitlink: every other directory stays unreadable, as before (an ordinary START keeps refusing it).
+_ALLOWED_GITLINKS: dict[str, tuple[Path, str, str]] = {}
+
+
+@contextmanager
+def allow_gitlink(root: Path, rel: str, commit: str) -> Iterator[None]:
+    """Let the completion of a parallel finish read the one gitlink ``rel`` it integrates, as ``commit``."""
+    key = os.path.normcase(str((Path(root) / rel).resolve()))
+    _ALLOWED_GITLINKS[key] = (Path(root), rel, commit)
+    try:
+        yield
+    finally:
+        _ALLOWED_GITLINKS.pop(key, None)
+
+
+def _gitlink_digest(path: Path) -> str | None:
+    """``gitlink:<commit>`` for the allowed gitlink only: Git's own index holds ``rel`` as a mode-160000 entry and its
+    checkout has exactly the declared commit out. A nested repository Git does not hold as a gitlink, or any other
+    directory, stays unreadable (``None``)."""
+    allowed = _ALLOWED_GITLINKS.get(os.path.normcase(str(path.resolve())))
+    if allowed is None:
+        return None
+    root, rel, commit = allowed
+    staged = gitcmd.run_git(root, "ls-files", "--stage", "--", rel, check=False)
+    entry = staged.stdout.split() if staged.ok else []
+    if len(entry) != 4 or entry[0] != "160000" or entry[3] != rel:
+        return None
+    head = gitcmd.head_commit(path)
+    return _GITLINK + head if head is not None and head == commit else None
 
 
 @dataclass(frozen=True)

@@ -188,7 +188,14 @@ class HumanNG:
 @dataclass(frozen=True)
 class Detach:
     """Parallel START only (:mod:`workline.parallel`): commit what this cycle recorded and end the operation
-    with the Work running, so its executor can work outside the Project execution lock."""
+    with the Work running, so its executor can work outside the Project execution lock. Accepted only from the
+    claim / finish of the parallel run that owns the Work; returned anywhere else it is an unknown outcome."""
+
+
+def _parallel_detach_allowed(store: ProjectStore, work_id: str) -> bool:
+    from .parallel import detach_allowed
+
+    return detach_allowed(store, work_id)
 
 
 Outcome = Completed | QuestionWait | Hold | Cancel | Derive | HumanNG | Detach
@@ -674,7 +681,9 @@ class _Session:
             self._keep_protected_read_targets(view, work_id, protected)
             if isinstance(outcome, Completed):
                 return self._complete(view, work, outcome)
-            if isinstance(outcome, Detach):
+            if isinstance(outcome, Detach) and _parallel_detach_allowed(self.store, work_id):
+                # only the parallel run that owns the Work, in its own claim / finish; any other Detach is an
+                # unknown outcome below, exactly as before Detach existed
                 self._commit("commit", f"chore(workline): start {work.display}", [])
                 return StartResult("running", work_id, self.mutation.id, phase_id=work.phase_id,
                                    head=gitcmd.head_commit(self.store.root))

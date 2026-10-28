@@ -851,6 +851,17 @@ def pending_classification(
     return UNKNOWN_OR_INVALID, _reason("mutation_not_pending", f"{mutation_id} is not a pending recovery record")
 
 
+def _parallel_runs(context: _Context) -> dict[str, Any]:
+    """The parallel runs this Project's runtime records name: which Work each holds, its state, the Human question
+    it waits on. A projection of runtime state for the reader; it is not a pending mutation and blocks nothing here."""
+    from .parallel import status_projection
+
+    runs = status_projection(context.store)
+    return {"status": "available", "source": "runtime run records (not canonical)", "runs": runs,
+            "waiting_for_human": [r["work_id"] for r in runs if r["state"] == "question_wait"],
+            "needs_human": [r["work_id"] for r in runs if r["next_actor"] == "human"]}
+
+
 def _pending(context: _Context) -> dict[str, Any]:
     store = context.store
     lock = _lock_hint(store)
@@ -1597,6 +1608,9 @@ def _collect(root: Path) -> dict[str, Any]:
     body["policy"] = _isolated(lambda: _policy(context))
     # RB5 (§32.51 / §14.28): the completion slot, from the Project alone
     body["completion"] = _isolated(lambda: _completion(context))
+    # Parallel START: its runtime run records, projected (never the canonical pending; only when there are any)
+    if (context.store.root / ".workline/runtime/runs").is_dir():
+        body["parallel_runs"] = _isolated(lambda: _parallel_runs(context))
     body["_blocking_mutations"] = list(context.blocking_mutations)
     return body
 
@@ -1848,6 +1862,19 @@ def render_human(model: StatusModel) -> str:
             f"  execution lock: {lock['state']} (holder hint: {lock['holder_hint']}"
             + (f", {lock['holder_operation']}" if lock.get("holder_operation") else "") + ")"
         )
+    runs = data.get("parallel_runs")
+    if isinstance(runs, dict):
+        heading("Parallel runs (runtime records, not canonical)")
+        unavailable_runs = _section_status(runs)
+        if unavailable_runs:
+            out.append(unavailable_runs)
+        for run in runs.get("runs") or []:
+            out.append(f"  {run['work_id']}  {run['state']}  run={run['run_id']}  next={run['next_actor'] or '-'}"
+                       + (f"  owner={run['owner']['state']}" if run["owner"].get("state") else ""))
+            if run.get("question"):
+                out.append(f"    waits for a Human: {run['question']}")
+            if run["integration"].get("base_drift"):
+                out.append(f"    base drift (not verified together): {', '.join(run['integration']['base_drift'])}")
 
     review = data["review"]
     heading("Review")
