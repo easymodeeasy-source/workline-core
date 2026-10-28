@@ -155,14 +155,20 @@ class ParallelRepairTests(WorklineTestCase):
         git(self.store.root, "add", "plain")
         git(self.store.root, "commit", "-q", "-m", "plain dir")
         (a,) = self.standalone("A")
+        head = git(self.store.root, "rev-parse", "HEAD").strip()
         spec = par.WorkspaceSpec(repo=self.store.root / "solver", root=self.ws_root, branch_prefix="feature/",
                                  integrate=par.IntegrateSpec("plain", push_remote="origin"))
-        done = st.start(self.store, a, "single-work",
-                        lambda ctx: ((ctx.workspace / "engine.cpp").write_text("x\n", encoding="utf-8"),
-                                     st.Completed(("engine.cpp",)))[1], parallel=True, workspace=spec)
-        self.assertEqual((done.status, done.code), ("conflict", "run_conflict"))
-        self.assertIn("mode 160000", par.read_run(self.store, a)["conflicts"][0])
-        self.assertEqual(ProjectView.load(self.store).work_state(a).state, "in_progress")
+        ran = []
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, a, "single-work", lambda ctx: ran.append(1) or st.Completed(), parallel=True,
+                     workspace=spec)
+        self.assertEqual(raised.exception.code, "run_gitlink_missing")
+        self.assertIn("mode 160000", str(raised.exception))
+        # refused before the claim: no run, no START lifecycle, no commit, no executor
+        self.assertEqual(ran, [])
+        self.assertIsNone(par.read_run(self.store, a))
+        self.assertNotIn("work_started", self.lifecycle(a))
+        self.assertEqual(git(self.store.root, "rev-parse", "HEAD").strip(), head)
 
     # R3 -------------------------------------------------------------------
     def test_r3_pid_state_never_takes_an_unprovable_owner_for_gone(self) -> None:
@@ -505,3 +511,88 @@ class ParallelRepairTests(WorklineTestCase):
         self.assertIn("big.bin", kept)
         self.assertNotIn("cache/c.bin", kept)
         self.assertFalse(ws.exists())
+
+    # ported from candidate 3a3c132 (the final selection) ---------------------------------------------------
+    def test_port_a_checkout_away_from_the_pointer_is_neither_the_base_nor_moved(self) -> None:
+        fork_remote, solver_base = self.solver_project()
+        checkout = self.store.root / "solver"
+        (checkout / "engine.cpp").write_text("int v = 99;  // not reviewed\n", encoding="utf-8")
+        git(checkout, "commit", "-q", "-am", "an unintegrated commit left in the checkout")
+        stray = git(checkout, "rev-parse", "HEAD").strip()
+        git(checkout, "checkout", "-q", "--detach", stray)  # detached and clean, but not at the Project's pointer
+        (a,) = self.standalone("A")
+        done = st.start(self.store, a, "single-work",
+                        lambda ctx: ((ctx.workspace / "notes.txt").write_text("A\n", encoding="utf-8"),
+                                     st.Completed(("notes.txt",)))[1], parallel=True, workspace=self.solver_spec())
+        self.assertEqual((done.status, done.code), ("conflict", "run_conflict"), done.detail)
+        record = par.read_run(self.store, a)
+        self.assertEqual(record["workspace"]["base_commit"], solver_base)  # the Work started from the pointer
+        self.assertEqual(git(checkout, "rev-parse", f"{record['result_commit']}^").strip(), solver_base)
+        self.assertIn("which the Project does not name", record["conflicts"][0])
+        # nothing was written under it: the checkout, the fork (local and remote) and the pointer are as they were
+        self.assertEqual(git(checkout, "rev-parse", "HEAD").strip(), stray)
+        self.assertEqual(git(checkout, "rev-parse", "main").strip(), solver_base)
+        self.assertEqual(git(fork_remote, "rev-parse", "main").strip(), solver_base)
+        self.assertEqual(self.pointer(), solver_base)
+
+    def test_port_an_executor_writing_canonical_files_is_not_finished(self) -> None:
+        (a,) = self.standalone("A")
+        head = git(self.store.root, "rev-parse", "HEAD").strip()
+        work_file = next((self.store.root / ".workline" / "works").glob("*.md"))
+
+        def trespass(ctx):
+            with open(work_file, "a", encoding="utf-8") as f:
+                f.write("\nwritten by an executor without the lock\n")
+            (ctx.workspace / "a.txt").write_text("A\n", encoding="utf-8")
+            return st.Completed(("a.txt",))
+
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, a, "single-work", trespass, parallel=True, workspace=par.WorkspaceSpec(root=self.ws_root))
+        self.assertEqual(raised.exception.code, "run_project_written")
+        record = par.read_run(self.store, a)
+        self.assertEqual(record["next_actor"], "human")
+        self.assertIn(work_file.relative_to(self.store.root).as_posix(), record["project_written"])
+        self.assertEqual(ProjectView.load(self.store).work_state(a).state, "in_progress")
+        self.assertEqual(git(self.store.root, "rev-list", "--count", f"{head}..HEAD").strip(), "1")  # the claim only
+
+    def test_port_a_resumed_run_states_its_push_attestation_again(self) -> None:
+        self.solver_project()
+        guard = ('while read l s r o; do if [ "$r" = refs/heads/main ] && [ "$FORK_INTEGRATE_VERIFIED" != "$s" ]; '
+                 'then echo "REFUSED: main needs FORK_INTEGRATE_VERIFIED=$s"; exit 1; fi; done; exit 0')
+        self.hook(self.store.root / "solver" / ".git", "pre-push", guard)
+        (a,) = self.standalone("A")
+        ran = []
+
+        def change(ctx):
+            ran.append(1)
+            (ctx.workspace / "engine.cpp").write_text("int v = 7;\n", encoding="utf-8")
+            return st.Completed(("engine.cpp",))
+
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, a, "single-work", change, parallel=True, workspace=self.solver_spec())
+        self.assertEqual(raised.exception.code, "run_push_failed")
+        before = self.pointer()
+        attested = par.WorkspaceSpec(repo=self.store.root / "solver", root=self.ws_root, regenerable=("bin", "bin/*"),
+                                     branch_prefix="feature/", integrate=par.IntegrateSpec(
+                                         "solver", push_remote="origin", push_env=(("FORK_INTEGRATE_VERIFIED", "{sha}"),)))
+        done = st.start(self.store, a, "single-work", change, parallel=True, workspace=attested)
+        self.assertEqual(done.status, "completed", done.detail)
+        self.assertEqual(ran, [1])
+        record = par.read_run(self.store, a)
+        self.assertEqual(len(record["push_env_history"]), 1)
+        self.assertNotEqual(self.pointer(), before)
+        self.assertEqual(self.pointer(), record["result_commit"])
+
+    def test_port_a_target_branch_checked_out_elsewhere_is_not_moved(self) -> None:
+        fork_remote, solver_base = self.solver_project()
+        other = self.tmp / "solver-main-worktree"
+        git(self.store.root / "solver", "worktree", "add", "-q", str(other), "main")
+        (a,) = self.standalone("A")
+        done = st.start(self.store, a, "single-work",
+                        lambda ctx: ((ctx.workspace / "engine.cpp").write_text("x\n", encoding="utf-8"),
+                                     st.Completed(("engine.cpp",)))[1], parallel=True, workspace=self.solver_spec())
+        self.assertEqual((done.status, done.code), ("conflict", "run_conflict"))
+        self.assertIn("checked out in another worktree", par.read_run(self.store, a)["conflicts"][0])
+        self.assertEqual(git(other, "rev-parse", "HEAD").strip(), solver_base)
+        self.assertEqual(git(fork_remote, "rev-parse", "main").strip(), solver_base)
+        self.assertEqual(self.pointer(), solver_base)

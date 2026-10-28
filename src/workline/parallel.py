@@ -438,6 +438,13 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
     base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
     path = (base_root / record["run_id"]).resolve()
     branch = f"{spec.branch_prefix}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
+    if base is None and spec.integrate is not None:
+        # an integrated Work starts from what the Project names (its gitlink at HEAD), never from whatever the
+        # checkout has out: a checkout left on other commits must not carry them into the integration
+        base = _project_pointer(store, spec.integrate.gitlink)
+        if base is None:
+            raise StopError(f"{spec.integrate.gitlink} is not a gitlink (a mode 160000 entry) at the Project's HEAD",
+                            code="run_gitlink_missing")
     base = base or _must(repo, "rev-parse", "HEAD")
     record["workspace"] = {"kind": "worktree", "repo": str(repo), "path": str(path), "branch": branch,
                            "base_commit": base, "project_repo": os.path.normcase(str(repo)) == os.path.normcase(str(store.root.resolve())),
@@ -459,6 +466,29 @@ def _prepare(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec) -
     spec.prepare(Path(ws["path"]), json.loads(json.dumps(record)))
     ws["prepared"] = True
     _save(store, record)
+
+
+def _project_pointer(store: ProjectStore, gitlink: str) -> str | None:
+    """The commit the Project's HEAD names for ``gitlink`` - only for a mode-160000 entry, else None."""
+    entry = _git(store.root, "ls-tree", "HEAD", "--", gitlink).stdout.split()
+    if len(entry) < 4 or entry[0] != "160000" or entry[1] != "commit" or entry[3] != gitlink:
+        return None
+    return entry[2]
+
+
+def _staged(store: ProjectStore) -> list[str]:
+    return sorted(p for p in _git(store.root, "diff", "--cached", "--name-only", "-z").stdout.split("\0") if p)
+
+
+def _project_written(store: ProjectStore, record: dict[str, Any]) -> list[str]:
+    """What a lock-free executor may never have changed in the Project: uncommitted canonical ``.workline/`` files
+    (runtime aside) and entries staged in the Project's index since the claim. Read under the finish's lock, before
+    anything is written; whatever it finds stops the finish (a reconcile, not a guess)."""
+    status = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", ".workline",
+                  ":(exclude).workline/runtime").stdout
+    canonical = sorted({entry[3:] for entry in status.split("\0") if len(entry) > 3})
+    staged = sorted(set(_staged(store)) - set(record.get("claim", {}).get("staged", [])))
+    return canonical + [f"staged:{p}" for p in staged]
 
 
 def workspace_path(record: dict[str, Any]) -> Path:
@@ -813,6 +843,15 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
         if not _owned_by_me(record):
             _become_owner(record)
             _save(store, record, take=True)
+        recorded = (record.get("workspace") or {}).get("integrate")
+        if recorded and spec.integrate is not None and spec.integrate.gitlink == recorded["gitlink"] \
+                and spec.integrate.target_branch == recorded["target_branch"] \
+                and [list(e) for e in spec.integrate.push_env] != recorded.get("push_env"):
+            # the push environment is the caller's attestation (e.g. FORK_INTEGRATE_VERIFIED, which the repository's
+            # own guard checks): the invocation that resumes the run states it again, and the change is kept
+            record.setdefault("push_env_history", []).append({"was": recorded.get("push_env"), "at": _now()})
+            recorded["push_env"] = [list(e) for e in spec.integrate.push_env]
+            _save(store, record)
         if record["state"] == CREATING:
             with _token(store, work_id, record["run_id"]):
                 if not Path(record.get("workspace", {}).get("path", "")).exists():
@@ -823,6 +862,10 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
             # one acknowledgement, one re-run: it is used up here, and a later interruption needs a new one
             record.setdefault("resumed_after_interruption", []).append(record.pop("resume_acknowledged"))
     else:
+        if spec.integrate is not None and _project_pointer(store, spec.integrate.gitlink) is None:
+            # checked before anything is written: no claim is made for an integration the Project cannot name
+            raise StopError(f"{spec.integrate.gitlink} is not a gitlink (a mode 160000 entry) at the Project's HEAD; "
+                            "nothing was begun", code="run_gitlink_missing")
         record = {"workline": RUN_MARKER, "version": RUN_VERSION, "run_id": f"run_{new_ulid()}",
                   "work_id": work_id, "created_at": _now()}
         _become_owner(record)
@@ -842,7 +885,8 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
         if claimed.status != "running":
             _forget(store, record, previous)
             return claimed
-        _set(store, record, CREATING, claim={"mutation_id": claimed.mutation_id, "head": claimed.head})
+        _set(store, record, CREATING, claim={"mutation_id": claimed.mutation_id, "head": claimed.head,
+                                             "staged": _staged(store)})
         with _token(store, work_id, record["run_id"]):
             if resume_parked is not None:
                 old = resume_parked["workspace"]
@@ -980,6 +1024,14 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
         if not _owned_by_me(read_run(store, work_id) or {}):
             raise StopError(f"run {record['run_id']} of {work_id} is no longer owned by this process; its finish is "
                             "not made here", code="run_owner_changed")
+        touched = _project_written(store, record)
+        if touched:
+            # the executor ran without the lock: it may write its own workspace, never the Project's canonical files
+            # or its index. Nothing is finished; the Project needs a reconcile, not a guess
+            _set(store, record, record["state"], next_actor="human", project_written=touched)
+            raise StopError("the Project's canonical files or Git index changed outside any Workline operation while "
+                            f"this run worked ({', '.join(touched[:8])}); nothing is finished: reconcile required",
+                            code="run_project_written")
         ws = record["workspace"]
         drift = _base_drift(store, record)  # what the Project changed since the base, before this finish commits
         result_paths = list(record.get("outcome", {}).get("result_paths") or [])
@@ -1205,8 +1257,25 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
         return refuse(f"the checkout {gitlink} is on {on}, not detached or on {target}; it is not moved under it")
     if _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip():
         return refuse(f"the checkout {gitlink} has uncommitted changes")
+    at = _git(checkout, "rev-parse", "HEAD").stdout.strip()
+    if at not in (pointer, result):
+        # a checkout holding a commit the Project does not name is someone's state: nothing is written under it
+        return refuse(f"the checkout {gitlink} has {at[:12]} out, which the Project does not name ({pointer[:12]}); "
+                      "it is not moved under it")
     if gitcmd.changed_against_head(store.root, [p for p in _git(store.root, "ls-files", "--", ".gitmodules").stdout.split()]):
         return refuse(".gitmodules has uncommitted changes")
+    if not done.get("repository"):
+        # a branch another worktree has out is never moved under it (that worktree would be left behind its branch)
+        mine, current, holders = os.path.normcase(str(checkout.resolve())), None, []
+        for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+            if line.startswith("worktree "):
+                current = line[len("worktree "):]
+            elif line == f"branch refs/heads/{target}" and current is not None \
+                    and os.path.normcase(str(Path(current).resolve())) != mine:
+                holders.append(current)
+        if holders:
+            return refuse(f"{target} is checked out in another worktree of {repo.name} ({', '.join(holders)}); "
+                          "it is not moved under it")
     if not done.get("repository"):
         # 3. the repository's own branch, fast-forward only; then the remote, before the Project names the commit.
         # A branch the gitlink checkout has out moves with that checkout, inside the completion.
