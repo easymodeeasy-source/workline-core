@@ -139,7 +139,7 @@ class ReviewR7Tests(WorklineTestCase):
         import socket
 
         nonce = (f"workline-run x pid {alive.pid} host {socket.gethostname()} "
-                 f"started {par._process_started(alive.pid)} process otherproc id live")
+                 f"started {par._process_started(alive.pid)} process 01M6300000000000000000PROC id 01M630000000000000000LIVE0")
         lock.write_bytes(nonce.encode("utf-8"))
         record = par.read_run(self.store, a)
         record["integration"]["checkout_move"]["lock_nonce"] = nonce

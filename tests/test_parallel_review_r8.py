@@ -61,8 +61,8 @@ class ReviewR8Tests(WorklineTestCase):
         self.assertNotEqual(human(self.repo, "checkout", "-q", "other").returncode, 0)  # Git writers stay out
         self.assertEqual(human(self.repo, "symbolic-ref", "HEAD").stdout.strip(), "refs/heads/main")
 
-    def nonce(self, pid: int, *, host: str | None = None, started: str | None = None, process: str = "otherproc",
-              lock_id: str = "lockid") -> str:
+    def nonce(self, pid: int, *, host: str | None = None, started: str | None = None,
+              process: str = "01M6300000000000000000PROC", lock_id: str = "01M630000000000000000LOCK0") -> str:
         return (f"workline-run run_test pid {pid} host {host or socket.gethostname()} started {started or '-'} "
                 f"process {process} id {lock_id}")
 

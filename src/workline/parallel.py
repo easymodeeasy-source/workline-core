@@ -1780,41 +1780,48 @@ def _index_lock(gitdir: Path, record: dict[str, Any] | None = None) -> Iterator[
     lock_id = new_ulid()
     nonce = (f"workline-run {(record or {}).get('run_id')} pid {me['pid']} host {me['host']} "
              f"started {me['started'] or '-'} process {me['process']} id {lock_id}")
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
+    # R9-01: in this process, taking the lock (creating it with its nonce, or taking a dead owner's over) and
+    # registering it as held is one step, and so is unregistering and removing it: no other thread of this process
+    # can see the lock existing but not held, or held but already gone
+    with _lock_table:
         try:
-            held = lock.read_bytes().decode("utf-8", "replace")
-        except OSError:
-            held = ""
-        if not journal.get("lock_nonce") or held != journal["lock_nonce"]:
-            raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
-                            code="run_checkout_busy") from exc
-        state = _lock_owner_state(held)
-        if state != DEAD:
-            raise StopError(f"{lock} is a Workline lock whose owner is {state}; it is never taken over unless the owner "
-                            "is proven gone; nothing is moved", code="run_checkout_busy") from exc
-        fd = None  # the lock a Workline run of this record left, its owner proven gone: taken over
-        nonce = held
-        lock_id = held.split()[-1]
-    if fd is not None:
-        os.write(fd, nonce.encode("utf-8"))
-        os.close(fd)
-    with _guard:
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            try:
+                held = lock.read_bytes().decode("utf-8", "replace")
+            except OSError:
+                held = ""
+            if not journal.get("lock_nonce") or held != journal["lock_nonce"]:
+                raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
+                                code="run_checkout_busy") from exc
+            state = _lock_owner_state(held)
+            if state != DEAD:
+                raise StopError(f"{lock} is a Workline lock whose owner is {state}; it is never taken over unless the "
+                                "owner is proven gone; nothing is moved", code="run_checkout_busy") from exc
+            fd = None  # the lock a Workline run of this record left, its owner proven gone: taken over
+            nonce = held
+            lock_id = held.split()[-1]
+        if fd is not None:
+            try:
+                os.write(fd, nonce.encode("utf-8"))
+            finally:
+                os.close(fd)
         _held_locks.add(lock_id)
     try:
         yield lock
     finally:
-        with _guard:
+        with _lock_table:
             _held_locks.discard(lock_id)
-        try:
-            lock.unlink()
-        except FileNotFoundError:
-            pass  # committed: renamed over the index
+            try:
+                lock.unlink()
+            except FileNotFoundError:
+                pass  # committed: renamed over the index
 
 
-#: the ids of the checkout index.locks this process holds right now (:func:`_index_lock`)
+#: the ids of the checkout index.locks this process holds right now (:func:`_index_lock`), and the guard under which
+#: a lock is taken and registered, or unregistered and removed, as one step (R9-01)
 _held_locks: set[str] = set()
+_lock_table = threading.RLock()
 
 
 def _lock_owner_state(held: str) -> str:
@@ -1828,19 +1835,38 @@ def _lock_owner_state(held: str) -> str:
     """
     words = held.split()
     if len(words) != 12 or words[0] != "workline-run" or [words[i] for i in (2, 4, 6, 8, 10)] != \
-            ["pid", "host", "started", "process", "id"] or not words[3].isdigit():
+            ["pid", "host", "started", "process", "id"]:
         return UNKNOWN
-    pid, host, started, process, lock_id = int(words[3]), words[5], words[7], words[9], words[11]
+    pid_text, host, started, process, lock_id = words[3], words[5], words[7], words[9], words[11]
+    # R9-02: a pid is a positive decimal without a sign or leading zeros; a start time is a positive decimal (as
+    # _process_started writes it) or "-"; the ids are what new_ulid writes. Anything else is unknown, never dead.
+    if not (pid_text.isascii() and pid_text.isdigit() and pid_text[0] != "0" and len(pid_text) <= 10):
+        return UNKNOWN
+    if started != "-" and not (started.isascii() and started.isdigit() and started[0] != "0" and len(started) <= 20):
+        return UNKNOWN
+    if not all(len(v) == 26 and v.isascii() and v.isalnum() for v in (process, lock_id)):
+        return UNKNOWN
+    pid = int(pid_text)
     if host != socket.gethostname():
         return UNKNOWN
     if process == _me()["process"]:
-        with _guard:
+        with _lock_table:
             return ALIVE if lock_id in _held_locks else DEAD
     if pid == os.getpid():
         return UNKNOWN  # this pid, but not this process's id: a nonce this process never wrote
     if started == "-":
         return UNKNOWN  # without a start time a reused pid could not be told apart
-    return pid_state(pid, started)
+    state = pid_state(pid)
+    if state != ALIVE:
+        return state  # the OS answered that no such process runs (dead), or could not answer (unknown)
+    now = _process_started(pid)
+    if now is None:
+        return UNKNOWN
+    if now == started:
+        return ALIVE
+    # the pid runs, but not as the process that wrote the lock: that one is gone only if the running process came
+    # after it (the pid was reused); a recorded start later than the running process's is inconsistent - unknown
+    return DEAD if int(started) < int(now) else UNKNOWN
 
 
 def _target_holders(repo: Path, target: str, checkout: Path) -> list[str]:
