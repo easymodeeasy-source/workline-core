@@ -1763,16 +1763,23 @@ def _index_lock(gitdir: Path, record: dict[str, Any] | None = None) -> Iterator[
     while Workline holds it no such command, from a terminal or a GUI, can change the checkout's branch, HEAD or
     index. The holder commits a new index by writing it into the lock file and renaming that over ``index``.
 
-    The lock carries a nonce (run, pid, host, a unique id), recorded in the run's checkout journal (``record``) before
-    anything is written, and it keeps that nonce until it is released: the new index is never written into the lock
-    (R7-F02-01) but completed as a private index file beside it and renamed over ``index`` while the lock still
-    stands. A lock found existing is taken over only when it holds exactly the journal's nonce and the process that
-    wrote it is not alive - a lock of any other Git process, or of a Workline process still running, STOPs.
+    The lock carries a nonce (run, pid, host, process start time, the process's own id, the lock's own id), recorded
+    in the run's checkout journal (``record``) before anything is written, and it keeps that nonce until it is
+    released: the new index is never written into the lock (R7-F02-01) but completed as a private index file beside
+    it and renamed over ``index`` while the lock still stands.
+
+    A lock found existing is taken over only when its owner is proven gone (R8-F02-02, :func:`_lock_owner_state`):
+    it holds exactly the journal's nonce, in the exact form written here, written on this host; and either it is this
+    very process's and no holder in this process still has it, or the operating system answers that the writing
+    process (with its start time) no longer exists. A lock of any other Git process, of a live holder, of another
+    host, or of an owner whose state cannot be established, STOPs with nothing touched.
     """
     lock = gitdir / "index.lock"
     journal = (record or {}).get("integration", {}).get("checkout_move") or {}
-    nonce = (f"workline-run {(record or {}).get('run_id')} pid {os.getpid()} host {socket.gethostname()} "
-             f"id {new_ulid()}")
+    me = _me()
+    lock_id = new_ulid()
+    nonce = (f"workline-run {(record or {}).get('run_id')} pid {me['pid']} host {me['host']} "
+             f"started {me['started'] or '-'} process {me['process']} id {lock_id}")
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
@@ -1783,24 +1790,57 @@ def _index_lock(gitdir: Path, record: dict[str, Any] | None = None) -> Iterator[
         if not journal.get("lock_nonce") or held != journal["lock_nonce"]:
             raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
                             code="run_checkout_busy") from exc
-        words = held.split()
-        owner_pid = int(words[3]) if len(words) > 5 and words[2] == "pid" and words[3].isdigit() else None
-        owner_host = words[5] if len(words) > 5 and words[4] == "host" else None
-        if owner_host == socket.gethostname() and owner_pid not in (None, os.getpid()) and pid_alive(owner_pid):
-            raise StopError(f"{lock} is held by Workline process {owner_pid}, which is still running; nothing is moved",
-                            code="run_checkout_busy") from exc
-        fd = None  # the lock a dead Workline run of this record left: taken over
+        state = _lock_owner_state(held)
+        if state != DEAD:
+            raise StopError(f"{lock} is a Workline lock whose owner is {state}; it is never taken over unless the owner "
+                            "is proven gone; nothing is moved", code="run_checkout_busy") from exc
+        fd = None  # the lock a Workline run of this record left, its owner proven gone: taken over
         nonce = held
+        lock_id = held.split()[-1]
     if fd is not None:
         os.write(fd, nonce.encode("utf-8"))
         os.close(fd)
+    with _guard:
+        _held_locks.add(lock_id)
     try:
         yield lock
     finally:
+        with _guard:
+            _held_locks.discard(lock_id)
         try:
             lock.unlink()
         except FileNotFoundError:
             pass  # committed: renamed over the index
+
+
+#: the ids of the checkout index.locks this process holds right now (:func:`_index_lock`)
+_held_locks: set[str] = set()
+
+
+def _lock_owner_state(held: str) -> str:
+    """The owner of a Workline index.lock nonce: ``dead`` only when proven gone; ``alive`` or ``unknown`` otherwise.
+
+    The nonce must be exactly ``workline-run <run> pid <pid> host <host> started <start|-> process <id> id <lock id>``
+    (anything else is ``unknown``). Another host's owner cannot be checked from here (``unknown``). This process's own
+    lock is ``alive`` while one of its holders still has it (another invocation, another thread, an outer frame),
+    and ``dead`` once none does. Another process is as the operating system answers for that pid and start time -
+    ``unknown`` stays unknown, a pid that now names a later process is ``dead`` (:func:`pid_state`).
+    """
+    words = held.split()
+    if len(words) != 12 or words[0] != "workline-run" or [words[i] for i in (2, 4, 6, 8, 10)] != \
+            ["pid", "host", "started", "process", "id"] or not words[3].isdigit():
+        return UNKNOWN
+    pid, host, started, process, lock_id = int(words[3]), words[5], words[7], words[9], words[11]
+    if host != socket.gethostname():
+        return UNKNOWN
+    if process == _me()["process"]:
+        with _guard:
+            return ALIVE if lock_id in _held_locks else DEAD
+    if pid == os.getpid():
+        return UNKNOWN  # this pid, but not this process's id: a nonce this process never wrote
+    if started == "-":
+        return UNKNOWN  # without a start time a reused pid could not be told apart
+    return pid_state(pid, started)
 
 
 def _target_holders(repo: Path, target: str, checkout: Path) -> list[str]:
