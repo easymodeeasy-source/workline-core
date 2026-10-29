@@ -6,6 +6,7 @@ its workspace.
   before_branch       right before the Work branch is made (the first branch-making git call, not run)
   after_branch        right after the call that made the Work branch returned
   after_worktree_add  right after ``git worktree add`` returned
+  after_branch_delete right after the release's ``git branch -D`` returned (before the owned ref is removed)
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from workline.store import ProjectStore  # noqa: E402
 
 
 def _makes_branch(args) -> bool:
-    return args[:2] == ("update-ref", "--stdin") or (args[:2] == ("worktree", "add") and "-b" in args)
+    return (args[:1] == ("update-ref",) and "--stdin" in args) or (args[:2] == ("worktree", "add") and "-b" in args)
 
 
 def main() -> None:
@@ -44,6 +45,8 @@ def main() -> None:
             if die == "after_branch" and _makes_branch(args):
                 os._exit(23)
             if die == "after_worktree_add" and args[:2] == ("worktree", "add"):
+                os._exit(23)
+            if die == "after_branch_delete" and args[:2] == ("branch", "-D"):
                 os._exit(23)
             return out
         return wrapped

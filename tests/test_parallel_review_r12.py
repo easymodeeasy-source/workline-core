@@ -200,9 +200,10 @@ class ReviewR12Tests(WorklineTestCase):
         self.assertEqual(done.status, "completed", done.detail)
         self.assertIsNotNone(original)
         record = par.read_run(self.store, a)
-        self.assertEqual(record["state"], par.RELEASED)
-        self.assertNotEqual(self.ref("refs/heads/feature/kept"), "")  # kept, and said so
-        self.assertTrue(any("feature/kept" in note for note in record.get("cleanup_notes", [])))
+        # r14 (R13-01): unproven is not a finished cleanup - kept, said so, and left to the Human
+        self.assertEqual((record["state"], record["cleanup"]["state"]), (par.CLEANUP_FAILED, "branch_unproven"))
+        self.assertNotEqual(self.ref("refs/heads/feature/kept"), "")
+        self.assertEqual(self.ref(record["refs"]["saved"]), self.ref("refs/heads/feature/kept"))
         self.assertEqual(len(self.worktrees()), 1)
 
 

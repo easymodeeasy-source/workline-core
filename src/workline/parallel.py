@@ -580,6 +580,11 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
                                "deps_store": None if spec.deps_store is None else str(spec.deps_store)}
     ws = record["workspace"]
     ws.pop("branch_creating", None)  # an intention never proves ownership (R12-01); the owned ref does
+    if "branch_origin" not in ws:
+        # R13-01: the run whose creation made the branch - this one, or for a held run continued, the one it came from
+        inherited_from = record.get("resumed_from") or {}
+        ws["branch_origin"] = (inherited_from.get("branch_origin") or inherited_from.get("run_id")) \
+            if ws.get("branch_owner") == "inherited" else record["run_id"]
     own_start = ws.get("start_at") or ws["base_commit"]
     owned = OWNED_REF_PREFIX + record["run_id"]
     _save(store, record)  # where it will be, before it exists: an interrupted creation is found and finished
@@ -595,6 +600,12 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
         if _branch_out(repo, branch) or existing != own_start:
             raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and is not this "
                             "run's own; a run never takes another branch", code="run_branch_exists")
+        if not _made_by(repo, branch, ws["branch_origin"]):
+            # R13-01: the owned ref and the commit can both match a branch deleted and made again by someone else;
+            # only the branch's own history (its reflog, begun by Workline's creation) shows it is the same branch
+            raise StopError(f"the Work branch {branch} in {repo.name} ({existing[:12]}) is not the one Workline made "
+                            f"(its reflog does not begin with run {ws['branch_origin']}'s creation); a run never takes "
+                            "another branch", code="run_branch_exists")
         if mine and mine == existing:
             pass  # this run's own branch, made before it was interrupted
         elif handed:
@@ -608,7 +619,15 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
             raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and no Workline "
                             "ref proves it is this run's; a run never takes another branch", code="run_branch_exists")
     else:
-        made = _ref_transaction(repo, [f"create refs/heads/{branch} {own_start}", f"create {owned} {own_start}"])
+        mine = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
+        # this run's own branch, gone before its worktree was made (or never made): made again with its owned ref
+        made = _ref_transaction(repo, [f"create refs/heads/{branch} {own_start}",
+                                       f"update {owned} {own_start} {mine}" if mine else f"create {owned} {own_start}"],
+                                message=_created_message(ws["branch_origin"], branch)) \
+            if ws["branch_origin"] == record["run_id"] else None
+        if made is None:
+            raise StopError(f"the held branch {branch} is gone from {repo.name}; nothing was begun",
+                            code="run_branch_missing")
         if not made.ok:
             # someone made the branch (or the ref) first: neither ref was created by this transaction
             raise StopError(f"the Work branch {branch} could not be created ({made.stderr.decode('utf-8', 'replace').strip()[-200:]}); nothing "
@@ -620,9 +639,24 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
     _prepare(store, record, spec)
 
 
-def _ref_transaction(repo: Path, lines: list[str]) -> gitcmd.GitBytes:
+def _ref_transaction(repo: Path, lines: list[str], message: str | None = None) -> gitcmd.GitBytes:
     """One Git ref transaction (``update-ref --stdin``): every line applies, or none does."""
-    return gitcmd.run_git_bytes(repo, "update-ref", "--stdin", input=("\n".join(lines) + "\n").encode("utf-8"))
+    return gitcmd.run_git_bytes(repo, "update-ref", *(["-m", message] if message else []), "--stdin",
+                                input=("\n".join(lines) + "\n").encode("utf-8"))
+
+
+def _created_message(origin: str, branch: str) -> str:
+    return f"workline: run {origin} created {branch}"
+
+
+def _made_by(repo: Path, branch: str, origin: str | None) -> bool:
+    """R13-01: whether ``branch`` is still the very branch run ``origin`` created - its reflog begins with that
+    creation. A branch deleted and made again starts a new reflog; no reflog, or one that cannot be read, is no proof."""
+    if not origin:
+        return False
+    log = _git(repo, "reflog", "show", "--format=%gs", f"refs/heads/{branch}", "--")
+    entries = [line for line in log.stdout.splitlines() if line.strip()] if log.ok else []
+    return bool(entries) and entries[-1] == _created_message(origin, branch)
 
 
 def _branch_out(repo: Path, branch: str) -> list[str]:
@@ -661,7 +695,8 @@ def _branch_preflight(store: ProjectStore, spec: WorkspaceSpec, previous: dict[s
                   and previous.get("integration", {}).get("state") == "held" and bool(owned_before)
                   and old.get("branch") == branch and old.get("branch_owner", "created") in ("created", "inherited")
                   and os.path.normcase(str(Path(old.get("repo", "")).resolve())) == os.path.normcase(str(repo))
-                  and parked and existing == parked and not _branch_out(repo, branch))
+                  and parked and existing == parked and not _branch_out(repo, branch)
+                  and _made_by(repo, branch, old.get("branch_origin") or previous.get("run_id")))
     if not continuing:
         raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and is not this "
                         "Work's own held branch; nothing was begun", code="run_branch_exists")
@@ -1114,18 +1149,24 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
                 return record
         _git(repo, "worktree", "prune")
         _drop_deps_users(record)
+        owned = ws.get("owned_ref") or OWNED_REF_PREFIX + record["run_id"]
+        proof = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
         if tip and (integrated or tip == ws["base_commit"]):
-            owned = ws.get("owned_ref") or OWNED_REF_PREFIX + record["run_id"]
-            proof = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
-            if proof and not _branch_out(repo, ws["branch"]):
-                # R12-01: deleted only with Workline's proof that it made it, in one transaction, at the tip just saved
-                gone = _ref_transaction(repo, [f"delete refs/heads/{ws['branch']} {tip}", f"delete {owned} {proof}"])
-                if not gone.ok:
-                    record.setdefault("cleanup_notes", []).append(
-                        f"branch {ws['branch']} kept: {gone.stderr.decode('utf-8', 'replace').strip()[-200:]}")
-            else:
-                record.setdefault("cleanup_notes", []).append(
-                    f"branch {ws['branch']} kept: no Workline ref proves this run made it")
+            # R12-01 / R13-01: deleted only when Workline's owned ref and the branch's own reflog prove it is the very
+            # branch Workline made; anything less keeps the branch, and the release is not declared done
+            if not proof or not _made_by(repo, ws["branch"], ws.get("branch_origin") or record["run_id"]):
+                _set(store, record, CLEANUP_FAILED, next_actor="human", cleanup={
+                    "state": "branch_unproven", "blocked": [f"branch {ws['branch']} kept: nothing proves it is the one "
+                                                            "this run made (its commits are on the saved ref)"]})
+                return record
+            # R13-02: git branch -D, which refuses a branch out in any worktree - a ref update would not
+            gone = _git(repo, "branch", "-D", ws["branch"])
+            if not gone.ok:
+                _set(store, record, CLEANUP_FAILED, next_actor="human", cleanup={
+                    "state": "branch_in_use", "blocked": [f"branch {ws['branch']} kept: {gone.stderr.strip()[-200:]}"]})
+                return record
+        if proof and not _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ws['branch']}").stdout.strip():
+            _git(repo, "update-ref", "-d", owned, proof)  # the branch it proved is gone: the proof goes too
         final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
         _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
                                             "removed_top": sorted({r.split("/")[0] for r in removed})},
@@ -1337,7 +1378,8 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
         _become_owner(store, record)
         if resume_parked is not None:
             record["resumed_from"] = {"run_id": resume_parked["run_id"], "ref": resume_parked["refs"]["parked"],
-                                      "branch": (resume_parked.get("workspace") or {}).get("branch")}
+                                      "branch": (resume_parked.get("workspace") or {}).get("branch"),
+                                      "branch_origin": (resume_parked.get("workspace") or {}).get("branch_origin")}
         previous = read_run(store, work_id)
         if previous is not None:
             record["previous_runs"] = previous.get("previous_runs", []) + [
