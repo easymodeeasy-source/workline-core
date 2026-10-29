@@ -274,17 +274,27 @@ class ParallelReviewR3Tests(WorklineTestCase):
         self.assertEqual(done.status, "completed", done.detail)  # a reading Work runs in place
 
         def stray(ctx):
-            (ctx.workspace / "stray.txt").write_text("written in place\n", encoding="utf-8")
             (ctx.workspace / "kept.txt").write_text("overwritten\n", encoding="utf-8")
             return st.Completed()
 
-        with self.assertRaises(StopError) as raised:
+        # F-01 (r6 review): through its workspace a reading Work cannot reach the Human's file at all
+        with self.assertRaises(PermissionError):
             st.start(self.store, b, "single-work", stray, parallel=True, workspace=par.WorkspaceSpec(kind="in_place"))
-        self.assertEqual(raised.exception.code, "run_project_written")
-        written = par.read_run(self.store, b)["project_written"]
-        self.assertIn("folder:stray.txt", written)
-        self.assertIn("folder:kept.txt", written)
+        self.assertEqual((self.store.root / "kept.txt").read_text(encoding="utf-8"), "a Human's draft\n")
         self.assertEqual(self.state(b), "in_progress")
+
+        # an executor that bypasses its workspace and writes the Project folder itself is still not finished over
+        (c,) = self.standalone("C")
+
+        def bypass(ctx):
+            (ctx.store.root / "stray.txt").write_text("written in the Project\n", encoding="utf-8")
+            return st.Completed()
+
+        with self.assertRaises(StopError) as raised:
+            st.start(self.store, c, "single-work", bypass, parallel=True, workspace=par.WorkspaceSpec(kind="in_place"))
+        self.assertEqual(raised.exception.code, "run_project_written")
+        self.assertIn("folder:stray.txt", par.read_run(self.store, c)["project_written"])
+        self.assertEqual(self.state(c), "in_progress")
 
     # P-05 shared deps ---------------------------------------------------------------------------------------
     def deps_entry(self) -> tuple[Path, dict, str]:

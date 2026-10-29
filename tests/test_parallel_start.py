@@ -302,8 +302,9 @@ class ParallelStartTests(WorklineTestCase):
         seen = []
 
         def read_only(ctx):
-            self.assertEqual(Path(ctx.workspace), self.store.root)
-            seen.append(sorted(p.name for p in (self.store.root / ".workline" / "works").glob("*.md")))
+            # F-01 (r6 review): a reading Work runs on a read-only snapshot of the Project, never the Project folder
+            self.assertNotEqual(Path(ctx.workspace).resolve(), self.store.root.resolve())
+            seen.append(sorted(p.name for p in (Path(ctx.workspace) / ".workline" / "works").glob("*.md")))
             return st.Completed()
 
         done = st.start(self.store, b, "single-work", read_only, parallel=True,

@@ -40,6 +40,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import stat
 import sys
 import threading
 import time
@@ -525,10 +526,20 @@ def _must(repo: Path, *args: str) -> str:
 def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec,
                       start_at: str | None = None, base: str | None = None) -> None:
     if spec.kind == "in_place":
-        # read-only: an in-place run shares the Project folder with every other Work, so it returns no result paths
-        # (:func:`_execute`) and the finish refuses it when the folder changed under it (:func:`_project_written`)
-        record["workspace"] = {"kind": "in_place", "path": str(store.root), "repo": str(store.root),
-                               "base_commit": gitcmd.head_commit(store.root), "folder": _folder_state(store)}
+        # F-01 (r6 review): a reading Work never gets the Project folder itself. It runs on a snapshot - a detached
+        # worktree of the Project's HEAD with the Human's uncommitted files copied in - whose files are made
+        # read-only; the Project folder, the Human's uncommitted work included, is not where it writes. It still
+        # returns no result paths (:func:`_execute`), and the finish still refuses when the Project folder changed
+        # under it (:func:`_project_written`).
+        base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
+        path = (base_root / record["run_id"]).resolve()
+        head = gitcmd.head_commit(store.root)
+        record["workspace"] = {"kind": "in_place", "snapshot": True, "path": str(path), "repo": str(store.root),
+                               "base_commit": head, "folder": _folder_state(store)}
+        _save(store, record)  # where it will be, before it exists
+        base_root.mkdir(parents=True, exist_ok=True)
+        _must(store.root, "worktree", "add", "--detach", str(path), head)
+        _snapshot_overlay(store.root, path)
         return
     if spec.kind != "worktree":
         raise ValidationError(f"workspace kind must be worktree or in_place: {spec.kind!r}", code="run_workspace_kind")
@@ -589,6 +600,48 @@ def _index_state(store: ProjectStore) -> dict[str, str]:
     """What the Project's index holds against HEAD, entry by entry: path -> ``<modes> <objects> <status>``."""
     items = _z(_git(store.root, "diff", "--cached", "--raw", "-z", "--no-renames", "--full-index").stdout)
     return {items[i + 1]: items[i] for i in range(0, len(items) - 1, 2)}
+
+
+def _snapshot_overlay(project: Path, snapshot: Path) -> None:
+    """Copy the Project folder's uncommitted state (tracked changes, deletions, untracked files; runtime aside) onto
+    ``snapshot`` and make every file there read-only. Only the snapshot is written; the Project is only read."""
+    import shutil
+
+    out = _git(project, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", ".",
+               ":(exclude).workline/runtime").stdout
+    for entry in _z(out):
+        if len(entry) <= 3:
+            continue
+        rel = entry[3:]
+        source, target = project / rel, snapshot / rel
+        if os.path.lexists(source) and source.is_file() and not source.is_symlink():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+        elif not os.path.lexists(source) and os.path.lexists(target):
+            target.unlink()
+    for item in snapshot.rglob("*"):
+        if item.is_file() and not item.is_symlink() and item.name != ".git":
+            os.chmod(item, stat.S_IREAD)
+
+
+def _remove_snapshot(record: dict[str, Any]) -> list[str]:
+    """Remove an in-place run's own snapshot (Workline's copy, never the Project); what the run added there is listed."""
+    import shutil
+
+    ws = record.get("workspace") or {}
+    path, repo = Path(ws["path"]), Path(ws["repo"])
+    added = []
+    if path.is_dir():
+        out = _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames").stdout
+        added = [entry[3:] for entry in _z(out) if len(entry) > 3]
+
+        def writable(function, target, _info):
+            os.chmod(target, stat.S_IWRITE)
+            function(target)
+
+        shutil.rmtree(path, onerror=writable)
+    _git(repo, "worktree", "prune")
+    return added
 
 
 def _folder_state(store: ProjectStore) -> dict[str, str]:
@@ -774,7 +827,8 @@ def _commit_in_workspace(record: dict[str, Any], paths: list[str], deleted: list
     return _must(ws, "rev-parse", "HEAD")
 
 
-def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], deleted: list[str]) -> list[str]:
+def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], deleted: list[str],
+               snapshot: dict[str, bytes] | None = None) -> list[str]:
     """Result paths the Project changed since the run's base in a way the run's result does not match."""
     ws = record["workspace"]
     base = ws["base_commit"]
@@ -783,7 +837,13 @@ def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], de
     for p in sorted(set(paths) | set(deleted)):
         before = _blob(store.root, base, p)
         now = _blob(store.root, head, p)
-        mine = None if p in deleted else _file_blob(store.root, p, workspace_path(record) / p)
+        if p in deleted:
+            mine = None
+        elif snapshot is not None:
+            hashed = gitcmd.run_git_bytes(store.root, "hash-object", "--path", p, "--stdin", input=snapshot[p])
+            mine = hashed.stdout.decode("ascii").strip() if hashed.returncode == 0 else None
+        else:
+            mine = _file_blob(store.root, p, workspace_path(record) / p)
         if now != before and mine != now:
             found.append(p)
         elif gitcmd.changed_against_head(store.root, [p]) and _file_blob(store.root, p, store.root / p) != mine:
@@ -791,12 +851,41 @@ def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], de
     return found
 
 
-def _copy_results(store: ProjectStore, record: dict[str, Any], paths: list[str], deleted: list[str]) -> None:
+def _verified_snapshot(record: dict[str, Any]) -> tuple[dict[str, bytes], list[str]]:
+    """F-03 (r6 review): the result files read ONCE into memory, each proven against the content identity recorded
+    when the executor returned and against the Work branch's result commit (as Git writes it out); what is copied
+    into the Project is these bytes, never a second read of the mutable workspace."""
+    ws = workspace_path(record)
+    outcome = record.get("outcome") or {}
+    recorded = outcome.get("identity") or {}
+    snapshot, problems = {}, []
+    for p in outcome.get("result_paths", []):
+        path = ws / p
+        if path.is_symlink() or not path.is_file():
+            problems.append(f"{p} is not a regular file")
+            continue
+        data = path.read_bytes()
+        if "file:" + hashlib.sha256(data).hexdigest() != recorded.get(p):
+            problems.append(f"{p} is not what the executor returned")
+            continue
+        commit = record.get("result_commit")
+        if commit:
+            written = gitcmd.run_git_bytes(Path(record["workspace"]["repo"]), "cat-file", "--filters", f"{commit}:{p}",
+                                           cwd=ws)
+            if written.returncode != 0 or hashlib.sha256(written.stdout).hexdigest() != hashlib.sha256(data).hexdigest():
+                problems.append(f"{p} differs from the result commit {commit[:12]}")
+                continue
+        snapshot[p] = data
+    return snapshot, problems
+
+
+def _copy_results(store: ProjectStore, record: dict[str, Any], paths: list[str], deleted: list[str],
+                  snapshot: dict[str, bytes] | None = None) -> None:
     ws = workspace_path(record)
     for p in paths:
         target = store.root / p
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes((ws / p).read_bytes())
+        target.write_bytes(snapshot[p] if snapshot is not None else (ws / p).read_bytes())
     for p in deleted:
         target = store.root / p
         if target.exists():
@@ -853,7 +942,9 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
         if stash.is_dir():
             shutil.rmtree(stash)  # the set-aside copies of results the completion has committed
             removed.append(f"{RUNS_DIR}/{record['run_id']}")
-        _set(store, record, RELEASED, cleanup={"state": "released", "removed": removed})
+        written = _remove_snapshot(record) if ws.get("snapshot") else []
+        _set(store, record, RELEASED, cleanup={"state": "released", "removed": removed,
+                                               "snapshot_writes_discarded": written})
         return record
     path, repo = Path(ws["path"]), Path(ws["repo"])
     try:
@@ -1337,12 +1428,14 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
             paths = list(record["outcome"]["result_paths"])
             deleted = list(record["outcome"]["deleted_paths"])
             changed = _unproven_result(record, workspace_path(record))
+            snapshot, unproven = _verified_snapshot(record)
+            changed += [u for u in unproven if u not in changed]
             if changed:
                 # what is copied into the Project is exactly what the executor returned, or nothing
                 _set(store, record, OUTCOME_UNKNOWN, next_actor="human", unknown=changed)
                 raise StopError(f"run {record['run_id']} of {work_id}: the workspace no longer holds what the executor "
                                 f"returned ({'; '.join(changed)}); nothing was integrated", code="run_outcome_unknown")
-            conflicts = _conflicts(store, record, paths, deleted)
+            conflicts = _conflicts(store, record, paths, deleted, snapshot)
             if conflicts:
                 parked = PARKED_REF_PREFIX + record["run_id"]
                 _must(Path(record["workspace"]["repo"]), "update-ref", parked, record["result_commit"])
@@ -1357,7 +1450,7 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                 calls["n"] += 1
                 if calls["n"] > 1:
                     return st.Detach()
-                _copy_results(store, record, paths, deleted)
+                _copy_results(store, record, paths, deleted, snapshot)
                 return completed
         else:
             def finishing(ctx):
@@ -1558,6 +1651,7 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
     repo, result, target = Path(ws["repo"]), record["result_commit"], spec["target_branch"]
     gitlink = spec["gitlink"]
     done = record.setdefault("integration", {}).setdefault("stages", {})
+    _recover_checkout_move(store, record)  # F-02: an interrupted move of the checkout is undone before any check
 
     def refuse(why: str):
         parked = PARKED_REF_PREFIX + record["run_id"]
@@ -1661,21 +1755,36 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
 
 
 @contextmanager
-def _index_lock(gitdir: Path) -> Iterator[Path]:
+def _index_lock(gitdir: Path, record: dict[str, Any] | None = None) -> Iterator[Path]:
     """Hold the checkout's own ``index.lock`` the way Git does (exclusive create), released by removing it.
 
     Every Git command that changes the index - ``checkout`` / ``switch`` of a branch, ``add``, ``commit``, ``reset``,
     ``merge``, ``read-tree`` - takes this same lock first and refuses while it exists ("index.lock: File exists"), so
     while Workline holds it no such command, from a terminal or a GUI, can change the checkout's branch, HEAD or
     index. The holder commits a new index by writing it into the lock file and renaming that over ``index``.
+
+    The lock carries a nonce, recorded in the run's checkout journal (``record``) before anything is written; a lock
+    left by a Workline process that died holding it (its nonce in the journal) is taken over by the recovery - any
+    other existing lock is someone else's and STOPs.
     """
     lock = gitdir / "index.lock"
+    journal = (record or {}).get("integration", {}).get("checkout_move") or {}
+    nonce = f"workline-run {(record or {}).get('run_id')} {new_ulid()}"
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
-        raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
-                        code="run_checkout_busy") from exc
-    os.close(fd)
+        try:
+            held = lock.read_bytes().decode("utf-8", "replace")
+        except OSError:
+            held = ""
+        if not journal.get("lock_nonce") or held != journal["lock_nonce"]:
+            raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
+                            code="run_checkout_busy") from exc
+        fd = None  # the lock a dead Workline run of this record left: taken over
+        nonce = held
+    if fd is not None:
+        os.write(fd, nonce.encode("utf-8"))
+        os.close(fd)
     try:
         yield lock
     finally:
@@ -1697,37 +1806,134 @@ def _target_holders(repo: Path, target: str, checkout: Path) -> list[str]:
     return found
 
 
+def _path_blob(checkout: Path, rel: str) -> str | None:
+    """The blob ``rel`` would be in ``checkout`` as it is now (Git's own filters applied); None when absent, "?" when
+    it is something Workline never writes (a link, a directory)."""
+    path = checkout / rel
+    if not os.path.lexists(path):
+        return None
+    if path.is_symlink() or not path.is_file():
+        return "?"
+    return _must(checkout, "hash-object", "--path", rel, "--", str(path))
+
+
+def _restore_paths(checkout: Path, paths: list[str], frm: str, to: str) -> list[str]:
+    """Put each of ``paths`` from commit ``frm``'s content back to commit ``to``'s, file by file, only where the file
+    holds exactly ``frm``'s (Workline's own write) - a file already at ``to`` is left, and a file holding anything
+    else (the Human's) is never touched and is returned."""
+    untouched = []
+    for rel in paths:
+        now, before, after = _path_blob(checkout, rel), _blob(checkout, to, rel), _blob(checkout, frm, rel)
+        if now == before:
+            continue
+        if now != after:
+            untouched.append(rel)
+            continue
+        target = checkout / rel
+        if before is None:
+            target.unlink()
+        else:
+            data = gitcmd.run_git_bytes(checkout, "cat-file", "--filters", f"{to}:{rel}")
+            if data.returncode != 0:
+                untouched.append(rel)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data.stdout)
+    return untouched
+
+
+def _move_ref(checkout: Path, symbolic: str | None, new: str, old: str) -> gitcmd.GitResult:
+    return gitcmd.run_git(checkout, *(["update-ref", symbolic, new, old] if symbolic is not None
+                                      else ["update-ref", "--no-deref", "HEAD", new, old]), check=False)
+
+
+def _ref_now(checkout: Path, symbolic: str | None) -> str:
+    return _git(checkout, "rev-parse", "--verify", "--quiet", symbolic or "HEAD").stdout.strip()
+
+
+def _undo_move(store: ProjectStore, record: dict[str, Any]) -> None:
+    """F-02 (r6 review): put the gitlink checkout back to where the recorded move (``checkout_move``) started.
+
+    Runs under the checkout's index.lock - after an exception in the same process, or by the next START after the
+    process died. Git cannot change a ref and the index in one transaction, so the move is recorded durably before
+    its first write and undone from that record: the index was never committed (it is the last write), the ref goes
+    back by compare-and-swap if it is still the move's, and each file the move wrote goes back only if it still holds
+    exactly the move's content. A file holding anything else is the Human's and STOPs the undo with nothing touched;
+    the record stays for the next attempt.
+    """
+    integ = record["integration"]
+    move = integ["checkout_move"]
+    spec = record["workspace"]["integrate"]
+    checkout = store.root / spec["gitlink"]
+    old, new, symbolic = move["old"], move["new"], move["symbolic"]
+    if move.get("phase") == "index":
+        # the index was committed: the move completed; only its end was not recorded
+        if _ref_now(checkout, symbolic) == new:
+            integ.pop("checkout_move", None)
+            integ["stages"]["checkout"] = {"path": spec["gitlink"], "head": new, "at": _now(), "recovered": "completed"}
+            _save(store, record)
+            return
+    index_at_old = _git(checkout, "--no-optional-locks", "diff-index", "--cached", "--quiet", old, "--").returncode == 0
+    index_at_new = _git(checkout, "--no-optional-locks", "diff-index", "--cached", "--quiet", new, "--").returncode == 0
+    if index_at_new and not index_at_old and _ref_now(checkout, symbolic) == new:
+        # the process died after its last write (the index) and before recording it: the move is complete
+        integ.pop("checkout_move", None)
+        integ["stages"]["checkout"] = {"path": spec["gitlink"], "head": new, "at": _now(), "recovered": "completed"}
+        _save(store, record)
+        return
+    if not index_at_old:
+        raise StopError(f"the checkout {spec['gitlink']}'s index is neither where the interrupted move started nor where "
+                        "it ended; nothing is changed, the record stays: reconcile required", code="run_checkout_unrecovered")
+    ref = _ref_now(checkout, symbolic)
+    if ref == new:
+        back = _move_ref(checkout, symbolic, old, new)
+        if not back.ok:
+            raise StopError(f"the move's ref cannot be put back ({back.stderr.strip()[-200:]}); the record stays",
+                            code="run_checkout_unrecovered")
+    elif ref != old:
+        raise StopError(f"{symbolic or 'HEAD'} is at {ref[:12]}, neither the move's start nor its end; nothing is "
+                        "changed, the record stays: reconcile required", code="run_checkout_unrecovered")
+    untouched = _restore_paths(checkout, list(move["paths"]), new, old)
+    if untouched:
+        integ["checkout_unrecovered_paths"] = untouched
+        _save(store, record)
+        raise StopError(f"files changed by someone else since the move began are left as they are ({', '.join(untouched)}); "
+                        "the record stays: reconcile required", code="run_checkout_unrecovered")
+    integ.pop("checkout_move", None)
+    integ.setdefault("checkout_undone", []).append({"old": old, "new": new, "at": _now()})
+    _save(store, record)
+
+
+def _recover_checkout_move(store: ProjectStore, record: dict[str, Any]) -> None:
+    """Before anything is checked again: an interrupted move of the gitlink checkout is undone first (F-02)."""
+    if not (record.get("integration") or {}).get("checkout_move"):
+        return
+    checkout = store.root / record["workspace"]["integrate"]["gitlink"]
+    gitdir = Path(_must(checkout, "rev-parse", "--absolute-git-dir"))
+    with _index_lock(gitdir, record):
+        _undo_move(store, record)
+
+
 def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
     """The completion's own write: the gitlink checkout takes the result (after the remote was reached).
 
-    F-02 (r5 remaining race): everything from the last look at the checkout to the new index runs while Workline
-    holds the checkout's ``index.lock`` (:func:`_index_lock`), so no index-changing Git command of the Human can
-    interleave. Inside it, in this order:
-
-    1. the checkout must still be what the integration check saw (``checkout_seen``: branch HEAD names - the target
-       or none - and commit), clean, with no other worktree holding the target; otherwise STOP, nothing written;
-    2. the working tree is moved by ``read-tree -m -u`` on a private copy of the index (``GIT_INDEX_FILE``), which
-       refuses before writing anything a local change or an untracked file would lose;
-    3. the ref is moved by compare-and-swap (the target branch by its full name, or a detached HEAD without
-       dereferencing);
-    4. HEAD's branch, the commit and the worktrees are checked again; a difference undoes 3 and 2;
-    5. the new index is committed by renaming it over ``index`` through the held lock.
-
-    A failure anywhere before 5 leaves the branch, HEAD and index as they were and the working tree put back (a file
-    the Human edited in between is never overwritten: read-tree checks it against the index). The run stays
-    ``executed`` with its result commit, and the next parallel START checks again without running the executor.
-    Not covered (no Git lock exists for them): an editor writing a tracked file in the instant between read-tree's
-    own check and its write, the same window ``git checkout`` itself has; plumbing that rewrites HEAD without the
-    index (``git symbolic-ref``), which step 4 detects and undoes.
+    Under the checkout's index.lock (:func:`_index_lock`), in this order: check (branch HEAD names - the target or
+    none - commit, clean, no other worktree on the target); record the move durably (``checkout_move``: start, end,
+    branch, the paths it writes, the lock's nonce); working tree by ``read-tree -m -u`` on a private index (it refuses
+    before writing anything that would lose local work); ref by compare-and-swap; check again; index committed through
+    the lock (the last write). Any exception before the index is committed undoes the move (:func:`_undo_move`); a
+    process that dies leaves the record and its lock, and the next START undoes the move before it checks anything.
+    The run stays ``executed`` with its result commit throughout; the executor is never run again for this.
     """
     ws = record["workspace"]
     spec = ws["integrate"]
     checkout, result, target = store.root / spec["gitlink"], record["result_commit"], spec["target_branch"]
     seen = record["integration"].get("checkout_seen") or {}
     gitdir = Path(_must(checkout, "rev-parse", "--absolute-git-dir"))
+    integ = record["integration"]
 
     def changed(detail: str, now: dict[str, Any] | None = None) -> StopError:
-        record["integration"]["checkout_changed"] = {"seen": seen, "now": now, "detail": detail, "at": _now()}
+        integ["checkout_changed"] = {"seen": seen, "now": now, "detail": detail, "at": _now()}
         _save(store, record)
         return StopError(f"the checkout {spec['gitlink']} {detail}; nothing is moved under it",
                          code="run_checkout_changed")
@@ -1736,15 +1942,13 @@ def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
         return (_git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip() or None,
                 _must(checkout, "rev-parse", "HEAD"))
 
-    def holders() -> list[str]:
-        return _target_holders(checkout, target, checkout) if now_symbolic is not None else []
-
-    with _index_lock(gitdir) as lock:
-        # 1 --------------------------------------------------------------------------------------------------
+    with _index_lock(gitdir, record) as lock:
+        if integ.get("checkout_move"):
+            _undo_move(store, record)
         now_symbolic, now_head = head_state()
         now = {"symbolic": now_symbolic, "head": now_head}
         if now_head == result and now_symbolic == seen.get("symbolic"):
-            record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now()}
+            integ["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now()}
             _save(store, record)
             return
         if (now_symbolic, now_head) != (seen.get("symbolic"), seen.get("head")) \
@@ -1753,9 +1957,14 @@ def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
                           f"{str(seen.get('head'))[:12]}, it is {now_symbolic or 'detached'} at {now_head[:12]})", now)
         if _git(checkout, "--no-optional-locks", "status", "--porcelain", "--untracked-files=no").stdout.strip():
             raise changed("has uncommitted changes", now)
-        if holders():
-            raise changed(f"has {target} out in another worktree ({', '.join(holders())})", now)
-        # 2 --------------------------------------------------------------------------------------------------
+        taken = _target_holders(checkout, target, checkout) if now_symbolic is not None else []
+        if taken:
+            raise changed(f"has {target} out in another worktree ({', '.join(taken)})", now)
+        paths = _z(_git(checkout, "diff", "--name-only", "-z", "--no-renames", now_head, result).stdout)
+        integ["checkout_move"] = {"old": now_head, "new": result, "symbolic": now_symbolic, "paths": paths,
+                                  "phase": "begun", "lock_nonce": lock.read_bytes().decode("utf-8", "replace"),
+                                  "at": _now()}
+        _save(store, record)  # durable before the first write: a death from here on is undone from it
         private = gitdir / f"workline-index-{record['run_id']}"
         private.write_bytes((gitdir / "index").read_bytes())
         env = dict(os.environ, GIT_INDEX_FILE=str(private))
@@ -1764,38 +1973,35 @@ def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
             if not moved.ok:
                 raise changed(f"cannot take the result without overwriting local work ({moved.stderr.strip()[-300:]})",
                               now)
-            # 3 ----------------------------------------------------------------------------------------------
-            ref = (["update-ref", f"refs/heads/{target}", result, now_head] if now_symbolic is not None
-                   else ["update-ref", "--no-deref", "HEAD", result, now_head])
-            try:
-                swapped = gitcmd.run_git(checkout, *ref, check=False)
-                after_symbolic, after_head = head_state()
-                taken = holders()
-                if not swapped.ok or (after_symbolic, after_head) != (now_symbolic, result) or taken:
-                    # 4: undo the ref (only if it is still ours to undo), then the working tree below
-                    if swapped.ok:
-                        back = (["update-ref", f"refs/heads/{target}", now_head, result] if now_symbolic is not None
-                                else ["update-ref", "--no-deref", "HEAD", now_head, result])
-                        gitcmd.run_git(checkout, *back, check=False)
-                    raise changed("changed while it was being moved (ref "
-                                  f"{'refused: ' + swapped.stderr.strip()[-200:] if not swapped.ok else 'moved and put back'}"
-                                  f"; now {after_symbolic or 'detached'} at {after_head[:12]}"
-                                  f"{'; ' + target + ' taken by ' + ', '.join(taken) if taken else ''})",
-                                  {"symbolic": after_symbolic, "head": after_head})
-            except BaseException:
-                restored = gitcmd.run_git(checkout, "read-tree", "-m", "-u", result, now_head, check=False, env=env)
-                if not restored.ok:
-                    record["integration"]["checkout_restore_failed"] = restored.stderr.strip()[-400:]
-                    _save(store, record)
-                raise
-            # 5 ----------------------------------------------------------------------------------------------
+            integ["checkout_move"]["phase"] = "worktree"
+            _save(store, record)
+            swapped = _move_ref(checkout, now_symbolic, result, now_head)
+            if not swapped.ok:
+                raise changed(f"ref refused the move ({swapped.stderr.strip()[-200:]})", now)
+            integ["checkout_move"]["phase"] = "ref"
+            _save(store, record)
+            after_symbolic, after_head = head_state()
+            moved_away = _target_holders(checkout, target, checkout) if now_symbolic is not None else []
+            if (after_symbolic, after_head) != (now_symbolic, result) or moved_away:
+                raise changed(f"changed while it was being moved (now {after_symbolic or 'detached'} at {after_head[:12]}"
+                              f"{'; ' + target + ' taken by ' + ', '.join(moved_away) if moved_away else ''})",
+                              {"symbolic": after_symbolic, "head": after_head})
             lock.write_bytes(private.read_bytes())
-            os.replace(lock, gitdir / "index")
+            os.replace(lock, gitdir / "index")  # the last write: the index, committed through the lock
+            integ["checkout_move"]["phase"] = "index"
+            integ.pop("checkout_move", None)
+            integ["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now(),
+                                           "branch": now_symbolic, "under": "index.lock"}
+            _save(store, record)
+        except BaseException:
+            if integ.get("checkout_move") and integ["checkout_move"].get("phase") != "index":
+                try:
+                    _undo_move(store, record)
+                except StopError:
+                    pass  # the record stays; the next START undoes the move before anything else
+            raise
         finally:
             private.unlink(missing_ok=True)
-    record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now(),
-                                                   "branch": now_symbolic, "under": "index.lock"}
-    _save(store, record)
 
 
 def use_deps(ctx, identity: dict[str, Any], exclude: tuple[str, ...] = ()) -> Path:
