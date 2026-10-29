@@ -547,40 +547,96 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
         return
     if spec.kind != "worktree":
         raise ValidationError(f"workspace kind must be worktree or in_place: {spec.kind!r}", code="run_workspace_kind")
-    repo = Path(spec.repo or store.root).resolve()
-    base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
-    path = (base_root / record["run_id"]).resolve()
-    branch = spec.branch or f"{spec.branch_prefix}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
-    if spec.branch is not None and (not spec.branch.startswith(spec.branch_prefix)
-                                    or _git(repo, "check-ref-format", f"refs/heads/{spec.branch}").returncode != 0):
-        raise ValidationError(f"the Work branch {spec.branch!r} is not a valid {spec.branch_prefix}... branch name",
-                              code="run_branch_name")
-    existing = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").stdout.strip()
-    if existing and not (spec.branch is not None and start_at is not None and existing == start_at):
-        raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}); a run never reuses "
-                        "another branch", code="run_branch_exists")
-    if base is None and spec.integrate is not None:
-        # an integrated Work starts from what the Project names (its gitlink at HEAD), never from whatever the
-        # checkout has out: a checkout left on other commits must not carry them into the integration
-        base = _project_pointer(store, spec.integrate.gitlink)
-        if base is None:
-            raise StopError(f"{spec.integrate.gitlink} is not a gitlink (a mode 160000 entry) at the Project's HEAD",
-                            code="run_gitlink_missing")
-    base = base or _must(repo, "rev-parse", "HEAD")
-    record["workspace"] = {"kind": "worktree", "repo": str(repo), "path": str(path), "branch": branch,
-                           "base_commit": base, "project_repo": os.path.normcase(str(repo)) == os.path.normcase(str(store.root.resolve())),
-                           "regenerable": list(spec.regenerable),
-                           "integrate": None if spec.integrate is None else {
-                               "gitlink": spec.integrate.gitlink, "target_branch": spec.integrate.target_branch,
-                               "push_remote": spec.integrate.push_remote, "push_env": [list(e) for e in spec.integrate.push_env]},
-                           "deps_store": None if spec.deps_store is None else str(spec.deps_store)}
-    _save(store, record)  # where it will be, before it exists: an interrupted creation is found and cleaned
-    base_root.mkdir(parents=True, exist_ok=True)
-    if existing:
-        _must(repo, "worktree", "add", str(path), branch)  # the held run's own branch, at its kept work
+    recorded = record.get("workspace") if isinstance(record.get("workspace"), dict) else None
+    if recorded is not None and recorded.get("kind") == "worktree" and recorded.get("branch"):
+        # R11-02: a creation recorded before it was interrupted is finished exactly as recorded - its branch, base and
+        # start never change (a different branch asked for now was refused before this, in the claim)
+        repo, path, branch = Path(recorded["repo"]), Path(recorded["path"]), recorded["branch"]
+        base, start_at = recorded["base_commit"], recorded.get("start_at")
     else:
-        _must(repo, "worktree", "add", "-b", branch, str(path), start_at or base)
+        repo = Path(spec.repo or store.root).resolve()
+        base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
+        path = (base_root / record["run_id"]).resolve()
+        branch = spec.branch or f"{spec.branch_prefix}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
+        if base is None and spec.integrate is not None:
+            # an integrated Work starts from what the Project names (its gitlink at HEAD), never from whatever the
+            # checkout has out: a checkout left on other commits must not carry them into the integration
+            base = _project_pointer(store, spec.integrate.gitlink)
+            if base is None:
+                raise StopError(f"{spec.integrate.gitlink} is not a gitlink (a mode 160000 entry) at the Project's HEAD",
+                                code="run_gitlink_missing")
+        base = base or _must(repo, "rev-parse", "HEAD")
+        inherited = record.get("resumed_from", {}).get("branch") == branch and start_at is not None
+        record["workspace"] = {"kind": "worktree", "repo": str(repo), "path": str(path), "branch": branch,
+                               "branch_owner": "inherited" if inherited else "created", "start_at": start_at,
+                               "base_commit": base, "project_repo": os.path.normcase(str(repo)) == os.path.normcase(str(store.root.resolve())),
+                               "regenerable": list(spec.regenerable),
+                               "integrate": None if spec.integrate is None else {
+                                   "gitlink": spec.integrate.gitlink, "target_branch": spec.integrate.target_branch,
+                                   "push_remote": spec.integrate.push_remote, "push_env": [list(e) for e in spec.integrate.push_env]},
+                               "deps_store": None if spec.deps_store is None else str(spec.deps_store)}
+    ws = record["workspace"]
+    existing = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").stdout.strip()
+    if existing:
+        # R11-01: an existing branch is used only when it is provably this run's: the held run's own branch it
+        # continues (checked in the claim, recorded as inherited), or the branch this run's own interrupted creation
+        # made - at the very commit it was created at, and out in no worktree
+        own_start = ws.get("start_at") or ws["base_commit"]
+        if existing != own_start or ws.get("branch_owner") not in ("created", "inherited") \
+                or (ws.get("branch_owner") == "created" and not ws.get("branch_creating")) or _branch_out(repo, branch):
+            raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and is not this "
+                            "run's own; a run never takes another branch", code="run_branch_exists")
+    if ws.get("branch_owner") == "created":
+        ws["branch_creating"] = True
+    _save(store, record)  # where it will be, before it exists: an interrupted creation is found and finished
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    if existing:
+        _must(repo, "worktree", "add", str(path), branch)
+    else:
+        _must(repo, "worktree", "add", "-b", branch, str(path), start_at or ws["base_commit"])
+    ws.pop("branch_creating", None)
+    _save(store, record)
     _prepare(store, record, spec)
+
+
+def _branch_out(repo: Path, branch: str) -> list[str]:
+    """The worktrees of ``repo`` that have ``branch`` out."""
+    out, current = [], None
+    for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch}" and current is not None:
+            out.append(current)
+    return out
+
+
+def _branch_preflight(store: ProjectStore, spec: WorkspaceSpec, previous: dict[str, Any] | None) -> None:
+    """R11-03: a Project-named branch is checked BEFORE the claim writes anything: its form, and that it does not
+    exist - unless it is the held run's own branch being continued (R11-01), proven by that run's record: the same
+    branch name, Workline's own (created or inherited), at the commit of that run's parked ref, out in no worktree."""
+    if spec.kind != "worktree" or spec.branch is None:
+        return
+    repo = Path(spec.repo or store.root).resolve()
+    branch = spec.branch
+    if not branch.startswith(spec.branch_prefix) \
+            or _git(repo, "check-ref-format", f"refs/heads/{branch}").returncode != 0:
+        raise ValidationError(f"the Work branch {branch!r} is not a valid {spec.branch_prefix}... branch name; nothing "
+                              "was begun", code="run_branch_name")
+    existing = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").stdout.strip()
+    if not existing:
+        return
+    old = (previous or {}).get("workspace") or {}
+    parked_ref = (previous or {}).get("refs", {}).get("parked")
+    parked = _git(Path(old.get("repo") or repo), "rev-parse", "--verify", "--quiet", parked_ref).stdout.strip() \
+        if parked_ref else ""
+    continuing = (previous is not None and previous.get("state") == PARKED
+                  and previous.get("integration", {}).get("state") == "held"
+                  and old.get("branch") == branch and old.get("branch_owner", "created") in ("created", "inherited")
+                  and os.path.normcase(str(Path(old.get("repo", "")).resolve())) == os.path.normcase(str(repo))
+                  and parked and existing == parked and not _branch_out(repo, branch))
+    if not continuing:
+        raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and is not this "
+                        "Work's own held branch; nothing was begun", code="run_branch_exists")
 
 
 def _prepare(store: ProjectStore, record: dict[str, Any], spec: WorkspaceSpec) -> None:
@@ -1031,7 +1087,8 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
         _git(repo, "worktree", "prune")
         _drop_deps_users(record)
         if tip and (integrated or tip == ws["base_commit"]):
-            _must(repo, "branch", "-D", ws["branch"])  # its commit stays on the saved ref
+            if ws.get("branch_owner", "created") in ("created", "inherited"):
+                _must(repo, "branch", "-D", ws["branch"])  # its commit stays on the saved ref (R11-01: only its own)
         final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
         _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
                                             "removed_top": sorted({r.split("/")[0] for r in removed})},
@@ -1202,6 +1259,13 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
             raise StopError(f"run {record['run_id']} of {work_id} is parked on a conflict "
                             f"({', '.join(record.get('conflicts', []))}); integrate it first", code="run_conflict_parked")
     if record is not None:
+        fixed = (record.get("workspace") or {}).get("branch") if isinstance(record.get("workspace"), dict) else None
+        if spec.branch is not None and fixed is not None and spec.branch != fixed:
+            # R11-02: a run's branch, once recorded, never changes; None asks for nothing and keeps the recorded one
+            raise StopError(f"run {record['run_id']} of {work_id} is recorded on {fixed}, not {spec.branch}; its branch "
+                            "never changes - nothing was changed", code="run_branch_mismatch")
+        if fixed is None and record["state"] == CREATING:
+            _branch_preflight(store, spec, None)  # its workspace was never recorded: checked as a fresh one
         if not _owned_by_me(store, record):
             _become_owner(store, record)
             _save(store, record, take=True)
@@ -1216,7 +1280,9 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
             _save(store, record)
         if record["state"] == CREATING:
             with _token(store, work_id, record["run_id"]):
-                if not Path(record.get("workspace", {}).get("path", "")).exists():
+                ws_path = (record.get("workspace") or {}).get("path") if isinstance(record.get("workspace"), dict) else None
+                # R11-03: no recorded path (or an empty one) is no workspace - never the current directory
+                if not ws_path or not Path(ws_path).is_dir():
                     _create_workspace(store, record, spec)
                 else:
                     _prepare(store, record, spec)
@@ -1224,6 +1290,7 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
             # one acknowledgement, one re-run: it is used up here, and a later interruption needs a new one
             record.setdefault("resumed_after_interruption", []).append(record.pop("resume_acknowledged"))
     else:
+        _branch_preflight(store, spec, resume_parked)  # R11-03: before the claim writes anything
         if spec.integrate is not None and _project_pointer(store, spec.integrate.gitlink) is None:
             # checked before anything is written: no claim is made for an integration the Project cannot name
             raise StopError(f"{spec.integrate.gitlink} is not a gitlink (a mode 160000 entry) at the Project's HEAD; "
@@ -1232,7 +1299,8 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
                   "work_id": work_id, "created_at": _now()}
         _become_owner(store, record)
         if resume_parked is not None:
-            record["resumed_from"] = {"run_id": resume_parked["run_id"], "ref": resume_parked["refs"]["parked"]}
+            record["resumed_from"] = {"run_id": resume_parked["run_id"], "ref": resume_parked["refs"]["parked"],
+                                      "branch": (resume_parked.get("workspace") or {}).get("branch")}
         previous = read_run(store, work_id)
         if previous is not None:
             record["previous_runs"] = previous.get("previous_runs", []) + [
