@@ -60,6 +60,9 @@ RUNS_DIR = ".workline/runtime/runs"
 JOURNAL_DIR = ".workline/runtime/commit-journal"
 SAVED_REF_PREFIX = "refs/workline/runs/"
 PARKED_REF_PREFIX = "refs/workline/parked/"
+#: R12-01: the proof that a run's Work branch was made by Workline itself - created in the same Git ref transaction as
+#: the branch (``git update-ref --stdin``: both refs or neither), pointing at the commit the branch was created at
+OWNED_REF_PREFIX = "refs/workline/owned/"
 BRANCH_PREFIX = "workline/run/"
 
 #: The one wait a parallel START adds: each of its short locked sections (claim, finish) retries the
@@ -576,27 +579,50 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
                                    "push_remote": spec.integrate.push_remote, "push_env": [list(e) for e in spec.integrate.push_env]},
                                "deps_store": None if spec.deps_store is None else str(spec.deps_store)}
     ws = record["workspace"]
+    ws.pop("branch_creating", None)  # an intention never proves ownership (R12-01); the owned ref does
+    own_start = ws.get("start_at") or ws["base_commit"]
+    owned = OWNED_REF_PREFIX + record["run_id"]
+    _save(store, record)  # where it will be, before it exists: an interrupted creation is found and finished
     existing = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").stdout.strip()
     if existing:
-        # R11-01: an existing branch is used only when it is provably this run's: the held run's own branch it
-        # continues (checked in the claim, recorded as inherited), or the branch this run's own interrupted creation
-        # made - at the very commit it was created at, and out in no worktree
-        own_start = ws.get("start_at") or ws["base_commit"]
-        if existing != own_start or ws.get("branch_owner") not in ("created", "inherited") \
-                or (ws.get("branch_owner") == "created" and not ws.get("branch_creating")) or _branch_out(repo, branch):
+        # R11-01 / R12-01: an existing branch is this run's only when Workline's own ref says so - this run's owned
+        # ref (made in one transaction with the branch) still at the branch's tip, or, for a held run continued, the
+        # previous run's owned ref, handed over to this run in one transaction - and the branch is out in no worktree
+        mine = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
+        previous = (record.get("resumed_from") or {}).get("run_id")
+        handed = _git(repo, "rev-parse", "--verify", "--quiet", OWNED_REF_PREFIX + previous).stdout.strip() \
+            if previous and ws.get("branch_owner") == "inherited" else ""
+        if _branch_out(repo, branch) or existing != own_start:
             raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and is not this "
                             "run's own; a run never takes another branch", code="run_branch_exists")
-    if ws.get("branch_owner") == "created":
-        ws["branch_creating"] = True
-    _save(store, record)  # where it will be, before it exists: an interrupted creation is found and finished
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    if existing:
-        _must(repo, "worktree", "add", str(path), branch)
+        if mine and mine == existing:
+            pass  # this run's own branch, made before it was interrupted
+        elif handed:
+            moved = _ref_transaction(repo, [f"verify refs/heads/{branch} {existing}",
+                                            f"create {owned} {existing}",
+                                            f"delete {OWNED_REF_PREFIX}{previous} {handed}"])
+            if not moved.ok:
+                raise StopError(f"the held branch {branch} could not be handed over to this run "
+                                f"({moved.stderr.decode('utf-8', 'replace').strip()[-200:]}); nothing was changed", code="run_branch_exists")
+        else:
+            raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}) and no Workline "
+                            "ref proves it is this run's; a run never takes another branch", code="run_branch_exists")
     else:
-        _must(repo, "worktree", "add", "-b", branch, str(path), start_at or ws["base_commit"])
-    ws.pop("branch_creating", None)
+        made = _ref_transaction(repo, [f"create refs/heads/{branch} {own_start}", f"create {owned} {own_start}"])
+        if not made.ok:
+            # someone made the branch (or the ref) first: neither ref was created by this transaction
+            raise StopError(f"the Work branch {branch} could not be created ({made.stderr.decode('utf-8', 'replace').strip()[-200:]}); nothing "
+                            "of anyone else's was taken", code="run_branch_exists")
+    ws["owned_ref"] = owned
     _save(store, record)
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    _must(repo, "worktree", "add", str(path), branch)
     _prepare(store, record, spec)
+
+
+def _ref_transaction(repo: Path, lines: list[str]) -> gitcmd.GitBytes:
+    """One Git ref transaction (``update-ref --stdin``): every line applies, or none does."""
+    return gitcmd.run_git_bytes(repo, "update-ref", "--stdin", input=("\n".join(lines) + "\n").encode("utf-8"))
 
 
 def _branch_out(repo: Path, branch: str) -> list[str]:
@@ -629,8 +655,10 @@ def _branch_preflight(store: ProjectStore, spec: WorkspaceSpec, previous: dict[s
     parked_ref = (previous or {}).get("refs", {}).get("parked")
     parked = _git(Path(old.get("repo") or repo), "rev-parse", "--verify", "--quiet", parked_ref).stdout.strip() \
         if parked_ref else ""
+    owned_before = _git(repo, "rev-parse", "--verify", "--quiet",
+                        OWNED_REF_PREFIX + str((previous or {}).get("run_id"))).stdout.strip()
     continuing = (previous is not None and previous.get("state") == PARKED
-                  and previous.get("integration", {}).get("state") == "held"
+                  and previous.get("integration", {}).get("state") == "held" and bool(owned_before)
                   and old.get("branch") == branch and old.get("branch_owner", "created") in ("created", "inherited")
                   and os.path.normcase(str(Path(old.get("repo", "")).resolve())) == os.path.normcase(str(repo))
                   and parked and existing == parked and not _branch_out(repo, branch))
@@ -1087,8 +1115,17 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
         _git(repo, "worktree", "prune")
         _drop_deps_users(record)
         if tip and (integrated or tip == ws["base_commit"]):
-            if ws.get("branch_owner", "created") in ("created", "inherited"):
-                _must(repo, "branch", "-D", ws["branch"])  # its commit stays on the saved ref (R11-01: only its own)
+            owned = ws.get("owned_ref") or OWNED_REF_PREFIX + record["run_id"]
+            proof = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
+            if proof and not _branch_out(repo, ws["branch"]):
+                # R12-01: deleted only with Workline's proof that it made it, in one transaction, at the tip just saved
+                gone = _ref_transaction(repo, [f"delete refs/heads/{ws['branch']} {tip}", f"delete {owned} {proof}"])
+                if not gone.ok:
+                    record.setdefault("cleanup_notes", []).append(
+                        f"branch {ws['branch']} kept: {gone.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+            else:
+                record.setdefault("cleanup_notes", []).append(
+                    f"branch {ws['branch']} kept: no Workline ref proves this run made it")
         final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
         _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
                                             "removed_top": sorted({r.split("/")[0] for r in removed})},
