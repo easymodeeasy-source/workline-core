@@ -1763,13 +1763,16 @@ def _index_lock(gitdir: Path, record: dict[str, Any] | None = None) -> Iterator[
     while Workline holds it no such command, from a terminal or a GUI, can change the checkout's branch, HEAD or
     index. The holder commits a new index by writing it into the lock file and renaming that over ``index``.
 
-    The lock carries a nonce, recorded in the run's checkout journal (``record``) before anything is written; a lock
-    left by a Workline process that died holding it (its nonce in the journal) is taken over by the recovery - any
-    other existing lock is someone else's and STOPs.
+    The lock carries a nonce (run, pid, host, a unique id), recorded in the run's checkout journal (``record``) before
+    anything is written, and it keeps that nonce until it is released: the new index is never written into the lock
+    (R7-F02-01) but completed as a private index file beside it and renamed over ``index`` while the lock still
+    stands. A lock found existing is taken over only when it holds exactly the journal's nonce and the process that
+    wrote it is not alive - a lock of any other Git process, or of a Workline process still running, STOPs.
     """
     lock = gitdir / "index.lock"
     journal = (record or {}).get("integration", {}).get("checkout_move") or {}
-    nonce = f"workline-run {(record or {}).get('run_id')} {new_ulid()}"
+    nonce = (f"workline-run {(record or {}).get('run_id')} pid {os.getpid()} host {socket.gethostname()} "
+             f"id {new_ulid()}")
     try:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError as exc:
@@ -1779,6 +1782,12 @@ def _index_lock(gitdir: Path, record: dict[str, Any] | None = None) -> Iterator[
             held = ""
         if not journal.get("lock_nonce") or held != journal["lock_nonce"]:
             raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
+                            code="run_checkout_busy") from exc
+        words = held.split()
+        owner_pid = int(words[3]) if len(words) > 5 and words[2] == "pid" and words[3].isdigit() else None
+        owner_host = words[5] if len(words) > 5 and words[4] == "host" else None
+        if owner_host == socket.gethostname() and owner_pid not in (None, os.getpid()) and pid_alive(owner_pid):
+            raise StopError(f"{lock} is held by Workline process {owner_pid}, which is still running; nothing is moved",
                             code="run_checkout_busy") from exc
         fd = None  # the lock a dead Workline run of this record left: taken over
         nonce = held
@@ -1986,12 +1995,10 @@ def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
                 raise changed(f"changed while it was being moved (now {after_symbolic or 'detached'} at {after_head[:12]}"
                               f"{'; ' + target + ' taken by ' + ', '.join(moved_away) if moved_away else ''})",
                               {"symbolic": after_symbolic, "head": after_head})
-            lock.write_bytes(private.read_bytes())
-            os.replace(lock, gitdir / "index")  # the last write: the index, committed through the lock
+            # the last write: the completed private index is renamed over ``index`` while the nonce-bearing lock
+            # still keeps every Git writer out; the lock is released only after the journal records it (R7-F02-01)
+            os.replace(private, gitdir / "index")
             integ["checkout_move"]["phase"] = "index"
-            integ.pop("checkout_move", None)
-            integ["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now(),
-                                           "branch": now_symbolic, "under": "index.lock"}
             _save(store, record)
         except BaseException:
             if integ.get("checkout_move") and integ["checkout_move"].get("phase") != "index":
@@ -2002,6 +2009,12 @@ def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
             raise
         finally:
             private.unlink(missing_ok=True)
+    # the lock is released (above); the completed move is closed in the journal last - a death before this leaves
+    # phase "index", which the next START reads as complete
+    integ.pop("checkout_move", None)
+    integ["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now(),
+                                   "branch": now_symbolic, "under": "index.lock"}
+    _save(store, record)
 
 
 def use_deps(ctx, identity: dict[str, Any], exclude: tuple[str, ...] = ()) -> Path:
