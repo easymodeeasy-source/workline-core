@@ -1157,7 +1157,7 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
         # what Git had at the release - never a proof that the branch is Workline's later on
         branch_now = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ws['branch']}").stdout.strip()
         if not branch_now and proof:
-            _git(repo, "update-ref", "-d", owned, proof)  # no branch left for it to prove: Workline's own ref goes
+            _must(repo, "update-ref", "-d", owned, proof)  # R15-01: a failure leaves the run cleanup_failed, ref kept
             proof = ""
         retained = {"exists": bool(branch_now), "branch": ws["branch"], "tip": branch_now or None,
                     "owned_ref": owned if proof else None, "saved_ref": record.get("refs", {}).get("saved")}

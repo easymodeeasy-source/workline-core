@@ -61,7 +61,7 @@ class ReviewR14Tests(WorklineTestCase):
     def human_in_the_window(self, act):
         """``act`` runs once, after the release removed the run's worktree and right before the branch would be
         deleted - r14's ``git branch -D`` (after its proof checks), or the first look at the branch after that."""
-        run_git = gitcmd.run_git
+        run_git = self.originals = gitcmd.run_git
         seen = {"pruned": False, "hit": 0}
 
         def git_(repo, *args, **kwargs):
@@ -161,6 +161,41 @@ class ReviewR14Tests(WorklineTestCase):
         self.assertEqual((self.ref(f"refs/heads/{BRANCH}"), self.refs(OWNED)), ("", []))
         self.assertEqual(self.ref(record["refs"]["saved"]), record["result_commit"])  # the result is kept
         self.assertFalse(Path(record["workspace"]["path"]).exists())
+
+    # R15-01: the owned ref cannot be removed (its ref is locked) - not RELEASED until it is ----------------------------
+    def test_r15_01_an_owned_ref_that_cannot_be_removed_keeps_the_run_unreleased(self) -> None:
+        (a,) = self.standalone("A")
+        git(self.store.root, "branch", "feature/human", "HEAD")  # a Human branch that must stay as it is
+        human_tip = self.ref("refs/heads/feature/human")
+        common = Path(git(self.store.root, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+        lock = {}
+
+        def human():
+            git(self.store.root, "update-ref", "-d", f"refs/heads/{BRANCH}")
+            run_id = par.read_run(self.store, a)["run_id"]
+            lock["path"] = common / "refs" / "workline" / "owned" / f"{run_id}.lock"
+            lock["path"].write_text("held", encoding="utf-8")  # someone holds the owned ref's lock
+
+        seen = self.human_in_the_window(human)
+        done = st.start(self.store, a, "single-work", self.writes, parallel=True, workspace=self.spec(BRANCH))
+        self.assertEqual(seen["hit"], 1, done.detail)
+        record = par.read_run(self.store, a)
+        owned = OWNED + record["run_id"]
+        self.assertEqual(record["state"], par.CLEANUP_FAILED)  # not declared released
+        self.assertNotEqual(self.ref(owned), "")  # the owned ref is kept
+        self.assertEqual(self.ref(record["refs"]["saved"]), record["result_commit"])  # and the result's saved ref
+        self.assertFalse(Path(record["workspace"]["path"]).exists())
+        # the lock released, the next release finishes it
+        lock["path"].unlink()
+        gitcmd.run_git = self.originals
+        released = par.release(self.store, a)
+        self.assertEqual(released["state"], par.RELEASED)
+        self.assertEqual(released["cleanup"]["retained_branch"],
+                         {"exists": False, "branch": BRANCH, "tip": None, "owned_ref": None,
+                          "saved_ref": record["refs"]["saved"]})
+        self.assertEqual((self.ref(f"refs/heads/{BRANCH}"), self.refs(OWNED)), ("", []))  # matches real Git
+        self.assertEqual(self.ref(record["refs"]["saved"]), record["result_commit"])
+        self.assertEqual(self.ref("refs/heads/feature/human"), human_tip)
 
     # a release cut short is finished by the next one ----------------------------------------------------------------
     def test_r14_death_during_the_release_is_finished_and_keeps_the_branch(self) -> None:
