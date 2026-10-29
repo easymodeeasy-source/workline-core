@@ -1153,14 +1153,14 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
         proof = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
         # R14-01 / R14-02: the release never deletes the Work branch. No Git operation both refuses a branch out in a
         # worktree and deletes only at an expected tip, and a proof checked before a deletion is not bound to it - so
-        # the branch is kept, as it is, and recorded; deleting it later is a separate, explicit step
+        # the branch is kept, as it is, and recorded; deleting it later is a separate, explicit step. The record says
+        # what Git had at the release - never a proof that the branch is Workline's later on
         branch_now = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ws['branch']}").stdout.strip()
-        retained = None
-        if branch_now:
-            retained = {"branch": ws["branch"], "tip": branch_now, "owned_ref": owned if proof else None,
-                        "saved_ref": record.get("refs", {}).get("saved")}
-        elif proof:
+        if not branch_now and proof:
             _git(repo, "update-ref", "-d", owned, proof)  # no branch left for it to prove: Workline's own ref goes
+            proof = ""
+        retained = {"exists": bool(branch_now), "branch": ws["branch"], "tip": branch_now or None,
+                    "owned_ref": owned if proof else None, "saved_ref": record.get("refs", {}).get("saved")}
         final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
         _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
                                             "removed_top": sorted({r.split("/")[0] for r in removed}),

@@ -71,7 +71,7 @@ class ReviewR12Tests(WorklineTestCase):
         # r15 (R14-01/02): the release keeps the Work branch, and records what it kept exactly as Git has it
         tip = self.ref(f"refs/heads/{branch}")
         self.assertEqual(record["cleanup"]["retained_branch"],
-                         {"branch": branch, "tip": tip, "owned_ref": OWNED + record["run_id"],
+                         {"exists": True, "branch": branch, "tip": tip, "owned_ref": OWNED + record["run_id"],
                           "saved_ref": record["refs"]["saved"]})
         self.assertEqual(self.ref(record["refs"]["saved"]), tip)
         self.assertEqual(self.owned_refs(), [OWNED + record["run_id"]])

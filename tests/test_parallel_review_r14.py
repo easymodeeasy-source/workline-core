@@ -147,6 +147,21 @@ class ReviewR14Tests(WorklineTestCase):
         self.assertEqual(self.ref(record["refs"]["saved"]), tip)
         self.assertEqual(self.refs(OWNED), [OWNED + record["run_id"]])
 
+    # the branch already gone at the release: recorded as gone, only Workline's own ref is removed --------------------
+    def test_r14_a_branch_gone_at_the_release_is_recorded_and_only_the_owned_ref_goes(self) -> None:
+        (a,) = self.standalone("A")
+        seen = self.human_in_the_window(lambda: git(self.store.root, "update-ref", "-d", f"refs/heads/{BRANCH}"))
+        done = st.start(self.store, a, "single-work", self.writes, parallel=True, workspace=self.spec(BRANCH))
+        self.assertEqual((done.status, seen["hit"]), ("completed", 1), done.detail)
+        record = par.read_run(self.store, a)
+        self.assertEqual(record["state"], par.RELEASED)
+        self.assertEqual(record["cleanup"]["retained_branch"],
+                         {"exists": False, "branch": BRANCH, "tip": None, "owned_ref": None,
+                          "saved_ref": record["refs"]["saved"]})
+        self.assertEqual((self.ref(f"refs/heads/{BRANCH}"), self.refs(OWNED)), ("", []))
+        self.assertEqual(self.ref(record["refs"]["saved"]), record["result_commit"])  # the result is kept
+        self.assertFalse(Path(record["workspace"]["path"]).exists())
+
     # a release cut short is finished by the next one ----------------------------------------------------------------
     def test_r14_death_during_the_release_is_finished_and_keeps_the_branch(self) -> None:
         (a,) = self.standalone("A")
