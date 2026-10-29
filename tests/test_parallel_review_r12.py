@@ -68,8 +68,13 @@ class ReviewR12Tests(WorklineTestCase):
     def assert_clean_finish(self, a: str, branch: str) -> None:
         record = par.read_run(self.store, a)
         self.assertEqual(record["state"], par.RELEASED)
-        self.assertEqual(self.ref(f"refs/heads/{branch}"), "")  # its own branch, deleted with its proof
-        self.assertEqual(self.owned_refs(), [])
+        # r15 (R14-01/02): the release keeps the Work branch, and records what it kept exactly as Git has it
+        tip = self.ref(f"refs/heads/{branch}")
+        self.assertEqual(record["cleanup"]["retained_branch"],
+                         {"branch": branch, "tip": tip, "owned_ref": OWNED + record["run_id"],
+                          "saved_ref": record["refs"]["saved"]})
+        self.assertEqual(self.ref(record["refs"]["saved"]), tip)
+        self.assertEqual(self.owned_refs(), [OWNED + record["run_id"]])
         self.assertEqual(len(self.worktrees()), 1)  # only the Project's own checkout
         self.assertEqual(self.lifecycle(a).count("work_started"), 1)
         self.assertEqual(git(self.store.root, "show", "HEAD~1:a.txt").replace("\r\n", "\n"), "A\n")
@@ -165,8 +170,9 @@ class ReviewR12Tests(WorklineTestCase):
         self.assertEqual(done.status, "completed", done.detail)
         second = par.read_run(self.store, a)
         self.assertEqual(second["workspace"]["branch_owner"], "inherited")
-        self.assertEqual(self.ref("refs/heads/feature/owned-work"), "")  # deleted with the handed-over proof
-        self.assertEqual(self.owned_refs(), [])
+        # kept (r15), with the proof handed over to the run that finished it
+        self.assertEqual(second["cleanup"]["retained_branch"]["tip"], self.ref("refs/heads/feature/owned-work"))
+        self.assertEqual(self.owned_refs(), [OWNED + second["run_id"]])
 
     def test_r12_01_a_held_branch_without_workline_proof_is_not_continued(self) -> None:
         (a,) = self.standalone("A")
@@ -200,9 +206,10 @@ class ReviewR12Tests(WorklineTestCase):
         self.assertEqual(done.status, "completed", done.detail)
         self.assertIsNotNone(original)
         record = par.read_run(self.store, a)
-        # r14 (R13-01): unproven is not a finished cleanup - kept, said so, and left to the Human
-        self.assertEqual((record["state"], record["cleanup"]["state"]), (par.CLEANUP_FAILED, "branch_unproven"))
+        # r15: the branch is never deleted; that no Workline ref proves it is recorded with it
+        self.assertEqual(record["state"], par.RELEASED)
         self.assertNotEqual(self.ref("refs/heads/feature/kept"), "")
+        self.assertIsNone(record["cleanup"]["retained_branch"]["owned_ref"])
         self.assertEqual(self.ref(record["refs"]["saved"]), self.ref("refs/heads/feature/kept"))
         self.assertEqual(len(self.worktrees()), 1)
 

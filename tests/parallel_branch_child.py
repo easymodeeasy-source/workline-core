@@ -6,7 +6,8 @@ its workspace.
   before_branch       right before the Work branch is made (the first branch-making git call, not run)
   after_branch        right after the call that made the Work branch returned
   after_worktree_add  right after ``git worktree add`` returned
-  after_branch_delete right after the release's ``git branch -D`` returned (before the owned ref is removed)
+  after_branch_delete right after the release's ``git branch -D`` returned (before the owned ref is removed; r14)
+  after_worktree_remove right after the release's ``git worktree remove`` returned
 """
 
 from __future__ import annotations
@@ -47,6 +48,8 @@ def main() -> None:
             if die == "after_worktree_add" and args[:2] == ("worktree", "add"):
                 os._exit(23)
             if die == "after_branch_delete" and args[:2] == ("branch", "-D"):
+                os._exit(23)
+            if die == "after_worktree_remove" and args[:2] == ("worktree", "remove"):
                 os._exit(23)
             return out
         return wrapped

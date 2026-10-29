@@ -1151,25 +1151,20 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
         _drop_deps_users(record)
         owned = ws.get("owned_ref") or OWNED_REF_PREFIX + record["run_id"]
         proof = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
-        if tip and (integrated or tip == ws["base_commit"]):
-            # R12-01 / R13-01: deleted only when Workline's owned ref and the branch's own reflog prove it is the very
-            # branch Workline made; anything less keeps the branch, and the release is not declared done
-            if not proof or not _made_by(repo, ws["branch"], ws.get("branch_origin") or record["run_id"]):
-                _set(store, record, CLEANUP_FAILED, next_actor="human", cleanup={
-                    "state": "branch_unproven", "blocked": [f"branch {ws['branch']} kept: nothing proves it is the one "
-                                                            "this run made (its commits are on the saved ref)"]})
-                return record
-            # R13-02: git branch -D, which refuses a branch out in any worktree - a ref update would not
-            gone = _git(repo, "branch", "-D", ws["branch"])
-            if not gone.ok:
-                _set(store, record, CLEANUP_FAILED, next_actor="human", cleanup={
-                    "state": "branch_in_use", "blocked": [f"branch {ws['branch']} kept: {gone.stderr.strip()[-200:]}"]})
-                return record
-        if proof and not _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ws['branch']}").stdout.strip():
-            _git(repo, "update-ref", "-d", owned, proof)  # the branch it proved is gone: the proof goes too
+        # R14-01 / R14-02: the release never deletes the Work branch. No Git operation both refuses a branch out in a
+        # worktree and deletes only at an expected tip, and a proof checked before a deletion is not bound to it - so
+        # the branch is kept, as it is, and recorded; deleting it later is a separate, explicit step
+        branch_now = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ws['branch']}").stdout.strip()
+        retained = None
+        if branch_now:
+            retained = {"branch": ws["branch"], "tip": branch_now, "owned_ref": owned if proof else None,
+                        "saved_ref": record.get("refs", {}).get("saved")}
+        elif proof:
+            _git(repo, "update-ref", "-d", owned, proof)  # no branch left for it to prove: Workline's own ref goes
         final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
         _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
-                                            "removed_top": sorted({r.split("/")[0] for r in removed})},
+                                            "removed_top": sorted({r.split("/")[0] for r in removed}),
+                                            "retained_branch": retained},
              next_actor=None if final == RELEASED else "integration")
         return record
     except (StopError, OSError) as exc:

@@ -12,7 +12,6 @@ import sys
 
 from helpers import WorklineTestCase, git
 import test_parallel_repair as repair
-from workline import gitcmd
 from workline import parallel as par
 from workline import start as st
 from workline.errors import StopError
@@ -94,81 +93,13 @@ class ReviewR13Tests(WorklineTestCase):
         git(self.store.root, "update-ref", "-d", "refs/heads/feature/approved")
         done = st.start(self.store, a, "single-work", self.writes, parallel=True, workspace=self.spec(None))
         self.assertEqual(done.status, "completed", done.detail)
-        self.assertEqual(par.read_run(self.store, a)["state"], par.RELEASED)
-        self.assertEqual((self.ref("refs/heads/feature/approved"), self.refs(OWNED)), ("", []))
-
-    # R13-02 ------------------------------------------------------------------------------------------------------
-    def checkout_in_the_window(self, branch: str, other: Path):
-        """The Human checks ``branch`` out in a worktree of their own right before Workline deletes the branch."""
-        run_git, run_git_bytes = self.originals = gitcmd.run_git, gitcmd.run_git_bytes
-        hit = []
-
-        def human():
-            if not hit:
-                hit.append(1)
-                subprocess.run(["git", "-C", str(self.store.root), "worktree", "add", str(other), branch],
-                               capture_output=True, check=True)
-                (other / "human.txt").write_text("the Human's own, uncommitted\n", encoding="utf-8")
-
-        def git_(repo, *args, **kwargs):
-            if args[:2] == ("branch", "-D") and args[-1] == branch:
-                human()
-            return run_git(repo, *args, **kwargs)
-
-        def git_bytes(repo, *args, **kwargs):
-            if args[:1] == ("update-ref",) and "--stdin" in args and f"delete refs/heads/{branch} ".encode() in (kwargs.get("input") or b""):
-                human()
-            return run_git_bytes(repo, *args, **kwargs)
-
-        gitcmd.run_git, gitcmd.run_git_bytes = git_, git_bytes
-        self.addCleanup(setattr, gitcmd, "run_git", run_git)
-        self.addCleanup(setattr, gitcmd, "run_git_bytes", run_git_bytes)
-        return hit
-
-    def test_r13_02_a_branch_the_human_checks_out_during_the_release_is_never_deleted(self) -> None:
-        (a,) = self.standalone("A")
-        other = self.tmp / "human-wt"
-        hit = self.checkout_in_the_window("feature/approved", other)
-        done = st.start(self.store, a, "single-work", self.writes, parallel=True, workspace=self.spec("feature/approved"))
-        self.assertEqual(hit, [1])
-        self.assertEqual(done.status, "completed", done.detail)
         record = par.read_run(self.store, a)
-        tip = self.ref("refs/heads/feature/approved")
-        self.assertNotEqual(tip, "")  # the Human's checked-out branch is still there
-        self.assertEqual(git(other, "symbolic-ref", "HEAD").strip(), "refs/heads/feature/approved")
-        self.assertEqual(git(other, "rev-parse", "HEAD").strip(), tip)
-        self.assertEqual(self.run_git("diff", "--cached", "--name-only", cwd=other).stdout, "")  # index matches HEAD
-        self.assertEqual(self.run_git("status", "--porcelain", cwd=other).stdout.strip(), "?? human.txt")
-        self.assertEqual((other / "human.txt").read_text(encoding="utf-8"), "the Human's own, uncommitted\n")
-        # the run: not declared clean; its result and its proof kept
-        self.assertEqual((record["state"], record["cleanup"]["state"]), (par.CLEANUP_FAILED, "branch_in_use"))
-        self.assertEqual(self.ref(record["refs"]["saved"]), tip)
+        self.assertEqual(record["state"], par.RELEASED)
+        # its own branch, made again, kept at the release (r15) and recorded with its proof
+        self.assertEqual(record["cleanup"]["retained_branch"]["tip"], self.ref("refs/heads/feature/approved"))
         self.assertEqual(self.refs(OWNED), [OWNED + record["run_id"]])
-        self.assertEqual(git(self.store.root, "show", "HEAD~1:a.txt").replace("\r\n", "\n"), "A\n")
-        self.assertEqual(self.lifecycle(a)[-1], "work_completed")
-        # once the Human is done with it, the release finishes and leaves nothing of Workline's
-        (other / "human.txt").unlink()
-        git(self.store.root, "worktree", "remove", str(other))
-        gitcmd.run_git, gitcmd.run_git_bytes = self.originals
-        released = par.release(self.store, a)
-        self.assertEqual(released["state"], par.RELEASED)
-        self.assertEqual((self.ref("refs/heads/feature/approved"), self.refs(OWNED)), ("", []))
-        self.assertEqual(self.refs("refs/workline/runs/"), [record["refs"]["saved"]])
-        self.assertEqual(self.refs("refs/workline/parked/"), [])
-        self.assertEqual(len(self.worktrees()), 1)
 
-    def test_r13_02_death_between_branch_delete_and_proof_removal_is_finished(self) -> None:
-        (a,) = self.standalone("A")
-        record = self.die(a, "after_branch_delete", "feature/approved")
-        self.assertEqual(record["state"], par.RELEASING)
-        self.assertEqual(self.ref("refs/heads/feature/approved"), "")
-        self.assertEqual(self.refs(OWNED), [OWNED + record["run_id"]])  # the proof outlived the branch
-        released = par.release(self.store, a)
-        self.assertEqual(released["state"], par.RELEASED)
-        self.assertEqual(self.refs(OWNED), [])
-        self.assertEqual(self.refs("refs/workline/runs/"), [record["refs"]["saved"]])
-        self.assertEqual(len(self.worktrees()), 1)
-        self.assertEqual(git(self.store.root, "show", "HEAD~1:a.txt").replace("\r\n", "\n"), "A\n")
+    # R13-02 (the release and a Human checkout) is covered by test_parallel_review_r14: no release deletes a branch
 
 
 for _name in _HELPERS:

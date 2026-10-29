@@ -93,7 +93,10 @@ class ParallelStartTests(WorklineTestCase):
         self.assertEqual(record["state"], par.RELEASED, record.get("cleanup"))
         ws = record["workspace"]
         self.assertFalse(Path(ws["path"]).exists())
-        self.assertNotIn(ws["branch"], git(self.store.root, "branch", "--list"))
+        # r15 (R14-01/02): the Work branch is kept, never deleted by the release, and recorded as Git has it
+        kept = record["cleanup"]["retained_branch"]
+        self.assertEqual(kept["branch"], ws["branch"])
+        self.assertEqual(git(self.store.root, "rev-parse", f"refs/heads/{ws['branch']}").strip(), kept["tip"])
         self.assertEqual(git(self.store.root, "rev-parse", record["refs"]["saved"]).strip(), record["result_commit"])
         return record
 
