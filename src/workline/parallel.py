@@ -1617,6 +1617,18 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
         if on != f"refs/heads/{target}":
             _must(repo, "update-ref", f"refs/heads/{target}", result,
                   *(([old]) if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{target}").ok else ["0" * 40]))
+            # F-02 (r5): a worktree that took the target branch out between the check above and this move holds it at
+            # the old commit (its index still is that tree): the move is undone under it and nothing goes further.
+            # A worktree that took it out after the move holds the new commit and is consistent; it is left alone.
+            stale = [w for w in _target_holders(repo, target, checkout)
+                     if _git(Path(w), "--no-optional-locks", "diff", "--cached", "--quiet", "HEAD").returncode != 0]
+            if stale:
+                _git(repo, "update-ref", f"refs/heads/{target}", old, result)
+                record["integration"]["target_taken"] = {"worktrees": stale, "undone": [result, old], "at": _now()}
+                _save(store, record)
+                raise StopError(f"{target} was taken out by another worktree ({', '.join(stale)}) while it was moved; "
+                                "the move is undone and the result kept, the next START checks again",
+                                code="run_checkout_changed")
         done["repository"] = {"branch": target, "from": old, "to": result, "at": _now(),
                               "with_checkout": on == f"refs/heads/{target}"}
         _set(store, record, record["state"], integration=record["integration"])
@@ -1648,49 +1660,141 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
     return None
 
 
+@contextmanager
+def _index_lock(gitdir: Path) -> Iterator[Path]:
+    """Hold the checkout's own ``index.lock`` the way Git does (exclusive create), released by removing it.
+
+    Every Git command that changes the index - ``checkout`` / ``switch`` of a branch, ``add``, ``commit``, ``reset``,
+    ``merge``, ``read-tree`` - takes this same lock first and refuses while it exists ("index.lock: File exists"), so
+    while Workline holds it no such command, from a terminal or a GUI, can change the checkout's branch, HEAD or
+    index. The holder commits a new index by writing it into the lock file and renaming that over ``index``.
+    """
+    lock = gitdir / "index.lock"
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError as exc:
+        raise StopError(f"{lock} exists: another Git operation is running in the checkout; nothing is moved",
+                        code="run_checkout_busy") from exc
+    os.close(fd)
+    try:
+        yield lock
+    finally:
+        try:
+            lock.unlink()
+        except FileNotFoundError:
+            pass  # committed: renamed over the index
+
+
+def _target_holders(repo: Path, target: str, checkout: Path) -> list[str]:
+    """The worktrees of ``repo`` other than ``checkout`` that have ``target`` out."""
+    mine, current, found = os.path.normcase(str(Path(checkout).resolve())), None, []
+    for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):]
+        elif line == f"branch refs/heads/{target}" and current is not None \
+                and os.path.normcase(str(Path(current).resolve())) != mine:
+            found.append(current)
+    return found
+
+
 def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
     """The completion's own write: the gitlink checkout takes the result (after the remote was reached).
 
-    F-02: the checkout is re-read here and must still be exactly what the integration check saw (``checkout_seen``:
-    the branch HEAD names - only the target branch or none - and the commit). No branch is ever moved through "the
-    branch that happens to be checked out now": the target branch is updated by its full name with compare-and-swap
-    on the commit seen, a detached HEAD by compare-and-swap without dereferencing, and the working tree follows by a
-    two-tree ``read-tree -m -u`` (which refuses local changes it would overwrite). Any difference STOPs with nothing
-    moved; the run stays ``executed`` and the next parallel START checks again from the start.
+    F-02 (r5 remaining race): everything from the last look at the checkout to the new index runs while Workline
+    holds the checkout's ``index.lock`` (:func:`_index_lock`), so no index-changing Git command of the Human can
+    interleave. Inside it, in this order:
+
+    1. the checkout must still be what the integration check saw (``checkout_seen``: branch HEAD names - the target
+       or none - and commit), clean, with no other worktree holding the target; otherwise STOP, nothing written;
+    2. the working tree is moved by ``read-tree -m -u`` on a private copy of the index (``GIT_INDEX_FILE``), which
+       refuses before writing anything a local change or an untracked file would lose;
+    3. the ref is moved by compare-and-swap (the target branch by its full name, or a detached HEAD without
+       dereferencing);
+    4. HEAD's branch, the commit and the worktrees are checked again; a difference undoes 3 and 2;
+    5. the new index is committed by renaming it over ``index`` through the held lock.
+
+    A failure anywhere before 5 leaves the branch, HEAD and index as they were and the working tree put back (a file
+    the Human edited in between is never overwritten: read-tree checks it against the index). The run stays
+    ``executed`` with its result commit, and the next parallel START checks again without running the executor.
+    Not covered (no Git lock exists for them): an editor writing a tracked file in the instant between read-tree's
+    own check and its write, the same window ``git checkout`` itself has; plumbing that rewrites HEAD without the
+    index (``git symbolic-ref``), which step 4 detects and undoes.
     """
     ws = record["workspace"]
     spec = ws["integrate"]
     checkout, result, target = store.root / spec["gitlink"], record["result_commit"], spec["target_branch"]
     seen = record["integration"].get("checkout_seen") or {}
-    now_symbolic = _git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip() or None
-    now_head = _must(checkout, "rev-parse", "HEAD")
-    if now_head == result and now_symbolic == seen.get("symbolic"):
-        record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now()}
+    gitdir = Path(_must(checkout, "rev-parse", "--absolute-git-dir"))
+
+    def changed(detail: str, now: dict[str, Any] | None = None) -> StopError:
+        record["integration"]["checkout_changed"] = {"seen": seen, "now": now, "detail": detail, "at": _now()}
         _save(store, record)
-        return
-    if (now_symbolic, now_head) != (seen.get("symbolic"), seen.get("head")) \
-            or now_symbolic not in (None, f"refs/heads/{target}"):
-        record["integration"]["checkout_changed"] = {"seen": seen, "now": {"symbolic": now_symbolic, "head": now_head},
-                                                     "at": _now()}
-        _save(store, record)
-        raise StopError(f"the checkout {spec['gitlink']} changed after the integration check (it was "
-                        f"{seen.get('symbolic') or 'detached'} at {str(seen.get('head'))[:12]}, it is "
-                        f"{now_symbolic or 'detached'} at {now_head[:12]}); nothing is moved under it",
-                        code="run_checkout_changed")
-    if _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip():
-        raise StopError(f"the checkout {spec['gitlink']} has uncommitted changes; nothing is moved under it",
-                        code="run_checkout_changed")
-    if now_symbolic is not None:
-        _must(checkout, "update-ref", f"refs/heads/{target}", result, now_head)
-    else:
-        _must(checkout, "update-ref", "--no-deref", "HEAD", result, now_head)
-    _must(checkout, "read-tree", "-m", "-u", now_head, result)
-    after = (_git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip() or None, _must(checkout, "rev-parse", "HEAD"))
-    if after != (now_symbolic, result):
-        raise StopError(f"the checkout {spec['gitlink']} is {after[0] or 'detached'} at {after[1][:12]} after the move, "
-                        f"not {now_symbolic or 'detached'} at {result[:12]}", code="run_checkout_changed")
+        return StopError(f"the checkout {spec['gitlink']} {detail}; nothing is moved under it",
+                         code="run_checkout_changed")
+
+    def head_state() -> tuple[str | None, str]:
+        return (_git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip() or None,
+                _must(checkout, "rev-parse", "HEAD"))
+
+    def holders() -> list[str]:
+        return _target_holders(checkout, target, checkout) if now_symbolic is not None else []
+
+    with _index_lock(gitdir) as lock:
+        # 1 --------------------------------------------------------------------------------------------------
+        now_symbolic, now_head = head_state()
+        now = {"symbolic": now_symbolic, "head": now_head}
+        if now_head == result and now_symbolic == seen.get("symbolic"):
+            record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now()}
+            _save(store, record)
+            return
+        if (now_symbolic, now_head) != (seen.get("symbolic"), seen.get("head")) \
+                or now_symbolic not in (None, f"refs/heads/{target}"):
+            raise changed(f"changed after the integration check (it was {seen.get('symbolic') or 'detached'} at "
+                          f"{str(seen.get('head'))[:12]}, it is {now_symbolic or 'detached'} at {now_head[:12]})", now)
+        if _git(checkout, "--no-optional-locks", "status", "--porcelain", "--untracked-files=no").stdout.strip():
+            raise changed("has uncommitted changes", now)
+        if holders():
+            raise changed(f"has {target} out in another worktree ({', '.join(holders())})", now)
+        # 2 --------------------------------------------------------------------------------------------------
+        private = gitdir / f"workline-index-{record['run_id']}"
+        private.write_bytes((gitdir / "index").read_bytes())
+        env = dict(os.environ, GIT_INDEX_FILE=str(private))
+        try:
+            moved = gitcmd.run_git(checkout, "read-tree", "-m", "-u", now_head, result, check=False, env=env)
+            if not moved.ok:
+                raise changed(f"cannot take the result without overwriting local work ({moved.stderr.strip()[-300:]})",
+                              now)
+            # 3 ----------------------------------------------------------------------------------------------
+            ref = (["update-ref", f"refs/heads/{target}", result, now_head] if now_symbolic is not None
+                   else ["update-ref", "--no-deref", "HEAD", result, now_head])
+            try:
+                swapped = gitcmd.run_git(checkout, *ref, check=False)
+                after_symbolic, after_head = head_state()
+                taken = holders()
+                if not swapped.ok or (after_symbolic, after_head) != (now_symbolic, result) or taken:
+                    # 4: undo the ref (only if it is still ours to undo), then the working tree below
+                    if swapped.ok:
+                        back = (["update-ref", f"refs/heads/{target}", now_head, result] if now_symbolic is not None
+                                else ["update-ref", "--no-deref", "HEAD", now_head, result])
+                        gitcmd.run_git(checkout, *back, check=False)
+                    raise changed("changed while it was being moved (ref "
+                                  f"{'refused: ' + swapped.stderr.strip()[-200:] if not swapped.ok else 'moved and put back'}"
+                                  f"; now {after_symbolic or 'detached'} at {after_head[:12]}"
+                                  f"{'; ' + target + ' taken by ' + ', '.join(taken) if taken else ''})",
+                                  {"symbolic": after_symbolic, "head": after_head})
+            except BaseException:
+                restored = gitcmd.run_git(checkout, "read-tree", "-m", "-u", result, now_head, check=False, env=env)
+                if not restored.ok:
+                    record["integration"]["checkout_restore_failed"] = restored.stderr.strip()[-400:]
+                    _save(store, record)
+                raise
+            # 5 ----------------------------------------------------------------------------------------------
+            lock.write_bytes(private.read_bytes())
+            os.replace(lock, gitdir / "index")
+        finally:
+            private.unlink(missing_ok=True)
     record["integration"]["stages"]["checkout"] = {"path": spec["gitlink"], "head": result, "at": _now(),
-                                                   "branch": now_symbolic}
+                                                   "branch": now_symbolic, "under": "index.lock"}
     _save(store, record)
 
 
