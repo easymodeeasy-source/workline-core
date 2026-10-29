@@ -488,6 +488,10 @@ class WorkspaceSpec:
     #: before the executor runs (e.g. YGO naming the Work for its fork guard in the worktree's git dir). Workline
     #: knows nothing of what it does; a failure stops the run before its executor, and it is called again on resume.
     prepare: Callable[[Path, dict], None] | None = None
+    #: The Work branch's exact name, when the Project decides it before the START (the YGO Solver fork guard accepts
+    #: only a branch the Work's own record names). It must start with ``branch_prefix`` and must not exist yet - except
+    #: when a held run's kept work is resumed on that same branch. None: Workline names it (prefix, Work, run).
+    branch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -546,7 +550,15 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
     repo = Path(spec.repo or store.root).resolve()
     base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
     path = (base_root / record["run_id"]).resolve()
-    branch = f"{spec.branch_prefix}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
+    branch = spec.branch or f"{spec.branch_prefix}{record['work_id'].lower()}-{record['run_id'][-8:].lower()}"
+    if spec.branch is not None and (not spec.branch.startswith(spec.branch_prefix)
+                                    or _git(repo, "check-ref-format", f"refs/heads/{spec.branch}").returncode != 0):
+        raise ValidationError(f"the Work branch {spec.branch!r} is not a valid {spec.branch_prefix}... branch name",
+                              code="run_branch_name")
+    existing = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").stdout.strip()
+    if existing and not (spec.branch is not None and start_at is not None and existing == start_at):
+        raise StopError(f"the Work branch {branch} already exists in {repo.name} ({existing[:12]}); a run never reuses "
+                        "another branch", code="run_branch_exists")
     if base is None and spec.integrate is not None:
         # an integrated Work starts from what the Project names (its gitlink at HEAD), never from whatever the
         # checkout has out: a checkout left on other commits must not carry them into the integration
@@ -564,7 +576,10 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
                            "deps_store": None if spec.deps_store is None else str(spec.deps_store)}
     _save(store, record)  # where it will be, before it exists: an interrupted creation is found and cleaned
     base_root.mkdir(parents=True, exist_ok=True)
-    _must(repo, "worktree", "add", "-b", branch, str(path), start_at or base)
+    if existing:
+        _must(repo, "worktree", "add", str(path), branch)  # the held run's own branch, at its kept work
+    else:
+        _must(repo, "worktree", "add", "-b", branch, str(path), start_at or base)
     _prepare(store, record, spec)
 
 
