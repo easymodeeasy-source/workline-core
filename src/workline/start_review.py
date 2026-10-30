@@ -4259,20 +4259,21 @@ def _integration_require_settled_context(store: ProjectStore, chain: Any, nothin
                                      REASON_INTEGRATION_CONTEXT_CHANGED)
 
 
-def _integration_current_problems(session: "_Session", run: IntegrationRun) -> list[str]:
+def _integration_current_problems(session: "_Session", run: IntegrationRun, *, context: bool = True) -> list[str]:
     """Why the frozen Candidate is no longer current (§32.30); empty when it is.
 
     The Run's Review Context still re-derives (§37.21), HEAD is on the
     Candidate's branch and descends from its base, every commit since changed
     Review records only, the committed structure at HEAD and the working
     structure (less START's own opening) are still the Candidate's, and the
-    integration still carries its marker.
+    integration still carries its marker. ``context=False`` leaves the Context out: the adjudication's branch is
+    derived from the structural currency only, the Context having its own gate (§37.21 F1).
     """
     from . import phase_integration as pi
     from . import start_integration_review as sir
     from .ops import _own_effects_free_view
 
-    context = _integration_context_problems(session, run)
+    context = _integration_context_problems(session, run) if context else []
     store, mutation = session.store, session.mutation
     base = run.candidate["base"]
     git = hermetic_module.enter(store)
@@ -4611,7 +4612,9 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
     try:
         outcome = returned.phase_outcome if type(returned.phase_outcome) is ri.PhaseOutcome \
             else ri.PhaseOutcome.from_record(returned.phase_outcome)
-        disposition = _integration_disposition(run, normalized, outcome, _integration_current_problems(session, run))
+        # the structural currency of §32.22 step 4 only: a stale Context is never a branch input (§37.21 F1)
+        disposition = _integration_disposition(run, normalized, outcome,
+                                               _integration_current_problems(session, run, context=False))
     except ValidationError as exc:
         raise p4.stop(p4.CODE_ADJUDICATION_INVALID,
                       f"the Phase Integration adjudication is not valid: {exc}; nothing is settled") from exc
@@ -4654,6 +4657,7 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
     # §28.8 / §28.12 / §28.5, ruling OQ-C: the Finding summaries, the relations and - for HUMAN_WAIT and every
     # G4-terminal disposition - the Run summary, in this same G4
     extra += p4.g4_history(adjudication, gate_four, drafts, relation_ids, references, fix_works=fix_works).extra()
+    _integration_require_context(session, run, "settled")  # once more, immediately before G4 is written
     _integration_generation(session, run, 4, p4.TRANSITION_SETTLE, gate_four, extra)
     history.require_history_ready(ReviewStore(store), run.review_run_id, history.BOUNDARY_FINDINGS,
                                   history_contract=history.HISTORY_CONTRACT)

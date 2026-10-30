@@ -188,6 +188,58 @@ class ContextCurrencyTests(IntegrationRunCase):
                 self.assertEqual(works, set(ProjectView.load(store).works), "no Work is registered")
                 self.assertEqual([], [entry for entry in log if entry[1] is not None], "no repair plan is asked")
 
+    def test_a_change_after_the_first_g4_gate_settles_no_branch_either(self) -> None:
+        """F1 (Codex r2 HIGH): changed after the adjudicator's answer passed the first gate - while the branch is
+        derived - the branch is derived from the structural currency only and the gate immediately before G4
+        refuses; no branch, HUMAN_WAIT included, is settled over the old Context."""
+        for name, claims, kind in (("ready", (), None), ("human", (claim("human"),), None),
+                                   ("repair", (claim("problem"),), None),
+                                   ("structure", (), ri.HUMAN_CONFIRMATION_REQUIRED)):
+            with self.subTest(branch=name):
+                changed = loader_changed()
+                real = sr._integration_disposition
+
+                def disposition(*args: Any, **kwargs: Any) -> str:
+                    changed.__enter__()
+                    return real(*args, **kwargs)
+
+                store, _, ids = self.marked_project(f"late-{name}")
+                try:
+                    with mock.patch.object(sr, "_integration_disposition", disposition), \
+                            self.assertRaises(ReconcileRequired) as raised:
+                        self.integrate(store, ids["integration"], phase_review(Discovery(*claims),
+                                                                               adjudicator=Adjudicator(kind)),
+                                       executor=repairing_executor(store))
+                finally:
+                    changed.__exit__(None, None, None)
+                self.assertEqual(sr.REASON_INTEGRATION_CONTEXT_CHANGED, raised.exception.reason)
+                chain = self.one_run(store, ids["integration"])
+                self.assertEqual(3, chain.latest.generation)
+                self.assertFalse(ReviewStore(store).adjudication_exists(chain.review_run_id))
+
+    def test_the_branch_is_derived_without_the_context(self) -> None:
+        """The adjudication's branch never reads the Context: ``_integration_disposition`` gets the structural
+        currency only, so a Context problem can never turn into a step-4 refusal or reorder §32.22."""
+        store, _, ids = self.marked_project("structural-only")
+        stale: list[str] = []
+        seen: list[list[str]] = []
+        real = sr._integration_disposition
+
+        class Staling(Adjudicator):
+            def __call__(self, task: Any) -> Any:
+                stale.append("the Review Context no longer re-derives")  # reported from here on, gates disabled
+                return super().__call__(task)
+
+        def disposition(run: Any, normalized: Any, outcome: Any, current: list[str]) -> str:
+            seen.append(list(current))
+            return real(run, normalized, outcome, current)
+
+        with mock.patch.object(sr, "_integration_context_problems", lambda session, run: list(stale)), \
+                mock.patch.object(sr, "_integration_require_context"), \
+                mock.patch.object(sr, "_integration_disposition", disposition), self.assertRaises(StopError):
+            self.integrate(store, ids["integration"], phase_review(adjudicator=Staling()))
+        self.assertEqual([[]], seen, "the branch input holds no Context problem")
+
     def test_a_g4_settled_run_begins_no_follow_up_after_its_context_changed(self) -> None:
         """F2 (CP F2 i): a Run settled at G4 under the old Context is not followed up after the change - no successor
         Run is reserved for a HUMAN_WAIT (even with a Human decision and its evidence), no confirmation is
