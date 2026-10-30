@@ -102,9 +102,11 @@ class ReviewF1Tests(WorklineTestCase):
         done = st.start(self.store, a, "single-work", self.writes(), parallel=True, workspace=self.worktree_spec())
         self.assertEqual((done.status, fired), ("completed", [1]), done.detail)
         record = par.read_run(self.store, a)
-        # the run's worktree no longer matches its branch, so the release may stop (cleanup_failed) - but whatever it
-        # does, the result commit is kept before anything else
-        self.assertIn(record["state"], (par.RELEASED, par.CLEANUP_FAILED))
+        # the branch is not what the release checks (it is kept, never deleted): the run's worktree is. Here it no
+        # longer matches its HEAD (the branch it names changed under it), so the worktree is not removed and the release
+        # stops as cleanup_failed (blocked) - with the result commit already kept on the saved ref
+        self.assertEqual((record["state"], record["cleanup"]["state"]), (par.CLEANUP_FAILED, "blocked"))
+        self.assertTrue(Path(record["workspace"]["path"]).is_dir())
         return record
 
     def test_f02_the_saved_ref_is_the_result_commit_when_the_branch_is_gone(self) -> None:
