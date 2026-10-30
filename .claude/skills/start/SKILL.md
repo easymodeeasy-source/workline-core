@@ -138,7 +138,7 @@ state fieldをWork本体へ保存しない。
 - target原則維持
 - lifecycle eventなし
 - ad hoc質問のためhuman_confirmation Workを作らない
-- START invocationはProject execution lockを解放して戻り、START mutationはpendingのまま残る（並行STARTでは、question waitをrun recordの `question_wait` で持つ）
+- START invocationはProject execution lockを解放して戻り、START mutationはpendingのまま残る（並行STARTでは、claimのmutationは完了しており、question waitはrun recordの `question_wait` で持つ）
 - 再開は新しいSTART invocationがlockを取得してからpending mutationをresumeする
 
 一時的に別Workへ移る:

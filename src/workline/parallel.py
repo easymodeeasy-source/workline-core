@@ -426,6 +426,18 @@ def require_run_free(store: ProjectStore, work_id: str) -> None:
     )
 
 
+def run_holds(store: ProjectStore, work_id: str) -> str | None:
+    """PARSTARTF2 N-09: the run id of a parallel run that holds ``work_id`` (and is not this thread's own claim or
+    finish), else None - read only, so an outer continuation can stop before it would run that Work."""
+    try:
+        record = read_run(store, work_id)
+    except StopError:
+        return "unreadable"
+    if record is None or record.get("state") not in _HOLDING or _token_here(store, work_id) == record.get("run_id"):
+        return None
+    return record.get("run_id") or "unknown"
+
+
 def detach_allowed(store: ProjectStore, work_id: str) -> bool:
     """Whether ``start.Detach`` may end this START: only inside the claim or finish of the parallel run that owns
     ``work_id``, made by its owner. Anywhere else a returned Detach is an unknown outcome."""
@@ -541,8 +553,9 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
         base_root = Path(spec.root) if spec.root else store.root.parent / f"{store.root.name}.workline-runs"
         path = (base_root / record["run_id"]).resolve()
         head = gitcmd.head_commit(store.root)
+        inside = _inside(store.root, base_root)
         record["workspace"] = {"kind": "in_place", "snapshot": True, "path": str(path), "repo": str(store.root),
-                               "base_commit": head, "folder": _folder_state(store)}
+                               "base_commit": head, "folder": _folder_state(store, inside), "folder_exclude": inside}
         _save(store, record)  # where it will be, before it exists
         base_root.mkdir(parents=True, exist_ok=True)
         _must(store.root, "worktree", "add", "--detach", str(path), head)
@@ -697,7 +710,8 @@ def _drop_worktree_admin(repo: Path, path: Path) -> None:
             pointed = (admin / "gitdir").read_text(encoding="utf-8").strip()
         except OSError:
             continue
-        if os.path.normcase(str(Path(pointed).resolve())) == mine and not Path(path).exists():
+        target = Path(pointed) if Path(pointed).is_absolute() else admin / pointed  # PARSTARTF2 N-08
+        if os.path.normcase(str(target.resolve())) == mine and not Path(path).exists():
             shutil.rmtree(admin)
 
 
@@ -789,6 +803,15 @@ def _snapshot_overlay(project: Path, snapshot: Path) -> None:
             os.chmod(item, stat.S_IREAD)
 
 
+def _inside(project: Path, folder: Path) -> str | None:
+    """``folder`` relative to ``project`` (forward slashes) when it lies inside it, else None."""
+    try:
+        rel = Path(folder).resolve().relative_to(Path(project).resolve())
+    except ValueError:
+        return None
+    return rel.as_posix() if str(rel) != "." else None
+
+
 def _remove_snapshot(record: dict[str, Any]) -> list[str]:
     """Remove an in-place run's own snapshot (Workline's copy, never the Project); what the run added there is listed."""
     import shutil
@@ -809,12 +832,15 @@ def _remove_snapshot(record: dict[str, Any]) -> list[str]:
     return added
 
 
-def _folder_state(store: ProjectStore) -> dict[str, str]:
+def _folder_state(store: ProjectStore, exclude: str | None = None) -> dict[str, str]:
     """What the Project folder holds apart from HEAD (runtime aside): path -> its exact content identity. Ignored files
-    are included (PARSTARTF1 F-04) by their size and modification time, not their bytes - a build tree is large, and a
-    write is what is detected."""
+    are included (PARSTARTF1 F-04) by their presence only (PARSTARTF2 N-02, CP choice C): one created or deleted is
+    detected, one that existed at the claim and was only rewritten (a Human's build, a cache) is not - so every stop it
+    makes is cleared by removing what was created, or putting back what was deleted. ``exclude`` is the runs folder
+    when it lies inside the Project (N-07)."""
+    spec = ["--", ".", ":(exclude).workline/runtime"] + ([f":(exclude){exclude}"] if exclude else [])
     listed = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored", "--no-renames",
-                  "--", ".", ":(exclude).workline/runtime")
+                  *spec)
     if not listed.ok:
         raise StopError(f"the Project folder's state cannot be read ({listed.stderr.strip()[-200:]})",
                         code="run_git_unknown")
@@ -823,12 +849,10 @@ def _folder_state(store: ProjectStore) -> dict[str, str]:
         if len(entry) <= 3:
             continue
         rel, path = entry[3:], store.root / entry[3:]
+        if exclude and (rel.rstrip("/") == exclude or rel.startswith(exclude.rstrip("/") + "/")):
+            continue  # N-07: Git may name the runs folder (a nested worktree) despite the pathspec
         if entry[:2] == "!!":
-            try:
-                found = path.lstat()
-                state[rel] = f"stat:{found.st_size}:{found.st_mtime_ns}"
-            except OSError:
-                state[rel] = "absent"
+            state[rel] = "present" if os.path.lexists(path) else "absent"
         else:
             state[rel] = _identity(path) or "absent"
     return state
@@ -926,7 +950,7 @@ def _project_written(store: ProjectStore, record: dict[str, Any]) -> list[str]:
     found = canonical + [f"index:{p}" for p in index] + _unproven_commits(store, record)
     ws = record.get("workspace") or {}
     if ws.get("kind") == "in_place" and "folder" in ws:
-        now = _folder_state(store)
+        now = _folder_state(store, ws.get("folder_exclude"))
         found += [f"folder:{p}" for p in sorted(set(now) | set(ws["folder"])) if now.get(p) != ws["folder"].get(p)]
     return found
 
@@ -1014,13 +1038,13 @@ def _commit_in_workspace(record: dict[str, Any], paths: list[str], deleted: list
 
 
 def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], deleted: list[str],
-               snapshot: dict[str, bytes] | None = None) -> list[str]:
+               snapshot: dict[str, bytes] | None = None, seen: dict[str, Any] | None = None) -> list[str]:
     """Result paths the Project changed since the run's base in a way the run's result does not match."""
     ws = record["workspace"]
     base = ws["base_commit"]
     head = gitcmd.head_commit(store.root)
     found = []
-    seen = record["_seen_before_copy"] = {}
+    seen = seen if seen is not None else {}
     for p in sorted(set(paths) | set(deleted)):
         before = _blob(store.root, base, p)
         now = _blob(store.root, head, p)
@@ -1084,7 +1108,11 @@ def _copy_results(store: ProjectStore, record: dict[str, Any], paths: list[str],
 # --------------------------------------------------------------------------- release
 
 def _ignored_and_dirty(ws: Path) -> tuple[list[str], list[str]]:
-    out = _git(ws, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "--no-renames", "-z").stdout
+    listed = _git(ws, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "--no-renames", "-z")
+    if not listed.ok:
+        # PARSTARTF2 N-05: an unreadable worktree is never taken for a clean one (the release is cleanup_failed)
+        raise StopError(f"the state of {ws} cannot be read ({listed.stderr.strip()[-200:]})", code="run_git_unknown")
+    out = listed.stdout
     dirty, ignored = [], []
     for entry in (e for e in out.split("\0") if e):
         code, path = entry[:2], entry[3:]
@@ -1529,10 +1557,13 @@ def _execute(store: ProjectStore, record: dict[str, Any], executor):
                       "commit_message": (outcome.message or f"work({work.display}): result").strip(),
                       "identity": _returned_identity(workspace_path(record), paths)})
         _commit_returned(store, record)
-    elif isinstance(outcome, st.Hold) and isinstance(outcome.reason, str):
+    elif isinstance(outcome, st.Hold):
         # PARSTARTF1 F-03: the decision is recorded before its finish; a finish that fails is continued from here,
-        # never by running the executor again
-        _set(store, record, EXECUTED, outcome={"kind": "hold", "reason": outcome.reason})
+        # never by running the executor again (N-01: a Hold has no result commit)
+        _set(store, record, EXECUTED, result_commit=None, outcome={"kind": "hold", "reason": str(outcome.reason)})
+    elif not isinstance(outcome, st.QuestionWait) and record.get("result_commit"):
+        record.pop("result_commit", None)  # PARSTARTF2 N-01: a Cancel / Derive / HumanNG has no result commit
+        _save(store, record)
     return outcome
 
 
@@ -1626,6 +1657,7 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                             f"operation is shown to have made while this run worked ({', '.join(touched[:8])}); "
                             "nothing is finished: reconcile required", code="run_project_written")
         ws = record["workspace"]
+        seen_before_copy: dict[str, Any] = {}  # PARSTARTF2 N-03: this finish's own conflict check only
         drift = _base_drift(store, record)  # what the Project changed since the base, before this finish commits
         result_paths = list(record.get("outcome", {}).get("result_paths") or [])
         allowed_gitlink = None
@@ -1670,7 +1702,7 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                 _set(store, record, OUTCOME_UNKNOWN, next_actor="human", unknown=changed)
                 raise StopError(f"run {record['run_id']} of {work_id}: the workspace no longer holds what the executor "
                                 f"returned ({'; '.join(changed)}); nothing was integrated", code="run_outcome_unknown")
-            conflicts = _conflicts(store, record, paths, deleted, snapshot)
+            conflicts = _conflicts(store, record, paths, deleted, snapshot, seen_before_copy)
             if conflicts:
                 parked = PARKED_REF_PREFIX + record["run_id"]
                 _must(Path(record["workspace"]["repo"]), "update-ref", parked, record["result_commit"])
@@ -1692,7 +1724,8 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                 calls["n"] += 1
                 return outcome if calls["n"] == 1 else st.Detach()
 
-        seen = record.pop("_seen_before_copy", None) or {}
+        record.pop("_seen_before_copy", None)  # a record written before PARSTARTF2 may still carry one
+        seen = seen_before_copy
         late = [p for p in sorted(seen) if _identity(store.root / p) != seen[p]]
         if late:
             # PARSTARTF1 F-07: the Project folder changed at a result path after the conflict check: nothing is
@@ -1929,7 +1962,10 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
     on = _git(checkout, "symbolic-ref", "--quiet", "HEAD").stdout.strip()
     if on and on != f"refs/heads/{target}":
         return refuse(f"the checkout {gitlink} is on {on}, not detached or on {target}; it is not moved under it")
-    if _git(checkout, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+    status = _git(checkout, "status", "--porcelain", "--untracked-files=no")
+    if not status.ok:
+        return refuse(f"the state of the checkout {gitlink} cannot be read (PARSTARTF2 N-05)")
+    if status.stdout.strip():
         return refuse(f"the checkout {gitlink} has uncommitted changes")
     at = _git(checkout, "rev-parse", "HEAD").stdout.strip()
     # F-02: the identity the decision below rests on; the move re-checks exactly this, under nothing else
@@ -1943,7 +1979,7 @@ def _integrate_repository(store: ProjectStore, record: dict[str, Any]):
     if not done.get("repository"):
         # a branch another worktree has out is never moved under it (that worktree would be left behind its branch)
         mine, current, holders = os.path.normcase(str(checkout.resolve())), None, []
-        for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+        for line in _worktree_list(repo).splitlines():  # PARSTARTF2 N-05: an unreadable list is a STOP
             if line.startswith("worktree "):
                 current = line[len("worktree "):]
             elif line == f"branch refs/heads/{target}" and current is not None \
@@ -2277,7 +2313,10 @@ def _move_checkout(store: ProjectStore, record: dict[str, Any]) -> None:
                 or now_symbolic not in (None, f"refs/heads/{target}"):
             raise changed(f"changed after the integration check (it was {seen.get('symbolic') or 'detached'} at "
                           f"{str(seen.get('head'))[:12]}, it is {now_symbolic or 'detached'} at {now_head[:12]})", now)
-        if _git(checkout, "--no-optional-locks", "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        status = _git(checkout, "--no-optional-locks", "status", "--porcelain", "--untracked-files=no")
+        if not status.ok:
+            raise changed("cannot be read (git status failed)", now)  # PARSTARTF2 N-05
+        if status.stdout.strip():
             raise changed("has uncommitted changes", now)
         taken = _target_holders(checkout, target, checkout) if now_symbolic is not None else []
         if taken:
@@ -2363,6 +2402,10 @@ def reopen(store: ProjectStore, work_id: str) -> dict[str, Any]:
         if ws.get("project_repo"):
             ws["base_commit"] = gitcmd.head_commit(store.root)
         record.pop("integration", None)
+        # PARSTARTF2 N-01 / N-03: the conflicting result is kept on the parked ref (and listed under "reopened"); it is no
+        # longer this run's result, so a later Hold / Cancel / stop keeps what the workspace then holds
+        record["reopened"][-1]["result_commit"] = record.pop("result_commit", None)
+        record.pop("_seen_before_copy", None)
         _set(store, record, QUESTION_WAIT, question=f"reconcile {', '.join(record.get('conflicts') or [])} with the "
                                                     "Project's current state in this workspace", next_actor="start",
              outcome={})

@@ -189,8 +189,8 @@ class ReviewF1Tests(WorklineTestCase):
         (a,) = self.standalone("A")
         original = par._conflicts
 
-        def then_the_human_writes(store, record, paths, deleted, snapshot=None):
-            found = original(store, record, paths, deleted, snapshot)
+        def then_the_human_writes(store, record, paths, deleted, snapshot=None, *rest):
+            found = original(store, record, paths, deleted, snapshot, *rest)
             (store.root / "a.txt").write_text("the Human's own\n", encoding="utf-8")
             return found
 

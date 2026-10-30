@@ -4054,6 +4054,16 @@ def _start_locked(
             result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id, unreviewable,
                                  gitcmd.head_commit(store.root), code=session.unreviewable_code(nxt))
             break
+        from .parallel import run_holds
+
+        holder = run_holds(store, nxt.id)
+        if holder is not None:
+            # PARSTARTF2 N-09: the next Work is held by a parallel run - stopped here, before running it, so this
+            # outer mutation completes instead of waiting (pending) on a run whose finish would wait on it
+            result = StartResult("stopped", work_id, mutation.id, tuple(session.completed), phase_id,
+                                 f"{nxt.id} is held by parallel run {holder}; it is continued only by a parallel START "
+                                 "of that Work", gitcmd.head_commit(store.root), code="work_run_active")
+            break
         result = session.run_work(nxt.id)
 
     if result.status != "question_wait":
