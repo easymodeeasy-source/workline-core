@@ -547,6 +547,8 @@ def _create_workspace(store: ProjectStore, record: dict[str, Any], spec: Workspa
         base_root.mkdir(parents=True, exist_ok=True)
         _must(store.root, "worktree", "add", "--detach", str(path), head)
         _snapshot_overlay(store.root, path)
+        record["workspace"]["snapshot_ready"] = True  # PARSTARTF1 F-09: an interrupted snapshot is never used
+        _save(store, record)
         return
     if spec.kind != "worktree":
         raise ValidationError(f"workspace kind must be worktree or in_place: {spec.kind!r}", code="run_workspace_kind")
@@ -662,12 +664,41 @@ def _made_by(repo: Path, branch: str, origin: str | None) -> bool:
 def _branch_out(repo: Path, branch: str) -> list[str]:
     """The worktrees of ``repo`` that have ``branch`` out."""
     out, current = [], None
-    for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+    for line in _worktree_list(repo).splitlines():
         if line.startswith("worktree "):
             current = line[len("worktree "):]
         elif line == f"branch refs/heads/{branch}" and current is not None:
             out.append(current)
     return out
+
+
+def _worktree_list(repo: Path) -> str:
+    """``git worktree list --porcelain`` of ``repo``; a list Git cannot give is a STOP, never "no worktree" (F-09)."""
+    listed = _git(repo, "worktree", "list", "--porcelain")
+    if not listed.ok:
+        raise StopError(f"the worktrees of {repo} cannot be listed ({listed.stderr.strip()[-200:]}); whether a branch "
+                        "is out is unknown", code="run_git_unknown")
+    return listed.stdout
+
+
+def _drop_worktree_admin(repo: Path, path: Path) -> None:
+    """PARSTARTF1 F-01: Git's administrative data of the ONE worktree of ``repo`` at ``path`` (Workline's own, already
+    removed from disk) - never a repository-wide prune, which would also drop a Human worktree that is only moved or
+    on a drive not attached now."""
+    import shutil
+
+    common = Path(_must(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    admin_root = common / "worktrees"
+    if not admin_root.is_dir():
+        return
+    mine = os.path.normcase(str((Path(path) / ".git").resolve()))
+    for admin in admin_root.iterdir():
+        try:
+            pointed = (admin / "gitdir").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if os.path.normcase(str(Path(pointed).resolve())) == mine and not Path(path).exists():
+            shutil.rmtree(admin)
 
 
 def _branch_preflight(store: ProjectStore, spec: WorkspaceSpec, previous: dict[str, Any] | None) -> None:
@@ -774,15 +805,33 @@ def _remove_snapshot(record: dict[str, Any]) -> list[str]:
             function(target)
 
         shutil.rmtree(path, onerror=writable)
-    _git(repo, "worktree", "prune")
+    _drop_worktree_admin(repo, path)
     return added
 
 
 def _folder_state(store: ProjectStore) -> dict[str, str]:
-    """What the Project folder holds apart from HEAD (runtime aside): path -> its exact content identity."""
-    out = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--", ".",
-               ":(exclude).workline/runtime").stdout
-    return {entry[3:]: _identity(store.root / entry[3:]) or "absent" for entry in _z(out) if len(entry) > 3}
+    """What the Project folder holds apart from HEAD (runtime aside): path -> its exact content identity. Ignored files
+    are included (PARSTARTF1 F-04) by their size and modification time, not their bytes - a build tree is large, and a
+    write is what is detected."""
+    listed = _git(store.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored", "--no-renames",
+                  "--", ".", ":(exclude).workline/runtime")
+    if not listed.ok:
+        raise StopError(f"the Project folder's state cannot be read ({listed.stderr.strip()[-200:]})",
+                        code="run_git_unknown")
+    state = {}
+    for entry in _z(listed.stdout):
+        if len(entry) <= 3:
+            continue
+        rel, path = entry[3:], store.root / entry[3:]
+        if entry[:2] == "!!":
+            try:
+                found = path.lstat()
+                state[rel] = f"stat:{found.st_size}:{found.st_mtime_ns}"
+            except OSError:
+                state[rel] = "absent"
+        else:
+            state[rel] = _identity(path) or "absent"
+    return state
 
 
 def _journal(store: ProjectStore, commit: str) -> dict[str, Any] | None:
@@ -837,7 +886,10 @@ def _unproven_commits(store: ProjectStore, record: dict[str, Any]) -> list[str]:
     if head is None or _git(store.root, "merge-base", "--is-ancestor", since, head).returncode != 0:
         return found + [f"history:{since[:12]} (the claim's commit) is no longer in HEAD's history"]
     accepted = set((record.get("accepted_writes") or {}).get("commits", []))
-    for commit in _git(store.root, "rev-list", "--reverse", f"{since}..{head}").stdout.split():
+    listed = _git(store.root, "rev-list", "--reverse", f"{since}..{head}")
+    if not listed.ok:
+        return found + [f"history:{since[:12]}..{head[:12]} cannot be listed (whether any commit is unproven is unknown)"]
+    for commit in listed.stdout.split():
         if commit in accepted:
             continue
         noted = _journal(store, commit)
@@ -968,6 +1020,7 @@ def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], de
     base = ws["base_commit"]
     head = gitcmd.head_commit(store.root)
     found = []
+    seen = record["_seen_before_copy"] = {}
     for p in sorted(set(paths) | set(deleted)):
         before = _blob(store.root, base, p)
         now = _blob(store.root, head, p)
@@ -982,6 +1035,8 @@ def _conflicts(store: ProjectStore, record: dict[str, Any], paths: list[str], de
             found.append(p)
         elif gitcmd.changed_against_head(store.root, [p]) and _file_blob(store.root, p, store.root / p) != mine:
             found.append(p)  # someone's uncommitted change in the Project folder
+        else:
+            seen[p] = _identity(store.root / p)  # what the Project folder holds now (F-07: checked again at the write)
     return found
 
 
@@ -1073,10 +1128,16 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
 
         stash = _runs_dir(store) / record["run_id"]
         removed = []
-        if stash.is_dir():
-            shutil.rmtree(stash)  # the set-aside copies of results the completion has committed
-            removed.append(f"{RUNS_DIR}/{record['run_id']}")
-        written = _remove_snapshot(record) if ws.get("snapshot") else []
+        try:
+            if stash.is_dir():
+                shutil.rmtree(stash)  # the set-aside copies of results the completion has committed
+                removed.append(f"{RUNS_DIR}/{record['run_id']}")
+            written = _remove_snapshot(record) if ws.get("snapshot") else []
+        except (StopError, OSError) as exc:
+            # PARSTARTF1 F-08: e.g. a snapshot file Windows still holds - this run's cleanup only, resumed by release
+            _set(store, record, CLEANUP_FAILED, cleanup={"state": "error", "blocked": [str(exc)[:1000]]},
+                 next_actor="human")
+            return record
         _set(store, record, RELEASED, cleanup={"state": "released", "removed": removed,
                                                "snapshot_writes_discarded": written})
         return record
@@ -1113,16 +1174,21 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
             keep = [p for p in ignored if not any(fnmatch.fnmatch(p.rstrip('/'), pat) or fnmatch.fnmatch(p, pat) for pat in patterns)]
             if keep:
                 blocked.append(f"ignored files not declared regenerable: {', '.join(sorted(keep)[:10])}")
-        tip = _git(repo, "rev-parse", "--verify", "--quiet", ws["branch"]).stdout.strip()
-        if tip:
-            # the run's own commits are always kept on a saved ref before the branch can go
-            saved = SAVED_REF_PREFIX + record["run_id"]
-            _must(repo, "update-ref", saved, tip)
-            record.setdefault("refs", {})["saved"] = saved
+        tip = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{ws['branch']}").stdout.strip()
         integrated = record.get("integration", {}).get("state") == "integrated"
-        if not integrated and tip and tip != ws["base_commit"]:
+        # PARSTARTF1 F-02: what the run made is its result commit when it has one (whatever the branch now is), else
+        # what its branch holds (a held / stopped run's work in progress)
+        kept = record.get("result_commit") or record.get("wip_commit") or tip
+        if kept:
+            saved = SAVED_REF_PREFIX + record["run_id"]
+            _must(repo, "update-ref", saved, kept)
+            record.setdefault("refs", {})["saved"] = saved
+        elif not integrated:
+            blocked.append(f"nothing holds what run {record['run_id']} made: its branch {ws['branch']} is gone and no "
+                           "result commit is recorded")
+        if not integrated and kept and kept != ws["base_commit"]:
             parked = PARKED_REF_PREFIX + record["run_id"]
-            _must(repo, "update-ref", parked, tip)
+            _must(repo, "update-ref", parked, tip if tip and not record.get("result_commit") else kept)
             record["refs"]["parked"] = parked
         if blocked:
             _set(store, record, CLEANUP_FAILED, cleanup={"state": "blocked", "blocked": blocked}, next_actor="human")
@@ -1147,7 +1213,7 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
                 _set(store, record, CLEANUP_FAILED,
                      cleanup={"state": "directory_left", "blocked": [f"{path} still exists (in use?)"]}, next_actor="human")
                 return record
-        _git(repo, "worktree", "prune")
+        _drop_worktree_admin(repo, path)  # PARSTARTF1 F-01: only this run's own worktree data, never a prune
         _drop_deps_users(record)
         owned = ws.get("owned_ref") or OWNED_REF_PREFIX + record["run_id"]
         proof = _git(repo, "rev-parse", "--verify", "--quiet", owned).stdout.strip()
@@ -1161,7 +1227,7 @@ def _release(store: ProjectStore, work_id: str) -> dict[str, Any]:
             proof = ""
         retained = {"exists": bool(branch_now), "branch": ws["branch"], "tip": branch_now or None,
                     "owned_ref": owned if proof else None, "saved_ref": record.get("refs", {}).get("saved")}
-        final = RELEASED if integrated or not tip or tip == ws["base_commit"] else PARKED
+        final = RELEASED if integrated or kept == ws["base_commit"] else PARKED
         _set(store, record, final, cleanup={"state": "released", "removed_files": len(removed),
                                             "removed_top": sorted({r.split("/")[0] for r in removed}),
                                             "retained_branch": retained},
@@ -1235,6 +1301,8 @@ def _run_timed(store: ProjectStore, work_id: str, executor, spec: WorkspaceSpec,
         if record.get("outcome", {}).get("kind") == "completed" and record["state"] == EXECUTED:
             outcome = st.Completed(tuple(record["outcome"]["result_paths"]), record["outcome"].get("message"),
                                    tuple(record["outcome"].get("deleted_paths", ())))
+        elif record.get("outcome", {}).get("kind") == "hold" and record["state"] == EXECUTED:
+            outcome = st.Hold(record["outcome"].get("reason", ""))  # PARSTARTF1 F-03: finished from the record
         else:
             outcome = _execute(store, record, executor)
         timings["run_s"] = time.perf_counter() - t1
@@ -1355,7 +1423,13 @@ def _claim(store: ProjectStore, work_id: str, spec: WorkspaceSpec):
             with _token(store, work_id, record["run_id"]):
                 ws_path = (record.get("workspace") or {}).get("path") if isinstance(record.get("workspace"), dict) else None
                 # R11-03: no recorded path (or an empty one) is no workspace - never the current directory
-                if not ws_path or not Path(ws_path).is_dir():
+                recorded_ws = record.get("workspace") if isinstance(record.get("workspace"), dict) else {}
+                if ws_path and recorded_ws.get("snapshot") and not recorded_ws.get("snapshot_ready"):
+                    # PARSTARTF1 F-09: a snapshot whose making was interrupted may be partial and not all read-only:
+                    # it is removed (Workline's own copy) and made again
+                    _remove_snapshot(record)
+                    _create_workspace(store, record, spec)
+                elif not ws_path or not Path(ws_path).is_dir():
                     _create_workspace(store, record, spec)
                 else:
                     _prepare(store, record, spec)
@@ -1455,6 +1529,10 @@ def _execute(store: ProjectStore, record: dict[str, Any], executor):
                       "commit_message": (outcome.message or f"work({work.display}): result").strip(),
                       "identity": _returned_identity(workspace_path(record), paths)})
         _commit_returned(store, record)
+    elif isinstance(outcome, st.Hold) and isinstance(outcome.reason, str):
+        # PARSTARTF1 F-03: the decision is recorded before its finish; a finish that fails is continued from here,
+        # never by running the executor again
+        _set(store, record, EXECUTED, outcome={"kind": "hold", "reason": outcome.reason})
     return outcome
 
 
@@ -1614,6 +1692,18 @@ def _finish(store: ProjectStore, record: dict[str, Any], outcome):
                 calls["n"] += 1
                 return outcome if calls["n"] == 1 else st.Detach()
 
+        seen = record.pop("_seen_before_copy", None) or {}
+        late = [p for p in sorted(seen) if _identity(store.root / p) != seen[p]]
+        if late:
+            # PARSTARTF1 F-07: the Project folder changed at a result path after the conflict check: nothing is
+            # written, the result is kept on the parked ref, as for any conflict
+            parked = PARKED_REF_PREFIX + record["run_id"]
+            _must(Path(record["workspace"]["repo"]), "update-ref", parked, record["result_commit"])
+            _set(store, record, CONFLICT, conflicts=late, refs={"parked": parked}, next_actor="human",
+                 integration={"state": "conflict", "target": gitcmd.current_branch_ref(store.root)})
+            return st.StartResult("conflict", work_id, record["claim"]["mutation_id"],
+                                  detail=f"the Project changed at {', '.join(late)} after the conflict check; "
+                                         f"kept on {parked}", code="run_conflict")
         _set(store, record, record["state"], finishing_at=_now())
         with ExitStack() as allow:
             if allowed_gitlink is not None:
@@ -2029,7 +2119,7 @@ def _lock_owner_state(held: str) -> str:
 def _target_holders(repo: Path, target: str, checkout: Path) -> list[str]:
     """The worktrees of ``repo`` other than ``checkout`` that have ``target`` out."""
     mine, current, found = os.path.normcase(str(Path(checkout).resolve())), None, []
-    for line in _git(repo, "worktree", "list", "--porcelain").stdout.splitlines():
+    for line in _worktree_list(repo).splitlines():
         if line.startswith("worktree "):
             current = line[len("worktree "):]
         elif line == f"branch refs/heads/{target}" and current is not None \
