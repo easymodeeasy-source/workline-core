@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import unittest
+from unittest import mock
 
 from start_probe_helpers import EVENT_LOG, ProbeCase
 from status_helpers import append_events
@@ -274,7 +275,9 @@ class CancelExcludedTests(CancelCase):
                         add_relations=(RelationSpec("requires_completion", "r", self.i1),),
                         new_works={"r": WorkSpec("R", "r", phase_id=self.pa, roadmap_id=self.rid,
                                                  related=(RelatedSpec("bogus_type", "doc.md"),))})
-        self.cancel_record("cancel recorded", replan)
+        # Recorded as a START before BL-077 recorded it; START now refuses the registration before the cancel events.
+        with mock.patch.object(st, "refuse_replan_registration", lambda *args, **kwargs: None):
+            self.cancel_record("cancel recorded", replan)
         found = self.assertUnknown()
         self.assertEqual(found.step, "S3.4")
         refused = self.real_start()

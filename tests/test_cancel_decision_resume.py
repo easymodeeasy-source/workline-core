@@ -873,9 +873,12 @@ class PreflightTests(CancelCase):
                                   new_works={"r": WorkSpec("R", "r", phase_id=pa, roadmap_id=rid,
                                                            related=(RelatedSpec("bogus_type", "doc.md"),))}), "superseded")
         call = lambda: st.start(self.store, w1, "single-work", self.executor({w1: cancel}))  # noqa: E731
-        with self.assertRaises(StopError) as first:
+        # The record a START before BL-077 left: refused only once the cancel events were applied. START now refuses
+        # the registration before it records the cancel (``ops.refuse_replan_registration``).
+        with mock.patch.object(st, "refuse_replan_registration", lambda *args, **kwargs: None), \
+                self.assertRaises(StopError) as first:
             call()
-        self.assertEqual(first.exception.code, "validation_failed")  # as before: refused once the cancel events were applied
+        self.assertEqual(first.exception.code, "validation_failed")
         (pending,) = MutationController(self.store).list_pending()
 
         refused = self.assertStoppedUntouched([pending["mutation_id"]], call, code="validation_failed")
@@ -893,7 +896,9 @@ class PreflightTests(CancelCase):
                                   new_works={"r": WorkSpec("R", "r", phase_id=pa, roadmap_id=rid,
                                                            related=(RelatedSpec("bogus_type", "doc.md"),))}), "superseded")
         call = lambda: st.start(self.store, w1, "single-work", self.executor({w1: cancel}))  # noqa: E731
-        pending = self.interrupt(cancel_windows(w1)["cancel recorded"], call)
+        # Recorded as a START before BL-077 recorded it; START now refuses the registration before the cancel events.
+        with mock.patch.object(st, "refuse_replan_registration", lambda *args, **kwargs: None):
+            pending = self.interrupt(cancel_windows(w1)["cancel recorded"], call)
 
         refused = self.assertStoppedUntouched([pending["mutation_id"]], call, code="validation_failed")
 

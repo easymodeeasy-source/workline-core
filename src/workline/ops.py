@@ -167,6 +167,46 @@ def plan_replan(
     return work_ids, removals, additions
 
 
+def refuse_replan_registration(
+    view: ProjectView,
+    events: list[tuple[str, str]],
+    replan: Replan,
+    work_ids: dict[str, str],
+    removals: list[Relation],
+    additions: list[Relation],
+) -> None:
+    """Refuse, before the terminal event is recorded, the registration :func:`apply_replan` would refuse after it (BL-077).
+
+    A replan's owner records and applies its terminal ``events`` - the
+    ``(entity, type)`` pairs it projected - and only then registers the new
+    Works, and the registration core judges their payload on the Project as it
+    is then (``create.register_works``). What it refuses there that the owner's
+    projection does not hold - a Related type or condition, a relation's type or
+    endpoint, the state of the Phase a new Work joins as the event leaves it -
+    used to be refused once the event was in the working tree: the mutation was
+    left pending with its event log uncommitted, the same request was refused
+    again, any other was ``reconcile required``, and every later write of the
+    Project was refused.
+
+    Every owner therefore applies, after its projection and before it records
+    its event, the checks the registration core makes before it records its
+    stage (``create._check_registration``, as :func:`_refuse_before_replay`
+    applies them to a resumed replan) on ``view`` with those events projected,
+    with the IDs :func:`plan_replan` reserved, and the same reports. A replan
+    the registration accepts is unchanged.
+    """
+    if not replan.new_works:
+        return
+    _check_registration(
+        projected_view(view, add_events=events),
+        replan.new_works,
+        list(replan.add_relations),
+        work_ids,
+        {index: relation.id for index, relation in enumerate(additions)},
+        tuple(relation.id for relation in removals),
+    )
+
+
 def _resolve_removals(view: ProjectView, replan: Replan) -> list[Relation]:
     """The Roadmap relations a replan removes, as ``view`` holds them, or the refusal."""
     removals: list[Relation] = []

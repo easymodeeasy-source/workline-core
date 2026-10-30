@@ -68,6 +68,7 @@ from .ops import (
     plan_replan,
     problems_text,
     projected_view,
+    refuse_replan_registration,
     stage_name,
     validate_projection,
 )
@@ -1198,6 +1199,7 @@ class _Session:
         )
         validate_projection(projection, "cancel replan")
         decision = _cancel_decision(work.id, prefix, outcome, removals, work.display)
+        refuse_replan_registration(view, events, outcome.replan, work_ids, removals, additions)
         self._record_cancel(work, [t for _, t in events], decision)
         return self._carry_cancel(
             work, prefix, outcome.replan, removals, additions, work_ids, outcome.reason, work.display
@@ -4141,6 +4143,7 @@ def _plan_exclude_standalone_locked(store: ProjectStore, work_id: str, replan: R
                 add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
             )
             validate_projection(projection, "plan exclusion replan")
+            refuse_replan_registration(view, [(work_id, "plan_excluded")], replan, work_ids, removals, additions)
         gitops.ensure_separable_before_effects(mutation, _plan_exclusion_ledgers(replan))
     if not mutation.has_stage("event"):
         effects = event_effects(mutation, "event", work_id, ["plan_excluded"])

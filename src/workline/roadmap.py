@@ -59,6 +59,7 @@ from .ops import (
     plan_replan,
     problems_text,
     projected_view,
+    refuse_replan_registration,
     validate_projection,
 )
 from .phase_create import (
@@ -2078,6 +2079,7 @@ def _plan_exclude_locked(store: ProjectStore, operation: str, entity_id: str, re
                 add_works={work_ids[k]: spec for k, spec in replan.new_works.items()},
             )
             validate_projection(projection, "plan exclusion replan")
+            refuse_replan_registration(view, [(entity_id, "plan_excluded")], replan, work_ids, removals, additions)
         gitops.ensure_separable_before_effects(mutation, _plan_exclusion_ledgers(replan))
     if not mutation.has_stage("event"):
         mutation.add_effects("event", event_effects(mutation, "event", entity_id, ["plan_excluded"]))

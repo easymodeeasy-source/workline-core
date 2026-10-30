@@ -13,8 +13,9 @@ pending, and every later structural precheck refusing the Project.
 The registration now leaves the relations the replan has decided to remove out
 of every structure check it makes. Nothing else moves: the stages keep their
 names and their order, the removals are still applied after the registration, a
-registration refused for any other reason is refused where and how it was, and
-every other registration is checked on the Project exactly as it is.
+registration refused for any other reason is refused how it was - since BL-077
+before the owner records its terminal event, not after it - and every other
+registration is checked on the Project exactly as it is.
 """
 
 from __future__ import annotations
@@ -296,15 +297,21 @@ class ValidReplanTests(ReplanCase):
 
 # --------------------------------------------------------------------------- nothing else moves
 class UnchangedRefusalTests(ReplanCase):
-    """A replan refused for anything but the relations it removes is refused where and how it was."""
+    """A replan refused for anything but the relations it removes is refused how it was.
 
-    def assertRefusedAfterTheEventOnly(self, call, code: str, message: str, kept: tuple[str, str, str]) -> None:
+    BL-077: what the registration refuses is refused with its own code and report
+    before the owner records its terminal event. It used to be refused once that
+    event was applied, leaving the mutation pending and the Project's writes refused.
+    """
+
+    def assertRefusedBeforeTheEvent(self, call, code: str, message: str, kept: tuple[str, str, str]) -> None:
+        before = (self.edges(), ProjectView.load(self.store).events, self.head(), self.dirty())
         with self.assertRaises(StopError) as refused:
             call()
         self.assertEqual(refused.exception.code, code)
         self.assertIn(message, refused.exception.message)
-        (record,) = MutationController(self.store).list_pending()
-        self.assertEqual([(e["stage"], e["kind"]) for e in record["effects"]], [("event", "append_event")])
+        self.assertEqual(MutationController(self.store).list_pending(), [])
+        self.assertEqual((self.edges(), ProjectView.load(self.store).events, self.head(), self.dirty()), before)
         self.assertIn(kept, self.edges())  # the removal was not applied on its own
 
     def test_a_replacement_whose_payload_the_registration_refuses(self) -> None:
@@ -319,7 +326,7 @@ class UnchangedRefusalTests(ReplanCase):
                     w2, i1 = entry.work_ids["w2"], entry.integration_id
                     message = ("work w3: unknown related type bogus_type" if label == "related"
                                else "work w3: confirmation_target is only for human_confirmation Works")
-                    case.assertRefusedAfterTheEventOnly(lambda: rm.plan_exclude_work(case.store, w2, replan),
+                    case.assertRefusedBeforeTheEvent(lambda: rm.plan_exclude_work(case.store, w2, replan),
                                                         "validation_failed", message, ("requires_completion", w2, i1))
                 finally:
                     case.doCleanups()
@@ -331,7 +338,7 @@ class UnchangedRefusalTests(ReplanCase):
         replan = Replan(remove_relation_ids=(self.relation("requires_completion", pb, pc),),
                         add_relations=(RelationSpec("requires_completion", pa, pc),),
                         new_works={"n": WorkSpec("N", "n")})
-        self.assertRefusedAfterTheEventOnly(lambda: rm.plan_exclude_phase(self.store, pb, replan), "validation_failed",
+        self.assertRefusedBeforeTheEvent(lambda: rm.plan_exclude_phase(self.store, pb, replan), "validation_failed",
                                             "relation 0: endpoint unresolvable", ("requires_completion", pb, pc))
 
     def test_a_replan_its_owner_refuses_writes_nothing(self) -> None:
