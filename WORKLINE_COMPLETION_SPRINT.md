@@ -18637,6 +18637,19 @@ WSCA static screening complete; isolated probes complete; full-source integratio
 not CONTRACT_PROPOSED; not CONTRACT_FROZEN; no implementation or landing authorization
 ~~~
 
+Stage note (2026-10-30). The stage block above records the state of 2026-10-11 and is not rewritten. The current stage, as of 2026-10-30:
+
+~~~
+RB14  CONTRACT_FROZEN  Control Plane decision of 2026-10-27, for RB14 alone
+      integration-verification authorization (§44.8) not granted; IMPLEMENTATION_AUTHORIZED not granted; LANDING_AUTHORIZED not granted
+~~~
+
+- Basis: the Control Plane's RB14 contract freeze decision of 2026-10-27. The Control Plane adopted the submission and receipt of the contract in its own conversation as the CONTRACT_PROPOSED delivery (§44.8). The freeze identity and the limits of its evidence are recorded in §45.
+- Frozen identity: RB14_CONTRACT_PROPOSED.md (contract revision 2), sha256 d0778b3e967442759b284feb90d74fed4ac302d5f14ebda60797e411164ba217. The bytes were not changed after the decision. The status wording written into them before the freeze is historical text; the current stage is this note and §45.
+- Integration verification still waits on §44.7 (the relevant production RBs have landed and canonical main is stable; RB13 is among them per the §37.20 RB14 dispatch row and contract §9.2) and on the separate Control Plane authorization of §44.8, which is not a §37.20 stage. Production repair still needs IMPLEMENTATION_AUTHORIZED.
+- The canonical reflection of this note and of §45 is carried by one separate candidate. That candidate needs its own FORMAL_INDEPENDENT review (§39.4) and an exact LANDING_AUTHORIZED, landed serialized and race-gated (§2.2 dated note, §20). This note grants none of them.
+- This note is a management record of the stage after the freeze. It changes nothing in §44.1-§44.8, no frozen Human decision and no historical statement of §37.20, including its RB14 stage and dispatch rows.
+
 ### 44.1 Purpose and scope
 
 The independent Workline-wide safety-coverage audit (WSCA) has finished its exploration. RB14 closes its follow-up:
@@ -18744,6 +18757,47 @@ RB14 is DONE only when:
 - Integration verification execution: a separate Control Plane authorization, after the §44.7 conditions hold.
 - Production repair: IMPLEMENTATION_AUTHORIZED for RB14. Then, per candidate, FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 and LANDING_AUTHORIZED for the exact candidate.
 
-## 45. RB14 implementation brief — reserved
+## 45. RB14 implementation brief — freeze identity and references
 
-Reserved. No RB14 implementation brief exists. It is added by a separate canonical change only after RB14 is CONTRACT_FROZEN (§44.8). Until then this section authorizes nothing.
+Stage: CONTRACT_FROZEN for RB14 alone (Control Plane decision of 2026-10-27). The integration-verification authorization of §44.8 not granted; IMPLEMENTATION_AUTHORIZED not granted; LANDING_AUTHORIZED not granted.
+
+This section is a management record, not a duplicate of the contract. It authorizes nothing by itself.
+
+1. Freeze identity
+   - The Control Plane decision that froze RB14: a decision made in the Control Plane conversation and relayed by the Human in the project message cmsg_01TMNFaE3GijDgqrfHKWyLtNJZvsKFbs3MPPLRmrzeab5Y (author D, 2026-10-27T05:21:01Z). It states that the Control Plane decided CONTRACT_FROZEN for RB14 alone for the exact contract of item 2, by its sha256. The earlier relay cmsg_01TMNFaE3GijDgqrfHKWyLtNTfvREfCNqUDjVc7iDWDwuf (author D, 2026-10-27T05:12:06Z) records the Control Plane's approval of the revision 2 content as the freeze target, before the freeze itself was decided.
+   - Stored-body hashes were not obtained, neither of the project messages above nor of the Control Plane conversation, and the Control Plane conversation's own message identifiers were not obtained. The identifiers above identify the relays only.
+   - CONTRACT_PROPOSED delivery (§44.8): the Control Plane adopted the submission and receipt of revision 2 in its conversation as the delivery basis (relayed in the 2026-10-27T05:21:01Z message). No separate delivery record exists. The date of that submission in the Control Plane conversation was not obtained.
+   - Pre-freeze independent review: none is recorded. §44.8 does not require one.
+   - Reference base: the contract re-verified the finding register against production main 0ce4fba22814ea303cbce0f6c11c16d0dfaaaf09 (contract §1).
+
+2. Canonical reference (the only place the contract text lives)
+   - Contract: RB14_CONTRACT_PROPOSED.md, contract revision 2, sha256 d0778b3e967442759b284feb90d74fed4ac302d5f14ebda60797e411164ba217.
+   - Location: the private execution archive, not this repository. At the time of this record the file is held there only as a local staging copy (as for the WSCA evidence, §44.2); a verified durable destination has not been decided. The sha256 above, not the location, is the contract's identity.
+   - The frozen bytes carry status wording written before the freeze (its heading and the gate table of its §8 describe it as not frozen). That wording is historical. It does not supersede the Control Plane's decision, and the bytes were not edited after the decision.
+   - The contract lists OD-14-14 (the first-verification method for R2-01) as open. The Control Plane's ruling on it is recorded in item 3, outside the contract, because the frozen bytes are not changed.
+
+3. Control Plane ruling on OD-14-14 (R2-01 first verification), relayed in cmsg_01TMNFaE3GijDgqrfHKWyLtNTfvREfCNqUDjVc7iDWDwuf
+   - After the formal execution authorization, combine a narrowed static verification with a dynamic verification of a safely bounded owner path. Examine the termination condition of run_work, the Derive continue, the bounded-ness the contract states and what the existing tests guarantee.
+   - Where possible, use an isolated synthetic executor and observe a finite Derive continuation against a normal-termination control.
+   - An unbounded loop is never executed. A finite continuation or a timeout alone does not prove a non-terminating defect.
+   - If verification is impossible, the result is UNRESOLVED and needs an explicit Control Plane disposition.
+   - Nothing of this is executed by this record.
+   - This is a Control Plane ruling on a decision the contract leaves to the Control Plane (contract §9.5). It does not amend the contract. Its authority is the Control Plane decision relayed in the message above; this item is its identity record and a summary, and in a conflict the relayed Control Plane decision governs.
+
+4. Execution conditions that remain unchanged and unmet
+   - §44.7 and §44.8 are unchanged. Integration verification begins only after the relevant production RBs have landed and canonical main is stable (§44.7; RB13 per the §37.20 RB14 dispatch row and contract §9.2), and only under the separate Control Plane authorization of §44.8; the then-current canonical main is pinned (§44.5).
+   - Repairs need IMPLEMENTATION_AUTHORIZED and, per candidate, a FORMAL_INDEPENDENT review (§39.4), the final validation of §39.2 and an exact LANDING_AUTHORIZED.
+   - Integration verification is not authorized. The owner tests and I-01 to I-06 (contract §6, §9.2) have not been executed.
+
+5. Human and Control Plane matters that remain open
+   - The final destination of the WSCA evidence (Human, decided at the RB9 entry gate, §44.2).
+   - The disposition of R3-01 as a platform design boundary, only if POSIX evidence cannot be obtained (Control Plane or Human, contract §9.5).
+   - A scope amendment for RB14-YGO-01, which this record does not add (Control Plane or Human, contract §9.5).
+   - Any change of a Human-owned rule that R4-02 owner evidence may show to be needed (§44.3).
+
+6. Single-source rule
+   - The canonical contract above is the sole authority for the RB14 contract. This section, §44 and any private preparation material are rationale or identity records, not an alternative source of the contract. A Control Plane ruling on a decision the contract leaves to the Control Plane (item 3) is recorded here by identity and is not contract text.
+   - A change to the contract after the freeze needs its own Control Plane decision and a new identity record here.
+
+7. Not changed by this section
+   - §44.1-§44.8, §37.20, the frozen Human decisions, the Workline runtime, registry.md and the canonical Skills.
