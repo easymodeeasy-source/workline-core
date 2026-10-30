@@ -3897,6 +3897,9 @@ def _integration_exit_wait(session: "_Session", waiting_run_id: str, chain: Any,
     then bound, before anything is reserved for its successor. Without one, START stays pending at that wait."""
     history.require_history_ready(ReviewStore(session.store), waiting_run_id, history.BOUNDARY_HUMAN_WAIT,
                                   history_contract=history.HISTORY_CONTRACT)
+    if waiting_run_id not in _integration_decision_bindings(session.mutation):
+        # §37.21 (CP F2 i): a wait reviewed under a Context that no longer re-derives is never exited into a successor
+        _integration_require_settled_context(session.store, chain, "bound or reserved")
     _integration_require_evidence(session, waiting_run_id, chain, work_id)
     if _integration_bind_decision(session, waiting_run_id, chain) is None:
         try:
@@ -4247,6 +4250,15 @@ def _integration_require_context(session: "_Session", run: IntegrationRun, nothi
                                      + f"; nothing is {nothing}", REASON_INTEGRATION_CONTEXT_CHANGED)
 
 
+def _integration_require_settled_context(store: ProjectStore, chain: Any, nothing: str) -> None:
+    """§37.21 F2: before a G4-settled Run's follow-up begins, the Context it was reviewed under (its generation-1
+    Context hash) still re-derives; a follow-up already recorded is finished from its record and never comes here."""
+    if serialize.digest(integration_context(store)) != chain.generations[0].review_context_hash:
+        raise _integration_reconcile(f"Integration Review Run {chain.review_run_id} was settled under a Review Context "
+                                     f"that no longer re-derives; nothing is {nothing}",
+                                     REASON_INTEGRATION_CONTEXT_CHANGED)
+
+
 def _integration_current_problems(session: "_Session", run: IntegrationRun) -> list[str]:
     """Why the frozen Candidate is no longer current (§32.30); empty when it is.
 
@@ -4345,6 +4357,7 @@ def _integration_accept(session: "_Session", run: IntegrationRun) -> None:
     from .review import integration as ri
     from .review import policy as review_policy
 
+    _integration_require_context(session, run, "accepted")
     store, mutation = session.store, session.mutation
     candidate, context = run.candidate, run.context
     snapshot = _integration_snapshot(candidate)
@@ -4493,6 +4506,7 @@ def _integration_envelope(review: ReviewStore, chain: Any) -> dict[str, Any]:
 
 def _integration_accept_adjudication(session: "_Session", run: IntegrationRun, chain: Any) -> None:
     """G3: one adjudication TaskInput built from canonical material only, accepted before any launch."""
+    _integration_require_context(session, run, "accepted")
     store, mutation = session.store, session.mutation
     review = ReviewStore(store)
     second = chain.latest
@@ -4592,6 +4606,8 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
                       f"the Phase Integration adjudicator returned {type(returned).__name__}, not an "
                       "IntegrationAdjudicationReturn (the P4 adjudication and its one Phase outcome); nothing is settled")
     normalized = p4.normalize_adjudication(returned.adjudication, descriptor, reports, None, ground_not_applicable=True)
+    # §37.21 F1: changed while the adjudicator ran - no branch is settled over it, whichever the adjudication derives
+    _integration_require_context(session, run, "settled")
     try:
         outcome = returned.phase_outcome if type(returned.phase_outcome) is ri.PhaseOutcome \
             else ri.PhaseOutcome.from_record(returned.phase_outcome)
@@ -5464,6 +5480,9 @@ def review_phase_integration(session: "_Session", view: ProjectView, work: Entit
                 run = _integration_successor(session, view, work, run.review_run_id,
                                              _integration_exit_wait(session, run.review_run_id, chain, work.id))
                 continue
+            if disposition in (ri.BRANCH_CONFIRMATION_STRUCTURE_REQUIRED, ri.BRANCH_DOMAIN_REPAIR_REQUIRED) \
+                    and run.review_run_id not in _followups(mutation):
+                _integration_require_settled_context(store, chain, "begun")
             if disposition == ri.BRANCH_CONFIRMATION_STRUCTURE_REQUIRED:
                 run = _integration_confirmation_structure(session, view, work, run)
                 continue
