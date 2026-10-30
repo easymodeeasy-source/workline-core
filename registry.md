@@ -362,6 +362,28 @@ Mutation Controllerは、Project開始以外のoperation ownerについて、exe
 
 Project開始（初期化）はexecution lockの対象外であり、同じProjectへProject開始を同時に複数実行することはサポートしない。成立済みProjectに対するmaintenance（bootstrap backfill、push destination pin、Work-terminal activation等）はexecution lockの対象である。
 
+### Parallel START
+
+並行START（`start(store, work_id, "single-work", executor, parallel=True, workspace=WorkspaceSpec(...))`）は、single-workでReview selectorを持たないSTARTに限る（それ以外は `parallel_start_shape`）。Humanが指定したWorkだけを実行し、Roadmapが曖昧でもWorkを選ばない。通常START（`parallel=False`、既定）と他のoperationの動作は変えない。
+
+**lockと短い区間**: 並行STARTはclaim（lifecycleの記録・commit・push、workspace作成）とfinish（検査・取り込み・通常の完了経路）だけをProject execution lockの内側で行い、executorはlockの外で実行する。各取得試行は前節と同じく待たずに取得し、busyなら何も書かずにSTOPする。並行STARTのclaim / finishに限り、呼び出し元は同じ試行を有限回繰り返してよい。期限切れは `project_operation_busy` で、何も書かれていない。finishの期限切れでは、runは `executed` のまま残り、次の並行STARTがfinishから続ける。
+
+**lock外executorの書き込み境界**: executorが書いてよいのは自分のworkspaceだけである。Projectの正本（`.workline/`、runtimeを除く）・共通台帳・ProjectのGit indexは書かない。finishはlock内で最初に `.workline/` の未commit変更とclaim以降にstagedされたindex項目を調べ、あれば何も書かずに `run_project_written` でSTOPする（runは `executed` のまま、Humanがreconcileする）。これは防止ではなく検出である。worktree内のcommitはrepositoryのhookを通す（`--no-verify` を使わない）。
+
+**in_place**: 並行STARTの `in_place` のexecutorは、HumanのProjectフォルダではなく、そのrunの読み取り専用snapshotをworkspaceとして受け取る。snapshotはclaim時点のProjectのHEADのdetached worktreeに、Projectフォルダの未commit状態（変更・削除・未追跡の通常ファイル。`.workline/runtime` を除く）を写したもので、写したファイルはすべて読み取り専用にする。ignoredのファイルと未追跡のsymlinkは含まない。claim後にProjectフォルダで起きた変更は見えない。`in_place` は成果を返せない（返すと `parallel_in_place_read_only`）。snapshot内で作られたファイルは成果commitにならず、releaseで一覧を記録して破棄する。成果を作るWork、ignoredの成果物（ビルド済みexe等）を読むWorkはworktreeを使い、ビルド済み成果物はrun_depsから、SHA-256を含むidentityで読み取り専用の複製として受け取る。
+
+**run record**: `.workline/runtime/runs/<work_id>.json`（runtime・非canonical、Workごとに1件）。書くのはrunの所有processだけで、状態遷移を伴う書き込み（claim・finish・reopen）はlock内で行う。生存判定はhostとpidで行う。異常終了・question wait・executed・conflict・held（parked）・cleanup_failedからの再開は、同じWorkの次の並行STARTが記録された段階から続ける（lifecycleを重複させない）。conflictは `reopen()` による明示的な再開だけである。
+
+**成果の取り込み**: Project内の成果は、pathごとにbase（claim時）・現在のHEAD・成果をGitのblobで比べ、Project側がbaseから変わっていて成果と一致しないpathを競合とする。競合では何も書かず成果をparked refに保全し、Workはin_progressのままである。baseから統合時までにProjectが変えたpathは `base_drift` として記録する。統合の機械的成功は品質合格を意味しない。
+
+**別repository（gitlink）の成果**: `IntegrateSpec` を指定した並行STARTのWorkに限り、そのWork自身のfinishが、forkのWork worktreeでの成果commit、fork target branchのcompare-and-swapによるfast-forward（forceなし）、Work worktreeからのfeature・target branchのpush（repositoryのguardを通る）、remote到達確認、Projectのgitlinkだけを変えたpointer commit（branchをcompare-and-swapで進め、indexのgitlink項目だけを合わせる）、Workの完了commit・push、saved ref・後片付け、の順で統合する。各段階をrun recordに記録し、未完の段階から再開する。HumanのcheckoutとProjectの作業ツリーは変えない。通常STARTとIntegrateSpecの無いWorkは、gitlinkをWorkの成果として扱わない従来の手順のままである。Gitが追跡するgitlinkは `gitlink:<commit>` として読み、それ以外の入れ子repositoryは従来どおり読めない。
+
+**branch**: worktreeを使うWorkのbranchは、Projectが指定した名前（`WorkspaceSpec.branch`）か自動の名前で、branchとWorkline自身のowned ref（`refs/workline/owned/<run_id>`）を1つのGit ref transactionで作る。既存のbranchは、そのrunのowned refとbranchのreflogの始まりがWorklineの作成を示し、どのworktreeにも出ていない場合だけ使う。それ以外は `run_branch_exists` で何も取らない。一度記録したrunのbranchは変えない（`run_branch_mismatch`）。
+
+**後片付け**: 統合済みrunでは、結果commitのsaved refを保全し、run専用worktreeを `--force` なしで削除する。releaseはWork branchを自動削除しない。release時点で存在するWork branchと対応するowned refは原則として保持し、その存在状態・branch名・tip・owned ref・saved refを `cleanup.retained_branch` に記録する。Work branchが既に存在しない場合はその事実を記録し、Workline自身のowned refだけを整理できる（saved refは保全する）。owned refの削除に失敗した場合は成功扱いせず `cleanup_failed` とし、再releaseで続ける。Work branchが残存すること自体は、その他のcleanup条件を満たしたrunのRELEASED判定を妨げない。保持されたWork branchの削除はreleaseから分離し、別途承認された明示的な安全手続きによってのみ行う。`cleanup.retained_branch` の記録を、将来のbranch所有権を保証する証拠として扱わない。未統合（Hold・Cancel・停止）のrunは、未commitの変更をWIP commitにしてparked refを作り、worktreeを解放する。ignoredは `regenerable` 宣言に合うものだけを削除し、それ以外があれば何も消さず `cleanup_failed` とする。後片付けの失敗はそのrunの状態にだけ残り、他のWorkのSTARTを止めない。
+
+**deps**: 共有の読み取り専用依存（run_deps）は、identityのSHA-256を版キーとし、既存のtreeは期待manifestと一致するときだけ取り込む。読み取り専用、利用runを登録し、使用中は削除を拒否し、runの後片付けで登録を解除する。取得やビルドはdeps管理の外（executorの責任）である。
+
 ### Mutation Controller
 
 中央正本の物理writeは共通のMutation Controller経路を通す。

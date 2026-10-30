@@ -79,7 +79,7 @@ dependency確認（上のStart flowの `dependency確認`）は、Workの `requi
 
 STARTにはCLIが無い。`rules/git` のWorkline implementationに従い、対象Projectの中でisolated Python processを開始し、同じprocessで `<R>/run-workline.py` の `activate()` を実行してからSTARTのPython APIをimportする（R = configured Workline root）。executorもそのprocessの中で動く。Project contextの照合の後、実行中のimplementationがconfigured rootのものでなければ、lockを取得する前に `workline_implementation_mismatch` / `workline_implementation_unverified` でSTOPし、何も書かない。PYTHONPATHの手組みや別のimplementationへfallbackしない。
 
-`rules/git` のProject execution lockに従う。Work state・dependency・pending mutation・push destination・dirty stateはlock取得後に読み、lock取得前に読んだstateをmutation判断へ使わない。executorもlockの内側で実行される。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。executorの中から同じProjectの別top-level Workline operationを開始しない（`project_operation_nested`）。
+`rules/git` のProject execution lockに従う。Work state・dependency・pending mutation・push destination・dirty stateはlock取得後に読み、lock取得前に読んだstateをmutation判断へ使わない。通常STARTではexecutorもlockの内側で実行される。並行STARTでは `rules/git` のParallel STARTに従い、executorはlockの外で実行される。他processが同じProjectで実行中なら待たずに `project_operation_busy` でSTOPし、何も書かない。executorの中から同じProjectの別top-level Workline operationを開始しない（`project_operation_nested`）。
 
 `rules/information-tracing` に従い、Related / common rules読取のtargetは実行前に一意解決できなければならない。must_read、条件が現在成立しているconditional_must_read、obey chainのtargetが解決できない場合は、target / lifecycle処理・executor実行・Git書込みより前に `related_target_missing` でSTOPする。「たぶん不要」「古いfileだろう」と推測して無視せず、filename / directory / mtime / 意味類似で代替も探さない。自動修復もしない。
 
@@ -138,7 +138,7 @@ state fieldをWork本体へ保存しない。
 - target原則維持
 - lifecycle eventなし
 - ad hoc質問のためhuman_confirmation Workを作らない
-- START invocationはProject execution lockを解放して戻り、START mutationはpendingのまま残る
+- START invocationはProject execution lockを解放して戻り、START mutationはpendingのまま残る（並行STARTでは、question waitをrun recordの `question_wait` で持つ）
 - 再開は新しいSTART invocationがlockを取得してからpending mutationをresumeする
 
 一時的に別Workへ移る:
