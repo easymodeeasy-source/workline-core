@@ -3571,6 +3571,9 @@ CODE_INTEGRATION_REPAIR_PLAN_INVALID = "phase_integration_repair_plan_invalid"
 FIX_LINK_RATIONALE = "START's integration repair plan registered this fix Work for the Finding; provenance only."
 #: A verification actor changed persistent Project state across its launch: nothing is settled.
 CODE_INTEGRATION_SIDE_EFFECT = "phase_integration_verification_side_effect"
+#: §37.21: the Review Context the Run froze no longer re-derives (loader identity, Global baseline and the runtime
+#: authority it digests) - the sibling Review families' stale reason, as the reconcile reason of this kind.
+REASON_INTEGRATION_CONTEXT_CHANGED = "review_context_changed"
 
 
 @dataclass(frozen=True)
@@ -4214,29 +4217,61 @@ def _integration_chain(store: ProjectStore, run: IntegrationRun) -> Any:
 
 # --------------------------------------------------------------------------- currency and side effects
 
+def _integration_context_problems(session: "_Session", run: IntegrationRun) -> list[str]:
+    """§37.21: which components of the Run's Review Context no longer re-derive now; empty when it is current.
+
+    The Context is recomputed exactly as at freeze (:func:`integration_context`:
+    the running loader's identity and the Global baseline, whose digest carries
+    the runtime authority digests) and compared by digest with the one the
+    Candidate binds. Nothing frozen is re-evaluated: the Run's Effective Policy
+    stays the one it froze (R6-1), and a Context that cannot be recomputed is
+    its own STOP, never a stale difference. A START record whose frozen Context
+    is not the Candidate's is a reconcile, never compared as current.
+    """
+    bound = run.candidate.get("review_context_digest")
+    if serialize.digest(run.context) != bound:
+        raise _integration_reconcile(f"the Review Context frozen for Integration Review Run {run.review_run_id} is not "
+                                     "the one its Candidate binds")
+    now = integration_context(session.store)
+    if serialize.digest(now) == bound:
+        return []
+    changed = sorted(key for key in set(run.context) | set(now) if run.context.get(key) != now.get(key))
+    return [f"the Review Context no longer re-derives ({', '.join(changed)} changed since the Run was frozen)"]
+
+
+def _integration_require_context(session: "_Session", run: IntegrationRun, nothing: str) -> None:
+    """Refuse the next launch / seal / terminal stage over a Review Context that went stale after freeze (§37.21)."""
+    stale = _integration_context_problems(session, run)
+    if stale:
+        raise _integration_reconcile(f"Integration Review Run {run.review_run_id}: " + "; ".join(stale)
+                                     + f"; nothing is {nothing}", REASON_INTEGRATION_CONTEXT_CHANGED)
+
+
 def _integration_current_problems(session: "_Session", run: IntegrationRun) -> list[str]:
     """Why the frozen Candidate is no longer current (§32.30); empty when it is.
 
-    HEAD is on the Candidate's branch and descends from its base, every commit
-    since changed Review records only, the committed structure at HEAD and the
-    working structure (less START's own opening) are still the Candidate's,
-    and the integration still carries its marker.
+    The Run's Review Context still re-derives (§37.21), HEAD is on the
+    Candidate's branch and descends from its base, every commit since changed
+    Review records only, the committed structure at HEAD and the working
+    structure (less START's own opening) are still the Candidate's, and the
+    integration still carries its marker.
     """
     from . import phase_integration as pi
     from . import start_integration_review as sir
     from .ops import _own_effects_free_view
 
+    context = _integration_context_problems(session, run)
     store, mutation = session.store, session.mutation
     base = run.candidate["base"]
     git = hermetic_module.enter(store)
     branch, head = _head(git)
     if branch != base["branch"]:
-        return [f"HEAD is on {branch}, not the Candidate's {base['branch']}"]
-    problems: list[str] = []
+        return context + [f"HEAD is on {branch}, not the Candidate's {base['branch']}"]
+    problems: list[str] = list(context)
     if head != base["commit"]:
         descends = ancestry.raw_descends_from(git, head, base["commit"])
         if descends is not True:
-            return [f"HEAD {head} is not shown to descend from the Candidate's base {base['commit']}"]
+            return context + [f"HEAD {head} is not shown to descend from the Candidate's base {base['commit']}"]
         outside = sorted(entry.path for entry in _delta(git, base["commit"], head)
                          if not entry.path.startswith(f"{review_paths.REVIEW_DIR}/"))
         if outside:
@@ -4393,6 +4428,7 @@ def _integration_launch(session: "_Session", run: IntegrationRun, chain: Any) ->
         if problems:
             raise _integration_reconcile("the accepted discovery task's provenance: " + "; ".join(problems),
                                          "review_task_invalid")
+    _integration_require_context(session, run, "launched")
     current = _integration_current_problems(session, run)
     if current:
         raise _integration_reconcile("the Phase Integration Candidate is no longer current: " + "; ".join(current)
@@ -4536,6 +4572,7 @@ def _integration_adjudicate(session: "_Session", run: IntegrationRun, chain: Any
                         f"{binding.version}; the adjudicator is not launched", code="review_reviewer_mismatch")
     task_input = review.read_task_input(task_id)
     references = list(task_input.request_envelope.get("prior_history") or [])
+    _integration_require_context(session, run, "launched")
     launched = p4.P4AdjudicationTask(
         task_id=task_id, task_slot=task_input.task_slot, task_kind=task_input.task_kind, review_kind=third.review_kind,
         request_envelope=serialize.canonical_data(task_input.request_envelope), request_digest=task_input.request_digest,
@@ -4619,6 +4656,7 @@ def _integration_seal(session: "_Session", run: IntegrationRun, chain: Any) -> N
                                         evidence_current=True)
     if unmet:
         raise _integration_reconcile(f"Integration Review Run {run.review_run_id} is not converged: " + "; ".join(unmet))
+    _integration_require_context(session, run, "sealed")
     current = _integration_current_problems(session, run)
     if current:
         raise _integration_reconcile("the Phase Integration Candidate is no longer current: " + "; ".join(current)
@@ -4758,6 +4796,7 @@ def _integration_terminal(session: "_Session", work: Entity, run: IntegrationRun
             raise _integration_reconcile(f"the next lifecycle stage of {work.id} is no longer the terminal stage its "
                                          f"Candidate names ({stage})", "review_candidate_mismatch")
         receipt = review.read_receipt(str(run.receipt_id))
+        _integration_require_context(session, run, "recorded")
         refused = _integration_terminal_gate(session, work, run, chain, receipt)
         if refused:
             raise StopError(f"integration {work.id} may not record its terminal stage (§32.30): " + "; ".join(refused),

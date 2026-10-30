@@ -16883,6 +16883,14 @@ Phase Integration Review Context currency:
   - test Context changes between freeze and reviewer launch, at G5 seal and at the terminal gate;
   - never edit or retrospectively rewrite RB5's landed implementation history.
 - Tracking: this section. No BL ID is allocated.
+- Fix shape (contract text of the candidate; it changes no record schema):
+  - The Context schema is unchanged (`review-phase-integration-context` version 1). Its dependencies are the loader identity of the running implementation package and the Global policy baseline digest; the baseline digest already carries the runtime authority digests (`registry.md`, `skills/review`, `skills/roadmap`, `skills/start`), so no authority field is added.
+  - START recomputes the Context exactly as at freeze and compares its digest with the `review_context_digest` the Candidate binds: before the discovery launch (G1 -> G2), before the adjudicator launch (G3 -> G4), after the adjudicator returns (as part of the Candidate currency of §32.22 step 4), before the G5 seal and at the terminal gate before the terminal stage is recorded. A terminal stage already recorded is finished from its record, as before.
+  - Stale before a launch, the seal or the terminal stage: `reconcile required` with reason `review_context_changed` (the sibling Review families' stale reason). Nothing is launched, sealed or recorded; the START stays pending; the Run is neither replaced nor settled.
+  - Stale while the adjudicator runs: the G4 disposition is the step-4 refusal `phase_integration_not_authorizable` (final `not_authorized`, no Receipt).
+  - A Context that cannot be recomputed is its own STOP (`review_context_unavailable` or `review_p6_baseline_unavailable`), never a stale difference. A START record whose frozen Context is not the one its Candidate binds is `reconcile required` with reason `review_chain_invalid`.
+  - The frozen Effective Policy of the open Run is kept as frozen and never re-resolved (R6-1); the comparison re-derives digests only and re-evaluates no frozen policy data.
+  - An open Integration Run frozen under an earlier loader (every Workline update changes the loader identity) is reconciled with `review_context_changed` when it is resumed after the update. No record is rewritten or removed; such a Run is finished under the implementation it was frozen under, or handled by a separate Human decision in the concrete Project.
 
 For each of the two candidates:
 
