@@ -13,9 +13,7 @@ registry-routed canonical Skills（.claude/skills/<name>/SKILL.md）
 
 canonical Skillの現在の集合は `registry.md` の `workline-id: skills/*` から読む。README側にSkill一覧を二重管理しない。
 
-repository内の過去のcheckpoint / audit / fix / contract文書（`REVIEW_SYSTEM_*` 等）は設計履歴・rationaleであり、実装時のnormative sourceとして横断合成しない。
-
-非正本の改善候補一覧は `BACKLOG.md` に置くが、正本は引き続き `registry.md` と canonical Skills だけである。
+過去のcheckpoint / audit / fix / contract文書（`REVIEW_SYSTEM_*` 等）とCompletion Sprintの文書は `docs/history/` にある設計履歴・rationaleであり、正本ではなく、実装時のnormative sourceとして横断合成しない。
 
 ## Local clone
 

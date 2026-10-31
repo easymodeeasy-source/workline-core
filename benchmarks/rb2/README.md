@@ -1,8 +1,8 @@
 # RB2 benchmark - BL-007 cold-start recovery
 
-Completion Sprint tooling and evidence for RB2 (`WORKLINE_COMPLETION_SPRINT.md` §10, §36). It is **not**
+Completion Sprint tooling and evidence for RB2 (`docs/history/completion/WORKLINE_COMPLETION_SPRINT_2026-10-03.md` §10, §36). It is **not**
 Workline runtime authority: no runtime code, status, validation or routing reads anything here, and it never
-edits the measured Workline root. The public-safe result lives in `WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md`.
+edits the measured Workline root. The public-safe result lives in `docs/history/completion/WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md`.
 
 ## What it measures, and what it does not
 
@@ -69,7 +69,7 @@ py -3 -B benchmarks/rb2/run.py admit  --workline-root <R> --fixtures <dir> --sca
 py -3 -B benchmarks/rb2/run.py series --workline-root <R> --fixtures <dir> --logs <dir> \
     --label OFFICIAL --measured-sha <sha> --scales S M L --reps 15 --warm-calls 30 \
     --component-samples 5 --derivation-samples 3 --sequence-reps 5 --suites-dir <suite dir>
-py -3 -B benchmarks/rb2/run.py render --results <logs>/<run>/results.json --out WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md
+py -3 -B benchmarks/rb2/run.py render --results <logs>/<run>/results.json --out docs/history/completion/WORKLINE_RB2_PERFORMANCE_MEASUREMENT.md
 ```
 
 `--label SMOKE` runs are harness debugging only and never evidence. Fixtures and logs are disposable and belong

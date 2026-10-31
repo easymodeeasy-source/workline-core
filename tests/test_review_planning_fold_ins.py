@@ -77,7 +77,7 @@ P2_FUNCTIONS_IN_LIVE_MODULES = {
     "roadmap.py": {"require_marker_compatible", "planning_marker"},
     "gitops.py": {"require_no_planning_transform", "review_commit_effect", "review_publication_effect"},
 }
-CONTRACT = WORKLINE_ROOT / "REVIEW_SYSTEM_P2_INTEGRATION_CONTRACT.md"
+CONTRACT = WORKLINE_ROOT / "docs" / "history" / "review-system" / "REVIEW_SYSTEM_P2_INTEGRATION_CONTRACT.md"
 
 
 class _Refusals:
