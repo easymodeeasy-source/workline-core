@@ -245,5 +245,62 @@ class CanonicalSkillLayoutTests(unittest.TestCase):
         self.assertIn("before a Workline Project exists", description)
 
 
+class ValidatedReadTests(RegistryFixture):
+    """RB14 R5-01: a validated registry is used from the one read that was validated, never re-read."""
+
+    GHOST = "skills/ghost"
+    BLOCK = ("\n<!-- workline-id: skills/ghost -->\n<!-- workline-target: skills/ghost/SKILL.md -->\n"
+             "<!-- workline-context: project -->\n")
+
+    def _staged(self, call):
+        from unittest import mock
+
+        root = self._root()
+        self._write_valid_registry(root)
+        file = (root / "registry.md").resolve()
+        a = file.read_text(encoding="utf-8")
+        b = a + self.BLOCK
+        original, reads = Path.read_text, [0]
+
+        def staged(path, *args, **kwargs):
+            if Path(path).resolve() == file:
+                reads[0] += 1
+                return a if reads[0] == 1 else b
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", staged):
+            result = call(root)
+        return result, reads[0]
+
+    def test_resolve_skill_never_returns_an_entry_of_an_unvalidated_second_read(self) -> None:
+        def call(root):
+            try:
+                return resolve_skill(root, self.GHOST)
+            except StopError as exc:
+                return exc.code
+
+        result, reads = self._staged(call)
+        self.assertEqual("routing_error", result)
+        self.assertEqual(1, reads)
+
+    def test_router_candidates_and_inventory_use_the_validated_text(self) -> None:
+        from workline.registry import authority_inventory
+
+        for call in (router_candidates, skill_inventory,
+                     lambda root: {entry.authority_id for entry in authority_inventory(root).entries}):
+            with self.subTest(call=getattr(call, "__name__", "authority_inventory")):
+                result, reads = self._staged(call)
+                self.assertNotIn(self.GHOST, result)
+                self.assertEqual(1, reads)
+
+    def test_start_reference_check_uses_the_validated_text(self) -> None:
+        from workline import start as st
+
+        result, reads = self._staged(st._registry_ids)
+        self.assertNotIn(self.GHOST, result)
+        self.assertIn(PROJECT_START_SKILL_ID, result)
+        self.assertEqual(1, reads)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -327,18 +327,18 @@ def reading_plan(store: ProjectStore, view: ProjectView, work: Entity) -> list[s
 
 def _ref_resolves(store: ProjectStore, target: str) -> bool:
     if target.startswith("workline://"):
-        root = store.workline_root()
-        return validate_registry(root).ok and target[len("workline://"):] in _registry_ids(root)
+        return target[len("workline://"):] in _registry_ids(store.workline_root())
     return (store.root / target).exists()
 
 
 def _registry_ids(root) -> set[str]:
-    from .registry import _extract_id_blocks
+    """The IDs of a registry that validates, from the very text that was validated (RB14 R5-01); empty otherwise."""
+    from pathlib import Path
 
-    try:
-        return set(_extract_id_blocks((root / "registry.md").read_text(encoding="utf-8")))
-    except OSError:
-        return set()
+    from .registry import _extract_id_blocks, _validated_text
+
+    validation, text = _validated_text(Path(root))
+    return set(_extract_id_blocks(text)) if validation.ok else set()
 
 
 def _result_message(message: str | None, work: Entity) -> str:

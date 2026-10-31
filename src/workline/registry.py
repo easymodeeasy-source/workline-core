@@ -124,18 +124,31 @@ def _safe_target(root: Path, target: str) -> Path | None:
 
 
 def validate_registry(root: Path) -> RegistryValidation:
+    return _validated_text(root)[0]
+
+
+def _validated_text(root: Path) -> tuple[RegistryValidation, str | None]:
+    """One read of ``registry.md``: its validation and the very text that was validated.
+
+    RB14 R5-01: a reader that validates and then reads the registry again can act on a second text that was never
+    validated. Every reader that needs the blocks of a validated registry takes them from this one read.
+    """
     root = root.resolve()
     registry = root / "registry.md"
-    problems: list[RegistryProblem] = []
 
     if not registry.is_file():
-        return RegistryValidation((RegistryProblem("registry_missing", "registry.md is missing"),))
+        return RegistryValidation((RegistryProblem("registry_missing", "registry.md is missing"),)), None
 
     try:
         text = registry.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        return RegistryValidation((RegistryProblem("registry_unreadable", "registry.md is not readable UTF-8"),))
+        return RegistryValidation((RegistryProblem("registry_unreadable", "registry.md is not readable UTF-8"),)), None
 
+    return _validate_text(root, text), text
+
+
+def _validate_text(root: Path, text: str) -> RegistryValidation:
+    problems: list[RegistryProblem] = []
     blocks = _extract_id_blocks(text)
 
     for rule_id in REQUIRED_RULE_IDS:
@@ -214,7 +227,7 @@ def owning_workline_root(skill_file: Path) -> Path:
             code="routing_error",
         )
 
-    validation = validate_registry(root)
+    validation, text = _validated_text(root)
     if not validation.ok:
         detail = "; ".join(f"{p.code}: {p.message}" for p in validation.problems)
         raise StopError(
@@ -222,7 +235,7 @@ def owning_workline_root(skill_file: Path) -> Path:
             code="routing_error",
         )
 
-    blocks = _extract_id_blocks((root / "registry.md").read_text(encoding="utf-8"))
+    blocks = _extract_id_blocks(text)
     target = _target_of(blocks, PROJECT_START_SKILL_ID)
     resolved = _safe_target(root, target) if target else None
     if resolved != skill:
@@ -239,11 +252,11 @@ def _validated_blocks(root: Path) -> dict[str, list[RegistryBlock]]:
 
     A broken registry never degrades into a partial inventory: routing stops.
     """
-    validation = validate_registry(root)
+    validation, text = _validated_text(root)
     if not validation.ok:
         detail = "; ".join(f"{p.code}: {p.message}" for p in validation.problems)
         raise StopError(f"registry validation failed for {root}: {detail}", code="registry_invalid")
-    return _extract_id_blocks((root / "registry.md").read_text(encoding="utf-8"))
+    return _extract_id_blocks(text)
 
 
 def skill_inventory(root: Path) -> dict[str, SkillEntry]:
@@ -311,14 +324,10 @@ def authority_inventory(root: Path) -> AuthorityInventory:
     root = Path(root).resolve()
     registry = root / "registry.md"
     digest = _sha256_of(registry) if registry.is_file() else None
-    validation = validate_registry(root)
+    validation, text = _validated_text(root)
     if not validation.ok:
         return AuthorityInventory(digest, validation, ())
-    try:
-        blocks = _extract_id_blocks(registry.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError):
-        problem = RegistryProblem("registry_unreadable", "registry.md is not readable UTF-8")
-        return AuthorityInventory(digest, RegistryValidation((problem,)), ())
+    blocks = _extract_id_blocks(text)
     entries = [AuthorityEntry(rule_id, None, None, None) for rule_id in REQUIRED_RULE_IDS]
     for skill_id in sorted(k for k in blocks if k.startswith(SKILL_ID_PREFIX)):
         block = blocks[skill_id][0]
