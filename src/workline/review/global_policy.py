@@ -2625,6 +2625,13 @@ def evaluation_record(request: Mapping[str, Any], *, evaluation_id: str, change:
         raise stop(CODE_EVALUATION_INVALID, f"the material environment changed during the observation window "
                                             f"({', '.join(changed)}); without a window split or a positive irrelevance "
                                             "proof the result is inconclusive")
+    basis_digest = record["environment"]["basis_digest"]
+    problem = policy.environment_basis_problem(
+        changed, record["environment"]["basis"],
+        [ref["family"] for refs in record["evidence"].values() for ref in refs
+         if ref["kind"] == REF_RECORD and ref["digest"] == basis_digest])
+    if problem is not None:
+        raise stop(CODE_EVALUATION_INVALID, problem)
     problem = _observation_problem(result, found_change, parsed, computed)
     if problem is not None:
         raise stop(CODE_EVALUATION_INVALID, problem)

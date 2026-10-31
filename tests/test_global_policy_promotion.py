@@ -999,8 +999,15 @@ class EvaluationRecordTests(unittest.TestCase):
         self.assertEqual(gp.RESULT_INCONCLUSIVE, inconclusive["result"])
         snapshots = observed(CHANGE_ID)
         proof = snapshots[0]["records"][0]["digest"]
-        found = evaluate(self.change, gp.RESULT_RETAIN, snapshots, end_env=changed, basis="window_split",
-                         basis_digest=proof)
+        # RB14 R4-02 (Human decision A): a source history record attests nothing about the changed toolchain
+        for basis in policy.ENVIRONMENT_BASES:
+            with self.subTest(basis=basis):
+                with self.assertRaises(StopError) as raised:
+                    evaluate(self.change, gp.RESULT_RETAIN, snapshots, end_env=changed, basis=basis,
+                             basis_digest=proof)
+                self.assertEqual(gp.CODE_EVALUATION_INVALID, raised.exception.code)
+                self.assertIn("does not attest the changed identities (toolchain)", str(raised.exception))
+        found = evaluate(self.change, gp.RESULT_RETAIN, snapshots, basis="window_split", basis_digest=proof)
         self.assertEqual("window_split", found["environment"]["basis"])
         with self.assertRaises(StopError) as raised:
             evaluate(self.change, gp.RESULT_RETAIN, snapshots, end_env=changed, basis="irrelevance_proof",

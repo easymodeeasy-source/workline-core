@@ -99,6 +99,7 @@
 | BL-075 | Landing-Gated Dependency Serialization / Stacked Candidate Execution | OPEN |
 | BL-076 | Progressive Review Pipelining / Early Stable-Leaf Review | OPEN |
 | BL-077 | Replan payload refusal after the terminal event freezes Project writes | OPEN |
+| BL-078 | Environment non-impact evidence for Policy evaluation reuse | DEFERRED |
 | BL-100 | Remove non-Workline systems and legacy operational surfaces from workline-core | OPEN |
 
 ## Items
@@ -1172,6 +1173,23 @@
 - Human confirmation likely: no（valid pathの意味は保つ。ただし既にstrandしたrecordの破壊的な回復は、具体Projectごとに人の承認が要る）
 - Self-hosting prerequisite: no
 - Evidence class: code inspection, completion-sprint execution
+
+### BL-078 Environment non-impact evidence for Policy evaluation reuse
+
+- ID: BL-078
+- Title: Environment non-impact evidence for Policy evaluation reuse
+- Status: DEFERRED（Dの判断待ち）
+- Kind: design, contract extension
+- Severity: Improvement（Completion Sprint §24 をblockしない）
+- Owner: 未定（RB14 R4-02 の修理のscopeではない）
+- Problem: RB14 R4-02 の修理（Human判断A、Store seq 336）で、Policy evaluation（P6 `policy.evaluation_record`、P7 `global_policy` のevaluation）は、material environment change（reviewers・check_adapters・toolchain・dependencies 等）があるとき、environment basis（window split / irrelevance proof）として、変更された識別子とその変更を正に証明するrecordだけを受け付けるようになった（`policy.ENVIRONMENT_ATTESTING_FAMILIES`）。現在admitされているevidence family（Run・Finding・Repair・Relation・Human decision・Policy evaluation）はどれもそれを証明できないため、この集合は空であり、material changeのあるobservationはinconclusiveでしか終われない。
+- Why it matters: Human判断Aは、十分な非影響証拠がある場合に既存のレビュー結果の再利用を許容している。その証拠を持てるrecord typeが無いため、現状では再利用の経路が無い。
+- Likely scope: 変更されたidentityごとのfrozen値とobserved値、対象のpolicy change、新しい構成で実行した正式Review Runとその結果を束ねる、新しいevidence family（schema・`EVIDENCE_FAMILIES`・`ENVIRONMENT_ATTESTING_FAMILIES`への追加）。reviewed contract changeであり、CPの決定とDの判断が要る。
+- Cross-project impact: あり（Policy experimentを使う全Project）
+- Backfill likely: no
+- Human confirmation likely: yes（どの証拠を非影響の証明として認めるかはHumanの規則）
+- Self-hosting prerequisite: no
+- Evidence class: RB14 integration verification（R4-02 REPRODUCED_IN_OWNER）、Human decision
 
 ### BL-100 Remove non-Workline systems and legacy operational surfaces from workline-core
 

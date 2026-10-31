@@ -1663,6 +1663,28 @@ POLICY_EVIDENCE_EVALUATIONS = "policy-evaluations"
 EVIDENCE_FAMILIES = (paths.HISTORY_RUNS, paths.HISTORY_FINDINGS, paths.HISTORY_REPAIRS, paths.HISTORY_RELATIONS,
                      paths.HISTORY_HUMAN_DECISIONS, POLICY_EVIDENCE_EVALUATIONS)
 EVIDENCE_FIELDS = ("family", "id", "digest")
+#: RB14 R4-02 (Human decision A, Store seq 336): the evidence families whose record positively attests that a
+#: material environment change did not affect the measurement - bound to the change and to the changed identities.
+#: None of the admitted families does: a Run, Finding, Repair or Relation carries no environment identity, a Human
+#: decision is about a HUMAN_WAIT Run, and an evaluation records only the environment it was observed under. Until a
+#: reviewed contract admits such a family, a material change ends an observation only as inconclusive.
+ENVIRONMENT_ATTESTING_FAMILIES: tuple[str, ...] = ()
+
+
+def environment_basis_problem(material_change: Sequence[str], basis: object,
+                              basis_families: Iterable[str]) -> str | None:
+    """Why the environment basis does not attribute ``material_change``, or ``None`` (P6 and P7, RB14 R4-02).
+
+    ``basis_families`` are the families of the evidence records the basis digest names. Naming a stored record is not
+    enough: an unrelated stored record proves nothing about a changed reviewer, adapter, toolchain or dependency.
+    """
+    if not material_change or basis is None:
+        return None
+    families = sorted(set(basis_families))
+    if families and all(family in ENVIRONMENT_ATTESTING_FAMILIES for family in families):
+        return None
+    return (f"the environment basis record ({', '.join(families) or 'none'}) does not attest the changed identities "
+            f"({', '.join(material_change)}); an unrelated stored record proves nothing")
 
 
 def _evidence_kind(family: str) -> str:
@@ -2714,6 +2736,10 @@ def evaluation_record(request: Mapping[str, Any], evaluation_id: str, state: Pol
         raise stop(CODE_ENVIRONMENT_UNATTRIBUTED,
                    "the environment basis (window split / positive irrelevance proof) is one of the evaluation's stored "
                    "evidence references, named by its digest; an arbitrary digest proves nothing")
+    problem = environment_basis_problem(material_change, request["environment_basis"],
+                                        [item["family"] for item in request["evidence"] if item["digest"] == basis_digest])
+    if problem is not None:
+        raise stop(CODE_ENVIRONMENT_UNATTRIBUTED, problem)
     # RB6B-H1: retain ends observation only after the frozen minimum of opportunities observed under the change; a
     # temporary_guard never ends observation into permanence
     if result == RESULT_RETAIN:

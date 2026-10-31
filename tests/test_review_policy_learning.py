@@ -613,10 +613,18 @@ class EvaluationTests(unittest.TestCase):
                        evidence, environment=changed, basis=policy.ENVIRONMENT_IRRELEVANCE_PROOF,
                        basis_digest="d" * 64)
         self.assertEqual(policy.CODE_ENVIRONMENT_UNATTRIBUTED, raised.exception.code)
+        # RB14 R4-02 (Human decision A): a stored record that does not attest the changed identities is no proof
         proof = self.world.finding(5, run=1, severity="LOW", category=records.OUTCOME_IMPROVEMENT)
+        for basis in policy.ENVIRONMENT_BASES:
+            with self.subTest(basis=basis):
+                with self.assertRaises(StopError) as raised:
+                    evaluation(self.world, self.state, self.change, policy.RESULT_RETAIN, policy.NEXT_END_OBSERVATION,
+                               evidence + (proof,), environment=changed, basis=basis, basis_digest=proof.digest)
+                self.assertEqual(policy.CODE_ENVIRONMENT_UNATTRIBUTED, raised.exception.code)
+                self.assertIn("does not attest the changed identities (reviewers)", str(raised.exception))
+        # without a material change the basis is recorded as before, and the reader still binds it to the evidence
         record = evaluation(self.world, self.state, self.change, policy.RESULT_RETAIN, policy.NEXT_END_OBSERVATION,
-                            evidence + (proof,), environment=changed, basis=policy.ENVIRONMENT_IRRELEVANCE_PROOF,
-                            basis_digest=proof.digest)
+                            evidence + (proof,), basis=policy.ENVIRONMENT_IRRELEVANCE_PROOF, basis_digest=proof.digest)
         self.assertEqual(proof.digest, record["environment_basis_digest"])
         tampered = dict(record, environment_basis_digest="e" * 64)
         with self.assertRaises(ValidationError):
