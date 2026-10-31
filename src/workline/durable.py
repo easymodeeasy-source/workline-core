@@ -22,12 +22,14 @@ class DurableWriteError(OSError):
 
 
 def _fsync_dir(directory: Path) -> None:
+    """fsync ``directory`` on POSIX. A directory that cannot be opened is a failed durable write, not a skip.
+
+    RB14 R3-01: the open error used to be swallowed, so a write into a directory the process could not open was
+    acknowledged as durable although its directory entry was never fsynced.
+    """
     if os.name == "nt":
         return
-    try:
-        fd = os.open(directory, os.O_RDONLY)
-    except OSError:
-        return
+    fd = os.open(directory, os.O_RDONLY)
     try:
         os.fsync(fd)
     finally:

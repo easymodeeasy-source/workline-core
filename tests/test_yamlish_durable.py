@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest import mock
 
@@ -81,6 +82,23 @@ class DurableWriteTests(WorklineTestCase):
                 durable_write_text(target, "new")
         self.assertEqual(target.read_text(encoding="utf-8"), "old")
         self.assertEqual([p.name for p in self.tmp.iterdir()], ["f.txt"])
+
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                     "POSIX, non-root only: Windows has no parent-directory fsync; root bypasses the mode bits")
+    def test_posix_parent_directory_that_cannot_be_opened_fails_the_write(self) -> None:
+        """RB14 R3-01: a parent directory the process cannot open is not skipped; the write is not acknowledged."""
+        parent = self.tmp / "canon"
+        parent.mkdir()
+        target = parent / "f.txt"
+        tmp_dir = self.tmp / "runtime" / "tmp"
+        os.chmod(parent, 0o300)  # write and search, no read: os.open(parent, O_RDONLY) fails with EACCES
+        try:
+            with self.assertRaises(DurableWriteError) as raised:
+                durable_write_text(target, "new", tmp_dir=tmp_dir)
+        finally:
+            os.chmod(parent, 0o700)
+        self.assertIsInstance(raised.exception.__cause__, PermissionError)
+        self.assertEqual([], list(tmp_dir.iterdir()), "the temporary file is not left behind")
 
 
 if __name__ == "__main__":
