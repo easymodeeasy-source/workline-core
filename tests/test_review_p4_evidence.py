@@ -97,6 +97,14 @@ class RepairCoverageTests(unittest.TestCase):
             coverage(shared_responsibility=True, other_sites=("src/b.py",), repair_scope="widened")
         ))
 
+    def test_local_patch_on_a_shared_responsibility_without_named_sites_is_widen_first(self) -> None:
+        """RB14 R1-04: an empty other_sites does not make a positively shared responsibility local (§27.17)."""
+        found = p4.repair_coverage_problems(coverage(shared_responsibility=True, other_sites=()))
+        self.assertEqual([p4.CODE_REPAIR_WIDEN_REQUIRED], [code for code, _ in found])
+        self.assertEqual([], p4.repair_coverage_problems(
+            coverage(shared_responsibility=True, other_sites=(), repair_scope="widened")
+        ))
+
 
 class ReverificationTests(unittest.TestCase):
     def test_minimums_follow_semantic_impact(self) -> None:

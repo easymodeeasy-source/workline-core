@@ -2201,7 +2201,9 @@ def repair_coverage_problems(check: object) -> list[tuple[str, str]]:
 
     Unknown is never PASS: an unresolved gap, an affected set that is not
     positively enumerable, or one the repair does not cover. A local patch on a
-    positively shared responsibility with other sites is the widen-first refusal.
+    positively shared responsibility is the widen-first refusal, whether or not the
+    check lists the other sites (§27.17; an empty ``other_sites`` does not make a
+    shared responsibility local - RB14 R1-04).
     """
     if type(check) is not P4CoverageCheck:
         return [(CODE_REPAIR_COVERAGE_UNKNOWN, "the repair carries no structured Repair Coverage Check")]
@@ -2227,11 +2229,12 @@ def repair_coverage_problems(check: object) -> list[tuple[str, str]]:
         problems.append((CODE_REPAIR_COVERAGE_UNKNOWN, "the affected set is not positively enumerable"))
     if not check.covers_affected_set:
         problems.append((CODE_REPAIR_COVERAGE_UNKNOWN, "the repair does not cover the affected set"))
-    if check.shared_responsibility and check.repair_scope == "local" and check.other_sites:
+    if check.shared_responsibility and check.repair_scope == "local":
         problems.append((
             CODE_REPAIR_WIDEN_REQUIRED,
-            "a local patch is presented for a positively shared responsibility with other sites; widen the repair "
-            "before another Formal Review round rediscovers the omission",
+            "a local patch is presented for a positively shared responsibility"
+            + (" with other sites" if check.other_sites else " (no other site is named)")
+            + "; widen the repair before another Formal Review round rediscovers the omission",
         ))
     return problems
 
