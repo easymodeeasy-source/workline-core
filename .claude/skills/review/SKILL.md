@@ -991,7 +991,7 @@ runtimeを失った後（ORCH-RB6-1）: frozenなCandidateを持つpending mutat
 - `adjust` / `rollback`: 評価だけで、Profileを変えるには新しいreviewされたCandidateが要る。rollbackは、そのsurfaceを今governしているactiveな変更を正確に戻す。
 - `inconclusive`: 成功ではない。凍結した契約が安全に許す時だけ観察を続ける。
 
-overlap: 同じsurfaceの2つの実験は `known_overlap`、v1の2つのsurfaceは `proven_disjoint`。並行に観察できるのは `proven_disjoint` だけで、他は直列化するか、自分のsurfaceの実験を明示にsupersedeする（別のsurfaceの実験はsupersedeしない。lighteningの実験を、そのholdoutが測る挙動より下のままで終わらせない）。environment: 観察窓の中で重要なidentity（baseline、reviewer、adapter、toolchain、measurement contract、dependency）が変わったら、窓を分けるか、保存されたevidenceである正の無関係の証明を示すか、`inconclusive` にする。時系列は因果ではない。
+overlap: 同じsurfaceの2つの実験は `known_overlap`、v1の2つのsurfaceは `proven_disjoint`。並行に観察できるのは `proven_disjoint` だけで、他は直列化するか、自分のsurfaceの実験を明示にsupersedeする（別のsurfaceの実験はsupersedeしない。lighteningの実験を、そのholdoutが測る挙動より下のままで終わらせない）。environment: 観察窓の中で重要なidentity（baseline、reviewer、adapter、toolchain、measurement contract、dependency）が変わったら、窓を分けるか、正の無関係の証明を示すか、`inconclusive` にする。正の無関係の証明は、basis digestが名指す保存されたevidence recordが、変わったidentityそのものを証言するfamilyのものである時だけ成り立つ（無関係な保存recordを名指すだけでは何も証明しない）。v1にはそのようなfamilyが無いので、重要なenvironmentの変化は、窓を分けない限り `inconclusive` で終わる（BL-078）。時系列は因果ではない。
 
 ### BL-055 shadow authority（advisory）
 
@@ -1143,7 +1143,7 @@ eligibilityは機械的な判定で、root meta-reviewはそれでもevidenceを
 
 ### Profile compatibility（§31.21）
 
-Global Policy Changeは、すべての対応するProject Profile schemaに対するtotalなcompatibility adapterの証明を前提とする。v1は `review-v1-p7-total-adapter-v1` で、Profile v1と2つの固定整数surfaceについて、Global defaultが変わっても有効な絶対値のlocal overrideをそのまま保つ（古いProfile + 古いGlobal setting + 新しいGlobal setting → 同じ正規化されたlocal overrideの意味。欄を落とさず改名しない）。証明できない変更は `review_p7_compatibility_unproven` である。Projectは次のReview Runの境界でだけP6 loaderを通して新しいGlobal versionを採用し、既存のProfile fileは書き換えず、open Runは凍結した `effective_policy_hash` のまま続く。ProfileがoverrideしているsurfaceのGlobal由来の実験はそのProjectでは凍結しない。Project固有のevidence・Profileは昇格で消えず、Projectは固定の強さ・compatibilityの規則が許す限り後のGlobal defaultより厳しいままでいられる。
+Global Policy Changeは、すべての対応するProject Profile schemaに対するtotalなcompatibility adapterの証明を前提とする。v1は `review-v1-p7-total-adapter-v1` で、Profile v1と2つの固定整数surfaceについて、Global defaultが変わっても有効な絶対値のlocal overrideをそのまま保つ（古いProfile + 古いGlobal setting + 新しいGlobal setting → 同じ正規化されたlocal overrideの意味。欄を落とさず改名しない）。証明できない変更は `review_p7_compatibility_unproven` である。Projectは次のReview Runの境界でだけP6 loaderを通して新しいGlobal versionを採用し、既存のProfile fileは書き換えず、open Runは凍結した `effective_policy_hash` のまま続く。ProfileがoverrideしているsurfaceのGlobal由来の実験はそのProjectでは凍結しない。Project固有のevidence・Profileは昇格で消えず、Projectは固定の強さ・compatibilityの規則が許す限り後のGlobal defaultより厳しいままでいられる。決定済みで未実装の規則（Q-C4）: そのsurfaceでactiveなProject-localのP6 lightening holdoutに届く、または越えるGlobal strengtheningは、衝突するGlobal versionを作る前に、Global変更のeligibility / compatibilityの段階で名前の付いたpolicy STOPで拒否する。localの実験を落としたり読み替えたりせず、読めないEffective Policyを待たない。Global v1は変更を持たないのでこの形には到達しない。active Project-local lightening実験と関わり得る最初のGlobal strengtheningより前に、この規則を実装する。
 
 ### Global Policy Change Review（`global-policy-change-v1`）
 
@@ -1180,7 +1180,7 @@ runtimeを失った後は、共有のcanonical recovery discovery（rootのnames
 - `rollback`: 新しいGlobal version・新しいreview・新しいcommitになり、上の正確なrollbackの例外は正確な時だけ使える。
 - `inconclusive`: 成功ではない。
 
-変更後のevidenceも同じ独立性 / 相関のモデルで数え、その変更の下で観察されたopportunityだけが数える。相関したProjectは多くの確認にならない。観察窓の中の重要なenvironmentの変化は、窓を分けるか正の無関係の証明を要し、さもなければ `inconclusive`。時系列だけでは因果のevidenceではない。
+変更後のevidenceも同じ独立性 / 相関のモデルで数え、その変更の下で観察されたopportunityだけが数える。相関したProjectは多くの確認にならない。観察窓の中の重要なenvironmentの変化は、窓を分けるか正の無関係の証明を要し、さもなければ `inconclusive`。正の無関係の証明の条件はP6と同じで（変わったidentityを証言するfamilyのrecordだけが数える）、v1ではそのようなfamilyが無い。時系列だけでは因果のevidenceではない。
 
 stranded changeの入口条件（Amendment 12）: 自分のReceiptのcommit済みGlobal Policy Consumptionを持たない、HEADの履歴にcommitされた変更記録がある間は、`global-policy-change` も `global-policy-evaluation` も新しいroot mutationを開かず（IDの割り当ての前）、`review_p7_run_unrecovered` で止まる。そのoperation自身のpending mutationの再開は検査し直さない。pending root mutationが `reserved_ids` に持つ変更は、そのmutationのものなのでstrandedではなく、単一writerの拒否 `review_p7_root_mutation_conflict` がその状態を報告する（変更がまだ途中の間、evaluationは開かない）。
 
