@@ -44,7 +44,7 @@ from dataclasses import dataclass, field, replace
 import json
 from typing import TYPE_CHECKING, Any
 
-from . import gitcmd, gitops
+from . import gitcmd, gitops, yamlish
 from .errors import ReconcileRequired, StopError, ValidationError, WorklineError
 from .mutation import _HELD_BEFORE, _WROTE, Effect, Mutation, MutationController, WriteScope, _last_wrote, abandon_on_stop
 from .ops import stage_name
@@ -75,7 +75,7 @@ from .review.hermetic import HermeticGit
 from .review.committed import CommittedReviewStore
 from .review.store import ReviewStore
 from .state import ACTIVE, HELD, IN_PROGRESS, UNSTARTED, ProjectView
-from .store import WORK_DESIRED_HEADING, WORK_TERMINAL_EVENTS, Entity, Event, ProjectStore
+from .store import WORK_DESIRED_HEADING, WORK_TERMINAL_EVENTS, WORKLINE_DIR, Entity, Event, ProjectStore
 
 if TYPE_CHECKING:  # pragma: no cover
     from .start import _Session
@@ -374,6 +374,8 @@ class WorkRun:
     contract: str | None = None
     #: P4 only: every record path of this START's P4 cycle - the own-Review set of L-2 (filled where a store is read).
     own_paths: tuple[str, ...] = ()
+    #: P4 only: the requirements a Human changed this Work to in this START's P4 cycle (L-2; filled with ``own_paths``).
+    requirement_effects: tuple[str, ...] = ()
 
 
 def run_key(work_id: str) -> str:
@@ -1582,6 +1584,35 @@ def run_record_paths(run: WorkRun, chain: Any) -> list[str]:
     return sorted(found)
 
 
+def _is_requirement_amendment(git: HermeticGit, run: WorkRun, delta: list[gitcmd.DeltaEntry]) -> bool:
+    """Whether one commit of the L-2 range is the amendment a ``requirement_changed`` decision of this cycle names.
+
+    G-1 reads a changed requirement from HEAD's committed Work body, so that decision needs a commit on the range and
+    L-2 is what it has to pass. Only exactly this passes: text appended to this Work's body, whose resulting requirement
+    is the effect of Human Decision Evidence this START's own cycle holds, and with it at most text appended to its
+    Phase's body. Appended text leaves everything W9b re-derives as it was, and touches no result path.
+    """
+    work_path = f"{WORKLINE_DIR}/works/{run.work_id}.md"
+    changed = {entry.path: entry for entry in delta}
+    if not run.requirement_effects or work_path not in changed or len(changed) != len(delta):
+        return False
+    texts: dict[str, bytes] = {}
+    for path, entry in changed.items():
+        if entry.status != "M" or entry.old_mode != "100644" or entry.new_mode != "100644":
+            return False
+        old, new = git.run_bytes("cat-file", "blob", entry.old_blob), git.run_bytes("cat-file", "blob", entry.new_blob)
+        if not old.ok or not new.ok or len(new.stdout) <= len(old.stdout) or not new.stdout.startswith(old.stdout):
+            return False
+        texts[path] = new.stdout
+    try:
+        meta, body = yamlish.load_frontmatter(texts[work_path].decode("utf-8"))
+    except (UnicodeDecodeError, yamlish.YamlishError):
+        return False
+    if set(changed) - {work_path, f"{WORKLINE_DIR}/phases/{meta.get('phase_id')}.md"}:
+        return False
+    return serialize.digest(work_review.requirement_authority(run.work_id, body)) in run.requirement_effects
+
+
 def _delta(git: HermeticGit, parent: str, commit: str) -> list[gitcmd.DeltaEntry]:
     """The complete delta of ``commit`` against ``parent``, from the stored objects (class B, no renames)."""
     try:
@@ -1621,7 +1652,7 @@ def require_lineage(git: HermeticGit, run: WorkRun, chain: Any, base: dict[str, 
         delta = _delta(git, parents[0], commit)
         foreign = [entry.path for entry in delta
                    if entry.status != "A" or entry.new_mode != "100644" or entry.path not in own]
-        if not delta or foreign:
+        if (not delta or foreign) and not _is_requirement_amendment(git, run, delta):
             raise _lineage_failed(
                 "L-2", f"{commit} is not an own-Review commit of Run {run.review_run_id}"
                 + (f" ({', '.join(foreign)})" if foreign else " (empty delta)")
@@ -1834,6 +1865,7 @@ def prove_result(store: ProjectStore, git: HermeticGit, mutation_record: dict[st
     work_id = record.work_id
     if record.run.contract is not None:
         record.run.own_paths = p4_cycle_paths(store, record.reserved, work_id)
+        record.run.requirement_effects = p4_requirement_effects(store, git, k1, record.reserved, work_id)
     stage = record.one_stage(f"{work_id}:results")
     effect = _commit_effect(record, stage)
     # W1 - ownership: the S-c1 effect promoted by O-7a, and nothing else confers it
@@ -1942,6 +1974,7 @@ def prove_terminal(store: ProjectStore, git: HermeticGit, mutation_record: dict[
     work_id, run = record.work_id, record.run
     if run.contract is not None:
         run.own_paths = p4_cycle_paths(store, record.reserved, work_id)
+        run.requirement_effects = p4_requirement_effects(store, git, k2, record.reserved, work_id)
     stage = record.one_stage(f"{work_id}:finalize")
     effect = _commit_effect(record, stage)
     # T1 - ownership
@@ -2286,10 +2319,12 @@ def terminalize(session: "_Session", sealed: "Sealed | Adoption") -> Any:
     run, material = sealed.run, sealed.material
     candidate, base = material.candidate, material.base
     work_id = run.work_id
-    if run.contract is not None:
-        run.own_paths = p4_cycle_paths(store, mutation.record.get("reserved_ids") or {}, work_id)
-    result = work_review.artifact_kind(candidate) == work_review.ARTIFACT_RESULT
     git = hermetic_module.enter(store)
+    if run.contract is not None:
+        reserved = mutation.record.get("reserved_ids") or {}
+        run.own_paths = p4_cycle_paths(store, reserved, work_id)
+        run.requirement_effects = p4_requirement_effects(store, git, _head(git)[1], reserved, work_id)
+    result = work_review.artifact_kind(candidate) == work_review.ARTIFACT_RESULT
     remote = session.destination is not None
     chain = _chain(store, run)
     recorded = work_record(mutation.record)
@@ -5941,9 +5976,17 @@ def _continue_p4(session: "_Session", run: WorkRun) -> Sealed:
                 _p4_seal(session, run, chain)
         elif latest == 5 and shape == p4.SHAPE_SEAL:
             run.receipt_id = str(chain.latest.receipt_id)
-            return Sealed(run, p4_run_material(store, run, chain), chain)
+            sealed = Sealed(run, p4_run_material(store, run, chain), chain)
+            # a START resumed under another Workline: found here, before K1, the Run is replaced; after K1, it could not be
+            if not _p4_terminal_began(mutation, run.work_id) and _p4_authorization_stale(session, sealed):
+                p4_invalidate(session, run, chain)
+                continue
+            return sealed
         elif latest == 5:
             _p4_repair(session, run, chain)
+        elif shape == p4.SHAPE_SEAL and not _p4_terminal_began(mutation, run.work_id):
+            successor = mutation.reserve_id(gate.review_successor_run_key(run.review_run_id), "review_run")
+            _p4_reserve(mutation, successor, run.work_id, _p4_bindings(session), predecessor=run.review_run_id)
         elif shape == p4.SHAPE_SEAL:
             raise p4.stop(p4.CODE_RECEIPT_INVALIDATED,
                           f"Work Review Run {run.review_run_id}'s Receipt is invalidated at generation 6; a P4 Run is "
@@ -5956,6 +5999,36 @@ def _continue_p4(session: "_Session", run: WorkRun) -> Sealed:
             _p4_adopt(session, run, chain)
             successor = mutation.reserve_id(gate.review_successor_run_key(run.review_run_id), "review_run")
             _p4_reserve(mutation, successor, run.work_id, _p4_bindings(session), predecessor=run.review_run_id)
+
+
+def _p4_terminal_began(mutation: Mutation, work_id: str) -> bool:
+    """Whether this START recorded any stage of the terminal phase: S-c1, S-c2 or the lifecycle's terminal stage."""
+    record = work_record(mutation.record)
+    return (record.one_stage(f"{work_id}:results") is not None or record.one_stage(f"{work_id}:finalize") is not None
+            or _terminal_stage(record) is not None)
+
+
+def _p4_authorization_stale(session: "_Session", sealed: Sealed) -> bool:
+    """Whether the sealed Run's bound Context or Policy no longer re-derives under the running Workline."""
+    from .implementation import package_directory
+
+    store = session.store
+    chain = _chain(store, sealed.run)
+    activation = session.activation
+    if activation is None or chain is None:
+        return False
+    capability = sealed.material.context["review_checkout_capability"]
+    try:
+        recomputed = work_context.context_record(
+            store.workline_root(), package_directory(store.workline_root()), activation.binding(),
+            capability["base_tree"], capability["resulting_tree"],
+        )
+        first = chain.generations[0]
+        policy = _p4_task_policy(sealed.material.task_input)  # the Run's own stored family policy (GAP-A)
+        return serialize.digest(work_review.context_record_p4(recomputed, policy)) != first.review_context_hash \
+            or p4.envelope_policy_hash(sealed.material.task_input.request_envelope) != first.effective_policy_hash
+    except StopError:
+        return False
 
 
 def _p4_launch_discovery(session: "_Session", run: WorkRun, chain: Any) -> None:
@@ -6497,6 +6570,19 @@ def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) 
         set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_REPAIRED}]
         write_snapshot = False
         decision = getattr(session.review, "human_decision", None)
+    elif p4.shape_of(predecessor) == p4.SHAPE_SEAL and len(predecessor.generations) == p4.INVALIDATION_GENERATION \
+            and not _p4_terminal_began(session.mutation, run.work_id):
+        set_aside = [{"review_run_id": predecessor_id, "reason": p4.SET_ASIDE_INVALIDATED}]
+        decision = None
+        result_paths, deleted_paths = work_review.declared_paths(predecessor_material.candidate)
+        witnesses = ownership.bind_declarations(store, git, result_paths, deleted_paths, pre_base)
+        ownership.assert_ownership(session.mutation, witnesses)
+        candidate, payloads = _p4_candidate_from_witnesses(
+            session, git, witnesses, base["base_commit"], base["branch"], run.work_id,
+            str(work_review.content_of(predecessor_material.candidate).get("message") or ""), result_paths, deleted_paths,
+        )
+        snapshot = work_review.snapshot_for(work_review.snapshot_material(candidate, payloads))
+        generation, succession, write_snapshot = 1, None, True
     elif len(predecessor.generations) == p4.ADJUDICATION_SETTLE_GENERATION \
             and review.read_adjudication(predecessor_id).outcome == p4.HUMAN_WAIT \
             and predecessor_id in _p4_decision_bindings(session.mutation) \
@@ -6529,7 +6615,7 @@ def _p4_begin_successor(session: "_Session", run: WorkRun, predecessor_id: str) 
         generation, succession, write_snapshot = 1, None, True
     else:
         raise p4.reconcile(f"{run.review_run_id} is reserved as the successor of {predecessor_id}, which neither "
-                           "settled a repair nor waits on a Human decision this START binds and this invocation carries",
+                           "settled a repair, nor was invalidated before K1, nor waits on a Human decision this START binds and this invocation carries",
                            p4.REASON_LINKAGE_INVALID)
     width = len(base["base_commit"])
     reconstruction = work_review.read_material(snapshot, snapshot.candidate_hash, width)
@@ -6564,12 +6650,29 @@ def p4_cycle_paths(store: ProjectStore, reserved: dict[str, Any], work_id: str) 
 
     review = ReviewStore(store)
     found: set[str] = set()
-    for run_id in _p4_reserved_runs(reserved, work_id):
+    runs = _p4_reserved_runs(reserved, work_id)
+    for run_id in runs:
         chain = review.gate_chain(run_id)
         if chain is None:
             continue
-        found |= set(recovery.p4_record_paths(review, run_id, chain))
-    return tuple(sorted(path for path in found if not path.startswith(review_paths.SUPERSESSIONS_DIR + "/")))
+        held = set(recovery.p4_record_paths(review, run_id, chain))
+        if run_id == runs[-1]:
+            held = {path for path in held if not path.startswith(review_paths.SUPERSESSIONS_DIR + "/")}
+        found |= held
+    return tuple(sorted(found))
+
+
+def p4_requirement_effects(store: ProjectStore, git: HermeticGit, commit: str, reserved: dict[str, Any],
+                           work_id: str) -> tuple[str, ...]:
+    """The requirement digests a Human changed this Work to, by this START's own cycle's evidence as ``commit`` holds it."""
+    at = CommittedRecords(store, git, commit)
+    runs = set(_p4_reserved_runs(reserved, work_id))
+    found: set[str] = set()
+    for identifier in at.human_decision_history_ids():
+        evidence = at.read_history(review_paths.HISTORY_HUMAN_DECISIONS, identifier)
+        if evidence.affected_review_run_id in runs and evidence.decision_disposition == p4.DECISION_CHANGED:
+            found.update(evidence.effect_digests)
+    return tuple(sorted(found))
 
 
 def _p4_material_at(at: "CommittedRecords", record: WorkRecord, item: str) -> ProofMaterial:
@@ -6612,25 +6715,9 @@ def _p4_post_commit(session: "_Session", sealed: Sealed, git: HermeticGit, failu
     invalidation at once, so no live Receipt survives known staleness, and the
     START stops for reconciliation. Anything else is reconcile as it stands.
     """
-    from .implementation import package_directory
-
     store, run = session.store, sealed.run
     chain = _chain(store, run)
-    stale = False
-    activation = session.activation
-    if activation is not None and chain is not None:
-        capability = sealed.material.context["review_checkout_capability"]
-        try:
-            recomputed = work_context.context_record(
-                store.workline_root(), package_directory(store.workline_root()), activation.binding(),
-                capability["base_tree"], capability["resulting_tree"],
-            )
-            first = chain.generations[0]
-            policy = _p4_task_policy(sealed.material.task_input)  # the Run's own stored family policy (GAP-A)
-            stale = serialize.digest(work_review.context_record_p4(recomputed, policy)) != first.review_context_hash \
-                or p4.envelope_policy_hash(sealed.material.task_input.request_envelope) != first.effective_policy_hash
-        except StopError:
-            stale = False
+    stale = _p4_authorization_stale(session, sealed)
     review = ReviewStore(store)
     if stale and chain is not None and chain.latest.generation == p4.SEAL_GENERATION and chain.latest.sealed \
             and not review.supersession_exists(str(chain.latest.receipt_id)):

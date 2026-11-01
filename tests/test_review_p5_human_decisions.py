@@ -17,16 +17,19 @@ evidence input (§28.14 lines 9101-9106; §28.18 line 9210). Planning and Work a
 from __future__ import annotations
 
 from typing import Any
+from unittest import mock
 
 from p5_helpers import at_head, decision_evidence, first_envelope, p5_only_cycle
 from planning_helpers import plan
 from test_review_p4_planning import Discovery, P4PlanningCase, p4_review
 from test_review_p4_work import P4WorkCase
+from test_work_review_runtime import git
 from workline import roadmap as rm
 from workline import roadmap_review as rr
 from workline import start as st
-from workline.errors import StopError
-from workline.review import history, p4, paths, planning, serialize, work_review
+from workline import start_review as sr
+from workline.errors import ReconcileRequired, StopError
+from workline.review import history, p4, paths, planning, serialize, work_context, work_review
 from workline.review.store import ReviewStore
 
 HUMAN = p4.P4Claim("HIGH", "human", "which scope?")
@@ -216,6 +219,167 @@ class WorkHumanDecisionTests(P4WorkCase):
         self.assertEqual(waiting, bound["affected_review_run_id"], "exactly the P4-R7 waiting Run")
         self.assertTrue(all(all(found.values()) for found in witness.committed_at_launch))
         self.assertEqual([], history.history_problems(review, work_ids=None))
+
+    def amend(self, *rels: str, message: str = "correct the requirement") -> None:
+        """One commit appending a section to each of ``rels`` (the Work's body by default), as a Human decision needs."""
+        for rel in rels or (self.work_rel(),):
+            (self.root / rel).write_bytes((self.root / rel).read_bytes() + b"\n## Corrected\nThe evidence is a comparison.\n")
+        git(self.root, "add", "--", *(rels or (self.work_rel(),)))
+        git(self.root, "commit", "-q", "-m", message)
+
+    def work_rel(self) -> str:
+        return f".workline/works/{self.work_id}.md"
+
+    def phase_rel(self) -> str:
+        from workline.state import ProjectView
+
+        return f".workline/phases/{ProjectView.load(self.store).works[self.work_id].phase_id}.md"
+
+    def changed_review(self, waiting: str) -> Any:
+        evidence = decision_evidence(ReviewStore(self.store), waiting, CHANGED, self.requirement())
+        return work_review_with(CHANGED, (evidence,), Discovery())
+
+    def assert_refused_by_the_lineage(self, review: Any) -> None:
+        before = self.head()
+        with self.assertRaises(ReconcileRequired) as raised:
+            st.start(self.store, self.work_id, "single-work", self.executor, review=review)
+        self.assertIn("L-2", str(raised.exception))
+        self.assertEqual("", git(self.root, "log", "--format=%H", "--", "out.txt"), "no K1")
+        self.assertTrue(before)
+
+    def test_a_requirement_changed_by_a_human_on_an_appended_work_body_completes(self) -> None:
+        waiting = self.wait()
+        self.amend()
+        result, record = self.complete(self.executor, review=self.changed_review(waiting))
+        self.assertEqual("completed", result.status)
+        review = ReviewStore(self.store)
+        (bound,) = first_envelope(review, self.consumption(self.head(), record).review_run_id)["decision_evidence"]
+        self.assertEqual(waiting, bound["affected_review_run_id"])
+        self.assertEqual([], history.history_problems(review, work_ids=None))
+        self.assertEqual([], self.problems())
+
+    def test_the_phase_body_may_be_appended_in_the_same_commit(self) -> None:
+        waiting = self.wait()
+        self.amend(self.work_rel(), self.phase_rel())
+        result, _ = self.complete(self.executor, review=self.changed_review(waiting))
+        self.assertEqual("completed", result.status)
+
+    def test_an_amendment_that_also_touches_another_file_is_foreign(self) -> None:
+        waiting = self.wait()
+        (self.root / "person.txt").write_bytes(b"theirs\n")
+        git(self.root, "add", "--", "person.txt")
+        self.amend()
+        git(self.root, "reset", "-q", "--soft", "HEAD~1")
+        git(self.root, "commit", "-q", "-m", "the requirement and something else")
+        self.assert_refused_by_the_lineage(self.changed_review(waiting))
+
+    def test_an_amendment_of_the_phase_alone_is_foreign(self) -> None:
+        waiting = self.wait()
+        self.amend()
+        self.amend(self.phase_rel(), message="the phase alone")
+        self.assert_refused_by_the_lineage(self.changed_review(waiting))
+
+    def test_a_rewritten_work_body_is_foreign_even_with_its_digest_as_the_effect(self) -> None:
+        waiting = self.wait()
+        path = self.root / self.work_rel()
+        path.write_bytes(path.read_bytes().replace(b"\n#", b"\n\n#", 1))
+        git(self.root, "add", "--", self.work_rel())
+        git(self.root, "commit", "-q", "-m", "a rewrite")
+        self.assert_refused_by_the_lineage(self.changed_review(waiting))
+
+    def test_an_appended_body_no_evidence_names_is_foreign(self) -> None:
+        waiting = self.wait()
+        self.amend()
+        review = self.changed_review(waiting)
+        self.amend(message="a second, undecided correction")
+        with self.assertRaises(StopError):
+            st.start(self.store, self.work_id, "single-work", self.executor, review=review)
+        self.assertEqual("", git(self.root, "log", "--format=%H", "--", "out.txt"), "no K1")
+
+    def test_a_correction_after_the_seal_is_foreign(self) -> None:
+        waiting = self.wait()
+        self.amend()
+        real = sr._p4_seal
+
+        def seal(*args: Any, **kwargs: Any) -> None:
+            real(*args, **kwargs)
+            self.amend(message="after the seal")
+
+        with mock.patch.object(sr, "_p4_seal", side_effect=seal):
+            self.assert_refused_by_the_lineage(self.changed_review(waiting))
+
+    def test_a_confirmed_requirement_is_no_amendment(self) -> None:
+        waiting = self.wait()
+        self.amend()
+        evidence = decision_evidence(ReviewStore(self.store), waiting, CONFIRMED, self.requirement(), effect=True)
+        self.assert_refused_by_the_lineage(work_review_with(CONFIRMED, (evidence,), Discovery()))
+
+    def sealed_then_another_workline(self) -> tuple[str, Any]:
+        """A START stopped right after its seal, and a patcher making the implementation identity another one."""
+        real = sr._p4_seal
+
+        class Interrupted(BaseException):
+            pass
+
+        def seal(*args: Any, **kwargs: Any) -> None:
+            real(*args, **kwargs)
+            raise Interrupted()
+
+        with mock.patch.object(sr, "_p4_seal", side_effect=seal), self.assertRaises(Interrupted):
+            st.start(self.store, self.work_id, "single-work", self.executor, review=work_review_with(None, (), Discovery()))
+        (first,) = self.runs()
+        return first, mock.patch.object(work_context, "loader_identity", return_value="f" * 64)
+
+    def test_a_seal_gone_stale_before_k1_is_invalidated_and_reviewed_again_under_the_running_workline(self) -> None:
+        first, another = self.sealed_then_another_workline()
+        receipt = ReviewStore(self.store).gate_chain(first).latest.receipt_id
+        head = self.head()
+        self.assertEqual("", git(self.root, "log", "--format=%H", "--", "out.txt"))
+        with another:
+            result, record = self.complete(self.executor, review=work_review_with(None, (), Discovery()))
+        self.assertEqual("completed", result.status)
+        review = ReviewStore(self.store)
+        self.assertEqual(p4.INVALIDATION_GENERATION, review.gate_chain(first).latest.generation)
+        self.assertTrue(review.supersession_exists(str(receipt)))
+        consumption = self.consumption(self.head(), record)
+        self.assertNotEqual(first, consumption.review_run_id)
+        envelope = first_envelope(review, consumption.review_run_id)
+        self.assertEqual([{"review_run_id": first, "reason": p4.SET_ASIDE_INVALIDATED}], envelope["set_aside_runs"])
+        self.assertEqual(history.DISPOSITION_INVALIDATED, review.read_history(paths.HISTORY_RUNS, first).durable_disposition)
+        # the invalidation precedes K1: nothing of the result exists under the stale authorization
+        k1 = git(self.root, "log", "--format=%H", "--", "out.txt")
+        self.assertIn(paths.gate_rel(first, p4.INVALIDATION_GENERATION),
+                      git(self.root, "log", "--name-only", "--format=", f"{head}..{k1}"))
+        self.assertEqual([], history.history_problems(review, work_ids=None))
+        with another:
+            self.assertEqual([], self.problems())
+
+    def test_a_seal_still_current_is_not_invalidated(self) -> None:
+        first, _ = self.sealed_then_another_workline()
+        result, record = self.complete(self.executor, review=work_review_with(None, (), Discovery()))
+        self.assertEqual("completed", result.status)
+        self.assertEqual(first, self.consumption(self.head(), record).review_run_id)
+        self.assertEqual([first], self.runs())
+
+    def test_the_requirement_amendment_survives_a_workline_update_in_the_same_cycle(self) -> None:
+        waiting = self.wait()
+        self.amend()
+        real = sr._p4_seal
+
+        class Interrupted(BaseException):
+            pass
+
+        def seal(*args: Any, **kwargs: Any) -> None:
+            real(*args, **kwargs)
+            raise Interrupted()
+
+        changed = self.changed_review(waiting)
+        with mock.patch.object(sr, "_p4_seal", side_effect=seal), self.assertRaises(Interrupted):
+            st.start(self.store, self.work_id, "single-work", self.executor, review=changed)
+        with mock.patch.object(work_context, "loader_identity", return_value="f" * 64):
+            result, _ = self.complete(self.executor, review=work_review_with(None, (), Discovery()))
+        self.assertEqual("completed", result.status)
+        self.assertEqual(3, len(self.runs()))
 
     def test_evidence_naming_another_run_than_the_waiting_one_is_refused_before_any_effect(self) -> None:
         waiting = self.wait()
