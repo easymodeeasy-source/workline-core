@@ -6009,26 +6009,27 @@ def _p4_terminal_began(mutation: Mutation, work_id: str) -> bool:
 
 
 def _p4_authorization_stale(session: "_Session", sealed: Sealed) -> bool:
-    """Whether the sealed Run's bound Context or Policy no longer re-derives under the running Workline."""
+    """Whether the sealed Run's bound Context or Policy no longer re-derives under the running Workline.
+
+    What cannot be re-derived is never an answer of "current": it raises, and before K1 that stops the START.
+    """
     from .implementation import package_directory
 
     store = session.store
     chain = _chain(store, sealed.run)
     activation = session.activation
     if activation is None or chain is None:
-        return False
+        raise _reconcile(f"the authorization of Work Review Run {sealed.run.review_run_id} cannot be re-derived: "
+                         "no activation or chain is held")
     capability = sealed.material.context["review_checkout_capability"]
-    try:
-        recomputed = work_context.context_record(
-            store.workline_root(), package_directory(store.workline_root()), activation.binding(),
-            capability["base_tree"], capability["resulting_tree"],
-        )
-        first = chain.generations[0]
-        policy = _p4_task_policy(sealed.material.task_input)  # the Run's own stored family policy (GAP-A)
-        return serialize.digest(work_review.context_record_p4(recomputed, policy)) != first.review_context_hash \
-            or p4.envelope_policy_hash(sealed.material.task_input.request_envelope) != first.effective_policy_hash
-    except StopError:
-        return False
+    recomputed = work_context.context_record(
+        store.workline_root(), package_directory(store.workline_root()), activation.binding(),
+        capability["base_tree"], capability["resulting_tree"],
+    )
+    first = chain.generations[0]
+    policy = _p4_task_policy(sealed.material.task_input)  # the Run's own stored family policy (GAP-A)
+    return serialize.digest(work_review.context_record_p4(recomputed, policy)) != first.review_context_hash \
+        or p4.envelope_policy_hash(sealed.material.task_input.request_envelope) != first.effective_policy_hash
 
 
 def _p4_launch_discovery(session: "_Session", run: WorkRun, chain: Any) -> None:
@@ -6717,7 +6718,10 @@ def _p4_post_commit(session: "_Session", sealed: Sealed, git: HermeticGit, failu
     """
     store, run = session.store, sealed.run
     chain = _chain(store, run)
-    stale = _p4_authorization_stale(session, sealed)
+    try:
+        stale = _p4_authorization_stale(session, sealed)
+    except (StopError, ReconcileRequired):
+        stale = False
     review = ReviewStore(store)
     if stale and chain is not None and chain.latest.generation == p4.SEAL_GENERATION and chain.latest.sealed \
             and not review.supersession_exists(str(chain.latest.receipt_id)):

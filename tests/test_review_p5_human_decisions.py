@@ -354,6 +354,16 @@ class WorkHumanDecisionTests(P4WorkCase):
         with another:
             self.assertEqual([], self.problems())
 
+    def test_an_authorization_that_cannot_be_rederived_stops_before_k1(self) -> None:
+        first, _ = self.sealed_then_another_workline()
+        unavailable = mock.patch.object(work_context, "loader_identity", side_effect=StopError("the package cannot be read"))
+        with unavailable, self.assertRaises(StopError):
+            st.start(self.store, self.work_id, "single-work", self.executor, review=work_review_with(None, (), Discovery()))
+        self.assertEqual("", git(self.root, "log", "--format=%H", "--", "out.txt"), "no K1")
+        self.assertEqual(p4.SEAL_GENERATION, ReviewStore(self.store).gate_chain(first).latest.generation, "not invalidated")
+        result, record = self.complete(self.executor, review=work_review_with(None, (), Discovery()))
+        self.assertEqual(first, self.consumption(self.head(), record).review_run_id, "the same Run, once it re-derives")
+
     def test_a_seal_still_current_is_not_invalidated(self) -> None:
         first, _ = self.sealed_then_another_workline()
         result, record = self.complete(self.executor, review=work_review_with(None, (), Discovery()))
